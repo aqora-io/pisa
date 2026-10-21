@@ -1,7 +1,6 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Context;
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, clap::Parser)]
 #[command(about = "Pisa worker: runs Lean REPLs for the router")]
@@ -132,36 +131,9 @@ impl WorkerConfig {
     pub fn version(&self) -> anyhow::Result<String> {
         match (&self.version, &self.project) {
             (Some(v), _) => Ok(v.clone()),
-            (None, Some(project)) => project_version(project),
+            (None, Some(project)) => pisa_protocol::version::project_version(project)
+                .with_context(|| format!("reading the project at {}", project.display())),
             (None, None) => Ok("dev".into()),
         }
-    }
-}
-
-/// `<toolchain tag>-<first 8 hex of sha256(lake-manifest.json)>`, e.g. `v4.35.0-1a2b3c4d`.
-pub fn project_version(project: &Path) -> anyhow::Result<String> {
-    let toolchain = std::fs::read_to_string(project.join("lean-toolchain"))
-        .context("reading lean-toolchain")?;
-    let toolchain = toolchain.trim();
-    let tag = toolchain.rsplit(':').next().unwrap_or(toolchain);
-    let manifest = std::fs::read(project.join("lake-manifest.json")).unwrap_or_default();
-    let hash = hex::encode(&Sha256::digest(&manifest)[..4]);
-    Ok(format!("{tag}-{hash}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn version_from_project_files() {
-        let dir = std::env::temp_dir().join(format!("pisa-v-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("lean-toolchain"), "leanprover/lean4:v4.35.0\n").unwrap();
-        std::fs::write(dir.join("lake-manifest.json"), "{}").unwrap();
-        let v = project_version(&dir).unwrap();
-        assert!(v.starts_with("v4.35.0-"), "{v}");
-        assert_eq!(v.len(), "v4.35.0-".len() + 8);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

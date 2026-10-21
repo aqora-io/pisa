@@ -1,0 +1,235 @@
+# Notation and LaTeX tokens → the Mathlib and Physlib constants they usually
+# mean. Soft hints for the structural lane, never filters. Tokens are as
+# `pisa_search::text::tokens` produces them (lowercase words, Unicode symbols;
+# LaTeX is converted first, so `\otimes` arrives as `⊗`). `context` words give
+# an entry full weight; without them it counts half.
+#
+# Seed list: review and extend. Unknown constants are dropped at load.
+
+# Linear algebra and operators
+[[symbol]]
+tokens = ["tr", "trace"]
+constants = ["Matrix.trace", "LinearMap.trace"]
+context = ["matrix", "operator", "density", "state", "ρ"]
+
+[[symbol]]
+tokens = ["†", "dagger", "adjoint", "conjugate"]
+constants = ["Matrix.conjTranspose", "star", "ContinuousLinearMap.adjoint", "LinearMap.adjoint"]
+
+[[symbol]]
+tokens = ["⊗", "tensor", "kronecker"]
+constants = ["TensorProduct", "Matrix.kroneckerMap", "TensorProduct.tmul"]
+
+[[symbol]]
+tokens = ["det", "determinant"]
+constants = ["Matrix.det", "LinearMap.det"]
+
+[[symbol]]
+tokens = ["hermitian", "self", "selfadjoint"]
+constants = ["Matrix.IsHermitian", "IsSelfAdjoint"]
+
+[[symbol]]
+tokens = ["unitary"]
+constants = ["Matrix.unitaryGroup", "unitary"]
+
+[[symbol]]
+tokens = ["eigenvalue", "eigenvalues", "spectrum"]
+constants = ["Matrix.IsHermitian.eigenvalues", "Module.End.HasEigenvalue", "spectrum"]
+
+[[symbol]]
+tokens = ["positive", "semidefinite", "posdef", "psd"]
+constants = ["Matrix.PosSemidef", "Matrix.PosDef"]
+context = ["matrix", "operator", "semidefinite", "definite"]
+
+[[symbol]]
+tokens = ["⟨", "⟩", "inner"]
+constants = ["Inner.inner", "inner"]
+
+[[symbol]]
+tokens = ["‖", "norm"]
+constants = ["Norm.norm"]
+
+[[symbol]]
+tokens = ["rank"]
+constants = ["Matrix.rank", "Module.finrank"]
+
+[[symbol]]
+tokens = ["commutator", "⁅", "⁆"]
+constants = ["Bracket.bracket", "commutatorElement"]
+
+[[symbol]]
+tokens = ["charpoly", "characteristic"]
+constants = ["Matrix.charpoly"]
+context = ["polynomial", "matrix"]
+
+# Analysis
+[[symbol]]
+tokens = ["∑", "sum"]
+constants = ["Finset.sum", "tsum"]
+
+[[symbol]]
+tokens = ["∏", "product"]
+constants = ["Finset.prod", "tprod"]
+
+[[symbol]]
+tokens = ["∫", "integral"]
+constants = ["MeasureTheory.integral", "intervalIntegral"]
+
+[[symbol]]
+tokens = ["√", "sqrt"]
+constants = ["Real.sqrt"]
+
+[[symbol]]
+tokens = ["exp", "exponential"]
+constants = ["Real.exp", "Complex.exp", "NormedSpace.exp"]
+
+[[symbol]]
+tokens = ["log", "logarithm", "ln"]
+constants = ["Real.log", "Complex.log"]
+
+[[symbol]]
+tokens = ["sin", "sine"]
+constants = ["Real.sin", "Complex.sin"]
+
+[[symbol]]
+tokens = ["cos", "cosine"]
+constants = ["Real.cos", "Complex.cos"]
+
+[[symbol]]
+tokens = ["sinh"]
+constants = ["Real.sinh"]
+
+[[symbol]]
+tokens = ["cosh"]
+constants = ["Real.cosh"]
+
+[[symbol]]
+tokens = ["π", "pi"]
+constants = ["Real.pi"]
+
+[[symbol]]
+tokens = ["∂", "derivative", "deriv", "differentiable"]
+constants = ["deriv", "fderiv", "HasDerivAt", "Differentiable"]
+
+[[symbol]]
+tokens = ["∇", "gradient"]
+constants = ["gradient", "fderiv"]
+
+[[symbol]]
+tokens = ["limit", "lim", "tendsto", "converges"]
+constants = ["Filter.Tendsto"]
+
+[[symbol]]
+tokens = ["continuous"]
+constants = ["Continuous", "ContinuousOn"]
+
+[[symbol]]
+tokens = ["|", "abs", "absolute"]
+constants = ["abs"]
+
+[[symbol]]
+tokens = ["∞", "infinity"]
+constants = ["Filter.atTop", "ENNReal"]
+
+[[symbol]]
+tokens = ["fourier"]
+constants = ["Real.fourierIntegral", "VectorFourier.fourierIntegral"]
+
+# Numbers and sets
+[[symbol]]
+tokens = ["ℝ", "real", "reals"]
+constants = ["Real"]
+
+[[symbol]]
+tokens = ["ℂ", "complex"]
+constants = ["Complex"]
+
+[[symbol]]
+tokens = ["ℕ", "natural"]
+constants = ["Nat"]
+
+[[symbol]]
+tokens = ["ℤ", "integer", "integers"]
+constants = ["Int"]
+
+[[symbol]]
+tokens = ["ℚ", "rational"]
+constants = ["Rat"]
+
+[[symbol]]
+tokens = ["i", "imaginary"]
+constants = ["Complex.I"]
+context = ["complex", "imaginary", "ℂ"]
+
+[[symbol]]
+tokens = ["re", "real"]
+constants = ["Complex.re", "RCLike.re"]
+context = ["complex", "part"]
+
+[[symbol]]
+tokens = ["!", "factorial"]
+constants = ["Nat.factorial"]
+
+[[symbol]]
+tokens = ["choose", "binomial"]
+constants = ["Nat.choose"]
+
+[[symbol]]
+tokens = ["∈", "∉"]
+constants = ["Membership.mem"]
+
+[[symbol]]
+tokens = ["⊆", "subset"]
+constants = ["HasSubset.Subset"]
+
+[[symbol]]
+tokens = ["∪", "union"]
+constants = ["Union.union"]
+
+[[symbol]]
+tokens = ["∩", "intersection"]
+constants = ["Inter.inter"]
+
+[[symbol]]
+tokens = ["card", "cardinality"]
+constants = ["Finset.card", "Fintype.card"]
+
+[[symbol]]
+tokens = ["prime"]
+constants = ["Nat.Prime", "Prime"]
+
+[[symbol]]
+tokens = ["gcd"]
+constants = ["Nat.gcd", "Int.gcd"]
+
+[[symbol]]
+tokens = ["probability", "measure"]
+constants = ["MeasureTheory.Measure", "MeasureTheory.IsProbabilityMeasure"]
+
+[[symbol]]
+tokens = ["expectation", "expected"]
+constants = ["MeasureTheory.integral"]
+context = ["probability", "random", "variable"]
+
+# Physics (Physlib)
+[[symbol]]
+tokens = ["ℏ", "hbar", "planck"]
+constants = ["Constants.ℏ"]
+
+[[symbol]]
+tokens = ["minkowski", "η"]
+constants = ["minkowskiMatrix"]
+context = ["minkowski", "metric", "lorentz", "relativity"]
+
+[[symbol]]
+tokens = ["lorentz"]
+constants = ["LorentzGroup"]
+
+[[symbol]]
+tokens = ["pauli"]
+constants = ["PauliMatrix.pauliMatrix"]
+
+[[symbol]]
+tokens = ["hamiltonian"]
+constants = ["ClassicalMechanics.HarmonicOscillator.hamiltonian"]
+context = ["oscillator", "harmonic", "classical"]

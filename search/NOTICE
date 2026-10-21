@@ -1,0 +1,9 @@
+pisa-search reuses data from LeanSearch v2 (https://github.com/frenzymath/LeanSearch-v2),
+licensed under the Apache License, Version 2.0:
+
+- Informal descriptions of Mathlib v4.28.0-rc1 declarations, from the dataset
+  FrenzyMath/lsv2-mathlib-v4.28.0-rc1-jsonl (https://huggingface.co/datasets/FrenzyMath/lsv2-mathlib-v4.28.0-rc1-jsonl),
+  stored in index bundles for declarations whose statements still match.
+- The MathlibQR retrieval benchmark (benchmark/MathlibQR.json), used for evaluation.
+
+Index bundles that include these descriptions must carry this notice.
