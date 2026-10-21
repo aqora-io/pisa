@@ -35,6 +35,40 @@ pub struct WorkerConfig {
     /// Headers to import at startup, e.g. "import Mathlib". Separate several with ';'.
     #[arg(long, env = "PISA_PREWARM", value_delimiter = ';')]
     pub prewarm: Vec<String>,
+    /// How to isolate each Lean process.
+    #[arg(long, env = "PISA_SANDBOX", value_enum, default_value_t = Sandbox::None)]
+    pub sandbox: Sandbox,
+    /// Scratch space for per-slot files. Defaults to a directory under $TMPDIR.
+    #[arg(long, env = "PISA_WORK_DIR")]
+    pub work_dir: Option<PathBuf>,
+    /// A delegated cgroup v2 directory. Each Lean process gets its own child
+    /// cgroup with the limits below. Without it, only RSS polling applies.
+    #[arg(long, env = "PISA_CGROUP_ROOT")]
+    pub cgroup_root: Option<PathBuf>,
+    /// memory.max per Lean process, in MiB (0 for no limit).
+    #[arg(long, env = "PISA_MEMORY_MAX_MB", default_value_t = 0)]
+    pub memory_max_mb: u64,
+    /// pids.max per Lean process (0 for no limit).
+    #[arg(long, env = "PISA_PIDS_MAX", default_value_t = 256)]
+    pub pids_max: u64,
+    /// Axioms a checked declaration may depend on.
+    #[arg(long, env = "PISA_ALLOWED_AXIOMS", value_delimiter = ',',
+          default_value = crate::policy::DEFAULT_AXIOMS)]
+    pub allowed_axioms: Vec<String>,
+    /// Options `set_option` may change; a trailing `*` matches a prefix.
+    #[arg(long, env = "PISA_ALLOWED_OPTIONS", value_delimiter = ',',
+          default_value = crate::policy::DEFAULT_OPTIONS)]
+    pub allowed_options: Vec<String>,
+    /// Allow #eval, macros, elaborators and other metaprogramming in submitted code.
+    #[arg(long, env = "PISA_ALLOW_METAPROGRAMMING")]
+    pub allow_metaprogramming: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Sandbox {
+    None,
+    /// bubblewrap: no network, private /proc and /tmp, read-only filesystem.
+    Bwrap,
 }
 
 impl WorkerConfig {
@@ -53,6 +87,14 @@ impl WorkerConfig {
                 .unwrap_or_else(|| "worker".into());
             format!("{host}-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
         })
+    }
+
+    pub fn policy(&self) -> crate::policy::Policy {
+        crate::policy::Policy {
+            allowed_axioms: self.allowed_axioms.clone(),
+            allowed_options: self.allowed_options.clone(),
+            allow_metaprogramming: self.allow_metaprogramming,
+        }
     }
 
     pub fn version(&self) -> anyhow::Result<String> {

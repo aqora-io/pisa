@@ -13,9 +13,17 @@ x-worker: &worker
       PROJECT: ${PROJECT:-lean-project}
   image: pisa-worker:${PROJECT:-lean-project}
   depends_on: [router]
+  # bubblewrap needs to create namespaces and the worker writes to its own
+  # cgroup subtree, so dev workers run privileged in a private cgroup namespace.
+  # Production would grant only what these need (see the design doc).
+  privileged: true
+  cgroup: private
   environment: &worker-env
     PISA_ROUTER: router:7070
     PISA_SLOTS: ${PISA_SLOTS:-2}
+    PISA_SANDBOX: bwrap
+    PISA_CGROUP_ROOT: /sys/fs/cgroup
+    PISA_MEMORY_MAX_MB: ${PISA_MEMORY_MAX_MB:-16000}
     PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
     PISA_PREWARM: ${PISA_PREWARM:-}
     RUST_LOG: info

@@ -12,12 +12,14 @@ use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 use crate::launcher::Launcher;
+use crate::policy::{Policy, header_with_report_import};
 
 pub struct PoolConfig {
     pub slots: usize,
     pub max_uses: u64,
     pub max_rss_bytes: u64,
     pub import_timeout: Duration,
+    pub policy: Policy,
 }
 
 pub struct Pool {
@@ -36,6 +38,8 @@ pub struct Slot {
     header: Option<Warm>,
     jobs: u64,
     last_used: Instant,
+    /// OOM kills in the slot's cgroup when the current process started.
+    oom_baseline: u64,
 }
 
 struct Warm {
@@ -68,6 +72,7 @@ impl Pool {
                 header: None,
                 jobs: 0,
                 last_used: now,
+                oom_baseline: 0,
             })
             .collect();
         let (warm, warm_rx) = watch::channel(BTreeMap::new());
@@ -185,12 +190,16 @@ impl Lease {
         let pool = self.pool.clone();
         let slot = self.slot.as_mut().unwrap();
         slot.jobs = 0;
+        slot.oom_baseline = pool.launcher.oom_kills(id);
         let repl = match pool.launcher.spawn(id) {
             Ok(r) => slot.repl.insert(r),
             Err(e) => return Err(HeaderFailure::Repl(format!("failed to start REPL: {e}"))),
         };
         match repl
-            .send(&ReplCommand::cmd(header, None), pool.cfg.import_timeout)
+            .send(
+                &ReplCommand::cmd(header_with_report_import(header), None),
+                pool.cfg.import_timeout,
+            )
             .await
         {
             Ok(ReplResponse::Command(r)) if !r.has_errors() => {
@@ -216,8 +225,13 @@ impl Lease {
                 Err(HeaderFailure::Timeout)
             }
             Err(e) => {
-                self.retire("crash");
-                Err(HeaderFailure::Repl(e.to_string()))
+                let cause = self.failure_cause();
+                self.retire(cause);
+                Err(HeaderFailure::Repl(if cause == "oom" {
+                    "ran out of memory".into()
+                } else {
+                    e.to_string()
+                }))
             }
         }
     }
@@ -228,6 +242,20 @@ impl Lease {
 
     pub fn import_timeout(&self) -> Duration {
         self.pool.cfg.import_timeout
+    }
+
+    pub fn policy(&self) -> &Policy {
+        &self.pool.cfg.policy
+    }
+
+    /// Why the process died: "oom" if its cgroup recorded an OOM kill since it
+    /// started, otherwise "crash".
+    pub fn failure_cause(&self) -> &'static str {
+        if self.pool.launcher.oom_kills(self.id) > self.oom_baseline {
+            "oom"
+        } else {
+            "crash"
+        }
     }
 
     /// Kills the process (if any) and forgets its header, reporting `cause`.
@@ -256,8 +284,7 @@ impl Lease {
         } else if self.jobs >= self.pool.cfg.max_uses {
             self.retire("uses");
         } else if self.pool.cfg.max_rss_bytes > 0
-            && repl.pid().map(pisa_repl::proc::tree_rss_bytes).unwrap_or(0)
-                > self.pool.cfg.max_rss_bytes
+            && self.pool.launcher.memory(self.id, repl) > self.pool.cfg.max_rss_bytes
         {
             self.retire("memory");
         }

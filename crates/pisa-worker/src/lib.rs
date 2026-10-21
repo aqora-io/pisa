@@ -11,9 +11,11 @@ use pisa_protocol::wire::{self, Job, JobResult, RouterMessage, WorkerMessage};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
+pub mod cgroup;
 pub mod check;
 pub mod config;
 pub mod launcher;
+pub mod policy;
 pub mod pool;
 
 pub use config::WorkerConfig;
@@ -22,7 +24,7 @@ use pool::{Pool, PoolConfig};
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
     let version = cfg.version()?;
     let worker_id = cfg.worker_id();
-    let launcher = launcher::Launcher::new(&cfg).await?;
+    let launcher = launcher::Launcher::new(&cfg, &worker_id).await?;
     let (pool, warm_rx, mut restarts_rx) = Pool::new(
         launcher,
         PoolConfig {
@@ -30,6 +32,7 @@ pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
             max_uses: cfg.max_uses,
             max_rss_bytes: cfg.max_rss_mb * 1024 * 1024,
             import_timeout: Duration::from_secs(cfg.import_timeout_secs),
+            policy: cfg.policy(),
         },
     );
     tracing::info!(%worker_id, %version, slots = pool.slots(), "worker starting");

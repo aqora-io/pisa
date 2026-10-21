@@ -7,6 +7,10 @@
 //! - `SLEEP <ms>` sleeps before answering; `CRASH` exits
 //!
 //! Without `env`, a command is an import header; `import Missing` fails.
+//! The worker's axiom report (`run_cmd` … `PISA_DECLS`) lists each `theorem`,
+//! `def` and `axiom` seen so far; theorems depend on `sorryAx` if the code used
+//! `sorry`, on `Lean.ofReduceBool` if it used `native_decide`, and on any
+//! declared axiom.
 //! Tactic `rfl` closes the goal, `fail` errors, anything else leaves a goal open.
 
 use std::io::{BufRead, Write};
@@ -121,6 +125,11 @@ fn import(s: &mut State, header: &str) -> Value {
 }
 
 fn run(s: &mut State, prev: &str, cmd: &str) -> Value {
+    if cmd.starts_with("run_cmd") && cmd.contains("PISA_DECLS") {
+        s.envs.push(prev.to_string());
+        let report = format!("PISA_DECLS {}", declarations(prev));
+        return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
+    }
     let mut messages = Vec::new();
     let mut sorries = Vec::new();
     for (i, line) in cmd.lines().enumerate() {
@@ -161,6 +170,50 @@ fn run(s: &mut State, prev: &str, cmd: &str) -> Value {
         out["sorries"] = sorries.into();
     }
     out
+}
+
+/// One declaration per line starting with `theorem`, `def` or `axiom`. Its
+/// "type hash" is the statement text between the name and `:=`.
+fn declarations(code: &str) -> String {
+    let mut used = vec!["propext".to_string()];
+    if code.contains("sorry") {
+        used.push("sorryAx".into());
+    }
+    if code.contains("native_decide") {
+        used.push("Lean.ofReduceBool".into());
+    }
+    let mut decls = Vec::new();
+    for line in code.lines() {
+        let mut words = line.split_whitespace();
+        let (Some(keyword), Some(name)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let statement = line
+            .split_once(name)
+            .map_or("", |(_, rest)| rest.split(":=").next().unwrap_or("").trim());
+        let (kind, axioms) = match keyword {
+            "axiom" => {
+                used.push(name.to_string());
+                ("axiom", vec![name.to_string()])
+            }
+            "def" => ("def", vec![]),
+            "theorem" => ("theorem", Vec::new()),
+            _ => continue,
+        };
+        decls.push((kind, name.to_string(), axioms, statement.to_string()));
+    }
+    let decls: Vec<Value> = decls
+        .into_iter()
+        .map(|(kind, name, axioms, statement)| {
+            let axioms = if kind == "theorem" {
+                used.clone()
+            } else {
+                axioms
+            };
+            json!({"name": name, "kind": kind, "axioms": axioms, "typeHash": statement})
+        })
+        .collect();
+    Value::Array(decls).to_string()
 }
 
 fn message(line: usize, severity: &str, data: &str) -> Value {

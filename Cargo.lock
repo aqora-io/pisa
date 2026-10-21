@@ -996,6 +996,7 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "libc",
  "pisa-protocol",
  "pisa-repl",
  "serde_json",

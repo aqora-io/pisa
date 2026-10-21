@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use pisa_router::{RouterConfig, Running};
 use pisa_worker::WorkerConfig;
+use pisa_worker::config::Sandbox;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -41,7 +42,19 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         max_rss_mb: 0,
         import_timeout_secs: 10,
         prewarm: Vec::new(),
+        sandbox: Sandbox::None,
+        work_dir: None,
+        cgroup_root: None,
+        memory_max_mb: 0,
+        pids_max: 0,
+        allowed_axioms: split(pisa_worker::policy::DEFAULT_AXIOMS),
+        allowed_options: split(pisa_worker::policy::DEFAULT_OPTIONS),
+        allow_metaprogramming: false,
     }
+}
+
+fn split(list: &str) -> Vec<String> {
+    list.split(',').map(String::from).collect()
 }
 
 impl Cluster {

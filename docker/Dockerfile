@@ -34,9 +34,10 @@ RUN git clone --depth 1 --branch ${REPL_REV} https://github.com/leanprover-commu
 ARG PROJECT=lean-project
 COPY docker/${PROJECT} /opt/project
 WORKDIR /opt/project
+# Dependencies follow the committed lake-manifest.json; without one, resolve them.
 # Mathlib comes prebuilt from its cache; Physlib compiles from source (slow, once).
-RUN lake update \
-    && if [ -d .lake/packages/mathlib ]; then lake exe cache get; fi \
+RUN if [ ! -f lake-manifest.json ]; then lake update; fi \
+    && if grep -q mathlib lakefile.toml; then lake exe cache get; fi \
     && lake build
 
 FROM lean AS worker
