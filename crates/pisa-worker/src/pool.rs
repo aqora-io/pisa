@@ -8,12 +8,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pisa_protocol::api::{Error, ErrorKind};
-use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse};
+use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplResponse, Severity};
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
 use crate::launcher::Launcher;
 use crate::policy::{Policy, header_with_report_import};
+
+/// Succeeds only in an environment where the header's imports loaded.
+const IMPORT_PROBE: &str = "#check @Lean.Elab.Command.elabCommand";
 
 pub struct PoolConfig {
     pub slots: usize,
@@ -217,46 +220,74 @@ impl Lease {
                 )));
             }
         };
-        match repl
-            .send(
-                &ReplCommand::cmd(header_with_report_import(header), None),
-                pool.cfg.import_timeout,
-            )
+        let header = header_with_report_import(header);
+        let timeout = pool.cfg.import_timeout;
+        let r = match repl
+            .send(&ReplCommand::cmd(header.clone(), None), timeout)
             .await
         {
-            Ok(ReplResponse::Command(r)) if !r.has_errors() => {
-                self.header = Some(Warm {
-                    key: key.to_string(),
-                    env: r.env,
-                });
-                self.pool.set_warm(id, Some(key));
-                Ok((r.env, false))
-            }
+            Ok(ReplResponse::Command(r)) if !r.has_errors() => r,
             Ok(ReplResponse::Command(r)) => {
                 self.retire("header_error");
-                Err(HeaderFailure::Lean(r))
+                return Err(HeaderFailure::Lean(r));
             }
             Ok(other) => {
                 self.retire("header_error");
-                Err(HeaderFailure::Failed(Error::new(
+                return Err(HeaderFailure::Failed(Error::new(
                     ErrorKind::Internal,
                     format!("unexpected response to header: {other:?}"),
-                )))
+                )));
             }
-            Err(ReplFailure::Timeout) => {
-                self.retire("timeout");
-                Err(HeaderFailure::Timeout)
+            Err(e) => return Err(self.header_failed(e)),
+        };
+        // When imports can't be loaded together (two modules declaring the same
+        // name), the REPL reports no error but leaves the environment empty.
+        // Every header imports Lean.Elab.Command, so probe for it.
+        let probe = ReplCommand::cmd(IMPORT_PROBE, Some(r.env));
+        match repl.send(&probe, timeout).await {
+            Ok(ReplResponse::Command(p)) if !p.has_errors() => {}
+            Ok(_) => {
+                let mut messages = pool.launcher.diagnose_header(id, &header, timeout).await;
+                if !messages.iter().any(|m| m.severity == Severity::Error) {
+                    messages.push(Message {
+                        severity: Severity::Error,
+                        pos: Pos { line: 1, column: 0 },
+                        end_pos: None,
+                        data: "the imports could not be loaded together".into(),
+                    });
+                }
+                self.retire("header_error");
+                return Err(HeaderFailure::Lean(CommandResponse {
+                    env: r.env,
+                    messages,
+                    sorries: Vec::new(),
+                    tactics: Vec::new(),
+                    infotree: None,
+                }));
             }
-            Err(e) => {
-                let cause = self.failure_cause();
-                self.retire(cause);
-                Err(HeaderFailure::Failed(if cause == "oom" {
-                    Error::new(ErrorKind::OutOfMemory, "Lean exceeded its memory limit")
-                } else {
-                    Error::new(ErrorKind::Crash, format!("Lean process failed: {e}"))
-                }))
-            }
+            Err(e) => return Err(self.header_failed(e)),
         }
+        self.header = Some(Warm {
+            key: key.to_string(),
+            env: r.env,
+        });
+        self.pool.set_warm(id, Some(key));
+        Ok((r.env, false))
+    }
+
+    /// Retires the process after the REPL failed while importing a header.
+    fn header_failed(&mut self, e: ReplFailure) -> HeaderFailure {
+        if matches!(e, ReplFailure::Timeout) {
+            self.retire("timeout");
+            return HeaderFailure::Timeout;
+        }
+        let cause = self.failure_cause();
+        self.retire(cause);
+        HeaderFailure::Failed(if cause == "oom" {
+            Error::new(ErrorKind::OutOfMemory, "Lean exceeded its memory limit")
+        } else {
+            Error::new(ErrorKind::Crash, format!("Lean process failed: {e}"))
+        })
     }
 
     pub fn resident(&self, state: &str) -> Option<Resident> {

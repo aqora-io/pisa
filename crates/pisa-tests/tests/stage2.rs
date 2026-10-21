@@ -102,3 +102,20 @@ async fn sandboxed_worker_runs_jobs() {
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(r["messages"][0]["data"], "Nat : Type");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn imports_that_fail_to_load_together_are_reported() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let r = check(&c, "import Foo\nimport Clash\ntheorem t : 1 = 1 := rfl").await;
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["messages"][0]["severity"], "error", "{r}");
+    assert_eq!(
+        r["messages"][0]["data"],
+        "import Clash failed, environment already contains 'dup' from Other"
+    );
+    assert_eq!(r["messages"][0]["pos"]["line"], 2);
+
+    // The slot is usable again afterwards.
+    let r = check(&c, "import Foo\ntheorem t : 1 = 1 := rfl").await;
+    assert_eq!(r["ok"], true, "{r}");
+}

@@ -10,6 +10,10 @@ description = "End-to-end tests for pisa, using fake-repl in place of Lean"
 name = "fake-repl"
 path = "src/bin/fake-repl.rs"
 
+[[bin]]
+name = "fake-lean"
+path = "src/bin/fake-lean.rs"
+
 [dependencies]
 serde_json.workspace = true
 

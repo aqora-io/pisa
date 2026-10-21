@@ -140,6 +140,10 @@ def core(failover=True):
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
     assert r["ok"], r
+    # Mathlib and QuantumInfo both declare Commute.log_left, so they can't be
+    # imported together; the error must say so rather than leave names unknown.
+    r = check("import Mathlib\nimport QuantumInfo\n#check MState")
+    assert not r["ok"] and "Commute.log_left" in r["messages"][0]["data"], r
     r = check("import Physlib\n\n#check SpaceTime")
     assert r["messages"][0]["pos"]["line"] == 3, r
     s = post("/sessions", {"code": "import Mathlib\n\ntheorem t (x : ℝ) (h : 0 < x) : 0 < x ^ 2 := by sorry"})

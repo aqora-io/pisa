@@ -6,7 +6,9 @@
 //! - `sorry` gives a warning and a sorry with a fresh proof state
 //! - `SLEEP <ms>` sleeps before answering; `CRASH` exits
 //!
-//! Without `env`, a command is an import header; `import Missing` fails.
+//! Without `env`, a command is an import header; `import Missing` fails, and
+//! `import Clash` silently yields an empty environment, like the real REPL
+//! when two imported modules declare the same name: every `#check` in it fails.
 //! The worker's axiom report (`run_cmd` … `PISA_DECLS`) lists each `theorem`,
 //! `def` and `axiom` seen so far; theorems depend on `sorryAx` if the code used
 //! `sorry`, on `Lean.ofReduceBool` if it used `native_decide`, and on any
@@ -129,6 +131,11 @@ fn run(s: &mut State, prev: &str, cmd: &str) -> Value {
         s.envs.push(prev.to_string());
         let report = format!("PISA_DECLS {}", declarations(prev));
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
+    }
+    if prev.contains("import Clash") && cmd.starts_with("#check") {
+        s.envs.push(prev.to_string());
+        return json!({"env": s.envs.len() - 1,
+                      "messages": [message(1, "error", "Unknown identifier")]});
     }
     let mut messages = Vec::new();
     let mut sorries = Vec::new();

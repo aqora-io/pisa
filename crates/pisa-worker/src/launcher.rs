@@ -4,8 +4,13 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use std::process::Stdio;
+use std::time::Duration;
+
 use anyhow::Context;
+use pisa_protocol::repl::Message;
 use pisa_repl::Repl;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::cgroup::Cgroups;
@@ -13,6 +18,7 @@ use crate::config::{Sandbox, WorkerConfig};
 
 pub struct Launcher {
     repl: PathBuf,
+    lean: PathBuf,
     project: Option<PathBuf>,
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
@@ -50,6 +56,8 @@ impl Launcher {
         };
         Ok(Launcher {
             repl: std::path::absolute(&cfg.repl).unwrap_or_else(|_| cfg.repl.clone()),
+            // Usually a bare `lean`, found on the project environment's PATH.
+            lean: cfg.lean.clone(),
             project: cfg.project.clone(),
             env,
             sandbox: cfg.sandbox,
@@ -65,28 +73,70 @@ impl Launcher {
     }
 
     pub fn spawn(&self, slot: usize) -> std::io::Result<Repl> {
+        Repl::spawn(self.command(slot, &self.repl, &[])?)
+    }
+
+    /// `program` set up like a REPL for `slot`: same environment, sandbox and
+    /// cgroup.
+    fn command(&self, slot: usize, program: &Path, args: &[&str]) -> std::io::Result<Command> {
         let dir = self.slot_dir(slot);
         std::fs::create_dir_all(&dir)?;
         let cwd = self.project.clone().unwrap_or_else(|| dir.clone());
         let mut cmd = match self.sandbox {
             Sandbox::None => {
-                let mut cmd = Command::new(&self.repl);
+                let mut cmd = Command::new(program);
                 cmd.current_dir(&cwd);
                 cmd
             }
             Sandbox::Bwrap => {
                 let mut cmd = Command::new("bwrap");
-                cmd.args(bwrap_args(&dir, &cwd)).arg("--").arg(&self.repl);
+                cmd.args(bwrap_args(&dir, &cwd)).arg("--").arg(program);
                 cmd
             }
         };
+        cmd.args(args);
         if let Some(env) = &self.env {
             cmd.env_clear().envs(env.iter().cloned());
         }
         if let Some(cg) = &self.cgroups {
             cg.apply(slot, &mut cmd)?;
         }
-        Repl::spawn(cmd)
+        Ok(cmd)
+    }
+
+    /// Lean's own messages for a header, from `lean --stdin --json`. The REPL
+    /// reports nothing when imports fail to load together; plain Lean does.
+    /// Returns no messages if Lean can't be run.
+    pub async fn diagnose_header(
+        &self,
+        slot: usize,
+        header: &str,
+        timeout: Duration,
+    ) -> Vec<Message> {
+        let run = async {
+            let mut cmd = self.command(slot, &self.lean, &["--stdin", "--json"])?;
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let mut child = cmd.spawn()?;
+            let mut stdin = child.stdin.take().expect("piped stdin");
+            stdin.write_all(header.as_bytes()).await?;
+            drop(stdin);
+            child.wait_with_output().await
+        };
+        let output = match tokio::time::timeout(timeout, run).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                tracing::warn!("running lean to diagnose a header failed: {e}");
+                return Vec::new();
+            }
+            Err(_) => return Vec::new(),
+        };
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
     }
 
     /// OOM kills so far in the slot's cgroup (0 without cgroups).

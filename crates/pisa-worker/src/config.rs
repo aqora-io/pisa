@@ -20,6 +20,9 @@ pub struct WorkerConfig {
     /// The REPL executable.
     #[arg(long, env = "PISA_REPL", default_value = "repl")]
     pub repl: PathBuf,
+    /// The `lean` executable, used to explain imports the REPL fails to load.
+    #[arg(long, env = "PISA_LEAN", default_value = "lean")]
+    pub lean: PathBuf,
     /// Lake project whose dependencies the REPL imports (run through `lake env`).
     #[arg(long, env = "PISA_PROJECT")]
     pub project: Option<PathBuf>,
