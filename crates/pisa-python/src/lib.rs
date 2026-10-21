@@ -1,0 +1,163 @@
+//! Python bindings for `pisa-client`, exposed as `pisa_client._native`.
+//!
+//! Each call runs the async Rust client on a shared Tokio runtime with the
+//! GIL released, so Python threads can issue requests concurrently. Results
+//! become plain dicts and lists.
+
+use std::future::Future;
+use std::sync::OnceLock;
+
+use pisa_client::Error;
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyDict, PyList, PyString};
+use serde::Serialize;
+use serde_json::Value;
+
+fn runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    })
+}
+
+/// Raises the exception class `pisa_client.errors` picks for the error.
+fn to_py_err(py: Python<'_>, e: Error) -> PyErr {
+    let (status, kind, message) = match e {
+        Error::Url(msg) => return PyValueError::new_err(msg),
+        Error::Server {
+            status,
+            kind,
+            message,
+        } => {
+            let kind = serde_json::to_value(kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from));
+            (Some(status), kind, message)
+        }
+        Error::Http(err) => (None, None, err.to_string()),
+    };
+    let raised = py
+        .import("pisa_client.errors")
+        .and_then(|m| m.getattr("_from_server"))
+        .and_then(|f| f.call1((message, kind, status)));
+    match raised {
+        Ok(exc) => PyErr::from_value(exc),
+        Err(err) => err,
+    }
+}
+
+fn call<'py, T, F>(py: Python<'py>, fut: F) -> PyResult<Bound<'py, PyAny>>
+where
+    T: Serialize + Send,
+    F: Future<Output = Result<T, Error>> + Send,
+{
+    let result = py.detach(|| runtime().block_on(fut));
+    match result {
+        Ok(value) => {
+            let value =
+                serde_json::to_value(value).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            to_py(py, &value)
+        }
+        Err(e) => Err(to_py_err(py, e)),
+    }
+}
+
+/// Converts JSON into the equivalent Python dicts, lists and scalars.
+fn to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
+    Ok(match value {
+        Value::Null => py.None().into_bound(py),
+        Value::Bool(b) => PyBool::new(py, *b).to_owned().into_any(),
+        Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(i), _, _) => i.into_pyobject(py)?.into_any(),
+            (_, Some(u), _) => u.into_pyobject(py)?.into_any(),
+            (_, _, Some(f)) => f.into_pyobject(py)?.into_any(),
+            _ => unreachable!("a JSON number is an i64, u64 or f64"),
+        },
+        Value::String(s) => PyString::new(py, s).into_any(),
+        Value::Array(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(to_py(py, item)?)?;
+            }
+            list.into_any()
+        }
+        Value::Object(fields) => {
+            let dict = PyDict::new(py);
+            for (key, item) in fields {
+                dict.set_item(key, to_py(py, item)?)?;
+            }
+            dict.into_any()
+        }
+    })
+}
+
+/// A client for one pisa server. Safe to share between threads.
+#[pyclass(frozen, module = "pisa_client")]
+struct Client {
+    inner: pisa_client::Client,
+}
+
+#[pymethods]
+impl Client {
+    #[new]
+    #[pyo3(signature = (url, *, version = None, timeout = 60))]
+    fn new(url: &str, version: Option<String>, timeout: u64) -> PyResult<Self> {
+        let mut inner = pisa_client::Client::new(url)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?
+            .with_timeout(timeout);
+        if let Some(v) = version {
+            inner = inner.with_version(v);
+        }
+        Ok(Client { inner })
+    }
+
+    fn health(&self, py: Python<'_>) -> PyResult<()> {
+        let result = py.detach(|| runtime().block_on(self.inner.health()));
+        result.map_err(|e| to_py_err(py, e))
+    }
+
+    fn check<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.check(&code).await })
+    }
+
+    fn check_batch<'py>(
+        &self,
+        py: Python<'py>,
+        items: Vec<(String, String)>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, self.inner.check_batch(items))
+    }
+
+    fn start_session<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.start_session(&code).await })
+    }
+
+    fn tactic<'py>(
+        &self,
+        py: Python<'py>,
+        state: String,
+        tactic: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.tactic(&state, &tactic).await })
+    }
+
+    fn check_session<'py>(
+        &self,
+        py: Python<'py>,
+        session: String,
+        code: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            self.inner.check_session(&session, &code).await
+        })
+    }
+}
+
+#[pymodule]
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<Client>()
+}

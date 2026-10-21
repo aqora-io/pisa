@@ -210,7 +210,7 @@ fn declarations(code: &str) -> String {
             } else {
                 axioms
             };
-            json!({"name": name, "kind": kind, "axioms": axioms, "typeHash": statement})
+            json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement})
         })
         .collect();
     Value::Array(decls).to_string()

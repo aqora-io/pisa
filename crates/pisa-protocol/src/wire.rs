@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use crate::kimina::CheckOutput;
-use crate::session;
+use crate::api;
+use crate::repl::CommandResponse;
 use crate::verify::Verification;
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -63,10 +63,6 @@ pub enum Job {
 pub struct CheckJob {
     pub code: String,
     pub timeout_secs: u64,
-    #[serde(default)]
-    pub infotree: Option<String>,
-    /// When false, the Lean process is discarded after this job.
-    pub reuse: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,8 +89,8 @@ pub struct SessionCheckJob {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobResult {
     Check(CheckOutcome),
-    SessionStarted(session::StartResponse),
-    TacticApplied(session::TacticResponse),
+    SessionStarted(Result<api::StartResponse, api::Error>),
+    TacticApplied(Result<api::TacticResponse, api::Error>),
     SessionChecked(SessionChecked),
     /// The worker could not run the job at all.
     Failed {
@@ -106,9 +102,10 @@ pub enum JobResult {
 pub struct CheckOutcome {
     pub time: f64,
     #[serde(default)]
-    pub error: Option<String>,
+    pub error: Option<api::Error>,
+    /// The REPL's response, positions already shifted to the submitted code.
     #[serde(default)]
-    pub response: Option<CheckOutput>,
+    pub response: Option<CommandResponse>,
     #[serde(default)]
     pub verification: Option<Verification>,
     /// Whether the header was already imported in the process that ran the job.
@@ -174,8 +171,6 @@ mod tests {
             job: Job::Check(CheckJob {
                 code: "import Mathlib\n".repeat(200),
                 timeout_secs: 5,
-                infotree: None,
-                reuse: true,
             }),
         };
         send(&mut a, &job).await.unwrap();

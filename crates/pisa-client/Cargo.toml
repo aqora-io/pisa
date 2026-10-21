@@ -1,0 +1,21 @@
+[package]
+name = "pisa-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Async client for the pisa Lean server"
+
+[features]
+default = ["rustls"]
+# HTTPS support; plain-HTTP deployments can disable it.
+rustls = ["reqwest/rustls"]
+
+[dependencies]
+pisa-protocol.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

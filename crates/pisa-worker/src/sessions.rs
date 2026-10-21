@@ -4,18 +4,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use pisa_protocol::api::{self, Error, ErrorKind, Key, StartResponse, StateInfo, TacticResponse};
 use pisa_protocol::header::split_header;
-use pisa_protocol::kimina::{header_timeout_error, timeout_error};
 use pisa_protocol::repl::{ReplCommand, ReplResponse};
-use pisa_protocol::session::{Key, StartResponse, StateInfo, TacticResponse};
 use pisa_protocol::verify::Declaration;
 use pisa_protocol::wire::{
     CheckJob, CheckOutcome, SessionCheckJob, SessionChecked, SessionStartJob, SessionTacticJob,
 };
 
-use crate::check::{Failure, axiom_report, run, run_check};
+use crate::check::{axiom_report, header_error, policy_error, run, run_check, unexpected};
 use crate::policy::parse_report;
-use crate::pool::{HeaderFailure, Lease, Pool, Resident};
+use crate::pool::{Lease, Pool, Resident};
 use crate::store::{SessionMeta, StateMeta, Store};
 
 /// Pickling and unpickling only touch the state's own constants.
@@ -24,6 +23,10 @@ const PICKLE_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct Sessions {
     pub store: Store,
     pub version: String,
+}
+
+fn internal(e: impl std::fmt::Display) -> Error {
+    Error::new(ErrorKind::Internal, e.to_string())
 }
 
 impl Sessions {
@@ -36,49 +39,52 @@ impl Sessions {
         .to_string()
     }
 
-    fn parse(&self, key: &str) -> Result<Key, String> {
-        let key = Key::parse(key).ok_or_else(|| format!("invalid key: {key}"))?;
+    fn parse(&self, key: &str) -> Result<Key, Error> {
+        let key = Key::parse(key)
+            .ok_or_else(|| Error::new(ErrorKind::BadRequest, format!("invalid key: {key}")))?;
         if key.version != self.version {
-            return Err(format!("key belongs to version {}", key.version));
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!("key belongs to version {}", key.version),
+            ));
         }
         Ok(key)
     }
 
     /// Runs code containing `sorry` and stores one proof state per `sorry`.
-    pub async fn start(&self, pool: &Arc<Pool>, job: SessionStartJob) -> StartResponse {
-        let mut resp = StartResponse::default();
+    pub async fn start(
+        &self,
+        pool: &Arc<Pool>,
+        job: SessionStartJob,
+    ) -> Result<StartResponse, Error> {
         let split = split_header(&job.code);
         let mut slot = pool.acquire(&split.header_key, None).await;
         let rejected = slot.policy().scan(&split.body);
         if !rejected.is_empty() {
-            resp.error = Some(format!("Rejected by policy: {}", rejected.join(", ")));
-            return resp;
+            return Err(policy_error(&rejected));
         }
-        let env = match warm_up(&mut slot, &split.header, &split.header_key).await {
-            Ok(env) => env,
-            Err((messages, error)) => {
-                resp.messages = messages;
-                resp.error = Some(error);
-                return resp;
-            }
-        };
+        let result = self.start_in(&mut slot, job, split).await;
+        slot.finish_job();
+        result
+    }
+
+    async fn start_in(
+        &self,
+        slot: &mut Lease,
+        job: SessionStartJob,
+        split: pisa_protocol::header::Split,
+    ) -> Result<StartResponse, Error> {
+        let (env, _) = slot
+            .warm_up(&split.header, &split.header_key)
+            .await
+            .map_err(|f| header_error(f, slot.import_timeout()))?;
         let cmd = ReplCommand::cmd(split.body.clone(), Some(env));
-        let mut r = match run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await {
-            Ok(ReplResponse::Command(r)) => r,
-            Ok(ReplResponse::Error(e)) => {
-                resp.error = Some(e.message);
-                return resp;
-            }
-            Ok(other) => {
-                resp.error = Some(format!("unexpected REPL response: {other:?}"));
-                return resp;
-            }
-            Err(f) => {
-                resp.error = Some(failure_message(f, job.timeout_secs));
-                return resp;
-            }
+        let mut r = match run(slot, &cmd, Duration::from_secs(job.timeout_secs)).await? {
+            ReplResponse::Command(r) => r,
+            ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
+            other => return Err(unexpected(other)),
         };
-        let declarations = axiom_report(&mut slot, &r)
+        let declarations = axiom_report(slot, &r)
             .await
             .as_ref()
             .and_then(parse_report)
@@ -87,6 +93,7 @@ impl Sessions {
         let session_id = uuid::Uuid::new_v4().simple().to_string();
         let session = self.key(&split.header_key, &session_id);
         r.shift_lines(split.header_lines);
+        let mut states = Vec::new();
         for sorry in &r.sorries {
             let Some(proof_state) = sorry.proof_state else {
                 continue;
@@ -98,97 +105,85 @@ impl Sessions {
                 tactic: None,
                 goals: vec![sorry.goal.clone()],
             };
-            match self.save(&mut slot, proof_state, &meta).await {
-                Ok(hash) => {
-                    resp.states.push(StateInfo {
-                        state: self.key(&split.header_key, &hash),
-                        goal: sorry.goal.clone(),
-                        pos: sorry.pos,
-                        end_pos: sorry.end_pos,
-                    });
-                }
-                Err(e) => {
-                    resp.error = Some(format!("saving proof state failed: {e}"));
-                    slot.finish_job(true);
-                    return resp;
-                }
-            }
+            let hash = self.save(slot, proof_state, &meta).await?;
+            states.push(StateInfo {
+                state: self.key(&split.header_key, &hash),
+                goal: sorry.goal.clone(),
+                pos: sorry.pos.map(Into::into),
+                end_pos: sorry.end_pos.map(Into::into),
+            });
         }
         let meta = SessionMeta {
             code: job.code,
             declarations,
         };
-        if let Err(e) = self.store.put_session(&session_id, &meta).await {
-            resp.error = Some(format!("saving session failed: {e}"));
-        } else {
-            resp.session = Some(session);
-        }
-        resp.messages = r.messages;
-        slot.finish_job(true);
-        resp
+        self.store
+            .put_session(&session_id, &meta)
+            .await
+            .map_err(internal)?;
+        Ok(StartResponse {
+            session,
+            states,
+            messages: api::messages(r.messages),
+        })
     }
 
     /// Applies one tactic to a stored proof state and stores the result.
-    pub async fn tactic(&self, pool: &Arc<Pool>, job: SessionTacticJob) -> TacticResponse {
-        let mut resp = TacticResponse::default();
-        let key = match self.parse(&job.state) {
-            Ok(k) => k,
-            Err(e) => {
-                resp.error = Some(e);
-                return resp;
-            }
-        };
+    pub async fn tactic(
+        &self,
+        pool: &Arc<Pool>,
+        job: SessionTacticJob,
+    ) -> Result<TacticResponse, Error> {
+        let key = self.parse(&job.state)?;
         let mut slot = pool.acquire(&key.header_key, Some(&key.id)).await;
         let rejected = slot.policy().scan(&job.tactic);
         if !rejected.is_empty() {
-            resp.error = Some(format!("Rejected by policy: {}", rejected.join(", ")));
-            return resp;
+            return Err(policy_error(&rejected));
         }
+        let result = self.tactic_in(&mut slot, &key, job).await;
+        slot.finish_job();
+        result
+    }
+
+    async fn tactic_in(
+        &self,
+        slot: &mut Lease,
+        key: &Key,
+        job: SessionTacticJob,
+    ) -> Result<TacticResponse, Error> {
         let resident = match slot.resident(&key.id) {
             Some(r) => r,
-            None => match self.load(&mut slot, &key).await {
-                Ok(r) => r,
-                Err(e) => {
-                    resp.error = Some(e);
-                    slot.finish_job(true);
-                    return resp;
-                }
-            },
+            None => self.load(slot, key).await?,
         };
-
         let cmd = ReplCommand::Tactic {
             tactic: job.tactic.clone(),
             proof_state: resident.proof_state,
         };
-        match run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await {
-            Ok(ReplResponse::ProofStep(step)) => {
-                let meta = StateMeta {
-                    header: resident.header.clone(),
-                    session: resident.session.clone(),
-                    parent: Some(job.state),
-                    tactic: Some(job.tactic),
-                    goals: step.goals.clone(),
-                };
-                match self.save(&mut slot, step.proof_state, &meta).await {
-                    Ok(hash) => resp.state = Some(self.key(&key.header_key, &hash)),
-                    Err(e) => resp.error = Some(format!("saving proof state failed: {e}")),
-                }
-                resp.goals = step.goals;
-                resp.proof_status = Some(step.proof_status);
-                resp.messages = step.messages;
-            }
-            Ok(ReplResponse::Error(e)) => resp.error = Some(e.message),
-            Ok(other) => resp.error = Some(format!("unexpected REPL response: {other:?}")),
-            Err(f) => resp.error = Some(failure_message(f, job.timeout_secs)),
-        }
-        slot.finish_job(true);
-        resp
+        let step = match run(slot, &cmd, Duration::from_secs(job.timeout_secs)).await? {
+            ReplResponse::ProofStep(step) => step,
+            ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
+            other => return Err(unexpected(other)),
+        };
+        let meta = StateMeta {
+            header: resident.header.clone(),
+            session: resident.session.clone(),
+            parent: Some(job.state),
+            tactic: Some(job.tactic),
+            goals: step.goals.clone(),
+        };
+        let hash = self.save(slot, step.proof_state, &meta).await?;
+        Ok(TacticResponse {
+            state: self.key(&key.header_key, &hash),
+            complete: step.proof_status == "Completed",
+            goals: step.goals,
+            messages: api::messages(step.messages),
+        })
     }
 
     /// Re-checks completed code from scratch and confirms it proves the same
     /// statements the session started from.
     pub async fn check(&self, pool: &Arc<Pool>, job: SessionCheckJob) -> SessionChecked {
-        let failed = |error: String| SessionChecked {
+        let failed = |error: Error| SessionChecked {
             outcome: CheckOutcome {
                 time: 0.0,
                 error: Some(error),
@@ -204,15 +199,18 @@ impl Sessions {
         };
         let session = match self.store.session(&key.id).await {
             Ok(s) => s,
-            Err(e) => return failed(format!("unknown session: {e}")),
+            Err(e) => {
+                return failed(Error::new(
+                    ErrorKind::NotFound,
+                    format!("unknown session: {e}"),
+                ));
+            }
         };
         let outcome = run_check(
             pool,
             CheckJob {
                 code: job.code,
                 timeout_secs: job.timeout_secs,
-                infotree: None,
-                reuse: true,
             },
         )
         .await;
@@ -233,7 +231,7 @@ impl Sessions {
         slot: &mut Lease,
         proof_state: u64,
         meta: &StateMeta,
-    ) -> anyhow::Result<String> {
+    ) -> Result<String, Error> {
         let path = slot
             .scratch_dir()
             .join(format!("{}.olean", uuid::Uuid::new_v4().simple()));
@@ -244,13 +242,16 @@ impl Sessions {
         let result = run(slot, &cmd, PICKLE_TIMEOUT).await;
         let bytes = tokio::fs::read(&path).await;
         let _ = tokio::fs::remove_file(&path).await;
-        match result {
-            Ok(ReplResponse::ProofStep(_)) => {}
-            Ok(ReplResponse::Error(e)) => anyhow::bail!(e.message),
-            Ok(other) => anyhow::bail!("unexpected REPL response: {other:?}"),
-            Err(f) => anyhow::bail!(failure_message(f, PICKLE_TIMEOUT.as_secs())),
+        match result? {
+            ReplResponse::ProofStep(_) => {}
+            ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
+            other => return Err(unexpected(other)),
         }
-        let hash = self.store.put_state(&bytes?, meta).await?;
+        let hash = self
+            .store
+            .put_state(&bytes.map_err(internal)?, meta)
+            .await
+            .map_err(internal)?;
         slot.remember(
             hash.clone(),
             Resident {
@@ -263,37 +264,31 @@ impl Sessions {
     }
 
     /// Loads a stored state into the slot's process, importing its header first.
-    async fn load(&self, slot: &mut Lease, key: &Key) -> Result<Resident, String> {
+    async fn load(&self, slot: &mut Lease, key: &Key) -> Result<Resident, Error> {
         let meta = self
             .store
             .state_meta(&key.id)
             .await
-            .map_err(|e| format!("unknown state: {e}"))?;
-        let env = warm_up(slot, &meta.header, &key.header_key)
+            .map_err(|e| Error::new(ErrorKind::NotFound, format!("unknown state: {e}")))?;
+        let (env, _) = slot
+            .warm_up(&meta.header, &key.header_key)
             .await
-            .map_err(|(_, e)| e)?;
-        let pickle = self
-            .store
-            .state_pickle(&key.id)
-            .await
-            .map_err(|e| format!("loading state failed: {e}"))?;
+            .map_err(|f| header_error(f, slot.import_timeout()))?;
+        let pickle = self.store.state_pickle(&key.id).await.map_err(internal)?;
         let path = slot
             .scratch_dir()
             .join(format!("{}.olean", uuid::Uuid::new_v4().simple()));
-        tokio::fs::write(&path, pickle)
-            .await
-            .map_err(|e| format!("writing state failed: {e}"))?;
+        tokio::fs::write(&path, pickle).await.map_err(internal)?;
         let cmd = ReplCommand::UnpickleProofState {
             unpickle_proof_state_from: path.to_string_lossy().into_owned(),
             env: Some(env),
         };
         let result = run(slot, &cmd, PICKLE_TIMEOUT).await;
         let _ = tokio::fs::remove_file(&path).await;
-        let proof_state = match result {
-            Ok(ReplResponse::ProofStep(step)) => step.proof_state,
-            Ok(ReplResponse::Error(e)) => return Err(e.message),
-            Ok(other) => return Err(format!("unexpected REPL response: {other:?}")),
-            Err(f) => return Err(failure_message(f, PICKLE_TIMEOUT.as_secs())),
+        let proof_state = match result? {
+            ReplResponse::ProofStep(step) => step.proof_state,
+            ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
+            other => return Err(unexpected(other)),
         };
         let resident = Resident {
             proof_state,
@@ -302,32 +297,6 @@ impl Sessions {
         };
         slot.remember(key.id.clone(), resident.clone());
         Ok(resident)
-    }
-}
-
-async fn warm_up(
-    slot: &mut Lease,
-    header: &str,
-    header_key: &str,
-) -> Result<u64, (Vec<pisa_protocol::repl::Message>, String)> {
-    match slot.warm_up(header, header_key).await {
-        Ok((env, _)) => Ok(env),
-        Err(HeaderFailure::Lean(r)) => Err((r.messages, "header failed to elaborate".into())),
-        Err(HeaderFailure::Timeout) => Err((
-            Vec::new(),
-            header_timeout_error(slot.import_timeout().as_secs()),
-        )),
-        Err(HeaderFailure::Repl(e)) => {
-            Err((Vec::new(), format!("Lean REPL failed on header: {e}")))
-        }
-    }
-}
-
-fn failure_message(f: Failure, timeout_secs: u64) -> String {
-    match f {
-        Failure::Timeout => timeout_error(timeout_secs),
-        Failure::OutOfMemory => "Lean REPL ran out of memory".into(),
-        Failure::Crashed(e) => format!("Lean REPL failed: {e}"),
     }
 }
 

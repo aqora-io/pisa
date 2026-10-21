@@ -1,9 +1,8 @@
-//! Shared protocol types for pisa: the Lean REPL protocol, the Kimina-compatible
-//! HTTP API, and the router↔worker wire protocol.
+//! Shared protocol types for pisa: the client HTTP API, the Lean REPL
+//! protocol, and the router↔worker wire protocol.
 
+pub mod api;
 pub mod header;
-pub mod kimina;
 pub mod repl;
-pub mod session;
 pub mod verify;
 pub mod wire;

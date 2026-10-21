@@ -7,6 +7,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use pisa_protocol::api::{Error, ErrorKind};
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse};
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
@@ -62,7 +63,8 @@ pub enum HeaderFailure {
     /// The header elaborated with errors (e.g. an unknown module).
     Lean(CommandResponse),
     Timeout,
-    Repl(String),
+    /// The process failed to start or died.
+    Failed(Error),
 }
 
 impl Pool {
@@ -208,7 +210,12 @@ impl Lease {
         slot.oom_baseline = pool.launcher.oom_kills(id);
         let repl = match pool.launcher.spawn(id) {
             Ok(r) => slot.repl.insert(r),
-            Err(e) => return Err(HeaderFailure::Repl(format!("failed to start REPL: {e}"))),
+            Err(e) => {
+                return Err(HeaderFailure::Failed(Error::new(
+                    ErrorKind::Crash,
+                    format!("failed to start Lean: {e}"),
+                )));
+            }
         };
         match repl
             .send(
@@ -231,8 +238,9 @@ impl Lease {
             }
             Ok(other) => {
                 self.retire("header_error");
-                Err(HeaderFailure::Repl(format!(
-                    "unexpected response to header: {other:?}"
+                Err(HeaderFailure::Failed(Error::new(
+                    ErrorKind::Internal,
+                    format!("unexpected response to header: {other:?}"),
                 )))
             }
             Err(ReplFailure::Timeout) => {
@@ -242,10 +250,10 @@ impl Lease {
             Err(e) => {
                 let cause = self.failure_cause();
                 self.retire(cause);
-                Err(HeaderFailure::Repl(if cause == "oom" {
-                    "ran out of memory".into()
+                Err(HeaderFailure::Failed(if cause == "oom" {
+                    Error::new(ErrorKind::OutOfMemory, "Lean exceeded its memory limit")
                 } else {
-                    e.to_string()
+                    Error::new(ErrorKind::Crash, format!("Lean process failed: {e}"))
                 }))
             }
         }
@@ -300,7 +308,7 @@ impl Lease {
 
     /// Records a finished job and retires the process if it died, has run too
     /// many jobs, or holds too much memory.
-    pub fn finish_job(&mut self, reuse: bool) {
+    pub fn finish_job(&mut self) {
         self.jobs += 1;
         let Some(repl) = self.repl.as_ref() else {
             return;
@@ -308,8 +316,6 @@ impl Lease {
         if !repl.is_alive() {
             // The caller already saw the failure; just clear the slot.
             self.retire("crash");
-        } else if !reuse {
-            self.retire("no_reuse");
         } else if self.jobs >= self.pool.cfg.max_uses {
             self.retire("uses");
         } else if self.pool.cfg.max_rss_bytes > 0

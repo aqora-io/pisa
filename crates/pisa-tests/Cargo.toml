@@ -15,6 +15,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 object_store.workspace = true
+pisa-client.workspace = true
 pisa-protocol.workspace = true
 pisa-router.workspace = true
 pisa-worker.workspace = true

@@ -1,28 +1,31 @@
-//! Client-facing HTTP API, compatible with Kimina Lean Server.
+//! Client-facing HTTP API; the types and conventions are in
+//! `pisa_protocol::api`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{FromRequest, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::join_all;
-use pisa_protocol::header::split_header;
-use pisa_protocol::kimina::{
-    CheckRequest, CheckResponse, CheckResult, VerifyRequest, VerifyResponse, VerifyResult,
+use pisa_protocol::api::{
+    self, BatchRequest, BatchResponse, CheckRequest, CheckResult, ErrorKind, ErrorResponse,
 };
+use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{CheckJob, CheckOutcome, Job, JobResult};
+use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::dispatch::{DispatchError, Dispatcher, Priority, Route};
 use crate::metrics as m;
+use crate::sessions;
 
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
     pub versions: Versions,
-    pub affinity: crate::sessions::Affinity,
+    pub affinity: sessions::Affinity,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,34 +46,61 @@ impl Versions {
 
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
-        .route("/", get(health))
         .route("/health", get(health))
-        .route("/api/check", post(check))
-        .route("/verify", post(verify))
-        .route("/one_pass_verify_batch", post(verify))
-        .route("/sessions", post(crate::sessions::start))
-        .route("/sessions/{id}/tactic", post(crate::sessions::tactic))
-        .route("/sessions/{id}/check", post(crate::sessions::check))
         .route("/metrics", get(metrics))
+        .route("/check", post(check))
+        .route("/check/batch", post(check_batch))
+        .route("/sessions", post(sessions::start))
+        .route("/sessions/{id}/check", post(sessions::check))
+        .route("/states/{id}/tactic", post(sessions::tactic))
+        .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
 }
 
-pub struct ApiError(pub StatusCode, pub String);
+/// An error response: the status follows the kind, the body is [`ErrorResponse`].
+pub struct ApiError(pub api::Error);
+
+impl ApiError {
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        ApiError(api::Error::new(kind, message))
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        // FastAPI's error shape, which Kimina clients expect.
-        (self.0, Json(json!({ "detail": self.1 }))).into_response()
+        let status =
+            StatusCode::from_u16(self.0.kind.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(ErrorResponse { error: self.0 })).into_response()
+    }
+}
+
+impl From<DispatchError> for api::Error {
+    fn from(e: DispatchError) -> Self {
+        let kind = match e {
+            DispatchError::NoCapacity => ErrorKind::Capacity,
+            DispatchError::WorkerLost(_) => ErrorKind::Unavailable,
+        };
+        api::Error::new(kind, e.to_string())
     }
 }
 
 impl From<DispatchError> for ApiError {
     fn from(e: DispatchError) -> Self {
-        let status = match e {
-            DispatchError::NoCapacity => StatusCode::TOO_MANY_REQUESTS,
-            DispatchError::WorkerLost(_) => StatusCode::SERVICE_UNAVAILABLE,
-        };
-        ApiError(status, e.to_string())
+        ApiError(e.into())
+    }
+}
+
+/// A JSON body whose rejections use the API's error shape.
+pub struct Body<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(v)) => Ok(Body(v)),
+            Err(rejection) => Err(ApiError::new(ErrorKind::BadRequest, rejection.body_text())),
+        }
     }
 }
 
@@ -84,105 +114,97 @@ async fn metrics() -> String {
 
 async fn check(
     State(app): State<Arc<App>>,
-    Json(req): Json<CheckRequest>,
-) -> Result<Json<CheckResponse>, ApiError> {
+    Body(req): Body<CheckRequest>,
+) -> Result<Json<CheckResult>, ApiError> {
     let version = app.versions.resolve(req.version.as_deref());
-    let items = req.snippets.into_iter().map(|s| {
-        let job = CheckJob {
-            code: s.code,
-            timeout_secs: req.timeout,
-            infotree: req.infotree.clone(),
-            reuse: req.reuse,
-        };
-        check_one(&app, s.id, job, version.clone())
-    });
-    let results = join_all(items)
-        .await
-        .into_iter()
-        .collect::<Result<_, _>>()?;
-    Ok(Json(CheckResponse { results }))
+    Ok(Json(check_one(&app, req.code, req.timeout, version).await?))
 }
 
-async fn verify(
+/// Every item gets a result; failures, including running out of capacity,
+/// are reported in that item's `error`.
+async fn check_batch(
     State(app): State<Arc<App>>,
-    Json(req): Json<VerifyRequest>,
-) -> Result<Json<VerifyResponse>, ApiError> {
+    Body(req): Body<BatchRequest>,
+) -> Json<BatchResponse> {
     let version = app.versions.resolve(req.version.as_deref());
-    let items = req.codes.iter().map(|c| {
-        let job = CheckJob {
-            code: c.text().to_string(),
-            timeout_secs: req.timeout,
-            infotree: req.infotree_type.clone(),
-            reuse: !req.disable_cache,
-        };
-        check_one(&app, c.id(), job, version.clone())
+    let items = req.items.into_iter().map(|item| {
+        let app = &app;
+        let version = version.clone();
+        async move {
+            let mut result = match check_one(app, item.code, req.timeout, version).await {
+                Ok(r) => r,
+                Err(e) => CheckResult {
+                    error: Some(e.into()),
+                    ..Default::default()
+                },
+            };
+            result.id = Some(item.id);
+            result
+        }
     });
-    let results = join_all(items)
-        .await
-        .into_iter()
-        .map(|r| r.map(|r| VerifyResult::from_check(r.id.clone(), r)))
-        .collect::<Result<_, _>>()?;
-    Ok(Json(VerifyResponse { results }))
+    Json(BatchResponse {
+        results: join_all(items).await,
+    })
 }
 
-pub async fn check_one(
+async fn check_one(
     app: &App,
-    id: String,
-    job: CheckJob,
+    code: String,
+    timeout_secs: u64,
     version: Option<String>,
 ) -> Result<CheckResult, DispatchError> {
-    let split = split_header(&job.code);
+    let split = split_header(&code);
     let route = Route {
         version,
         header_key: Some(split.header_key),
         header: Some(split.header),
         affinity: None,
     };
-    let done = app
-        .dispatcher
-        .submit(Job::Check(job), route, Priority::Batch)
-        .await?;
-    match done.result {
-        JobResult::Check(o) => Ok(check_result(id, o, "check")),
-        JobResult::Failed { error } => Ok(failed_result(id, error, "check")),
-        other => Ok(failed_result(
-            id,
-            format!("unexpected result: {other:?}"),
-            "check",
-        )),
-    }
+    let job = Job::Check(CheckJob { code, timeout_secs });
+    let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
+    Ok(match done.result {
+        JobResult::Check(o) => check_result(o, "check"),
+        other => failed_result(other, "check"),
+    })
 }
 
 /// Turns a worker's check outcome into the API result, recording metrics.
-pub fn check_result(id: String, o: CheckOutcome, kind: &'static str) -> CheckResult {
+pub fn check_result(o: CheckOutcome, kind: &'static str) -> CheckResult {
     let hit = if o.warm { "hit" } else { "miss" };
     metrics::counter!(m::HEADER_CACHE, "result" => hit).increment(1);
-    if let Some(v) = o.verification.as_ref().filter(|v| !v.ok) {
-        for reason in &v.reasons {
-            record_rejection(reason);
-        }
-    }
+    let (messages, sorries) = o.response.map_or_else(Default::default, |r| {
+        let sorries = r.sorries.into_iter().map(Into::into).collect();
+        (api::messages(r.messages), sorries)
+    });
+    let (verified, reasons, declarations) =
+        o.verification.map_or((false, Vec::new(), Vec::new()), |v| {
+            (v.ok, v.reasons, v.declarations)
+        });
+    reasons.iter().for_each(|r| record_rejection(r));
     let outcome = if o.error.is_some() { "error" } else { "ok" };
     metrics::counter!(m::JOBS, "kind" => kind, "outcome" => outcome).increment(1);
     CheckResult {
-        id,
+        id: None,
+        ok: verified && o.error.is_none(),
         time: o.time,
         error: o.error,
-        response: o.response,
-        diagnostics: None,
-        verification: o.verification,
+        messages,
+        sorries,
+        reasons,
+        declarations,
     }
 }
 
-pub fn failed_result(id: String, error: String, kind: &'static str) -> CheckResult {
+/// A worker answered with something other than a check outcome.
+pub fn failed_result(result: JobResult, kind: &'static str) -> CheckResult {
     metrics::counter!(m::JOBS, "kind" => kind, "outcome" => "failed").increment(1);
+    let message = match result {
+        JobResult::Failed { error } => error,
+        other => format!("unexpected worker result: {other:?}"),
+    };
     CheckResult {
-        id,
-        time: 0.0,
-        error: Some(error),
-        response: None,
-        diagnostics: None,
-        verification: None,
+        error: Some(api::Error::new(ErrorKind::Internal, message)),
+        ..Default::default()
     }
 }
 

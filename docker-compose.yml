@@ -1,8 +1,8 @@
 # Local development stack: one router, two workers, and Garage (S3) for
 # tactic-session proof states.
 #   docker compose up --build
-#   curl -s localhost:8000/api/check -H 'content-type: application/json' \
-#     -d '{"snippets":[{"id":"1","code":"import Mathlib\n#eval 1+1"}]}'
+#   curl -s localhost:8000/check -H 'content-type: application/json' \
+#     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
 # PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
 
 x-worker: &worker

@@ -8,15 +8,15 @@ use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use pisa_protocol::header::split_header;
-use pisa_protocol::session::{
-    CheckRequest, CheckResponse, Key, StartRequest, StartResponse, TacticRequest, TacticResponse,
+use pisa_protocol::api::{
+    CheckResult, ErrorKind, Key, SessionCheckRequest, StartRequest, StartResponse, TacticRequest,
+    TacticResponse,
 };
+use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{Job, JobResult, SessionCheckJob, SessionStartJob, SessionTacticJob};
 
 use crate::dispatch::{Priority, Route};
-use crate::http::{ApiError, App, check_result, failed_result, record_rejection};
+use crate::http::{ApiError, App, Body, check_result, failed_result, record_rejection};
 use crate::metrics as m;
 
 /// Bound on remembered state locations; the map is reset when it fills up.
@@ -43,14 +43,15 @@ impl Affinity {
 }
 
 fn parse_key(id: &str) -> Result<Key, ApiError> {
-    Key::parse(id).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("invalid key: {id}")))
+    Key::parse(id).ok_or_else(|| ApiError::new(ErrorKind::BadRequest, format!("invalid key: {id}")))
 }
 
 fn unexpected(result: JobResult) -> ApiError {
-    ApiError(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        format!("unexpected worker result: {result:?}"),
-    )
+    let message = match result {
+        JobResult::Failed { error } => error,
+        other => format!("unexpected worker result: {other:?}"),
+    };
+    ApiError::new(ErrorKind::Internal, message)
 }
 
 fn count(kind: &'static str, error: bool) {
@@ -60,7 +61,7 @@ fn count(kind: &'static str, error: bool) {
 
 pub async fn start(
     State(app): State<Arc<App>>,
-    Json(req): Json<StartRequest>,
+    Body(req): Body<StartRequest>,
 ) -> Result<Json<StartResponse>, ApiError> {
     let split = split_header(&req.code);
     let route = Route {
@@ -77,25 +78,20 @@ pub async fn start(
         .dispatcher
         .submit(job, route, Priority::Interactive)
         .await?;
-    match done.result {
-        JobResult::SessionStarted(r) => {
-            count("session_start", r.error.is_some());
-            app.affinity
-                .record(r.states.iter().map(|s| &s.state), &done.worker);
-            Ok(Json(r))
-        }
-        JobResult::Failed { error } => Ok(Json(StartResponse {
-            error: Some(error),
-            ..Default::default()
-        })),
-        other => Err(unexpected(other)),
-    }
+    let JobResult::SessionStarted(result) = done.result else {
+        return Err(unexpected(done.result));
+    };
+    count("session_start", result.is_err());
+    let r = result.map_err(ApiError)?;
+    app.affinity
+        .record(r.states.iter().map(|s| &s.state), &done.worker);
+    Ok(Json(r))
 }
 
 pub async fn tactic(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    Json(req): Json<TacticRequest>,
+    Body(req): Body<TacticRequest>,
 ) -> Result<Json<TacticResponse>, ApiError> {
     let key = parse_key(&id)?;
     let route = Route {
@@ -113,25 +109,23 @@ pub async fn tactic(
         .dispatcher
         .submit(job, route, Priority::Interactive)
         .await?;
-    match done.result {
-        JobResult::TacticApplied(r) => {
-            count("tactic", r.error.is_some());
-            app.affinity.record(&r.state, &done.worker);
-            Ok(Json(r))
-        }
-        JobResult::Failed { error } => Ok(Json(TacticResponse {
-            error: Some(error),
-            ..Default::default()
-        })),
-        other => Err(unexpected(other)),
-    }
+    let JobResult::TacticApplied(result) = done.result else {
+        return Err(unexpected(done.result));
+    };
+    count("tactic", result.is_err());
+    let r = result.map_err(ApiError)?;
+    app.affinity.record([&r.state], &done.worker);
+    Ok(Json(r))
 }
 
+/// The completed proof's check result, with statement changes added to
+/// `reasons`. A bad or unknown session ID is an HTTP error; everything else
+/// is in-band, as for `/check`.
 pub async fn check(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    Json(req): Json<CheckRequest>,
-) -> Result<Json<CheckResponse>, ApiError> {
+    Body(req): Body<SessionCheckRequest>,
+) -> Result<Json<CheckResult>, ApiError> {
     let key = parse_key(&id)?;
     let route = Route {
         version: Some(key.version),
@@ -140,7 +134,7 @@ pub async fn check(
         affinity: None,
     };
     let job = Job::SessionCheck(SessionCheckJob {
-        session: id.clone(),
+        session: id,
         code: req.code,
         timeout_secs: req.timeout,
     });
@@ -148,28 +142,21 @@ pub async fn check(
         .dispatcher
         .submit(job, route, Priority::Interactive)
         .await?;
-    let (result, statement_reasons) = match done.result {
-        JobResult::SessionChecked(c) => (
-            check_result(id, c.outcome, "session_check"),
-            c.statement_reasons,
-        ),
-        JobResult::Failed { error } => (failed_result(id, error, "session_check"), Vec::new()),
-        other => return Err(unexpected(other)),
+    let JobResult::SessionChecked(checked) = done.result else {
+        return Ok(Json(failed_result(done.result, "session_check")));
     };
-    statement_reasons.iter().for_each(|r| record_rejection(r));
-    let mut reasons = result
-        .verification
-        .as_ref()
-        .map(|v| v.reasons.clone())
-        .unwrap_or_default();
-    reasons.extend(statement_reasons);
-    if let Some(e) = &result.error {
-        reasons.push(format!("error: {e}"));
+    let about_the_request = |e: &&pisa_protocol::api::Error| {
+        matches!(e.kind, ErrorKind::NotFound | ErrorKind::BadRequest)
+    };
+    if let Some(e) = checked.outcome.error.as_ref().filter(about_the_request) {
+        return Err(ApiError(e.clone()));
     }
-    let verified = result.verification.as_ref().is_some_and(|v| v.ok);
-    Ok(Json(CheckResponse {
-        ok: verified && reasons.is_empty(),
-        reasons,
-        result,
-    }))
+    let mut result = check_result(checked.outcome, "session_check");
+    checked
+        .statement_reasons
+        .iter()
+        .for_each(|r| record_rejection(r));
+    result.ok &= checked.statement_reasons.is_empty();
+    result.reasons.extend(checked.statement_reasons);
+    Ok(Json(result))
 }

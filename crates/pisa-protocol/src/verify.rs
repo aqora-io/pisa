@@ -1,4 +1,6 @@
 //! Outcome of the verification policy that workers apply to checked code.
+//! Declarations are parsed from the worker's Lean report, so their field
+//! names must match the JSON it prints.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,10 +19,9 @@ pub struct Declaration {
     pub name: String,
     pub kind: String,
     pub axioms: Vec<String>,
-    #[serde(rename = "typeHash")]
     pub type_hash: String,
     /// For definitions, a hash of the value, so a proof can't change what a
     /// statement means by redefining something it mentions.
-    #[serde(rename = "valueHash", default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_hash: Option<String>,
 }

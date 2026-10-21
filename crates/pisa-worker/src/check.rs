@@ -4,9 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use pisa_protocol::api::{Error, ErrorKind};
 use pisa_protocol::header::split_header;
-use pisa_protocol::kimina::{CheckOutput, header_timeout_error, timeout_error};
-use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse};
+use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
@@ -30,7 +30,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     let mut slot = pool.acquire(&split.header_key, None).await;
     let rejected = slot.policy().scan(&split.body);
     if !rejected.is_empty() {
-        outcome.error = Some(format!("Rejected by policy: {}", rejected.join(", ")));
+        outcome.error = Some(policy_error(&rejected));
         outcome.verification = Some(Verification {
             ok: false,
             reasons: rejected,
@@ -45,28 +45,19 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
             env
         }
         Err(HeaderFailure::Lean(r)) => {
-            // Header positions are already those of the submitted code.
+            // Header positions are already those of the submitted code, and
+            // its error messages say what went wrong.
             outcome.verification = Some(slot.policy().judge(&r, None));
-            outcome.response = Some(CheckOutput::Command(r));
+            outcome.response = Some(r);
             return outcome;
         }
-        Err(HeaderFailure::Timeout) => {
-            outcome.error = Some(header_timeout_error(slot.import_timeout().as_secs()));
-            return outcome;
-        }
-        Err(HeaderFailure::Repl(e)) => {
-            outcome.error = Some(format!("Lean REPL failed on header: {e}"));
+        Err(other) => {
+            outcome.error = Some(header_error(other, slot.import_timeout()));
             return outcome;
         }
     };
 
-    let cmd = ReplCommand::Cmd {
-        cmd: split.body.clone(),
-        env: Some(env),
-        all_tactics: None,
-        root_goals: None,
-        infotree: job.infotree.clone(),
-    };
+    let cmd = ReplCommand::cmd(split.body.clone(), Some(env));
     let start = Instant::now();
     let result = run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await;
     outcome.time = round6(start.elapsed().as_secs_f64());
@@ -76,25 +67,55 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
             let report = axiom_report(&mut slot, &r).await;
             outcome.verification = Some(slot.policy().judge(&r, report.as_ref()));
             r.shift_lines(split.header_lines);
-            outcome.response = Some(CheckOutput::Command(r));
+            outcome.response = Some(r);
         }
-        Ok(ReplResponse::Error(e)) => outcome.response = Some(CheckOutput::Error(e)),
-        Ok(other) => outcome.error = Some(format!("unexpected REPL response: {other:?}")),
-        Err(Failure::Timeout) => {
-            outcome.error = Some(timeout_error(job.timeout_secs));
-            outcome.time = job.timeout_secs as f64;
+        Ok(ReplResponse::Error(e)) => outcome.error = Some(Error::new(ErrorKind::Lean, e.message)),
+        Ok(other) => outcome.error = Some(unexpected(other)),
+        Err(e) => {
+            if e.kind == ErrorKind::Timeout {
+                outcome.time = job.timeout_secs as f64;
+            }
+            outcome.error = Some(e);
         }
-        Err(Failure::OutOfMemory) => outcome.error = Some("Lean REPL ran out of memory".into()),
-        Err(Failure::Crashed(e)) => outcome.error = Some(format!("Lean REPL failed: {e}")),
     }
-    slot.finish_job(job.reuse);
+    slot.finish_job();
     outcome
 }
 
-pub enum Failure {
-    Timeout,
-    OutOfMemory,
-    Crashed(String),
+pub fn policy_error(reasons: &[String]) -> Error {
+    Error::new(
+        ErrorKind::Policy,
+        format!("rejected: {}", reasons.join(", ")),
+    )
+}
+
+pub fn unexpected(response: ReplResponse) -> Error {
+    Error::new(
+        ErrorKind::Internal,
+        format!("unexpected REPL response: {response:?}"),
+    )
+}
+
+/// The error for a header that could not be imported.
+pub fn header_error(failure: HeaderFailure, import_timeout: Duration) -> Error {
+    match failure {
+        HeaderFailure::Lean(r) => {
+            let first = r
+                .messages
+                .iter()
+                .find(|m| m.severity == Severity::Error)
+                .map_or("errors in the imports", |m| &m.data);
+            Error::new(ErrorKind::Lean, format!("header failed: {first}"))
+        }
+        HeaderFailure::Timeout => Error::new(
+            ErrorKind::Timeout,
+            format!(
+                "importing the header took more than {}s",
+                import_timeout.as_secs()
+            ),
+        ),
+        HeaderFailure::Failed(e) => e,
+    }
 }
 
 /// Sends one command on the slot's live process. On failure the process is
@@ -103,23 +124,23 @@ pub async fn run(
     slot: &mut Lease,
     cmd: &ReplCommand,
     timeout: Duration,
-) -> Result<ReplResponse, Failure> {
+) -> Result<ReplResponse, Error> {
     let Some(repl) = slot.repl() else {
-        return Err(Failure::Crashed("no live process".into()));
+        return Err(Error::new(ErrorKind::Crash, "no live Lean process"));
     };
     match repl.send(cmd, timeout).await {
         Ok(r) => Ok(r),
         Err(ReplFailure::Timeout) => {
             slot.retire("timeout");
-            Err(Failure::Timeout)
+            Err(Error::timeout(timeout.as_secs()))
         }
         Err(e) => {
             let cause = slot.failure_cause();
             slot.retire(cause);
             Err(if cause == "oom" {
-                Failure::OutOfMemory
+                Error::new(ErrorKind::OutOfMemory, "Lean exceeded its memory limit")
             } else {
-                Failure::Crashed(e.to_string())
+                Error::new(ErrorKind::Crash, format!("Lean process failed: {e}"))
             })
         }
     }

@@ -58,9 +58,7 @@ def compose(*args):
 
 
 def check(code, **extra):
-    return post("/api/check", {"snippets": [{"id": "x", "code": code}], "timeout": 600, **extra})[
-        "results"
-    ][0]
+    return post("/check", {"code": code, "timeout": 600, **extra})
 
 
 def step(name):
@@ -69,11 +67,11 @@ def step(name):
 
 def core():
     r = check("\n#check Nat")
-    assert r["response"]["messages"][0]["pos"]["line"] == 2, r
+    assert r["messages"][0]["pos"]["line"] == 2, r
     step("positions")
 
     r = check("example : True := by\n  sleep 5000\n  trivial", timeout=1)
-    assert "timed out" in r["error"], r
+    assert r["error"]["kind"] == "timeout", r
     step("timeout")
 
     for code, reason in [
@@ -85,16 +83,15 @@ def core():
         ("#eval IO.println \"hi\"", "#eval"),
     ]:
         r = check(code)
-        v = r["verification"]
-        assert not v["ok"] and any(reason in x for x in v["reasons"]), (code, r)
-    assert check("theorem t (a b : Nat) : a + b = b + a := Nat.add_comm a b")["verification"]["ok"]
+        assert not r["ok"] and any(reason in x for x in r["reasons"]), (code, r)
+    assert check("theorem t (a b : Nat) : a + b = b + a := Nat.add_comm a b")["ok"]
     step("verification policy")
 
     code = "theorem t (n : Nat) : n + 0 = n ∧ 0 + n = n := by sorry"
     s = post("/sessions", {"code": code})
     assert "error" not in s, s
     root = s["states"][0]
-    split = post(f"/sessions/{root['state']}/tactic", {"tactic": "constructor"})
+    split = post(f"/states/{root['state']}/tactic", {"tactic": "constructor"})
     assert len(split["goals"]) == 2, split
     step("session start and tactic")
 
@@ -102,20 +99,20 @@ def core():
     # steps must load the state from Garage on the other worker.
     compose("stop", "worker-1")
     wait_for_workers(1)
-    left = post(f"/sessions/{split['state']}/tactic", {"tactic": "simp"})
+    left = post(f"/states/{split['state']}/tactic", {"tactic": "simp"})
     assert left.get("goals") == ["case right\nn : Nat\n⊢ 0 + n = n"], left
     compose("start", "worker-1")
     wait_for_workers(2)
     compose("stop", "worker-2")
     wait_for_workers(1)
-    done = post(f"/sessions/{left['state']}/tactic", {"tactic": "simp"})
-    assert done.get("proofStatus") == "Completed", done
+    done = post(f"/states/{left['state']}/tactic", {"tactic": "simp"})
+    assert done.get("complete"), done
     compose("start", "worker-2")
     wait_for_workers(2)
     step("sessions resume on another worker")
 
-    bad = post(f"/sessions/{root['state']}/tactic", {"tactic": "foo"})
-    assert "error" in bad and "state" not in bad, bad
+    status, bad = call("POST", f"/states/{root['state']}/tactic", {"tactic": "foo"})
+    assert status == 422 and bad["error"]["kind"] == "lean", bad
     step("tactic errors")
 
     session = s["session"]
@@ -136,13 +133,13 @@ def core():
 
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
-    assert r["verification"]["ok"], r
+    assert r["ok"], r
     r = check("import Physlib\n\n#check SpaceTime")
-    assert r["response"]["messages"][0]["pos"]["line"] == 3, r
+    assert r["messages"][0]["pos"]["line"] == 3, r
     s = post("/sessions", {"code": "import Mathlib\n\ntheorem t (x : ℝ) (h : 0 < x) : 0 < x ^ 2 := by sorry"})
     assert "error" not in s, s
-    done = post(f"/sessions/{s['states'][0]['state']}/tactic", {"tactic": "positivity"})
-    assert done["proofStatus"] == "Completed", done
+    done = post(f"/states/{s['states'][0]['state']}/tactic", {"tactic": "positivity"})
+    assert done["complete"], done
     step("Mathlib and Physlib")
 
 

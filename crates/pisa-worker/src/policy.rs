@@ -79,8 +79,8 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
       ("name", _root_.Lean.ToJson.toJson n),
       ("kind", _root_.Lean.ToJson.toJson kind),
       ("axioms", _root_.Lean.ToJson.toJson axioms),
-      ("typeHash", _root_.Lean.ToJson.toJson (toString (hash ci.type))),
-      ("valueHash", match ci with
+      ("type_hash", _root_.Lean.ToJson.toJson (toString (hash ci.type))),
+      ("value_hash", match ci with
         | .defnInfo d => _root_.Lean.ToJson.toJson (toString (hash d.value))
         | _ => _root_.Lean.Json.null)])
   _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
@@ -275,14 +275,14 @@ mod tests {
                 "pos": {"line": 1, "column": 0}, "data": format!("PISA_DECLS {decls}")}]}))
         };
         let ok = report(json!([{"name": "x", "kind": "theorem",
-            "axioms": ["propext", "Quot.sound"], "typeHash": "1"}]));
+            "axioms": ["propext", "Quot.sound"], "type_hash": "1"}]));
         let v = p.judge(&response(json!({"env": 1})), Some(&ok));
         assert!(v.ok, "{v:?}");
         assert_eq!(v.declarations[0].name, "x");
 
         let bad = report(json!([{"name": "x", "kind": "theorem",
-            "axioms": ["sorryAx"], "typeHash": "1"},
-            {"name": "y", "kind": "theorem", "axioms": ["Lean.ofReduceBool"], "typeHash": "2"}]));
+            "axioms": ["sorryAx"], "type_hash": "1"},
+            {"name": "y", "kind": "theorem", "axioms": ["Lean.ofReduceBool"], "type_hash": "2"}]));
         let v = p.judge(&response(json!({"env": 1})), Some(&bad));
         assert!(!v.ok);
         assert_eq!(

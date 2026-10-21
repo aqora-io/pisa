@@ -7,26 +7,18 @@ use pisa_worker::config::Sandbox;
 use serde_json::{Value, json};
 
 async fn check(c: &Cluster, code: &str) -> Value {
-    let (status, body) = c
-        .post(
-            "/api/check",
-            json!({"snippets": [{"id": "x", "code": code}]}),
-        )
-        .await;
+    let (status, body) = c.post("/check", json!({"code": code})).await;
     assert_eq!(status, 200, "{body}");
-    body["results"][0].clone()
+    body
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn clean_proof_passes_with_declarations() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let r = check(&c, "import Mathlib\ntheorem t : 1 = 1 := rfl").await;
-    assert_eq!(r["verification"]["ok"], true, "{r}");
-    assert_eq!(r["verification"]["declarations"][0]["name"], "t");
-    assert_eq!(
-        r["verification"]["declarations"][0]["axioms"],
-        json!(["propext"])
-    );
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["declarations"][0]["name"], "t");
+    assert_eq!(r["declarations"][0]["axioms"], json!(["propext"]));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -53,8 +45,8 @@ async fn unsound_proofs_are_rejected() {
     ];
     for (code, reason) in cases {
         let r = check(&c, code).await;
-        assert_eq!(r["verification"]["ok"], false, "{code}: {r}");
-        let reasons = r["verification"]["reasons"].as_array().unwrap();
+        assert_eq!(r["ok"], false, "{code}: {r}");
+        let reasons = r["reasons"].as_array().unwrap();
         assert!(reasons.iter().any(|x| x == reason), "{code}: {r}");
     }
     let metrics = c.metrics().await;
@@ -77,21 +69,15 @@ async fn policy_rejects_before_running() {
     ] {
         // CRASH would kill the fake REPL if the code ran.
         let r = check(&c, code).await;
-        assert!(
-            r["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("Rejected by policy"),
-            "{r}"
-        );
-        assert_eq!(r["verification"]["reasons"], json!([reason]), "{r}");
+        assert_eq!(r["error"]["kind"], "policy", "{r}");
+        assert_eq!(r["reasons"], json!([reason]), "{r}");
     }
     let r = check(
         &c,
         "set_option maxHeartbeats 400000 in\ntheorem t : 1 = 1 := rfl",
     )
     .await;
-    assert_eq!(r["verification"]["ok"], true, "{r}");
+    assert_eq!(r["ok"], true, "{r}");
 }
 
 fn bwrap_works() -> bool {
@@ -113,6 +99,6 @@ async fn sandboxed_worker_runs_jobs() {
     })
     .await;
     let r = check(&c, "theorem t : 1 = 1 := rfl\n#check Nat").await;
-    assert_eq!(r["verification"]["ok"], true, "{r}");
-    assert_eq!(r["response"]["messages"][0]["data"], "Nat : Type");
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["messages"][0]["data"], "Nat : Type");
 }
