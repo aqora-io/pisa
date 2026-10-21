@@ -194,6 +194,10 @@ impl Dense {
         self.ids.is_empty()
     }
 
+    pub fn contains(&self, id: u32) -> bool {
+        self.ids.contains(&id)
+    }
+
     pub fn with_tei(mut self, tei: Tei) -> Dense {
         self.tei = Some(tei);
         self
@@ -252,6 +256,16 @@ impl Dense {
     /// Ids of the `n` vectors nearest to `query` (a normalized vector).
     pub fn nearest(&self, query: &[f32], n: usize) -> Vec<u32> {
         self.nearest_quantized(&quantize(query), n)
+    }
+
+    /// The `n` declarations nearest to declaration `id`, or `None` if it has no vector.
+    pub fn neighbours(&self, id: u32, n: usize) -> Option<Vec<u32>> {
+        let i = self.ids.iter().position(|&x| x == id)?;
+        let q = self.vectors[i * DIMS..(i + 1) * DIMS].to_vec();
+        let mut near = self.nearest_quantized(&q, n + 1);
+        near.retain(|&x| x != id);
+        near.truncate(n);
+        Some(near)
     }
 
     fn nearest_quantized(&self, q: &[i8], n: usize) -> Vec<u32> {

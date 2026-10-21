@@ -1,0 +1,1283 @@
+//! LLM informalization: natural-language descriptions of declarations,
+//! generated with Claude in dependency order (so a prompt can show what the
+//! declaration builds on) and cached by content hash in the informal store.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
+
+use futures::StreamExt;
+use pisa_protocol::search::Informal;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+use crate::anthropic::{self, Client, Usage};
+use crate::corpus::{Corpus, Decl};
+use crate::index::Bundle;
+use crate::informal_store::{Entry, Store};
+
+pub const GLOSSARY_MATHLIB: &str = include_str!("../../../search/glossary/mathlib.toml");
+pub const GLOSSARY_PHYSLIB: &str = include_str!("../../../search/glossary/physlib.toml");
+
+/// Source of the descriptions of Physlib informal results: their docstring.
+pub const PHYSLIB_DOCSTRING: &str = "physlib-docstring";
+
+/// Most dependencies a prompt shows.
+const MAX_DEPS: usize = 30;
+/// Descriptions saved per batch object while a run is in progress.
+const SAVE_EVERY: usize = 200;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub model: String,
+    pub effort: String,
+    pub max_tokens: u32,
+    pub concurrency: usize,
+}
+
+const SYSTEM: &str = "\
+You write the descriptions behind a search engine for Lean 4 declarations in Mathlib and Physlib. \
+Mathematicians, physicists and AI agents search it in natural language, LaTeX or keywords to find \
+the lemma or definition they need, usually without knowing its Lean name. Your descriptions are \
+indexed for keyword and embedding search and shown next to each search hit, so a reader should be \
+able to tell from one whether this declaration is the one they need.
+
+For each declaration you get its Lean name, kind and module, its type as Lean prints it, its \
+docstring and its module's docstring when they exist, and short descriptions of declarations it \
+uses. Write:
+
+- informal_name: a short noun phrase naming the result or object the way a textbook would, such \
+as \"Antisymmetry of the electromagnetic field strength\" or \"Commutator of the ladder operators\". \
+For a theorem, name what it states.
+- statement_nl: one to three sentences stating precisely what the declaration says or defines, \
+with the hypotheses that matter and what its variables are. Use the standard mathematical or \
+physical terms a reader would search for; when a Physlib declaration formalizes a physical \
+concept, say what it means physically. Put inline math between single dollar signs, in KaTeX \
+syntax. Mention other declarations by Lean name, in backticks, only when the reader needs them and \
+only names given to you. Don't claim anything the Lean statement doesn't support.
+- statement_latex: the statement as one KaTeX formula without dollar signs, as it would appear in \
+a paper: an equation, inequality or equivalence, or a definition written as a formula. Use an \
+empty string when there is none, as for structures, classes and properties like measurability; \
+don't put prose in it with \\text.
+- aliases: names the result is commonly known by in the literature, such as \"Cauchy–Schwarz \
+inequality\", only when they really apply. Usually empty.
+- synthetic_queries: exactly three different searches someone who doesn't know the Lean name \
+would type to find this declaration: a natural-language question or phrase, a formula in LaTeX, \
+and a few keywords. Write each as the search itself, without a label.
+
+Reading Lean: `↑x` is a coercion, such as a positive real used as a real number. `{x // p x}` is \
+the subtype of elements satisfying `p`. Arguments in square brackets are structure assumptions \
+(a field, a normed space) and rarely worth mentioning. `⋯` is an elided proof. Division by zero \
+is zero and `Real.sqrt` and `Real.log` are defined on all reals; mention such conventions only \
+when the statement depends on them. Lemmas named like `foo_apply`, `foo_def` or `foo_eq` usually \
+unfold a definition: say what it computes.
+
+The glossary below says how to read Lean names many declarations use; follow its terminology.";
+
+#[derive(Deserialize)]
+struct Glossary {
+    term: Vec<Term>,
+}
+
+#[derive(Deserialize)]
+struct Term {
+    lean: String,
+    meaning: String,
+}
+
+/// The system prompt: instructions, then the glossaries, cached together.
+pub fn system(glossaries: &[&str]) -> anyhow::Result<Value> {
+    let mut text = String::from("Glossary:\n");
+    for g in glossaries {
+        let g: Glossary = toml::from_str(g)?;
+        for t in g.term {
+            writeln!(text, "- `{}`: {}", t.lean, t.meaning)?;
+        }
+    }
+    Ok(json!([
+        {"type": "text", "text": SYSTEM},
+        {"type": "text", "text": text, "cache_control": {"type": "ephemeral"}},
+    ]))
+}
+
+/// What the model returns for one declaration.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Output {
+    pub informal_name: String,
+    pub statement_nl: String,
+    pub statement_latex: String,
+    pub aliases: Vec<String>,
+    pub synthetic_queries: Vec<String>,
+}
+
+fn output_schema() -> Value {
+    let string = json!({"type": "string"});
+    let strings = json!({"type": "array", "items": {"type": "string"}});
+    json!({
+        "type": "object",
+        "properties": {
+            "informal_name": string,
+            "statement_nl": string,
+            "statement_latex": string,
+            "aliases": strings,
+            "synthetic_queries": strings,
+        },
+        "required": ["informal_name", "statement_nl", "statement_latex", "aliases", "synthetic_queries"],
+        "additionalProperties": false,
+    })
+}
+
+pub fn request(cfg: &Config, system: &Value, prompt: &str, schema: Value) -> Value {
+    json!({
+        "model": cfg.model,
+        "max_tokens": cfg.max_tokens,
+        "system": system,
+        "messages": [{"role": "user", "content": prompt}],
+        "output_config": {
+            "effort": cfg.effort,
+            "format": {"type": "json_schema", "schema": schema},
+        },
+    })
+}
+
+/// Auxiliary declarations Lean generates that the exporter's `isAutoDecl`
+/// doesn't catch (`ctorIdx`, `sizeOf_spec`, `injEq`, ...).
+const GENERATED: &[&str] = &[
+    "ctorIdx",
+    "ctorElim",
+    "ctorElimType",
+    "ofNat_ctorIdx",
+    "sizeOf_spec",
+    "injEq",
+    "inj",
+    "congr_simp",
+    "noConfusion",
+    "noConfusionType",
+    "eq_def",
+];
+
+pub fn is_generated(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    GENERATED.contains(&last)
+        || last
+            .strip_prefix("eq_")
+            .is_some_and(|n| n.parse::<u32>().is_ok())
+}
+
+/// Declarations worth an LLM description. Instances (and what `deriving`
+/// generates inside them) are found through their class, structures' `mk`
+/// constructors through the structure, and Physlib informal results are
+/// described by their docstring.
+pub fn needs_description(d: &Decl) -> bool {
+    let in_instance = d.name.split('.').rev().skip(1).any(|part| {
+        part.strip_prefix("inst")
+            .is_some_and(|r| r.starts_with(char::is_uppercase))
+    });
+    !d.informal
+        && d.kind != "instance"
+        && !in_instance
+        && !(d.kind == "constructor" && d.name.ends_with(".mk"))
+        && !is_generated(&d.name)
+}
+
+/// Splits `targets` into levels, each declaration after the targets it
+/// builds on. Declarations in dependency cycles share the last level.
+pub fn levels(targets: &[&Decl]) -> Vec<Vec<usize>> {
+    let index: HashMap<&str, usize> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.name.as_str(), i))
+        .collect();
+    let deps: Vec<HashSet<usize>> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            d.description_deps()
+                .filter_map(|n| index.get(n.as_str()).copied())
+                .filter(|&j| j != i)
+                .collect()
+        })
+        .collect();
+    let mut placed = vec![false; targets.len()];
+    let mut remaining: Vec<usize> = (0..targets.len()).collect();
+    let mut out = Vec::new();
+    while !remaining.is_empty() {
+        let ready: Vec<usize> = remaining
+            .iter()
+            .copied()
+            .filter(|&i| deps[i].iter().all(|&j| placed[j]))
+            .collect();
+        if ready.is_empty() {
+            out.push(remaining);
+            break;
+        }
+        for &i in &ready {
+            placed[i] = true;
+        }
+        remaining.retain(|&i| !placed[i]);
+        out.push(ready);
+    }
+    out
+}
+
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A stable pseudo-random rank, for sampling and shuffling.
+pub fn rank(seed: u64, s: &str) -> u64 {
+    let mut h = Sha256::new();
+    h.update(seed.to_le_bytes());
+    h.update(s.as_bytes());
+    u64::from_le_bytes(h.finalize()[..8].try_into().expect("8 bytes"))
+}
+
+/// Problems with checked output.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Checks {
+    /// Unbalanced braces, `$` or environments, and commands KaTeX lacks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub latex: Vec<String>,
+    /// Cited Lean names that exist but that the declaration doesn't use and
+    /// its docstrings don't mention.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_dependency: Vec<String>,
+    /// Cited Lean names that exist nowhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown: Vec<String>,
+}
+
+impl Checks {
+    pub fn passed(&self) -> bool {
+        self.latex.is_empty() && self.not_dependency.is_empty() && self.unknown.is_empty()
+    }
+}
+
+#[rustfmt::skip]
+const KATEX_COMMANDS: &[&str] = &[
+    // Greek
+    "alpha", "beta", "gamma", "delta", "epsilon", "varepsilon", "zeta", "eta", "theta", "vartheta",
+    "iota", "kappa", "lambda", "mu", "nu", "xi", "pi", "varpi", "rho", "varrho", "sigma",
+    "varsigma", "tau", "upsilon", "phi", "varphi", "chi", "psi", "omega", "Gamma", "Delta",
+    "Theta", "Lambda", "Xi", "Pi", "Sigma", "Upsilon", "Phi", "Psi", "Omega",
+    // Fonts and accents
+    "mathbb", "mathcal", "mathfrak", "mathrm", "mathbf", "mathit", "mathsf", "mathtt", "mathscr",
+    "boldsymbol", "bm", "text", "textrm", "textbf", "textit", "texttt", "textsf", "textnormal",
+    "textup", "emph", "operatorname", "hat", "bar",
+    "tilde", "vec", "dot", "ddot", "check", "breve", "acute", "grave", "mathring", "overline",
+    "underline", "widehat", "widetilde", "overrightarrow", "overleftarrow", "underbrace",
+    "overbrace",
+    // Operators and functions
+    "frac", "dfrac", "tfrac", "sqrt", "sum", "prod", "coprod", "int", "iint", "iiint", "oint",
+    "lim", "limsup", "liminf", "sup", "inf", "max", "min", "exp", "log", "ln", "lg", "sin", "cos",
+    "tan", "sec", "csc", "cot", "sinh", "cosh", "tanh", "coth", "arcsin", "arccos", "arctan",
+    "det", "dim", "ker", "deg", "gcd", "hom", "Pr", "arg", "binom", "choose", "over", "bigcup",
+    "bigcap", "bigoplus", "bigotimes", "bigodot", "bigwedge", "bigvee", "bigsqcup",
+    // Relations and logic
+    "le", "leq", "ge", "geq", "ne", "neq", "lt", "gt", "ll", "gg", "approx", "sim", "simeq",
+    "cong", "equiv", "propto", "doteq", "triangleq", "coloneqq", "in", "notin", "ni", "subset",
+    "subseteq", "subsetneq", "supset", "supseteq", "supsetneq", "cup", "cap", "sqcup", "setminus",
+    "emptyset", "varnothing", "forall", "exists", "nexists", "neg", "lnot", "land", "lor", "wedge",
+    "vee", "implies", "impliedby", "iff", "to", "gets", "mapsto", "longmapsto", "rightarrow",
+    "leftarrow", "Rightarrow", "Leftarrow", "leftrightarrow", "Leftrightarrow", "longrightarrow",
+    "longleftarrow", "Longrightarrow", "Longleftrightarrow", "hookrightarrow", "hookleftarrow",
+    "twoheadrightarrow", "rightleftharpoons", "uparrow", "downarrow", "updownarrow", "xrightarrow",
+    "xleftarrow", "mid", "nmid", "parallel", "perp", "prec", "succ", "preceq", "succeq", "vdash",
+    "dashv", "models", "lhd", "rhd", "unlhd", "unrhd", "triangleleft", "trianglelefteq", "le",
+    "leqslant", "geqslant",
+    // Symbols
+    "infty", "partial", "nabla", "hbar", "ell", "wp", "Re", "Im", "aleph", "imath", "jmath",
+    "langle", "rangle", "lvert", "rvert", "lVert", "rVert", "vert", "Vert", "lfloor", "rfloor",
+    "lceil", "rceil", "lbrace", "rbrace", "lbrack", "rbrack", "backslash", "cdot", "cdots",
+    "ldots", "dots", "vdots", "ddots", "times", "div", "pm", "mp", "otimes", "oplus", "ominus",
+    "odot", "oslash", "circ", "bullet", "star", "ast", "dagger", "ddagger", "prime", "top", "bot",
+    "angle", "triangle", "Box", "square", "blacksquare", "sharp", "flat", "natural", "colon",
+    "smallsetminus", "amalg", "wr", "dag",
+    // Spacing and layout
+    "quad", "qquad", "left", "right", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr",
+    "biggl", "biggr", "Biggl", "Biggr", "middle", "begin", "end", "stackrel", "overset",
+    "underset", "substack", "not", "mathop", "limits", "nolimits", "displaystyle", "textstyle",
+    "scriptstyle", "phantom", "hspace", "space", "enspace", "thinspace", "boxed", "pmod", "bmod",
+    "mod",
+];
+
+#[rustfmt::skip]
+const KATEX_ENVIRONMENTS: &[&str] = &[
+    "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix", "smallmatrix", "cases",
+    "rcases", "aligned", "gathered", "array", "split",
+];
+
+/// LaTeX problems in a formula (no `$` delimiters).
+pub fn latex_problems(src: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut depth = 0i32;
+    let mut lefts = 0i32;
+    let mut envs: Vec<String> = Vec::new();
+    let chars: Vec<char> = src.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < chars.len() && chars[j].is_ascii_alphabetic() {
+                    j += 1;
+                }
+                if j == start {
+                    // `\{`, `\,`, `\\` and the like.
+                    i += 2;
+                    continue;
+                }
+                let cmd: String = chars[start..j].iter().collect();
+                match cmd.as_str() {
+                    "left" => lefts += 1,
+                    "right" => lefts -= 1,
+                    "begin" | "end" => {
+                        let rest: String = chars[j..].iter().collect();
+                        if let Some((name, _)) =
+                            rest.strip_prefix('{').and_then(|r| r.split_once('}'))
+                        {
+                            if !KATEX_ENVIRONMENTS.contains(&name) {
+                                problems
+                                    .push(format!("environment {name} isn't supported by KaTeX"));
+                            }
+                            if cmd == "begin" {
+                                envs.push(name.to_string());
+                            } else if envs.pop().as_deref() != Some(name) {
+                                problems.push(format!("\\end{{{name}}} doesn't match its \\begin"));
+                            }
+                        }
+                    }
+                    c if !KATEX_COMMANDS.contains(&c) => {
+                        problems.push(format!("\\{c} isn't a KaTeX command"));
+                    }
+                    _ => {}
+                }
+                i = j;
+                continue;
+            }
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth < 0 {
+                    problems.push("unbalanced }".into());
+                    depth = 0;
+                }
+            }
+            '$' => problems.push("contains $".into()),
+            _ => {}
+        }
+        i += 1;
+    }
+    if depth > 0 {
+        problems.push("unbalanced {".into());
+    }
+    if lefts != 0 {
+        problems.push("unbalanced \\left and \\right".into());
+    }
+    if !envs.is_empty() {
+        problems.push(format!("unclosed environment {}", envs.join(", ")));
+    }
+    problems.dedup();
+    problems
+}
+
+/// LaTeX problems in prose with `$…$` inline math.
+pub fn inline_latex_problems(text: &str) -> Vec<String> {
+    let parts: Vec<&str> = text.split('$').collect();
+    if parts.len().is_multiple_of(2) {
+        return vec!["unbalanced $".into()];
+    }
+    parts
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .flat_map(|m| latex_problems(m))
+        .collect()
+}
+
+/// Backticked spans that look like Lean names (a dotted path, or a known name).
+fn cited_names<'t>(text: &'t str, known: &impl Fn(&str) -> bool) -> Vec<&'t str> {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|s| {
+            s.chars()
+                .next()
+                .is_some_and(|c| c.is_alphabetic() || c == '_')
+                && s.chars()
+                    .all(|c| c.is_alphanumeric() || "._'!?".contains(c))
+                && !s.ends_with('.')
+                && (s.contains('.') || known(s))
+        })
+        .collect()
+}
+
+/// Stored descriptions and corpus lookups that prompts and checks need.
+pub struct Context<'a> {
+    by_name: HashMap<&'a str, &'a Decl>,
+    last_components: HashSet<&'a str>,
+    module_docs: HashMap<&'a str, &'a str>,
+    /// Descriptions known so far, by declaration name.
+    pub described: HashMap<String, Informal>,
+}
+
+impl<'a> Context<'a> {
+    pub fn new(corpus: &'a Corpus, described: HashMap<String, Informal>) -> Context<'a> {
+        Context {
+            by_name: corpus.decls.iter().map(|d| (d.name.as_str(), d)).collect(),
+            last_components: corpus
+                .decls
+                .iter()
+                .map(|d| d.name.rsplit('.').next().unwrap_or(&d.name))
+                .collect(),
+            module_docs: corpus
+                .modules
+                .iter()
+                .map(|m| (m.name.as_str(), m.doc.as_str()))
+                .collect(),
+            described,
+        }
+    }
+
+    /// The dependencies a prompt shows: no core plumbing, instances, parent
+    /// projections or generated names; the declaration's own library first.
+    pub fn shown_deps(&self, d: &Decl) -> Vec<&'a Decl> {
+        let mut seen = HashSet::new();
+        let mut deps: Vec<&Decl> = d
+            .description_deps()
+            .filter(|n| **n != d.name && seen.insert(n.as_str()))
+            .filter_map(|n| self.by_name.get(n.as_str()).copied())
+            .filter(|dep| {
+                let last = dep.name.rsplit('.').next().unwrap_or(&dep.name);
+                let parent_projection = last
+                    .strip_prefix("to")
+                    .is_some_and(|r| r.starts_with(char::is_uppercase));
+                !matches!(dep.library.as_str(), "Init" | "Std" | "Lean")
+                    && dep.kind != "instance"
+                    && !parent_projection
+                    && !is_generated(&dep.name)
+            })
+            .collect();
+        deps.sort_by_key(|dep| dep.library != d.library);
+        deps.truncate(MAX_DEPS);
+        deps
+    }
+
+    pub fn prompt(&self, d: &Decl) -> String {
+        let mut p = format!(
+            "<declaration>\nname: {}\nkind: {}\nmodule: {}\n</declaration>\n<lean>\n{}\n</lean>\n",
+            d.name, d.kind, d.module, d.signature
+        );
+        if let Some(doc) = &d.docstring {
+            let _ = writeln!(p, "<docstring>\n{}\n</docstring>", clip(doc.trim(), 2000));
+        }
+        if let Some(doc) = self.module_docs.get(d.module.as_str()) {
+            let _ = writeln!(p, "<module_doc>\n{}\n</module_doc>", clip(doc.trim(), 1200));
+        }
+        let deps = self.shown_deps(d);
+        if !deps.is_empty() {
+            p.push_str("<dependencies>\n");
+            for dep in deps {
+                match self.described.get(&dep.name) {
+                    Some(i) => {
+                        let _ = writeln!(
+                            p,
+                            "- `{}`: {}. {}",
+                            dep.name,
+                            i.informal_name,
+                            clip(&one_line(&i.statement_nl), 300)
+                        );
+                    }
+                    None => {
+                        let sig = dep
+                            .signature
+                            .strip_prefix(&dep.name)
+                            .unwrap_or(&dep.signature);
+                        let _ = write!(p, "- `{}`: `{}`", dep.name, clip(&one_line(sig), 300));
+                        if let Some(doc) = &dep.docstring {
+                            let _ = write!(p, ". {}", clip(&one_line(doc), 200));
+                        }
+                        p.push('\n');
+                    }
+                }
+            }
+            p.push_str("</dependencies>\n");
+        }
+        p
+    }
+
+    pub fn check(&self, d: &Decl, out: &Output) -> Checks {
+        let mut checks = Checks {
+            latex: latex_problems(&out.statement_latex),
+            ..Default::default()
+        };
+        checks
+            .latex
+            .extend(inline_latex_problems(&out.statement_nl));
+        let allowed: HashSet<&str> = std::iter::once(d.name.as_str())
+            .chain(d.description_deps().map(String::as_str))
+            .chain(d.value_refs.iter().map(String::as_str))
+            .collect();
+        let known = |s: &str| self.by_name.contains_key(s);
+        let docs = [
+            d.docstring.as_deref().unwrap_or_default(),
+            self.module_docs
+                .get(d.module.as_str())
+                .copied()
+                .unwrap_or_default(),
+        ];
+        let text = format!("{} {}", out.informal_name, out.statement_nl);
+        for name in cited_names(&text, &known) {
+            let dotted_suffix = name.split_once('.').map(|(_, rest)| format!(".{rest}"));
+            let grounded = allowed.contains(name)
+                || docs.iter().any(|doc| doc.contains(name))
+                // A namespace of something it uses, e.g. `Space`.
+                || allowed.iter().any(|a| a.strip_prefix(name).is_some_and(|r| r.starts_with('.')))
+                // Dot notation on a variable, e.g. `A.toFieldStrength`.
+                || dotted_suffix.is_some_and(|s| allowed.iter().any(|a| a.ends_with(&s)));
+            if grounded {
+                continue;
+            }
+            let last = name.rsplit('.').next().unwrap_or(name);
+            if known(name) || self.last_components.contains(last) {
+                checks.not_dependency.push(name.to_string());
+            } else {
+                checks.unknown.push(name.to_string());
+            }
+        }
+        checks
+    }
+
+    fn outcome(&self, cfg: &Config, d: &Decl, r: anthropic::Response) -> Outcome {
+        let mut o = Outcome {
+            name: d.name.clone(),
+            cost: anthropic::cost(&r.model, &r.usage),
+            usage: r.usage.clone(),
+            ..Default::default()
+        };
+        if r.stop_reason.as_deref() != Some("end_turn") {
+            o.error = Some(format!(
+                "stopped: {}",
+                r.stop_reason.as_deref().unwrap_or("unknown")
+            ));
+            return o;
+        }
+        let out: Output = match serde_json::from_str(&r.text()) {
+            Ok(out) => out,
+            Err(e) => {
+                o.error = Some(format!("invalid JSON: {e}"));
+                return o;
+            }
+        };
+        if out.statement_nl.trim().is_empty() {
+            // Not stored, so the next run tries again.
+            o.error = Some("empty description".into());
+            return o;
+        }
+        o.checks = self.check(d, &out);
+        let generated_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |t| t.as_millis() as u64);
+        o.entry = Some(Entry {
+            content_hash: d.content_hash.clone(),
+            name: d.name.clone(),
+            informal: Informal {
+                informal_name: out.informal_name,
+                statement_nl: out.statement_nl,
+                statement_latex: Some(out.statement_latex).filter(|s| !s.trim().is_empty()),
+                aliases: out.aliases,
+                source: r.model.clone(),
+            },
+            synthetic_queries: out.synthetic_queries,
+            meta: Some(json!({
+                "model": r.model,
+                "effort": cfg.effort,
+                "usage": r.usage,
+                "cost_usd": o.cost,
+                "checks": o.checks,
+                "generated_ms": generated_ms,
+            })),
+        });
+        o
+    }
+}
+
+/// The result of describing one declaration.
+#[derive(Debug, Clone, Default)]
+pub struct Outcome {
+    pub name: String,
+    pub entry: Option<Entry>,
+    pub error: Option<String>,
+    pub usage: Usage,
+    pub cost: Option<f64>,
+    pub checks: Checks,
+}
+
+/// The description of a Physlib informal result: its docstring.
+pub fn docstring_entry(d: &Decl) -> Option<Entry> {
+    let doc = d.docstring.as_deref()?.trim();
+    let last = d.name.rsplit('.').next().unwrap_or(&d.name);
+    Some(Entry {
+        content_hash: d.content_hash.clone(),
+        name: d.name.clone(),
+        informal: Informal {
+            informal_name: last.replace('_', " "),
+            statement_nl: doc.to_string(),
+            source: PHYSLIB_DOCSTRING.into(),
+            ..Default::default()
+        },
+        synthetic_queries: Vec::new(),
+        meta: None,
+    })
+}
+
+/// Describes `targets` level by level, saving descriptions to `store` as
+/// batches named `<batch>-<seq>`. Stops at the first authentication error.
+pub async fn run(
+    client: &Client,
+    cfg: &Config,
+    store: &Store,
+    corpus: &Corpus,
+    targets: &[&Decl],
+    described: HashMap<String, Informal>,
+    batch: &str,
+) -> anyhow::Result<Vec<Outcome>> {
+    let physlib_system = system(&[GLOSSARY_MATHLIB, GLOSSARY_PHYSLIB])?;
+    let mathlib_system = system(&[GLOSSARY_MATHLIB])?;
+    let mut ctx = Context::new(corpus, described);
+    let mut outcomes = Vec::new();
+    let mut pending: Vec<Entry> = Vec::new();
+    let mut seq = 0;
+    let mut save = async |pending: &mut Vec<Entry>| -> anyhow::Result<()> {
+        if !pending.is_empty() {
+            store
+                .write_batch(&format!("{batch}-{seq:04}"), pending)
+                .await?;
+            seq += 1;
+            pending.clear();
+        }
+        Ok(())
+    };
+
+    for d in targets.iter().filter(|d| d.informal) {
+        if let Some(e) = docstring_entry(d) {
+            ctx.described.insert(d.name.clone(), e.informal.clone());
+            pending.push(e);
+        }
+    }
+    let llm: Vec<&Decl> = targets
+        .iter()
+        .copied()
+        .filter(|d| needs_description(d))
+        .collect();
+    let levels = levels(&llm);
+    let started = std::time::Instant::now();
+    for (n, level) in levels.iter().enumerate() {
+        let requests: Vec<(usize, Value)> = level
+            .iter()
+            .map(|&i| {
+                let d = llm[i];
+                let system = if d.library == "Physlib" {
+                    &physlib_system
+                } else {
+                    &mathlib_system
+                };
+                (i, request(cfg, system, &ctx.prompt(d), output_schema()))
+            })
+            .collect();
+        let mut responses = futures::stream::iter(requests)
+            .map(|(i, body)| async move { (i, client.messages(&body).await) })
+            .buffer_unordered(cfg.concurrency.max(1));
+        while let Some((i, result)) = responses.next().await {
+            let d = llm[i];
+            let outcome = match result {
+                Ok(r) => ctx.outcome(cfg, d, r),
+                Err(e @ anthropic::Error::Auth { .. }) => return Err(e.into()),
+                Err(e) => Outcome {
+                    name: d.name.clone(),
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                },
+            };
+            if let Some(e) = &outcome.entry {
+                ctx.described.insert(d.name.clone(), e.informal.clone());
+                pending.push(e.clone());
+            }
+            if let Some(e) = &outcome.error {
+                tracing::warn!(name = %d.name, "{e}");
+            }
+            outcomes.push(outcome);
+            if pending.len() >= SAVE_EVERY {
+                save(&mut pending).await?;
+            }
+        }
+        save(&mut pending).await?;
+        let cost: f64 = outcomes.iter().filter_map(|o| o.cost).sum();
+        tracing::info!(
+            level = n + 1,
+            levels = levels.len(),
+            done = outcomes.len(),
+            total = llm.len(),
+            cost = format!("${cost:.3}"),
+            elapsed = format!("{:.0}s", started.elapsed().as_secs_f64()),
+            "level described"
+        );
+    }
+    save(&mut pending).await?;
+    Ok(outcomes)
+}
+
+/// About `n` declarations from `libraries` that need descriptions, taken as
+/// runs of whole modules in source order (so in-module dependencies come
+/// along) with each area, e.g. `Physlib.QuantumMechanics`, represented in
+/// proportion to its size. Physlib informal results in those modules come too.
+pub fn pilot_sample<'a>(
+    decls: &'a [Decl],
+    libraries: &[String],
+    n: usize,
+    seed: u64,
+) -> Vec<&'a Decl> {
+    let mut modules: BTreeMap<&str, Vec<&Decl>> = BTreeMap::new();
+    for d in decls.iter().filter(|d| libraries.contains(&d.library)) {
+        if needs_description(d) || d.informal {
+            modules.entry(&d.module).or_default().push(d);
+        }
+    }
+    let area = |m: &str| m.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+    let mut areas: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for m in modules.keys() {
+        areas.entry(area(m)).or_default().push(m);
+    }
+    let size = |m: &str| modules[m].iter().filter(|d| needs_description(d)).count();
+    let total: usize = modules.keys().map(|m| size(m)).sum();
+    let mut out = Vec::new();
+    for ms in areas.values_mut() {
+        let area_size: usize = ms.iter().map(|m| size(m)).sum();
+        let quota = (n * area_size).div_ceil(total.max(1)).max(1);
+        ms.sort_by_key(|m| rank(seed, m));
+        let mut taken = 0;
+        for m in ms.iter() {
+            if taken >= quota {
+                break;
+            }
+            let mut in_module = modules[m].clone();
+            in_module.sort_by_key(|d| d.range.map(|r| r.start));
+            for d in in_module {
+                if needs_description(d) {
+                    if taken >= quota {
+                        break;
+                    }
+                    taken += 1;
+                }
+                out.push(d);
+            }
+        }
+    }
+    out
+}
+
+/// Declarations per library that need a description and have none stored.
+pub fn undescribed(corpus: &Corpus, stored: &HashMap<String, Entry>) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for d in corpus
+        .decls
+        .iter()
+        .filter(|d| needs_description(d) && !stored.contains_key(&d.content_hash))
+    {
+        *out.entry(d.library.clone()).or_default() += 1;
+    }
+    out
+}
+
+/// Whether descriptions tell a declaration apart from its nearest neighbours
+/// in the dense lane.
+#[derive(Debug, Clone, Default)]
+pub struct Discrimination {
+    pub total: usize,
+    pub correct: usize,
+    /// Names whose description the judge matched to another candidate.
+    pub misses: Vec<String>,
+    pub cost: f64,
+}
+
+/// Shows the judge each description with the declaration and its three
+/// nearest neighbours in the dense lane, names hidden, and counts how often
+/// it picks the right one.
+pub async fn discriminate(
+    client: &Client,
+    cfg: &Config,
+    bundle: &Bundle,
+    entries: &[&Entry],
+    seed: u64,
+) -> anyhow::Result<Discrimination> {
+    let dense = bundle
+        .dense
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("the bundle has no vectors"))?;
+    let ids: HashMap<&str, u32> = bundle
+        .decls
+        .iter()
+        .enumerate()
+        .map(|(i, d)| (d.name.as_str(), i as u32))
+        .collect();
+    let system = json!([{"type": "text", "text": "\
+You check descriptions written for a search index of Lean declarations. You get one description \
+and several candidate Lean statements with their names hidden. Choose the candidate the \
+description describes."}]);
+    let schema = json!({
+        "type": "object",
+        "properties": {"choice": {"type": "integer"}},
+        "required": ["choice"],
+        "additionalProperties": false,
+    });
+    let mut items = Vec::new();
+    for e in entries {
+        let Some(&id) = ids.get(e.name.as_str()) else {
+            continue;
+        };
+        let Some(near) = dense.neighbours(id, 3) else {
+            continue;
+        };
+        let mut candidates = vec![id];
+        candidates.extend(near);
+        candidates.sort_by_key(|&c| rank(seed, &bundle.decls[c as usize].name));
+        let answer = candidates
+            .iter()
+            .position(|&c| c == id)
+            .expect("target is a candidate")
+            + 1;
+        let mut prompt = format!(
+            "<description>\n{}. {}\n</description>\n<candidates>\n",
+            e.informal.informal_name, e.informal.statement_nl
+        );
+        for (k, &c) in candidates.iter().enumerate() {
+            let d = &bundle.decls[c as usize];
+            let _ = writeln!(prompt, "{}. {}", k + 1, crate::engine::short_signature(d));
+        }
+        prompt.push_str("</candidates>\nAnswer with the candidate's number.");
+        items.push((
+            e.name.clone(),
+            answer,
+            request(cfg, &system, &prompt, schema.clone()),
+        ));
+    }
+    let mut result = Discrimination::default();
+    let mut responses = futures::stream::iter(items)
+        .map(|(name, answer, body)| async move { (name, answer, client.messages(&body).await) })
+        .buffer_unordered(cfg.concurrency.max(1));
+    while let Some((name, answer, r)) = responses.next().await {
+        let r = r?;
+        result.cost += anthropic::cost(&r.model, &r.usage).unwrap_or(0.0);
+        let choice = serde_json::from_str::<Value>(&r.text())
+            .ok()
+            .and_then(|v| v["choice"].as_u64());
+        result.total += 1;
+        if choice == Some(answer as u64) {
+            result.correct += 1;
+        } else {
+            result.misses.push(name);
+        }
+    }
+    result.misses.sort();
+    Ok(result)
+}
+
+/// What a pilot report describes besides the outcomes.
+pub struct ReportInput<'a> {
+    pub date: String,
+    pub env_id: &'a str,
+    pub cfg: &'a Config,
+    pub sample: String,
+    pub docstring_entries: usize,
+    pub elapsed_secs: f64,
+    /// Declarations per library without a description before the run.
+    pub undescribed: BTreeMap<String, usize>,
+    pub discrimination: Option<Discrimination>,
+    pub seed: u64,
+}
+
+pub fn report(input: &ReportInput, outcomes: &[Outcome], corpus: &Corpus) -> String {
+    let by_name: HashMap<&str, &Decl> = corpus.decls.iter().map(|d| (d.name.as_str(), d)).collect();
+    let ok: Vec<&Outcome> = outcomes.iter().filter(|o| o.entry.is_some()).collect();
+    let sum = |f: fn(&Usage) -> u64| outcomes.iter().map(|o| f(&o.usage)).sum::<u64>();
+    let cost: f64 = outcomes.iter().filter_map(|o| o.cost).sum();
+    let per_decl = cost / ok.len().max(1) as f64;
+    let mut r = String::new();
+    let cfg = input.cfg;
+    let _ = writeln!(r, "# Informalization pilot, {}\n", input.date);
+    let _ = writeln!(r, "- Environment: `{}`", input.env_id);
+    let _ = writeln!(
+        r,
+        "- Model: `{}`, effort `{}`, JSON-schema output; the instructions and glossary are prompt-cached",
+        cfg.model, cfg.effort
+    );
+    let _ = writeln!(r, "- Sample: {}", input.sample);
+    let _ = writeln!(
+        r,
+        "- {} Physlib informal results in the sample took their docstring as the description (no model call)\n",
+        input.docstring_entries
+    );
+
+    let _ = writeln!(r, "## Cost\n\n| | |\n|---|---|");
+    let _ = writeln!(
+        r,
+        "| Calls | {} ({} described, {} failed) |",
+        outcomes.len(),
+        ok.len(),
+        outcomes.len() - ok.len()
+    );
+    let _ = writeln!(
+        r,
+        "| Input tokens: uncached / cache write / cache read | {} / {} / {} |",
+        sum(|u| u.input_tokens),
+        sum(|u| u.cache_creation_input_tokens),
+        sum(|u| u.cache_read_input_tokens)
+    );
+    let _ = writeln!(
+        r,
+        "| Output tokens (with thinking) | {} |",
+        sum(|u| u.output_tokens)
+    );
+    let _ = writeln!(r, "| Cost | ${cost:.3} (${per_decl:.5} per description) |");
+    let _ = writeln!(
+        r,
+        "| Wall time | {:.0} s at concurrency {} |\n",
+        input.elapsed_secs, cfg.concurrency
+    );
+
+    let _ = writeln!(r, "### Full run estimate\n");
+    let _ = writeln!(
+        r,
+        "Declarations that need a description and had none stored before this run (LeanSearch v2 covers \
+         much of Mathlib), at this pilot's mean cost per description. The Message Batches API halves it.\n"
+    );
+    let _ = writeln!(
+        r,
+        "| Library | Declarations | Messages API | Batches API |\n|---|---:|---:|---:|"
+    );
+    let mut total = 0;
+    for (lib, &n) in &input.undescribed {
+        total += n;
+        let c = n as f64 * per_decl;
+        let _ = writeln!(r, "| {lib} | {n} | ${c:.2} | ${:.2} |", c / 2.0);
+    }
+    let c = total as f64 * per_decl;
+    let _ = writeln!(
+        r,
+        "| **All** | **{total}** | **${c:.2}** | **${:.2}** |\n",
+        c / 2.0
+    );
+
+    let failed: Vec<&Outcome> = outcomes.iter().filter(|o| o.error.is_some()).collect();
+    if !failed.is_empty() {
+        let _ = writeln!(r, "## Failures\n");
+        for o in &failed {
+            let _ = writeln!(
+                r,
+                "- `{}`: {}",
+                o.name,
+                o.error.as_deref().unwrap_or_default()
+            );
+        }
+        r.push('\n');
+    }
+
+    let _ = writeln!(r, "## Checks\n\n| Check | Passed |\n|---|---:|");
+    let pct = |k: usize| {
+        format!(
+            "{k}/{} ({:.0}%)",
+            ok.len(),
+            100.0 * k as f64 / ok.len().max(1) as f64
+        )
+    };
+    let count = |f: &dyn Fn(&Checks) -> bool| ok.iter().filter(|o| f(&o.checks)).count();
+    let _ = writeln!(
+        r,
+        "| LaTeX balanced and KaTeX-compatible | {} |",
+        pct(count(&|c| c.latex.is_empty()))
+    );
+    let _ = writeln!(
+        r,
+        "| Cited Lean names are used by the declaration | {} |",
+        pct(count(&|c| c.not_dependency.is_empty()))
+    );
+    let _ = writeln!(
+        r,
+        "| No cited Lean name is unknown | {} |",
+        pct(count(&|c| c.unknown.is_empty()))
+    );
+    let _ = writeln!(r, "| All checks | {} |", pct(count(&Checks::passed)));
+    let with_latex = ok
+        .iter()
+        .filter(|o| {
+            o.entry
+                .as_ref()
+                .is_some_and(|e| e.informal.statement_latex.is_some())
+        })
+        .count();
+    let _ = writeln!(r, "| Has a LaTeX formula | {} |\n", pct(with_latex));
+    let problems: Vec<String> = ok
+        .iter()
+        .filter(|o| !o.checks.passed())
+        .take(15)
+        .map(|o| {
+            let c = &o.checks;
+            let mut parts = c.latex.clone();
+            parts.extend(
+                c.not_dependency
+                    .iter()
+                    .map(|n| format!("cites `{n}`, which it doesn't use")),
+            );
+            parts.extend(c.unknown.iter().map(|n| format!("cites unknown `{n}`")));
+            format!("- `{}`: {}", o.name, parts.join("; "))
+        })
+        .collect();
+    if !problems.is_empty() {
+        let _ = writeln!(
+            r,
+            "Failing checks (first {}):\n\n{}\n",
+            problems.len(),
+            problems.join("\n")
+        );
+    }
+
+    if let Some(d) = &input.discrimination {
+        let _ = writeln!(r, "## Discrimination\n");
+        let _ = writeln!(
+            r,
+            "{}/{} descriptions picked out their declaration from it and its three nearest neighbours in \
+             the dense lane, names hidden, judged by `{}` (${:.3}).",
+            d.correct, d.total, cfg.model, d.cost
+        );
+        if !d.misses.is_empty() {
+            let misses: Vec<String> = d.misses.iter().map(|n| format!("`{n}`")).collect();
+            let _ = writeln!(r, "Missed: {}.", misses.join(", "));
+        }
+        r.push('\n');
+    }
+
+    let mut samples = ok.clone();
+    samples.sort_by_key(|o| rank(input.seed, &o.name));
+    samples.truncate(40);
+    samples.sort_by(|a, b| a.name.cmp(&b.name));
+    let _ = writeln!(r, "## Samples ({})\n", samples.len());
+    for o in samples {
+        let e = o.entry.as_ref().expect("described");
+        let Some(d) = by_name.get(o.name.as_str()) else {
+            continue;
+        };
+        let _ = writeln!(r, "### `{}`\n", d.name);
+        let _ = writeln!(
+            r,
+            "{} in `{}`\n\n```lean\n{}\n```\n",
+            d.kind, d.module, d.signature
+        );
+        if let Some(doc) = &d.docstring {
+            let _ = writeln!(r, "Docstring: {}\n", one_line(doc));
+        }
+        let i = &e.informal;
+        let _ = writeln!(r, "**{}**. {}\n", i.informal_name, i.statement_nl);
+        if let Some(l) = &i.statement_latex {
+            let _ = writeln!(r, "$$\n{l}\n$$\n");
+        }
+        if !i.aliases.is_empty() {
+            let _ = writeln!(r, "Aliases: {}\n", i.aliases.join("; "));
+        }
+        let queries: Vec<String> = e
+            .synthetic_queries
+            .iter()
+            .map(|q| format!("“{q}”"))
+            .collect();
+        let _ = writeln!(r, "Queries: {}\n", queries.join(" · "));
+        if !o.checks.passed() {
+            let _ = writeln!(
+                r,
+                "Checks: {}\n",
+                serde_json::to_string(&o.checks).unwrap_or_default()
+            );
+        }
+    }
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::corpus::tests::decl;
+
+    #[test]
+    fn levels_put_dependencies_first() {
+        let a = decl("A", "def", "A : Type", &[]);
+        let b = decl("B", "def", "B : A", &["A"]);
+        let c = decl("C", "theorem", "C : B = B", &["B", "A", "Nat"]);
+        let x = decl("X", "def", "X : Y", &["Y"]);
+        let y = decl("Y", "def", "Y : X", &["X"]);
+        let targets = [&c, &b, &a, &x, &y];
+        assert_eq!(
+            levels(&targets),
+            vec![vec![2], vec![1], vec![0], vec![3, 4]]
+        );
+    }
+
+    #[test]
+    fn generated_names() {
+        assert!(is_generated("StandardModel.LeptonDoublet.ctorIdx"));
+        assert!(is_generated("Foo.bar.eq_1"));
+        assert!(is_generated("Foo.mk.injEq"));
+        assert!(!is_generated("Foo.eq_iff"));
+        assert!(!is_generated("Space.deriv"));
+        let mut d = decl("instInhabitedCreateAnnihilate.default", "def", "...", &[]);
+        assert!(!needs_description(&d));
+        d.name = "Space.instInner".into();
+        assert!(needs_description(&d));
+    }
+
+    #[test]
+    fn latex_checks() {
+        assert!(latex_problems(r"\operatorname{Tr}(\rho) = 1").is_empty());
+        assert!(latex_problems(r"\left\{ x \in \mathbb{R} \mid x > 0 \right\}").is_empty());
+        assert!(latex_problems(r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}").is_empty());
+        assert_eq!(latex_problems(r"\Tr(\rho)"), ["\\Tr isn't a KaTeX command"]);
+        assert!(latex_problems(r"\texttt{Space.deriv}").is_empty());
+        assert_eq!(latex_problems(r"\frac{a}{b"), ["unbalanced {"]);
+        assert_eq!(
+            latex_problems(r"\left( x"),
+            ["unbalanced \\left and \\right"]
+        );
+        assert_eq!(
+            inline_latex_problems("the trace $\\mathrm{tr}\\,\\rho$ is one"),
+            Vec::<String>::new()
+        );
+        assert_eq!(inline_latex_problems("costs $5"), ["unbalanced $"]);
+    }
+
+    fn corpus(decls: Vec<Decl>) -> Corpus {
+        Corpus {
+            manifest: Default::default(),
+            decls,
+            modules: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn grounding_checks_cited_names() {
+        let mut t = decl(
+            "Space.grad_add",
+            "theorem",
+            "Space.grad_add : ...",
+            &["Space.grad", "Space"],
+        );
+        t.library = "Physlib".into();
+        let c = corpus(vec![
+            t.clone(),
+            decl("Space.grad", "def", "Space.grad : ...", &[]),
+            decl("Space", "def", "Space : Type", &[]),
+            decl("Space.div", "def", "Space.div : ...", &[]),
+            decl("Lorentz.Vector.toFieldStrength", "def", "...", &[]),
+        ]);
+        let ctx = Context::new(&c, HashMap::new());
+        let out = Output {
+            informal_name: "Additivity of the gradient".into(),
+            statement_nl:
+                "`Space.grad` of a sum in `Space` is the sum of gradients, unlike `Space.div`; \
+                           see `Space.grad_sum_wrong` and `f.grad` with `x`."
+                    .into(),
+            ..Default::default()
+        };
+        let checks = ctx.check(&t, &out);
+        assert_eq!(checks.not_dependency, ["Space.div"]);
+        assert_eq!(checks.unknown, ["Space.grad_sum_wrong"]);
+    }
+
+    #[test]
+    fn prompts_show_dependencies_with_descriptions() {
+        let mut t = decl(
+            "Space.grad_add",
+            "theorem",
+            "Space.grad_add : grad (f + g) = grad f + grad g",
+            &["Space.grad", "Eq", "Real.toNormedField"],
+        );
+        t.docstring = Some("The gradient is additive.".into());
+        let mut eq = decl("Eq", "inductive", "Eq : α → α → Prop", &[]);
+        eq.library = "Init".into();
+        let c = corpus(vec![
+            t.clone(),
+            decl(
+                "Space.grad",
+                "def",
+                "Space.grad (f : Space d → ℝ) : Space d → EuclideanSpace ℝ (Fin d)",
+                &[],
+            ),
+            eq,
+            decl("Real.toNormedField", "def", "...", &[]),
+        ]);
+        let described = HashMap::from([(
+            "Space.grad".to_string(),
+            Informal {
+                informal_name: "Gradient".into(),
+                statement_nl: "The gradient $\\nabla f$ of a function on space.".into(),
+                ..Default::default()
+            },
+        )]);
+        let p = Context::new(&c, described).prompt(&t);
+        assert!(
+            p.contains("<docstring>\nThe gradient is additive.\n</docstring>"),
+            "{p}"
+        );
+        assert!(
+            p.contains(
+                "- `Space.grad`: Gradient. The gradient $\\nabla f$ of a function on space."
+            ),
+            "{p}"
+        );
+        assert!(!p.contains("`Eq`") && !p.contains("toNormedField"), "{p}");
+    }
+
+    #[test]
+    fn pilot_sample_takes_modules_in_proportion() {
+        let mut decls = Vec::new();
+        for (area, modules, per_module) in [("A", 4, 30), ("B", 2, 10)] {
+            for m in 0..modules {
+                for k in 0..per_module {
+                    let mut d = decl(&format!("{area}.m{m}.d{k}"), "theorem", "...", &[]);
+                    d.library = "Physlib".into();
+                    d.module = format!("Physlib.{area}.M{m}");
+                    d.range = Some(crate::corpus::LineRange {
+                        start: k,
+                        end: k + 1,
+                    });
+                    decls.push(d);
+                }
+            }
+        }
+        let s = pilot_sample(&decls, &["Physlib".into()], 28, 7);
+        let a = s
+            .iter()
+            .filter(|d| d.module.starts_with("Physlib.A"))
+            .count();
+        let b = s.len() - a;
+        // 120 : 20 of the declarations, so 24 : 4 of the sample.
+        assert_eq!((a, b), (24, 4));
+        // Source order within a module.
+        let first_a: Vec<&str> = s
+            .iter()
+            .filter(|d| d.module.starts_with("Physlib.A"))
+            .take(2)
+            .map(|d| d.name.as_str())
+            .collect();
+        assert!(
+            first_a[0].ends_with(".d0") && first_a[1].ends_with(".d1"),
+            "{first_a:?}"
+        );
+    }
+}

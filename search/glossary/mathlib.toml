@@ -1,0 +1,102 @@
+# Seed glossary for informalization prompts: how to read Mathlib names and
+# notation common in physics-facing statements. Not yet reviewed.
+
+[[term]]
+lean = "Fin n"
+meaning = "the n-element index set {0, ..., n-1}"
+
+[[term]]
+lean = "{x // p x}"
+meaning = "the subtype of elements satisfying p, e.g. {x : ℝ // 0 < x} is the positive reals"
+
+[[term]]
+lean = "Matrix m n R"
+meaning = "matrices with rows indexed by m and columns by n; `Matrix.trace` is the trace, `Aᴴ` (`Matrix.conjTranspose`) the conjugate transpose, `A ⊗ₖ B` the Kronecker product"
+
+[[term]]
+lean = "Matrix.IsHermitian, Matrix.PosSemidef, Matrix.PosDef"
+meaning = "Hermitian (Aᴴ = A), positive semidefinite and positive definite matrices"
+
+[[term]]
+lean = "Matrix.unitaryGroup, Matrix.SpecialLinearGroup"
+meaning = "unitary matrices U(n) and matrices of determinant one SL(n, R), e.g. SL(2, ℂ)"
+
+[[term]]
+lean = "E →L[𝕜] F (ContinuousLinearMap)"
+meaning = "bounded (continuous) linear operators from E to F"
+
+[[term]]
+lean = "E →ₗ[R] F (LinearMap)"
+meaning = "linear maps from E to F"
+
+[[term]]
+lean = "IsSelfAdjoint"
+meaning = "self-adjoint: x⋆ = x (for operators on a Hilbert space, Hermitian)"
+
+[[term]]
+lean = "inner 𝕜 x y, ⟪x, y⟫"
+meaning = "the inner product, conjugate-linear in the first argument"
+
+[[term]]
+lean = "EuclideanSpace 𝕜 (Fin n)"
+meaning = "𝕜ⁿ with the Euclidean inner product and norm"
+
+[[term]]
+lean = "‖x‖"
+meaning = "the norm of x"
+
+[[term]]
+lean = "deriv f x, fderiv 𝕜 f x"
+meaning = "the derivative of a one-variable function, and the Fréchet (total) derivative, at x"
+
+[[term]]
+lean = "HasDerivAt f f' x, Differentiable 𝕜 f, ContDiff 𝕜 n f"
+meaning = "f has derivative f' at x; f is differentiable; f is n times continuously differentiable (smooth when n = ∞)"
+
+[[term]]
+lean = "∫ x, f x ∂μ (MeasureTheory.integral)"
+meaning = "the (Bochner) integral of f with respect to the measure μ; `MeasureTheory.volume` is Lebesgue measure"
+
+[[term]]
+lean = "MeasureTheory.Lp, MeasureTheory.MemLp, α →ₘ[μ] β"
+meaning = "Lᵖ spaces, functions with finite Lᵖ norm, and almost-everywhere equivalence classes of functions"
+
+[[term]]
+lean = "SchwartzMap E F, 𝓢(E, F)"
+meaning = "Schwartz functions: smooth functions all of whose derivatives decay faster than any power of ‖x‖"
+
+[[term]]
+lean = "Real.exp, Complex.exp, Real.log, Real.sqrt, Real.pi"
+meaning = "the exponential, natural logarithm, square root and π"
+
+[[term]]
+lean = "Complex.I, starRingEnd ℂ"
+meaning = "the imaginary unit i and complex conjugation"
+
+[[term]]
+lean = "∑ i ∈ s, f i (Finset.sum), ∑' i, f i (tsum)"
+meaning = "a finite sum over s, and an unconditional infinite sum"
+
+[[term]]
+lean = "Filter.Tendsto f l l'"
+meaning = "f tends to l' along l (a limit statement, e.g. as x → ∞ with `Filter.atTop`)"
+
+[[term]]
+lean = "Module.Basis ι R M, OrthonormalBasis ι 𝕜 E"
+meaning = "a basis, and an orthonormal basis, indexed by ι"
+
+[[term]]
+lean = "Representation k G V"
+meaning = "a linear representation of the group G on the k-vector space V"
+
+[[term]]
+lean = "TensorProduct R M N, M ⊗[R] N"
+meaning = "the tensor product of modules"
+
+[[term]]
+lean = "Polynomial R"
+meaning = "polynomials in one variable with coefficients in R"
+
+[[term]]
+lean = "Function.Injective, Function.Surjective, Function.Bijective"
+meaning = "injective, surjective and bijective functions"

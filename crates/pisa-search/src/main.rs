@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use pisa_protocol::search::Informal;
+use pisa_search::anthropic::Client;
 use pisa_search::corpus::{self, Corpus};
 use pisa_search::dense::{self, Tei};
 use pisa_search::engine::{Engine, Lanes};
 use pisa_search::index::{self, Bundle};
 use pisa_search::informal_store::Store;
+use pisa_search::informalize;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
 
@@ -67,6 +69,43 @@ enum Command {
         limit: Option<usize>,
         #[arg(long, default_value_t = 16)]
         batch: usize,
+    },
+    /// Describe declarations in natural language with Claude, in dependency
+    /// order, caching the descriptions. Needs ANTHROPIC_API_KEY.
+    Informalize {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Description and vector store (a directory or s3:// URL).
+        #[arg(long)]
+        informal: String,
+        #[arg(long, value_delimiter = ',', default_value = "Physlib")]
+        libraries: Vec<String>,
+        /// Describe a pilot sample of about this many declarations, whole
+        /// modules stratified by area, instead of all of them.
+        #[arg(long)]
+        sample: Option<usize>,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value = "claude-haiku-5-5")]
+        model: String,
+        #[arg(long, default_value = "low")]
+        effort: String,
+        #[arg(long, default_value_t = 4096)]
+        max_tokens: u32,
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+        /// Describe again even if a description is stored.
+        #[arg(long)]
+        force: bool,
+        /// Write a report (cost, checks, samples) to this file.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// A bundle with vectors, for the report's discrimination test.
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        /// Print the plan and the first prompts instead of calling the API.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Build an index bundle from a corpus and stored descriptions.
     Build {
@@ -220,6 +259,133 @@ async fn main() -> anyhow::Result<()> {
             let started = std::time::Instant::now();
             let n = dense::embed_missing(&store, &tei, &model, docs, batch, 1000).await?;
             eprintln!("embedded {n} in {:.0}s", started.elapsed().as_secs_f64());
+        }
+        Command::Informalize {
+            corpus,
+            informal,
+            libraries,
+            sample,
+            seed,
+            model,
+            effort,
+            max_tokens,
+            concurrency,
+            force,
+            report,
+            bundle,
+            dry_run,
+        } => {
+            let c = Corpus::read(&corpus)?;
+            let store = Store::open(&informal)?;
+            let stored = store.load_all().await?;
+            let described = descriptions(&c, &store).await?;
+            let undescribed = informalize::undescribed(&c, &stored);
+            let mut targets = match sample {
+                Some(n) => informalize::pilot_sample(&c.decls, &libraries, n, seed),
+                None => c
+                    .decls
+                    .iter()
+                    .filter(|d| {
+                        libraries.contains(&d.library)
+                            && (d.informal || informalize::needs_description(d))
+                    })
+                    .collect(),
+            };
+            let modules: std::collections::HashSet<&str> =
+                targets.iter().map(|d| d.module.as_str()).collect();
+            let sample_text = match sample {
+                Some(n) => format!(
+                    "{} declarations from {} {} modules (about {n} requested, whole modules stratified by area, seed {seed})",
+                    targets.len(),
+                    modules.len(),
+                    libraries.join("/")
+                ),
+                None => format!("all of {}", libraries.join(", ")),
+            };
+            if !force {
+                targets.retain(|d| !stored.contains_key(&d.content_hash));
+            }
+            let docstring_entries = targets.iter().filter(|d| d.informal).count();
+            eprintln!(
+                "{} declarations to describe ({docstring_entries} from docstrings)",
+                targets.len()
+            );
+            let cfg = informalize::Config {
+                model,
+                effort,
+                max_tokens,
+                concurrency,
+            };
+            if dry_run {
+                let llm: Vec<_> = targets
+                    .iter()
+                    .copied()
+                    .filter(|d| informalize::needs_description(d))
+                    .collect();
+                let ctx = informalize::Context::new(&c, described);
+                eprintln!("{} levels; {sample_text}", informalize::levels(&llm).len());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&informalize::system(&[
+                        informalize::GLOSSARY_MATHLIB,
+                        informalize::GLOSSARY_PHYSLIB
+                    ])?)?
+                );
+                for d in llm.iter().take(3) {
+                    println!("---\n{}", ctx.prompt(d));
+                }
+                return Ok(());
+            }
+            let client = Client::from_env()?;
+            let started = std::time::Instant::now();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+            let batch = format!("{}-{}", now.as_millis(), cfg.model);
+            let outcomes =
+                informalize::run(&client, &cfg, &store, &c, &targets, described, &batch).await?;
+            let elapsed_secs = started.elapsed().as_secs_f64();
+            let cost: f64 = outcomes.iter().filter_map(|o| o.cost).sum();
+            let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
+            eprintln!(
+                "described {} of {} in {elapsed_secs:.0}s for ${cost:.3}",
+                outcomes.len() - failed,
+                outcomes.len()
+            );
+            if let Some(path) = report {
+                let discrimination = match bundle {
+                    Some(b) => {
+                        let bundle = Bundle::open(&b)?;
+                        let mut entries: Vec<_> =
+                            outcomes.iter().filter_map(|o| o.entry.as_ref()).collect();
+                        entries.sort_by_key(|e| informalize::rank(seed + 1, &e.name));
+                        entries.truncate(20);
+                        Some(
+                            informalize::discriminate(&client, &cfg, &bundle, &entries, seed)
+                                .await?,
+                        )
+                    }
+                    None => None,
+                };
+                let input = informalize::ReportInput {
+                    date: path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    env_id: &c.manifest.env_id,
+                    cfg: &cfg,
+                    sample: sample_text,
+                    docstring_entries,
+                    elapsed_secs,
+                    undescribed,
+                    discrimination,
+                    seed,
+                };
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(&path, informalize::report(&input, &outcomes, &c))?;
+                eprintln!("wrote {}", path.display());
+            }
         }
         Command::Build {
             corpus,

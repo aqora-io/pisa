@@ -1,0 +1,155 @@
+# Seed glossary for informalization prompts: how to read Physlib names that
+# many declarations use. Each entry paraphrases the declaration's docstring at
+# Physlib v4.35.0. Not yet reviewed by a physicist.
+
+[[term]]
+lean = "Space d"
+meaning = "d-dimensional flat Euclidean space (d defaults to 3), with an arbitrary but fixed choice of length unit and origin"
+
+[[term]]
+lean = "Time"
+meaning = "an instant in time, with a unit and an orientation but no distinguished origin"
+
+[[term]]
+lean = "SpaceTime d"
+meaning = "(d+1)-dimensional Minkowski spacetime, acted on by the Lorentz group"
+
+[[term]]
+lean = "minkowskiMatrix"
+meaning = "the Minkowski metric diag(1, -1, ..., -1), i.e. signature (+, -, ..., -), indexed by Fin 1 ⊕ Fin d (time first)"
+
+[[term]]
+lean = "LorentzGroup d"
+meaning = "the Lorentz group O(1, d), as the set of real (1+d)×(1+d) matrices Λ with Λ · dual Λ = 1"
+
+[[term]]
+lean = "Lorentz.Vector d"
+meaning = "a real contravariant Lorentz vector (a (1+d)-vector)"
+
+[[term]]
+lean = "Lorentz.ContrMod d, Lorentz.CoMod d"
+meaning = "the modules of contravariant (upper-index) and covariant (lower-index) real Lorentz vectors, with the Lorentz group representations `rep`"
+
+[[term]]
+lean = "Lorentz.ContrℂModule, Lorentz.CoℂModule"
+meaning = "complex contravariant and covariant Lorentz vectors, with SL(2, ℂ) acting through the Lorentz group"
+
+[[term]]
+lean = "Fermion.LeftHandedWeyl, Fermion.RightHandedWeyl"
+meaning = "two-component Weyl spinors ψ^a and ψ^{ȧ}: ℂ² with the fundamental and conjugate representations of SL(2, ℂ)"
+
+[[term]]
+lean = "Fermion.DualLeftHandedWeyl, Fermion.DualRightHandedWeyl"
+meaning = "Weyl spinors with lower indices ψ_a and ψ_{ȧ}: ℂ² with the representations M ↦ (M⁻¹)ᵀ and M ↦ (M⁻¹)†"
+
+[[term]]
+lean = "TensorSpecies"
+meaning = "the structure needed for tensors with index notation: index colours, a group, its representations and contractions; examples are real and complex Lorentz tensors"
+
+[[term]]
+lean = "TensorSpecies.Tensor S c"
+meaning = "tensors of the species S whose indices have colours c : Fin n → C (e.g. up or down indices)"
+
+[[term]]
+lean = "realLorentzTensor d, complexLorentzTensor"
+meaning = "the tensor species of real Lorentz tensors (representations of O(1, d)) and of complex Lorentz tensors (representations of SL(2, ℂ), including spinor indices)"
+
+[[term]]
+lean = "Space.deriv μ f"
+meaning = "the partial derivative ∂_μ f of a function on space in coordinate direction μ"
+
+[[term]]
+lean = "Space.grad, Space.div, Space.curl, Space.laplacian"
+meaning = "the vector-calculus operators ∇f, ∇·f, ∇×f and Δf on Space"
+
+[[term]]
+lean = "SpaceTime.deriv μ f"
+meaning = "the partial derivative of a function on spacetime along coordinate μ : Fin 1 ⊕ Fin d (time, then the d space coordinates)"
+
+[[term]]
+lean = "Time.deriv f"
+meaning = "the time derivative of f : Time → M"
+
+[[term]]
+lean = "Physlib.Distribution 𝕜 E F"
+meaning = "F-valued distributions on E: continuous linear maps from the Schwartz space 𝓢(E, 𝕜) to F"
+
+[[term]]
+lean = "Electromagnetism.ElectromagneticPotential d"
+meaning = "the electromagnetic potential A^μ on spacetime; `toFieldStrength` gives its field strength tensor"
+
+[[term]]
+lean = "QuantumMechanics.OneDimension.HilbertSpace"
+meaning = "L²(ℝ, ℂ): almost-everywhere equivalence classes of square-integrable functions ℝ → ℂ, the state space of a one-dimensional quantum system"
+
+[[term]]
+lean = "QuantumMechanics.SpaceDHilbertSpace d"
+meaning = "L²(Space d, ℂ): square-integrable wave functions on d-dimensional space"
+
+[[term]]
+lean = "QuantumMechanics.OneDimension.HarmonicOscillator"
+meaning = "the one-dimensional quantum harmonic oscillator, given by a mass m, Planck's constant ℏ and angular frequency ω, all positive"
+
+[[term]]
+lean = "QuantumMechanics.FiniteTarget"
+meaning = "a finite-dimensional quantum system with a self-adjoint Hamiltonian"
+
+[[term]]
+lean = "ClassicalMechanics.HarmonicOscillator"
+meaning = "the classical harmonic oscillator, given by a positive mass m and positive spring constant k"
+
+[[term]]
+lean = "Constants.ℏ, Constants.h, Constants.kB"
+meaning = "the reduced Planck constant ℏ (positive), Planck's constant h = 2πℏ, and Boltzmann's constant k_B"
+
+[[term]]
+lean = "SpeedOfLight"
+meaning = "the speed of light in vacuum, in an arbitrary system of units"
+
+[[term]]
+lean = "Dimension B"
+meaning = "a physical dimension over a basis of base dimensions B (default `LTMCTDimensionBase`)"
+
+[[term]]
+lean = "FieldSpecification"
+meaning = "the specification of a quantum field theory's fields: their types, position and asymptotic labels, and bosonic or fermionic statistics"
+
+[[term]]
+lean = "FieldSpecification.FieldOp, FieldSpecification.CrAnFieldOp"
+meaning = "field operators (incoming and outgoing asymptotic states and position-space fields) and their creation and annihilation parts"
+
+[[term]]
+lean = "FieldSpecification.WickAlgebra"
+meaning = "the algebra of field operators: the free algebra on creation and annihilation operators modulo their (super)commutation relations"
+
+[[term]]
+lean = "WickContraction n"
+meaning = "a Wick contraction of n fields: a set of disjoint pairs of elements of Fin n"
+
+[[term]]
+lean = "FieldStatistic"
+meaning = "bosonic or fermionic statistics of a field or operator"
+
+[[term]]
+lean = "ACCSystem, ACCSystemCharges.Charges, ACCSystemLinear.LinSols"
+meaning = "anomaly cancellation conditions (ACCs) on the U(1) charges of a gauge theory's fermions: charges are functions Fin n → ℚ, and LinSols are the solutions of the linear ACCs"
+
+[[term]]
+lean = "PureU1 n"
+meaning = "the ACC system of a pure U(1) gauge theory with n fermions"
+
+[[term]]
+lean = "CKMMatrix"
+meaning = "Cabibbo–Kobayashi–Maskawa quark mixing matrices"
+
+[[term]]
+lean = "SuperSymmetry.SU5.ChargeSpectrum"
+meaning = "the U(1) charges of the matter content (Hd, Hu, 5-bar and 10 representations) in an SU(5) supersymmetric grand unified theory"
+
+[[term]]
+lean = "InnerProductSpace' 𝕜 E"
+meaning = "like `InnerProductSpace` but only requiring the norm to be equivalent to the one the inner product induces"
+
+[[term]]
+lean = "InformalLemma, InformalDefinition"
+meaning = "placeholders for results and definitions stated in words in their docstring but not yet formalized"
