@@ -62,6 +62,21 @@ pub struct WorkerConfig {
     /// Allow #eval, macros, elaborators and other metaprogramming in submitted code.
     #[arg(long, env = "PISA_ALLOW_METAPROGRAMMING")]
     pub allow_metaprogramming: bool,
+    /// Where pickled proof states live. `s3` reads the AWS_* environment
+    /// variables (AWS_ENDPOINT, AWS_BUCKET, AWS_REGION, credentials,
+    /// AWS_ALLOW_HTTP). All workers of a version must share one store.
+    #[arg(long, env = "PISA_STORE", value_enum, default_value_t = StoreKind::Memory)]
+    pub store: StoreKind,
+    /// Delete stored proof states and sessions older than this (0 keeps them).
+    #[arg(long, env = "PISA_STATE_TTL_SECS", default_value_t = 0)]
+    pub state_ttl_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum StoreKind {
+    /// In this process only; sessions can't move between workers.
+    Memory,
+    S3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -95,6 +110,17 @@ impl WorkerConfig {
             allowed_options: self.allowed_options.clone(),
             allow_metaprogramming: self.allow_metaprogramming,
         }
+    }
+
+    pub fn object_store(&self) -> anyhow::Result<std::sync::Arc<dyn object_store::ObjectStore>> {
+        Ok(match self.store {
+            StoreKind::Memory => std::sync::Arc::new(object_store::memory::InMemory::new()),
+            StoreKind::S3 => std::sync::Arc::new(
+                object_store::aws::AmazonS3Builder::from_env()
+                    .build()
+                    .context("configuring the S3 store")?,
+            ),
+        })
     }
 
     pub fn version(&self) -> anyhow::Result<String> {

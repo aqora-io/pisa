@@ -7,9 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use object_store::ObjectStore;
+use object_store::memory::InMemory;
 use pisa_router::{RouterConfig, Running};
 use pisa_worker::WorkerConfig;
-use pisa_worker::config::Sandbox;
+use pisa_worker::config::{Sandbox, StoreKind};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -17,6 +19,8 @@ pub struct Cluster {
     pub router: Running,
     pub workers: Vec<JoinHandle<()>>,
     pub client: reqwest::Client,
+    /// Shared by all workers, standing in for S3.
+    pub store: Arc<dyn ObjectStore>,
 }
 
 pub fn router_config() -> RouterConfig {
@@ -50,6 +54,8 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         allowed_axioms: split(pisa_worker::policy::DEFAULT_AXIOMS),
         allowed_options: split(pisa_worker::policy::DEFAULT_OPTIONS),
         allow_metaprogramming: false,
+        store: StoreKind::Memory,
+        state_ttl_secs: 0,
     }
 }
 
@@ -72,6 +78,7 @@ impl Cluster {
             router,
             workers: Vec::new(),
             client: reqwest::Client::new(),
+            store: Arc::new(InMemory::new()),
         };
         for (name, version, slots) in workers {
             cluster.add_worker(tweak(worker_config(
@@ -86,8 +93,9 @@ impl Cluster {
     }
 
     pub fn add_worker(&mut self, cfg: WorkerConfig) {
+        let store = self.store.clone();
         self.workers.push(tokio::spawn(async move {
-            pisa_worker::run(cfg).await.unwrap();
+            pisa_worker::run_with_store(cfg, store).await.unwrap();
         }));
     }
 

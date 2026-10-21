@@ -4,5 +4,6 @@
 pub mod header;
 pub mod kimina;
 pub mod repl;
+pub mod session;
 pub mod verify;
 pub mod wire;

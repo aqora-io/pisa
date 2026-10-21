@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
+use object_store::ObjectStore;
 use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{self, Job, JobResult, RouterMessage, WorkerMessage};
 use tokio::net::TcpStream;
@@ -17,11 +18,21 @@ pub mod config;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
+pub mod sessions;
+pub mod store;
 
 pub use config::WorkerConfig;
 use pool::{Pool, PoolConfig};
+use sessions::Sessions;
 
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
+    let store = cfg.object_store()?;
+    run_with_store(cfg, store).await
+}
+
+/// Runs the worker with proof states kept in `store`, which every worker of
+/// the same version must share.
+pub async fn run_with_store(cfg: WorkerConfig, store: Arc<dyn ObjectStore>) -> anyhow::Result<()> {
     let version = cfg.version()?;
     let worker_id = cfg.worker_id();
     let launcher = launcher::Launcher::new(&cfg, &worker_id).await?;
@@ -37,6 +48,24 @@ pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
     );
     tracing::info!(%worker_id, %version, slots = pool.slots(), "worker starting");
     prewarm(&pool, &cfg.prewarm);
+    let sessions = Arc::new(Sessions {
+        store: store::Store::new(store, version.clone()),
+        version: version.clone(),
+    });
+    if cfg.state_ttl_secs > 0 {
+        let ttl = Duration::from_secs(cfg.state_ttl_secs);
+        let store = sessions.store.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval((ttl / 4).max(Duration::from_secs(60)));
+            loop {
+                tick.tick().await;
+                match store.sweep(ttl).await {
+                    Ok(n) => tracing::info!(deleted = n, "swept expired proof states"),
+                    Err(e) => tracing::warn!("sweeping proof states failed: {e}"),
+                }
+            }
+        });
+    }
 
     let hello = WorkerMessage::Hello {
         worker_id,
@@ -49,9 +78,15 @@ pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
             Ok(stream) => {
                 backoff = Duration::from_millis(100);
                 tracing::info!(router = %cfg.router, "connected");
-                let result =
-                    serve_connection(stream, &pool, &hello, warm_rx.clone(), &mut restarts_rx)
-                        .await;
+                let result = serve_connection(
+                    stream,
+                    &pool,
+                    &sessions,
+                    &hello,
+                    warm_rx.clone(),
+                    &mut restarts_rx,
+                )
+                .await;
                 tracing::warn!(?result, "router connection closed");
             }
             Err(e) => tracing::warn!(router = %cfg.router, "connect failed: {e}"),
@@ -64,6 +99,7 @@ pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
 async fn serve_connection(
     stream: TcpStream,
     pool: &Arc<Pool>,
+    sessions: &Arc<Sessions>,
     hello: &WorkerMessage,
     mut warm_rx: watch::Receiver<BTreeMap<usize, String>>,
     restarts_rx: &mut mpsc::UnboundedReceiver<String>,
@@ -80,9 +116,10 @@ async fn serve_connection(
                 None => return Ok(()),
                 Some(RouterMessage::Job { request_id, job }) => {
                     let pool = pool.clone();
+                    let sessions = sessions.clone();
                     let tx = tx.clone();
                     tokio::spawn(async move {
-                        let result = run_job(&pool, job).await;
+                        let result = run_job(&pool, &sessions, job).await;
                         let _ = tx.send(WorkerMessage::Result { request_id, result });
                     });
                 }
@@ -100,9 +137,12 @@ async fn serve_connection(
     }
 }
 
-async fn run_job(pool: &Arc<Pool>, job: Job) -> JobResult {
+async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
     match job {
         Job::Check(c) => JobResult::Check(check::run_check(pool, c).await),
+        Job::SessionStart(j) => JobResult::SessionStarted(sessions.start(pool, j).await),
+        Job::SessionTactic(j) => JobResult::TacticApplied(sessions.tactic(pool, j).await),
+        Job::SessionCheck(j) => JobResult::SessionChecked(sessions.check(pool, j).await),
     }
 }
 

@@ -27,7 +27,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         warm: false,
     };
 
-    let mut slot = pool.acquire(&split.header_key).await;
+    let mut slot = pool.acquire(&split.header_key, None).await;
     let rejected = slot.policy().scan(&split.body);
     if !rejected.is_empty() {
         outcome.error = Some(format!("Rejected by policy: {}", rejected.join(", ")));

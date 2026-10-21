@@ -10,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::kimina::CheckOutput;
+use crate::session;
 use crate::verify::Verification;
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
@@ -53,6 +54,9 @@ pub enum RouterMessage {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Job {
     Check(CheckJob),
+    SessionStart(SessionStartJob),
+    SessionTactic(SessionTacticJob),
+    SessionCheck(SessionCheckJob),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,9 +70,32 @@ pub struct CheckJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionStartJob {
+    pub code: String,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTacticJob {
+    pub state: String,
+    pub tactic: String,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCheckJob {
+    pub session: String,
+    pub code: String,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobResult {
     Check(CheckOutcome),
+    SessionStarted(session::StartResponse),
+    TacticApplied(session::TacticResponse),
+    SessionChecked(SessionChecked),
     /// The worker could not run the job at all.
     Failed {
         error: String,
@@ -86,6 +113,13 @@ pub struct CheckOutcome {
     pub verification: Option<Verification>,
     /// Whether the header was already imported in the process that ran the job.
     pub warm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionChecked {
+    pub outcome: CheckOutcome,
+    /// Reasons the completed code does not prove the session's statements.
+    pub statement_reasons: Vec<String>,
 }
 
 pub type Connection<T> = Framed<T, LengthDelimitedCodec>;

@@ -1,4 +1,5 @@
-# Local development stack: one router and two workers.
+# Local development stack: one router, two workers, and Garage (S3) for
+# tactic-session proof states.
 #   docker compose up --build
 #   curl -s localhost:8000/api/check -H 'content-type: application/json' \
 #     -d '{"snippets":[{"id":"1","code":"import Mathlib\n#eval 1+1"}]}'
@@ -12,7 +13,7 @@ x-worker: &worker
     args:
       PROJECT: ${PROJECT:-lean-project}
   image: pisa-worker:${PROJECT:-lean-project}
-  depends_on: [router]
+  depends_on: [router, garage]
   # bubblewrap needs to create namespaces and the worker writes to its own
   # cgroup subtree, so dev workers run privileged in a private cgroup namespace.
   # Production would grant only what these need (see the design doc).
@@ -26,9 +27,28 @@ x-worker: &worker
     PISA_MEMORY_MAX_MB: ${PISA_MEMORY_MAX_MB:-16000}
     PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
     PISA_PREWARM: ${PISA_PREWARM:-}
+    PISA_STORE: s3
+    PISA_STATE_TTL_SECS: 86400
+    AWS_ENDPOINT: http://garage:3900
+    AWS_ALLOW_HTTP: "true"
+    AWS_REGION: garage
+    AWS_BUCKET: pisa
+    AWS_ACCESS_KEY_ID: &garage-key GK000000000000000000000001
+    AWS_SECRET_ACCESS_KEY: &garage-secret 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
     RUST_LOG: info
 
 services:
+  garage:
+    image: dxflrs/garage:v2.4.1
+    # --default-bucket creates the bucket and key below on first start.
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: *garage-key
+      GARAGE_DEFAULT_SECRET_KEY: *garage-secret
+      GARAGE_DEFAULT_BUCKET: pisa
+    volumes:
+      - ./docker/garage.toml:/etc/garage.toml:ro
+
   router:
     build:
       context: .

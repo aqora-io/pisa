@@ -13,7 +13,7 @@ use pisa_protocol::header::split_header;
 use pisa_protocol::kimina::{
     CheckRequest, CheckResponse, CheckResult, VerifyRequest, VerifyResponse, VerifyResult,
 };
-use pisa_protocol::wire::{CheckJob, Job, JobResult};
+use pisa_protocol::wire::{CheckJob, CheckOutcome, Job, JobResult};
 use serde_json::json;
 
 use crate::dispatch::{DispatchError, Dispatcher, Priority, Route};
@@ -22,6 +22,7 @@ use crate::metrics as m;
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
     pub versions: Versions,
+    pub affinity: crate::sessions::Affinity,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,11 +48,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/api/check", post(check))
         .route("/verify", post(verify))
         .route("/one_pass_verify_batch", post(verify))
+        .route("/sessions", post(crate::sessions::start))
+        .route("/sessions/{id}/tactic", post(crate::sessions::tactic))
+        .route("/sessions/{id}/check", post(crate::sessions::check))
         .route("/metrics", get(metrics))
         .with_state(app)
 }
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub StatusCode, pub String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -138,35 +142,52 @@ pub async fn check_one(
         .dispatcher
         .submit(Job::Check(job), route, Priority::Batch)
         .await?;
-    let mut result = CheckResult {
+    match done.result {
+        JobResult::Check(o) => Ok(check_result(id, o, "check")),
+        JobResult::Failed { error } => Ok(failed_result(id, error, "check")),
+        other => Ok(failed_result(
+            id,
+            format!("unexpected result: {other:?}"),
+            "check",
+        )),
+    }
+}
+
+/// Turns a worker's check outcome into the API result, recording metrics.
+pub fn check_result(id: String, o: CheckOutcome, kind: &'static str) -> CheckResult {
+    let hit = if o.warm { "hit" } else { "miss" };
+    metrics::counter!(m::HEADER_CACHE, "result" => hit).increment(1);
+    if let Some(v) = o.verification.as_ref().filter(|v| !v.ok) {
+        for reason in &v.reasons {
+            record_rejection(reason);
+        }
+    }
+    let outcome = if o.error.is_some() { "error" } else { "ok" };
+    metrics::counter!(m::JOBS, "kind" => kind, "outcome" => outcome).increment(1);
+    CheckResult {
+        id,
+        time: o.time,
+        error: o.error,
+        response: o.response,
+        diagnostics: None,
+        verification: o.verification,
+    }
+}
+
+pub fn failed_result(id: String, error: String, kind: &'static str) -> CheckResult {
+    metrics::counter!(m::JOBS, "kind" => kind, "outcome" => "failed").increment(1);
+    CheckResult {
         id,
         time: 0.0,
-        error: None,
+        error: Some(error),
         response: None,
         diagnostics: None,
         verification: None,
-    };
-    match done.result {
-        JobResult::Check(o) => {
-            let hit = if o.warm { "hit" } else { "miss" };
-            metrics::counter!(m::HEADER_CACHE, "result" => hit).increment(1);
-            if let Some(v) = o.verification.as_ref().filter(|v| !v.ok) {
-                for reason in &v.reasons {
-                    let kind = reason.split(':').next().unwrap_or(reason).to_string();
-                    metrics::counter!(m::REJECTIONS, "reason" => kind).increment(1);
-                }
-            }
-            let outcome = if o.error.is_some() { "error" } else { "ok" };
-            metrics::counter!(m::JOBS, "kind" => "check", "outcome" => outcome).increment(1);
-            result.time = o.time;
-            result.error = o.error;
-            result.response = o.response;
-            result.verification = o.verification;
-        }
-        JobResult::Failed { error } => {
-            metrics::counter!(m::JOBS, "kind" => "check", "outcome" => "failed").increment(1);
-            result.error = Some(error);
-        }
     }
-    Ok(result)
+}
+
+/// Counts a rejection under the reason's prefix, e.g. "axiom" or "statement".
+pub fn record_rejection(reason: &str) {
+    let kind = reason.split(':').next().unwrap_or(reason).to_string();
+    metrics::counter!(m::REJECTIONS, "reason" => kind).increment(1);
 }

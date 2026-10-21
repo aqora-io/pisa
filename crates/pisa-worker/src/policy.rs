@@ -58,7 +58,7 @@ pub fn header_with_report_import(header: &str) -> String {
 const MARKER: &str = "PISA_DECLS ";
 
 /// Lists every declaration added after the imports with the axioms it depends
-/// on and a hash of its type. Names are rooted so user declarations can't
+/// on, a hash of its type and, for definitions, of its value. Names are rooted so user declarations can't
 /// shadow them.
 pub const AXIOM_REPORT: &str = r#"run_cmd do
   let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
@@ -79,7 +79,10 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
       ("name", _root_.Lean.ToJson.toJson n),
       ("kind", _root_.Lean.ToJson.toJson kind),
       ("axioms", _root_.Lean.ToJson.toJson axioms),
-      ("typeHash", _root_.Lean.ToJson.toJson (toString (hash ci.type)))])
+      ("typeHash", _root_.Lean.ToJson.toJson (toString (hash ci.type))),
+      ("valueHash", match ci with
+        | .defnInfo d => _root_.Lean.ToJson.toJson (toString (hash d.value))
+        | _ => _root_.Lean.Json.null)])
   _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
     (_root_.Std.Format.text ("PISA_DECLS " ++ (_root_.Lean.Json.arr out).compress)))"#;
 

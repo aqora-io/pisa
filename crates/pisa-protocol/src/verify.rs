@@ -19,4 +19,8 @@ pub struct Declaration {
     pub axioms: Vec<String>,
     #[serde(rename = "typeHash")]
     pub type_hash: String,
+    /// For definitions, a hash of the value, so a proof can't change what a
+    /// statement means by redefining something it mentions.
+    #[serde(rename = "valueHash", default, skip_serializing_if = "Option::is_none")]
+    pub value_hash: Option<String>,
 }

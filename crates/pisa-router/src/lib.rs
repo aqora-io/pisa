@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 pub mod dispatch;
 pub mod http;
 pub mod metrics;
+pub mod sessions;
 
 use dispatch::{DispatchConfig, Dispatcher};
 use http::{App, Versions};
@@ -65,6 +66,7 @@ pub async fn start(cfg: RouterConfig) -> anyhow::Result<Running> {
             default: cfg.default_version.clone(),
             aliases: cfg.alias.iter().cloned().collect(),
         },
+        affinity: Default::default(),
     });
 
     let worker_listener = TcpListener::bind(cfg.workers).await?;
