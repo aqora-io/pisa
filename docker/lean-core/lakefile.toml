@@ -1,0 +1,3 @@
+# A project with no dependencies, for fast end-to-end tests of the images.
+name = "pisa_core"
+defaultTargets = []

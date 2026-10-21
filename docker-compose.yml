@@ -1,0 +1,45 @@
+# Local development stack: one router and two workers.
+#   docker compose up --build
+#   curl -s localhost:8000/api/check -H 'content-type: application/json' \
+#     -d '{"snippets":[{"id":"1","code":"import Mathlib\n#eval 1+1"}]}'
+# PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
+
+x-worker: &worker
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+    target: worker
+    args:
+      PROJECT: ${PROJECT:-lean-project}
+  image: pisa-worker:${PROJECT:-lean-project}
+  depends_on: [router]
+  environment: &worker-env
+    PISA_ROUTER: router:7070
+    PISA_SLOTS: ${PISA_SLOTS:-2}
+    PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
+    PISA_PREWARM: ${PISA_PREWARM:-}
+    RUST_LOG: info
+
+services:
+  router:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: router
+    image: pisa-router
+    ports: ["8000:8000"]
+    environment:
+      PISA_MAX_WAIT_SECS: 120
+      RUST_LOG: info
+
+  worker-1:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      PISA_WORKER_ID: worker-1
+
+  worker-2:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      PISA_WORKER_ID: worker-2

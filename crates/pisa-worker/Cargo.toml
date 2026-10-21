@@ -1,0 +1,19 @@
+[package]
+name = "pisa-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+clap.workspace = true
+hex.workspace = true
+pisa-protocol.workspace = true
+pisa-repl.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

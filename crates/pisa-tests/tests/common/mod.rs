@@ -1,0 +1,118 @@
+//! A router plus workers running fake-repl, all in-process.
+
+#![allow(dead_code)]
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use pisa_router::{RouterConfig, Running};
+use pisa_worker::WorkerConfig;
+use serde_json::Value;
+use tokio::task::JoinHandle;
+
+pub struct Cluster {
+    pub router: Running,
+    pub workers: Vec<JoinHandle<()>>,
+    pub client: reqwest::Client,
+}
+
+pub fn router_config() -> RouterConfig {
+    RouterConfig {
+        http: "127.0.0.1:0".parse().unwrap(),
+        workers: "127.0.0.1:0".parse().unwrap(),
+        max_wait_secs: 10,
+        max_retries: 2,
+        default_version: None,
+        alias: Vec::new(),
+    }
+}
+
+pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize) -> WorkerConfig {
+    WorkerConfig {
+        router: router.to_string(),
+        worker_id: Some(name.into()),
+        version: Some(version.into()),
+        slots: Some(slots),
+        repl: PathBuf::from(env!("CARGO_BIN_EXE_fake-repl")),
+        project: None,
+        max_uses: 100,
+        max_rss_mb: 0,
+        import_timeout_secs: 10,
+        prewarm: Vec::new(),
+    }
+}
+
+impl Cluster {
+    pub async fn start(workers: &[(&str, &str, usize)]) -> Cluster {
+        Self::start_with(router_config(), workers, |c| c).await
+    }
+
+    pub async fn start_with(
+        router: RouterConfig,
+        workers: &[(&str, &str, usize)],
+        tweak: impl Fn(WorkerConfig) -> WorkerConfig,
+    ) -> Cluster {
+        let router = pisa_router::start(router).await.unwrap();
+        let mut cluster = Cluster {
+            router,
+            workers: Vec::new(),
+            client: reqwest::Client::new(),
+        };
+        for (name, version, slots) in workers {
+            cluster.add_worker(tweak(worker_config(
+                cluster.router.worker_addr,
+                name,
+                version,
+                *slots,
+            )));
+        }
+        cluster.wait_for_workers(workers.len()).await;
+        cluster
+    }
+
+    pub fn add_worker(&mut self, cfg: WorkerConfig) {
+        self.workers.push(tokio::spawn(async move {
+            pisa_worker::run(cfg).await.unwrap();
+        }));
+    }
+
+    pub async fn wait_for_workers(&self, n: usize) {
+        let d = Arc::clone(&self.router.app.dispatcher);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while d.worker_count() != n {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("workers connect");
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.router.http_addr)
+    }
+
+    pub async fn post(&self, path: &str, body: Value) -> (u16, Value) {
+        let r = self
+            .client
+            .post(self.url(path))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = r.status().as_u16();
+        (status, r.json().await.unwrap())
+    }
+
+    pub async fn metrics(&self) -> String {
+        self.client
+            .get(self.url("/metrics"))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    }
+}
