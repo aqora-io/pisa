@@ -25,14 +25,30 @@ pub use config::WorkerConfig;
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;
 
+/// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
     let store = cfg.object_store()?;
-    run_with_store(cfg, store).await
+    run_with_store(cfg, store, shutdown_signal()).await
+}
+
+async fn shutdown_signal() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("installing a SIGTERM handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
+    }
 }
 
 /// Runs the worker with proof states kept in `store`, which every worker of
-/// the same version must share.
-pub async fn run_with_store(cfg: WorkerConfig, store: Arc<dyn ObjectStore>) -> anyhow::Result<()> {
+/// the same version must share. When `shutdown` completes, the worker drains:
+/// it tells the router to send no more jobs, finishes the ones it has (for at
+/// most `drain_timeout_secs`), and returns.
+pub async fn run_with_store(
+    cfg: WorkerConfig,
+    store: Arc<dyn ObjectStore>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
     let version = cfg.version()?;
     let worker_id = cfg.worker_id();
     let launcher = launcher::Launcher::new(&cfg, &worker_id).await?;
@@ -67,6 +83,14 @@ pub async fn run_with_store(cfg: WorkerConfig, store: Arc<dyn ObjectStore>) -> a
         });
     }
 
+    let (drain_tx, mut drain_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        shutdown.await;
+        tracing::info!("shutting down: draining");
+        let _ = drain_tx.send(true);
+    });
+    let drain_timeout = Duration::from_secs(cfg.drain_timeout_secs);
+
     let hello = WorkerMessage::Hello {
         worker_id,
         version,
@@ -74,64 +98,112 @@ pub async fn run_with_store(cfg: WorkerConfig, store: Arc<dyn ObjectStore>) -> a
     };
     let mut backoff = Duration::from_millis(100);
     loop {
+        if *drain_rx.borrow() {
+            return Ok(());
+        }
         match TcpStream::connect(&cfg.router).await {
             Ok(stream) => {
                 backoff = Duration::from_millis(100);
                 tracing::info!(router = %cfg.router, "connected");
-                let result = serve_connection(
-                    stream,
-                    &pool,
-                    &sessions,
-                    &hello,
-                    warm_rx.clone(),
-                    &mut restarts_rx,
-                )
-                .await;
+                let conn = Connection {
+                    pool: &pool,
+                    sessions: &sessions,
+                    hello: &hello,
+                    drain_timeout,
+                };
+                let result = conn
+                    .serve(stream, warm_rx.clone(), &mut restarts_rx, &mut drain_rx)
+                    .await;
+                if *drain_rx.borrow() {
+                    tracing::info!(?result, "drained");
+                    return Ok(());
+                }
                 tracing::warn!(?result, "router connection closed");
             }
             Err(e) => tracing::warn!(router = %cfg.router, "connect failed: {e}"),
         }
-        tokio::time::sleep(backoff).await;
+        tokio::select! {
+            _ = tokio::time::sleep(backoff) => {}
+            _ = drain_rx.changed() => {}
+        }
         backoff = (backoff * 2).min(Duration::from_secs(5));
     }
 }
 
-async fn serve_connection(
-    stream: TcpStream,
-    pool: &Arc<Pool>,
-    sessions: &Arc<Sessions>,
-    hello: &WorkerMessage,
-    mut warm_rx: watch::Receiver<BTreeMap<usize, String>>,
-    restarts_rx: &mut mpsc::UnboundedReceiver<String>,
-) -> anyhow::Result<()> {
-    stream.set_nodelay(true)?;
-    let (mut sink, mut source) = wire::connection(stream).split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<WorkerMessage>();
-    wire::send(&mut sink, hello).await?;
-    let msg = status(&warm_rx.borrow_and_update());
-    wire::send(&mut sink, &msg).await?;
-    loop {
-        tokio::select! {
-            msg = wire::recv::<_, RouterMessage>(&mut source) => match msg? {
-                None => return Ok(()),
-                Some(RouterMessage::Job { request_id, job }) => {
-                    let pool = pool.clone();
-                    let sessions = sessions.clone();
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        let result = run_job(&pool, &sessions, job).await;
-                        let _ = tx.send(WorkerMessage::Result { request_id, result });
-                    });
-                }
-                Some(RouterMessage::Prewarm { headers }) => prewarm(pool, &headers),
-            },
-            Some(out) = rx.recv() => wire::send(&mut sink, &out).await?,
-            Ok(()) = warm_rx.changed() => {
-                let msg = status(&warm_rx.borrow_and_update());
-                wire::send(&mut sink, &msg).await?;
+struct Connection<'a> {
+    pool: &'a Arc<Pool>,
+    sessions: &'a Arc<Sessions>,
+    hello: &'a WorkerMessage,
+    drain_timeout: Duration,
+}
+
+impl Connection<'_> {
+    /// Serves one router connection. Returns when the router hangs up, or,
+    /// once draining, when every job received has been answered.
+    async fn serve(
+        &self,
+        stream: TcpStream,
+        mut warm_rx: watch::Receiver<BTreeMap<usize, String>>,
+        restarts_rx: &mut mpsc::UnboundedReceiver<String>,
+        drain_rx: &mut watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
+        stream.set_nodelay(true)?;
+        let (mut sink, mut source) = wire::connection(stream).split();
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerMessage>();
+        wire::send(&mut sink, self.hello).await?;
+        let msg = status(&warm_rx.borrow_and_update());
+        wire::send(&mut sink, &msg).await?;
+        // Jobs received but not yet answered on this connection.
+        let mut outstanding = 0usize;
+        let mut draining = false;
+        let deadline = tokio::time::sleep(Duration::MAX);
+        tokio::pin!(deadline);
+        loop {
+            if draining && outstanding == 0 {
+                return Ok(());
             }
-            Some(cause) = restarts_rx.recv() => {
-                wire::send(&mut sink, &WorkerMessage::Restart { cause }).await?;
+            tokio::select! {
+                msg = wire::recv::<_, RouterMessage>(&mut source) => match msg? {
+                    None => return Ok(()),
+                    Some(RouterMessage::Job { request_id, job }) => {
+                        outstanding += 1;
+                        let pool = self.pool.clone();
+                        let sessions = self.sessions.clone();
+                        let tx = tx.clone();
+                        tokio::spawn(async move {
+                            let result = run_job(&pool, &sessions, job).await;
+                            let _ = tx.send(WorkerMessage::Result { request_id, result });
+                        });
+                    }
+                    Some(RouterMessage::Prewarm { headers }) if !draining => {
+                        prewarm(self.pool, &headers)
+                    }
+                    Some(RouterMessage::Prewarm { .. }) => {}
+                },
+                Some(out) = rx.recv() => {
+                    if matches!(out, WorkerMessage::Result { .. }) {
+                        outstanding -= 1;
+                    }
+                    wire::send(&mut sink, &out).await?;
+                }
+                Ok(()) = warm_rx.changed() => {
+                    let msg = status(&warm_rx.borrow_and_update());
+                    wire::send(&mut sink, &msg).await?;
+                }
+                Some(cause) = restarts_rx.recv() => {
+                    wire::send(&mut sink, &WorkerMessage::Restart { cause }).await?;
+                }
+                Ok(()) = drain_rx.changed(), if !draining => {
+                    if *drain_rx.borrow() {
+                        draining = true;
+                        tracing::info!(outstanding, "draining");
+                        wire::send(&mut sink, &WorkerMessage::Draining).await?;
+                        deadline.as_mut().reset(tokio::time::Instant::now() + self.drain_timeout);
+                    }
+                }
+                () = &mut deadline, if draining => {
+                    anyhow::bail!("drain timed out with {outstanding} jobs unanswered");
+                }
             }
         }
     }

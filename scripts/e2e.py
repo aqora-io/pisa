@@ -6,7 +6,8 @@
     python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
 
 It stops and restarts workers to check that tactic sessions resume on another
-worker (gate 3), so run it against a dev stack only.
+worker (gate 3), so run it against a dev stack only. Pass --no-failover to skip
+that step, e.g. against Kubernetes through a port-forward.
 """
 
 import argparse
@@ -65,7 +66,7 @@ def step(name):
     print(f"ok  {name}")
 
 
-def core():
+def core(failover=True):
     r = check("\n#check Nat")
     assert r["messages"][0]["pos"]["line"] == 2, r
     step("positions")
@@ -97,19 +98,24 @@ def core():
 
     # Gate 3: continue with each worker stopped in turn; at least one of the two
     # steps must load the state from Garage on the other worker.
-    compose("stop", "worker-1")
-    wait_for_workers(1)
+    if failover:
+        compose("stop", "worker-1")
+        wait_for_workers(1)
     left = post(f"/states/{split['state']}/tactic", {"tactic": "simp"})
     assert left.get("goals") == ["case right\nn : Nat\n⊢ 0 + n = n"], left
-    compose("start", "worker-1")
-    wait_for_workers(2)
-    compose("stop", "worker-2")
-    wait_for_workers(1)
+    if failover:
+        compose("start", "worker-1")
+        wait_for_workers(2)
+        compose("stop", "worker-2")
+        wait_for_workers(1)
     done = post(f"/states/{left['state']}/tactic", {"tactic": "simp"})
     assert done.get("complete"), done
-    compose("start", "worker-2")
-    wait_for_workers(2)
-    step("sessions resume on another worker")
+    if failover:
+        compose("start", "worker-2")
+        wait_for_workers(2)
+        step("sessions resume on another worker")
+    else:
+        step("tactic steps")
 
     status, bad = call("POST", f"/states/{root['state']}/tactic", {"tactic": "foo"})
     assert status == 422 and bad["error"]["kind"] == "lean", bad
@@ -146,9 +152,11 @@ def mathlib():
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--mathlib", action="store_true")
+    p.add_argument("--no-failover", action="store_true", help="don't stop workers (not using compose)")
     args = p.parse_args()
-    wait_for_workers(2)
-    core()
+    if not args.no_failover:
+        wait_for_workers(2)
+    core(failover=not args.no_failover)
     if args.mathlib:
         mathlib()
     print("all end-to-end checks passed")

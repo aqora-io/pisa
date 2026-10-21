@@ -1,0 +1,39 @@
+# Values for trying the chart on minikube with locally built images, and the
+# Garage from garage.yaml for proof states:
+#   minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
+#   kubectl apply -f deploy/minikube/garage.yaml
+#   helm install prometheus prometheus-community/prometheus -n monitoring \
+#     --create-namespace -f deploy/minikube/prometheus-values.yaml
+router:
+  image: { pullPolicy: Never }
+  resources:
+    requests: { cpu: 100m, memory: 64Mi }
+
+worker:
+  # The image without Mathlib, so loading it into minikube is quick.
+  image: { tag: lean-core, pullPolicy: Never }
+  slots: 2
+  memoryMaxMb: 1500
+  maxRssMb: 1200
+  drainTimeoutSecs: 120
+  # Small requests so four workers fit on one minikube node.
+  resources:
+    requests: { cpu: 500m, memory: 256Mi }
+    limits: { memory: 3500Mi }
+
+store:
+  s3:
+    bucket: pisa
+    region: garage
+    endpoint: http://garage:3900
+    allowHttp: true
+    credentialsSecret: { name: pisa-s3 }
+
+keda:
+  minReplicas: 1
+  maxReplicas: 4
+  # Scale back down quickly so the demo doesn't wait five minutes.
+  scaleDownStabilizationSecs: 30
+  prometheus:
+    # prometheus-community/prometheus installed as "prometheus" in "monitoring".
+    serverAddress: http://prometheus-server.monitoring.svc.cluster.local

@@ -144,3 +144,58 @@ async fn malformed_requests_use_the_error_shape() {
     assert_eq!(status, 404);
     assert_eq!(body["error"]["kind"], "not_found");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn draining_worker_finishes_its_jobs_and_exits() {
+    let mut c = Cluster::start(&[]).await;
+    let addr = c.router.worker_addr;
+    let stop = c.add_drainable_worker(common::worker_config(addr, "w0", "v", 2));
+    c.wait_for_workers(1).await;
+
+    let slow = {
+        let client = c.client.clone();
+        let url = c.url("/check");
+        tokio::spawn(async move {
+            let r = client
+                .post(url)
+                .json(&json!({"code": "SLEEP 1000\n#check Nat", "timeout": 10}))
+                .send()
+                .await
+                .unwrap();
+            r.json::<Value>().await.unwrap()
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    stop.send(()).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // w0 still has a free slot but is draining, so this waits for w1.
+    let later = {
+        let client = c.client.clone();
+        let url = c.url("/check");
+        tokio::spawn(async move {
+            let r = client
+                .post(url)
+                .json(&json!({"code": "#check Nat"}))
+                .send()
+                .await
+                .unwrap();
+            r.json::<Value>().await.unwrap()
+        })
+    };
+    let slow = slow.await.unwrap();
+    assert!(slow.get("error").is_none(), "{slow}");
+    assert_eq!(slow["messages"][0]["data"], "Nat : Type");
+
+    // w0 exits once its job is answered.
+    let w0 = c.workers.remove(0);
+    tokio::time::timeout(std::time::Duration::from_secs(5), w0)
+        .await
+        .expect("drained worker exits")
+        .unwrap();
+    assert!(!later.is_finished());
+    c.add_worker(common::worker_config(addr, "w1", "v", 1));
+    let later = later.await.unwrap();
+    assert!(later.get("error").is_none(), "{later}");
+    assert!(!c.metrics().await.contains("pisa_job_retries_total"));
+}

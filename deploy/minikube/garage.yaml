@@ -1,0 +1,74 @@
+# A single-node Garage for trying the chart on minikube, with the bucket and
+# credentials the minikube values expect. Not durable: emptyDir storage, fixed
+# secrets.
+#   kubectl apply -f deploy/minikube/garage.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pisa-s3
+stringData:
+  AWS_ACCESS_KEY_ID: GK000000000000000000000001
+  AWS_SECRET_ACCESS_KEY: 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "sqlite"
+    replication_factor = 1
+    rpc_bind_addr = "[::]:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+    rpc_secret = "8d3c1f4e0b6a2d9c7e5f1a3b8c0d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b4c6d"
+
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "[::]:3900"
+    root_domain = ".s3.garage.localhost"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garage
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: garage }
+  template:
+    metadata:
+      labels: { app: garage }
+    spec:
+      containers:
+        - name: garage
+          image: dxflrs/garage:v2.4.1
+          # --default-bucket creates the bucket and key on first start.
+          command: ["/garage", "server", "--single-node", "--default-bucket"]
+          env:
+            - name: GARAGE_DEFAULT_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: pisa-s3, key: AWS_ACCESS_KEY_ID } }
+            - name: GARAGE_DEFAULT_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: pisa-s3, key: AWS_SECRET_ACCESS_KEY } }
+            - { name: GARAGE_DEFAULT_BUCKET, value: pisa }
+          ports:
+            - { name: s3, containerPort: 3900 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/garage.toml, subPath: garage.toml }
+            - { name: data, mountPath: /var/lib/garage }
+      volumes:
+        - name: config
+          configMap: { name: garage }
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+spec:
+  selector: { app: garage }
+  ports:
+    - { name: s3, port: 3900, targetPort: s3 }

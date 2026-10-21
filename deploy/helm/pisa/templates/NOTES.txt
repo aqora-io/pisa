@@ -1,0 +1,14 @@
+pisa is installed.
+
+Reach the API:
+  kubectl port-forward svc/{{ include "pisa.fullname" . }}-router 8000:{{ .Values.router.service.port }}
+  curl -s localhost:8000/check -H 'content-type: application/json' \
+    -d '{"code":"theorem t : 2 + 2 = 4 := by decide"}'
+
+{{- if .Values.keda.enabled }}
+
+Workers scale between {{ .Values.keda.minReplicas }} and {{ .Values.keda.maxReplicas }} on outstanding jobs
+(KEDA must be installed in the cluster):
+  kubectl get scaledobject {{ include "pisa.fullname" . }}-worker
+  kubectl get deploy {{ include "pisa.fullname" . }}-worker -w
+{{- end }}

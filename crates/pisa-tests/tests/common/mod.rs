@@ -56,6 +56,7 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         allow_metaprogramming: false,
         store: StoreKind::Memory,
         state_ttl_secs: 0,
+        drain_timeout_secs: 30,
     }
 }
 
@@ -93,9 +94,28 @@ impl Cluster {
     }
 
     pub fn add_worker(&mut self, cfg: WorkerConfig) {
+        self.spawn_worker(cfg, std::future::pending());
+    }
+
+    /// Adds a worker that drains and exits when the returned sender fires.
+    pub fn add_drainable_worker(&mut self, cfg: WorkerConfig) -> tokio::sync::oneshot::Sender<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.spawn_worker(cfg, async move {
+            let _ = rx.await;
+        });
+        tx
+    }
+
+    fn spawn_worker(
+        &mut self,
+        cfg: WorkerConfig,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
         let store = self.store.clone();
         self.workers.push(tokio::spawn(async move {
-            pisa_worker::run_with_store(cfg, store).await.unwrap();
+            pisa_worker::run_with_store(cfg, store, shutdown)
+                .await
+                .unwrap();
         }));
     }
 

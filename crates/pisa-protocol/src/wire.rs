@@ -35,6 +35,9 @@ pub enum WorkerMessage {
     Restart {
         cause: String,
     },
+    /// The worker is shutting down: send it no new jobs. It finishes the ones
+    /// it has, then disconnects.
+    Draining,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

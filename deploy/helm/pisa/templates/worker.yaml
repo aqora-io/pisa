@@ -1,0 +1,78 @@
+{{- $name := include "pisa.fullname" . }}
+{{- $w := .Values.worker }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-worker
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.keda.enabled }}
+  replicas: {{ .Values.keda.minReplicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "pisa.selector" (dict "root" . "component" "worker") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pisa.selector" (dict "root" . "component" "worker") | nindent 8 }}
+    spec:
+      # SIGTERM starts a drain: no new jobs, finish the running ones, exit.
+      terminationGracePeriodSeconds: {{ add $w.drainTimeoutSecs 30 }}
+      containers:
+        - name: worker
+          image: "{{ $w.image.repository }}:{{ $w.image.tag }}"
+          imagePullPolicy: {{ $w.image.pullPolicy }}
+          {{- if or (eq $w.sandbox "bwrap") $w.cgroups }}
+          securityContext:
+            # bubblewrap creates namespaces and the worker writes to its own
+            # cgroup subtree. A production setup would grant only what these need.
+            privileged: true
+          {{- end }}
+          env:
+            - { name: PISA_ROUTER, value: "{{ $name }}-router-workers:7070" }
+            - name: PISA_WORKER_ID
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: PISA_SLOTS, value: {{ $w.slots | quote }} }
+            - { name: PISA_SANDBOX, value: {{ $w.sandbox | quote }} }
+            {{- if $w.cgroups }}
+            - { name: PISA_CGROUP_ROOT, value: /sys/fs/cgroup }
+            {{- end }}
+            - { name: PISA_MEMORY_MAX_MB, value: {{ $w.memoryMaxMb | quote }} }
+            - { name: PISA_MAX_RSS_MB, value: {{ $w.maxRssMb | quote }} }
+            - { name: PISA_PREWARM, value: {{ $w.prewarm | quote }} }
+            - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ $w.drainTimeoutSecs | quote }} }
+            - { name: PISA_STORE, value: s3 }
+            - { name: PISA_STATE_TTL_SECS, value: {{ .Values.store.stateTtlSecs | quote }} }
+            {{- with .Values.store.s3 }}
+            - { name: AWS_BUCKET, value: {{ required "store.s3.bucket is required" .bucket | quote }} }
+            {{- with .region }}
+            - { name: AWS_REGION, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .endpoint }}
+            - { name: AWS_ENDPOINT, value: {{ . | quote }} }
+            {{- end }}
+            - { name: AWS_ALLOW_HTTP, value: {{ .allowHttp | quote }} }
+            {{- with .credentialsSecret.name }}
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: {{ $.Values.store.s3.credentialsSecret.accessKeyIdKey }} } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ . }}, key: {{ $.Values.store.s3.credentialsSecret.secretAccessKeyKey }} } }
+            {{- end }}
+            {{- end }}
+            {{- with $w.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- if $w.resources }}
+            {{- toYaml $w.resources | nindent 12 }}
+            {{- else }}
+            # About a core per Lean process; memory for every process at its cap.
+            requests:
+              cpu: {{ $w.slots | quote }}
+              memory: "{{ $w.overheadMemoryMb }}Mi"
+            limits:
+              memory: "{{ add (mul $w.slots $w.memoryMaxMb) $w.overheadMemoryMb }}Mi"
+            {{- end }}

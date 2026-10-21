@@ -1,0 +1,104 @@
+# Default values for pisa. Like most application charts, it expects the
+# cluster's own Prometheus and KEDA, and doesn't bundle either.
+
+router:
+  image:
+    repository: pisa-router
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Seconds a request may wait for a free worker. Keep it above the time a new
+  # worker pod takes to start, so requests queued during a scale-up don't fail.
+  maxWaitSecs: 300
+  maxRetries: 2
+  # Version used when a request names none, and NAME=VERSION aliases.
+  defaultVersion: ""
+  aliases: []
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests: { cpu: 250m, memory: 128Mi }
+    limits: { memory: 512Mi }
+
+worker:
+  image:
+    # Built from docker/Dockerfile (target worker). The default project bundles
+    # Lean v4.35.0 with Mathlib and Physlib.
+    repository: pisa-worker
+    tag: lean-project
+    pullPolicy: IfNotPresent
+  # Lean processes per pod.
+  slots: 2
+  # bubblewrap sandbox per Lean process ("bwrap" or "none"). bwrap and cgroup
+  # limits need a privileged container in this example.
+  sandbox: bwrap
+  cgroups: true
+  # memory.max per Lean process (MiB); also sizes the pod's memory limit.
+  memoryMaxMb: 8000
+  maxRssMb: 6000
+  # Headers to import at startup, separated by ';', e.g. "import Mathlib".
+  prewarm: ""
+  # On scale-down a worker stops taking jobs and finishes the ones it has, for
+  # at most this long. The pod's grace period is 30s longer.
+  drainTimeoutSecs: 600
+  # Extra pod resources besides the per-process memory.
+  overheadMemoryMb: 512
+  # Pod resources. Empty means: one CPU per slot requested, and a memory
+  # limit of slots × memoryMaxMb + overheadMemoryMb.
+  resources: {}
+  extraEnv: []
+
+# S3-compatible storage for tactic-session proof states. All workers of a
+# release share it.
+store:
+  s3:
+    # Required.
+    bucket: ""
+    region: ""
+    # For S3-compatible stores (MinIO, Garage, R2, ...); empty means AWS S3.
+    endpoint: ""
+    allowHttp: false
+    # An existing Secret holding the credentials. Without one, workers use the
+    # pod's ambient credentials (e.g. EKS IRSA or an instance role).
+    credentialsSecret:
+      name: ""
+      accessKeyIdKey: AWS_ACCESS_KEY_ID
+      secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
+  # Delete stored states and sessions older than this (0 keeps them).
+  stateTtlSecs: 86400
+
+# How the cluster's Prometheus finds the router's /metrics.
+metrics:
+  # prometheus.io/scrape annotations on the router Service, for Prometheus
+  # setups that discover annotated services (e.g. prometheus-community/prometheus).
+  scrapeAnnotations: true
+  # A ServiceMonitor, for the Prometheus Operator (e.g. kube-prometheus-stack).
+  serviceMonitor:
+    enabled: false
+    interval: 5s
+    # Labels the operator's serviceMonitorSelector matches, e.g. release: kube-prometheus-stack.
+    labels: {}
+
+keda:
+  enabled: true
+  # 0 lets the pool scale to zero; the first request then waits for a cold
+  # worker, so keep router.maxWaitSecs above the worker's startup time.
+  minReplicas: 1
+  maxReplicas: 4
+  # Seconds of low demand before workers are removed.
+  scaleDownStabilizationSecs: 300
+  # Only used with minReplicas 0: how often KEDA checks for demand, and how
+  # long the pool stays up after the last demand.
+  pollingInterval: 15
+  cooldownPeriod: 300
+  # Outstanding jobs (queued + running) per worker pod. Defaults to slots.
+  jobsPerWorker: null
+  prometheus:
+    # The cluster's Prometheus, e.g.
+    # http://prometheus-server.monitoring.svc.cluster.local. Required.
+    # Its scrape interval bounds how quickly workers react to load.
+    serverAddress: ""
+    # Outstanding jobs for this release. The default counts queued and running
+    # jobs, once even if the router is scraped by more than one job.
+    query: ""
+

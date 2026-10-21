@@ -1,0 +1,39 @@
+{{- define "pisa.scalingQuery" -}}
+{{- $sel := printf "namespace=%q,service=\"%s-router\"" .Release.Namespace (include "pisa.fullname" .) -}}
+max(sum by (job) (pisa_queue_depth{ {{- $sel -}} }) + sum by (job) (pisa_slots{state="busy", {{- $sel -}} }))
+{{- end -}}
+{{- if .Values.keda.enabled }}
+{{- $name := include "pisa.fullname" . }}
+# Scales workers on outstanding jobs (queued + running), so that
+# replicas = ceil(outstanding / jobsPerWorker).
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}-worker
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ $name }}-worker
+  minReplicaCount: {{ .Values.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  {{- if eq (int .Values.keda.minReplicas) 0 }}
+  # Only used when scaling to and from zero.
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  {{- end }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # Scale down only after demand has stayed low this long. Removed
+          # workers drain, so this trades idle pods against cold imports.
+          stabilizationWindowSeconds: {{ .Values.keda.scaleDownStabilizationSecs }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ required "keda.prometheus.serverAddress is required" .Values.keda.prometheus.serverAddress | quote }}
+        query: {{ .Values.keda.prometheus.query | default (include "pisa.scalingQuery" .) | quote }}
+        threshold: {{ .Values.keda.jobsPerWorker | default .Values.worker.slots | quote }}
+        ignoreNullValues: "true"
+{{- end }}

@@ -102,11 +102,13 @@ struct WorkerEntry {
     warm: HashSet<String>,
     in_flight: HashMap<u64, Pending>,
     tx: mpsc::UnboundedSender<RouterMessage>,
+    /// Shutting down: finishes its in-flight jobs but takes no new ones.
+    draining: bool,
 }
 
 impl WorkerEntry {
     fn free(&self) -> bool {
-        (self.in_flight.len() as u32) < self.slots
+        !self.draining && (self.in_flight.len() as u32) < self.slots
     }
 }
 
@@ -190,6 +192,7 @@ impl Dispatcher {
                 warm: HashSet::new(),
                 in_flight: HashMap::new(),
                 tx,
+                draining: false,
             },
         );
         self.pump(&mut s);
@@ -200,6 +203,17 @@ impl Dispatcher {
         if let Some(w) = s.workers.get_mut(&conn) {
             w.warm = warm.into_iter().collect();
         }
+    }
+
+    /// Stops sending jobs to a worker that is shutting down. Its in-flight
+    /// jobs still complete, or are retried if it disconnects first.
+    pub fn drain(&self, conn: u64) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(w) = s.workers.get_mut(&conn) {
+            tracing::info!(worker = %w.name, in_flight = w.in_flight.len(), "worker draining");
+            w.draining = true;
+        }
+        self.update_gauges(&s);
     }
 
     pub fn complete(&self, conn: u64, request_id: u64, result: JobResult) {
@@ -523,6 +537,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn draining_worker_finishes_but_takes_no_new_jobs() {
+        let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+        let mut a = worker(&d, 1, "a", "v", 2);
+        let d2 = d.clone();
+        let first =
+            tokio::spawn(async move { d2.submit(job(), route("h"), Priority::Batch).await });
+        let id = next_job(&mut a).await;
+        d.drain(1);
+        let d3 = d.clone();
+        let second =
+            tokio::spawn(async move { d3.submit(job(), route("h"), Priority::Batch).await });
+        tokio::task::yield_now().await;
+        assert_eq!(d.in_flight()["a"], 1, "no new job despite a free slot");
+        d.complete(1, id, done());
+        assert_eq!(first.await.unwrap().unwrap().worker, "a");
+
+        let mut b = worker(&d, 2, "b", "v", 1);
+        let id = next_job(&mut b).await;
+        d.complete(2, id, done());
+        assert_eq!(second.await.unwrap().unwrap().worker, "b");
+    }
+
+    #[tokio::test]
     async fn expires_jobs_that_wait_too_long() {
         let d = Arc::new(Dispatcher::new(DispatchConfig {
             max_wait: Duration::from_millis(10),
@@ -546,6 +583,7 @@ mod tests {
                 warm: HashSet::new(),
                 in_flight: HashMap::new(),
                 tx: tx.clone(),
+                draining: false,
             };
             for i in 0..in_flight {
                 let (reply, _) = oneshot::channel();

@@ -47,6 +47,79 @@ The pinned versions live in `docker/lean-project`: `lean-toolchain`,
 `lakefile.toml` and `lake-manifest.json`. Keep `REPL_REV` in `docker/Dockerfile`
 on the same Lean version.
 
+## Kubernetes
+
+`deploy/helm/pisa` is a Helm chart containing:
+- the router;
+- the worker Deployment;
+- a KEDA `ScaledObject`;
+- an optional `ServiceMonitor`.
+
+**Cluster prerequisites.** Like most application charts, it uses the cluster's
+own KEDA and Prometheus:
+- `keda.prometheus.serverAddress` must point at that Prometheus.
+- Prometheus must scrape the router. The router Service carries
+  `prometheus.io/scrape` annotations, which `prometheus-community/prometheus`
+  picks up. With the Prometheus Operator, set
+  `metrics.serviceMonitor.enabled=true`, plus any labels its selector needs.
+- Keep the scrape interval short, e.g. 5–15s: it bounds how fast workers react
+  to load.
+
+**Storage.** Proof states go to an S3-compatible bucket. Give its credentials as an existing Secret, or leave
+`store.s3.credentialsSecret.name` empty to use the pod's ambient credentials
+(e.g. EKS IRSA):
+
+```sh
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda -n keda --create-namespace --version 2.21.0
+kubectl create secret generic pisa-s3 \
+  --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+helm install pisa deploy/helm/pisa \
+  --set worker.image.repository=<registry>/pisa-worker \
+  --set keda.prometheus.serverAddress=http://prometheus-server.monitoring.svc.cluster.local \
+  --set store.s3.bucket=<bucket> --set store.s3.region=<region> \
+  --set store.s3.credentialsSecret.name=pisa-s3
+```
+
+`store.s3.endpoint` and `store.s3.allowHttp` point the workers at a non-AWS
+store such as MinIO or Garage. `credentialsSecret.accessKeyIdKey` and
+`credentialsSecret.secretAccessKeyKey` name the keys inside the Secret.
+
+**Scaling.** Workers scale on the release's outstanding jobs, queued plus
+running, read from the router's `pisa_queue_depth` and `pisa_slots{state="busy"}`
+metrics. The query counts each job once even if two scrape jobs collect the
+router; `keda.prometheus.query` overrides it.
+- The target is `keda.jobsPerWorker` jobs per pod, which defaults to `worker.slots`.
+- `keda.scaleDownStabilizationSecs` sets how long demand must stay low before pods are removed.
+
+**Draining.** A worker that receives SIGTERM tells the router it is draining, gets no new jobs, finishes the ones it has, and exits. Two settings bound this:
+- `worker.drainTimeoutSecs` is the longest it waits for running jobs.
+- The pod's grace period is that plus 30s.
+
+Scale-downs and rollouts therefore don't cut jobs off.
+
+**On minikube**, with the images built by `PROJECT=lean-core docker compose build`:
+
+```sh
+minikube start -p pisa --driver=docker --cpus=8 --memory=20g
+helm repo add kedacore https://kedacore.github.io/charts
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm install keda kedacore/keda -n keda --create-namespace --version 2.21.0
+helm install prometheus prometheus-community/prometheus --version 29.37.0 \
+  -n monitoring --create-namespace -f deploy/minikube/prometheus-values.yaml
+minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
+kubectl apply -f deploy/minikube/garage.yaml   # a throwaway S3 store and its Secret
+helm install pisa deploy/helm/pisa -f deploy/minikube/values.yaml
+kubectl port-forward svc/pisa-router 8000:8000 &
+python3 scripts/e2e.py --no-failover   # checks, policy, sessions against real Lean
+python3 scripts/k8s_scale.py           # scales up under load, back down, drains on delete
+```
+
+**Not covered by the chart:**
+- Separate pools per project version. The scaling query counts every job, so one release should serve one version.
+- Auth on the API.
+- A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
+
 ## API
 
 All fields are snake_case. The request and response types are in
@@ -147,5 +220,5 @@ workers add `import Lean.Elab.Command` to every header they load.
 - REPL tactic mode can't write a finished tactic script back into the `sorry`.
   Clients submit the assembled proof to `/sessions/{session}/check`.
 - Scoped extensions, such as scoped notation, don't survive pickling.
-- Not built yet: Kubernetes manifests, autoscaling, auth and per-tenant
-  fairness, `/jobs` async batches, and human workspaces (stage 4).
+- Not built yet: auth and per-tenant fairness, `/jobs` async batches, and
+  human workspaces (stage 4).

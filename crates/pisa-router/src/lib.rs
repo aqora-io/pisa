@@ -148,6 +148,7 @@ async fn serve_worker(conn: u64, stream: TcpStream, d: &Dispatcher) -> anyhow::R
                 WorkerMessage::Restart { cause } => {
                     ::metrics::counter!(metrics::RESTARTS, "cause" => cause).increment(1)
                 }
+                WorkerMessage::Draining => d.drain(conn),
                 WorkerMessage::Hello { .. } => tracing::warn!("duplicate hello"),
             }
         }
