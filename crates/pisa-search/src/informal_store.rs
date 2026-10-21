@@ -60,6 +60,35 @@ impl Store {
             .join(format!("{batch}.ndjson.zst"))
     }
 
+    /// Writes one object under `<kind>/` (e.g. `vectors/<model>/<batch>.bin.zst`).
+    pub async fn put(&self, key: &str, bytes: Vec<u8>) -> anyhow::Result<()> {
+        let mut path = self.prefix.clone();
+        for part in key.split('/') {
+            path = path.join(part);
+        }
+        self.inner.put(&path, PutPayload::from(bytes)).await?;
+        Ok(())
+    }
+
+    /// Every object under `dir`, in name order.
+    pub async fn get_all(&self, dir: &str) -> anyhow::Result<Vec<bytes::Bytes>> {
+        let mut prefix = self.prefix.clone();
+        for part in dir.split('/') {
+            prefix = prefix.join(part);
+        }
+        let mut names: Vec<Path> = Vec::new();
+        let mut list = self.inner.list(Some(&prefix));
+        while let Some(meta) = list.next().await {
+            names.push(meta?.location);
+        }
+        names.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        let mut out = Vec::new();
+        for path in names {
+            out.push(self.inner.get(&path).await?.bytes().await?);
+        }
+        Ok(out)
+    }
+
     pub async fn write_batch(&self, batch: &str, entries: &[Entry]) -> anyhow::Result<()> {
         let mut enc = zstd::Encoder::new(Vec::new(), 9)?;
         for e in entries {

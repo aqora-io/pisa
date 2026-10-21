@@ -240,7 +240,7 @@ fn engine() -> (tempfile::TempDir, Engine) {
             ..Default::default()
         },
     );
-    index::build(&c, &informal, dir.path()).unwrap();
+    index::build(&c, &informal, None, dir.path()).unwrap();
     let e = Engine::new(
         Bundle::open(dir.path()).unwrap(),
         Symbols::parse(symbols::DEFAULT).unwrap(),

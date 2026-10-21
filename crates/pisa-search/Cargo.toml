@@ -7,6 +7,7 @@ description = "Declaration search over Mathlib and Physlib for pisa"
 
 [dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 axum.workspace = true
 clap.workspace = true
 futures.workspace = true
@@ -14,7 +15,7 @@ hex.workspace = true
 object_store.workspace = true
 pisa-protocol.workspace = true
 rayon = "1"
-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = ["rustls", "blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

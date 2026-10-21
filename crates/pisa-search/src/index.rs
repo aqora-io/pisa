@@ -151,10 +151,12 @@ pub fn name_text(name: &str) -> String {
     words.join(" ")
 }
 
-/// Builds a bundle from a corpus and descriptions keyed by declaration name.
+/// Builds a bundle from a corpus, descriptions keyed by declaration name, and
+/// optionally (model, document vectors keyed by declaration name).
 pub fn build(
     corpus: &Corpus,
     informal: &HashMap<String, Informal>,
+    vectors: Option<(&str, &HashMap<String, Vec<f32>>)>,
     out: &Path,
 ) -> anyhow::Result<BundleManifest> {
     std::fs::create_dir_all(out)?;
@@ -208,13 +210,33 @@ pub fn build(
         std::io::Write::write_all(&mut enc, b"\n")?;
     }
     drop(enc);
+    let path = out.join("vectors.bin");
+    let embedding_model = match vectors {
+        Some((model, vectors)) => {
+            let entries: Vec<(u32, Vec<i8>)> = decls
+                .iter()
+                .enumerate()
+                .filter_map(|(i, d)| {
+                    Some((i as u32, crate::dense::quantize(vectors.get(&d.name)?)))
+                })
+                .collect();
+            crate::dense::Dense::new(model.to_string(), entries).write(&path)?;
+            Some(model.to_string())
+        }
+        None => {
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+            }
+            None
+        }
+    };
     let manifest = BundleManifest {
         format: FORMAT_VERSION,
         env_id: corpus.manifest.env_id.clone(),
         decls: decls.len(),
         libraries: corpus.manifest.libraries.clone(),
         informal: stored.iter().filter(|s| s.informal.is_some()).count(),
-        embedding_model: None,
+        embedding_model,
     };
     std::fs::write(
         out.join("manifest.json"),
@@ -330,6 +352,7 @@ pub struct Bundle {
     pub decls: Vec<StoredDecl>,
     pub index: Index,
     pub fields: Fields,
+    pub dense: Option<crate::dense::Dense>,
 }
 
 impl Bundle {
@@ -349,11 +372,18 @@ impl Bundle {
         let index = Index::open_in_dir(dir.join("tantivy"))?;
         register_tokenizers(&index);
         let (_, fields) = schema();
+        let vectors = dir.join("vectors.bin");
+        let dense = if vectors.exists() {
+            Some(crate::dense::Dense::read(&vectors)?)
+        } else {
+            None
+        };
         Ok(Bundle {
             manifest,
             decls,
             index,
             fields,
+            dense,
         })
     }
 }

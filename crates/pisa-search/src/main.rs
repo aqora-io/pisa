@@ -1,10 +1,14 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use pisa_protocol::search::Informal;
 use pisa_search::corpus::{self, Corpus};
-use pisa_search::engine::Engine;
+use pisa_search::dense::{self, Tei};
+use pisa_search::engine::{Engine, Lanes};
 use pisa_search::index::{self, Bundle};
+use pisa_search::informal_store::Store;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
 
@@ -32,16 +36,6 @@ enum Command {
         #[arg(long)]
         previous: Option<PathBuf>,
     },
-    /// Build an index bundle from a corpus and stored descriptions.
-    Build {
-        #[arg(long)]
-        corpus: PathBuf,
-        /// Description store (a directory or s3:// URL), if any.
-        #[arg(long)]
-        informal: Option<String>,
-        #[arg(long)]
-        out: PathBuf,
-    },
     /// Store LeanSearch v2's Mathlib descriptions for matching declarations.
     ImportLsv2 {
         #[arg(long)]
@@ -49,9 +43,43 @@ enum Command {
         /// Where the LeanSearch v2 JSONL is (downloaded and verified if absent).
         #[arg(long)]
         file: PathBuf,
-        /// Description store (a directory or s3:// URL).
+        /// Description and vector store (a directory or s3:// URL).
         #[arg(long)]
         informal: String,
+    },
+    /// Embed document views through a TEI server, caching the vectors.
+    Embed {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Description and vector store (a directory or s3:// URL).
+        #[arg(long)]
+        informal: String,
+        #[arg(long, env = "PISA_SEARCH_TEI", default_value = "http://localhost:8090")]
+        tei: String,
+        /// Libraries to embed.
+        #[arg(long, value_delimiter = ',', default_value = "Physlib")]
+        libraries: Vec<String>,
+        /// Also embed what those declarations use directly.
+        #[arg(long)]
+        with_deps: bool,
+        /// Embed at most this many (for measuring throughput).
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, default_value_t = 16)]
+        batch: usize,
+    },
+    /// Build an index bundle from a corpus and stored descriptions.
+    Build {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Description and vector store (a directory or s3:// URL), if any.
+        #[arg(long)]
+        informal: Option<String>,
+        /// Include cached document vectors of this embedding model.
+        #[arg(long)]
+        embedding_model: Option<String>,
+        #[arg(long)]
+        out: PathBuf,
     },
     /// Serve the HTTP API for a bundle.
     Serve {
@@ -62,6 +90,9 @@ enum Command {
         /// Symbol dictionary; defaults to the shipped search/symbols.toml.
         #[arg(long, env = "PISA_SEARCH_SYMBOLS")]
         symbols: Option<PathBuf>,
+        /// TEI server for embedding queries (enables the dense lane).
+        #[arg(long, env = "PISA_SEARCH_TEI")]
+        tei: Option<String>,
     },
     /// Measure retrieval quality on MathlibQR.
     Eval {
@@ -76,6 +107,9 @@ enum Command {
         /// Only the fused result, not each lane alone.
         #[arg(long)]
         fused_only: bool,
+        /// TEI server for embedding queries (enables the dense lane).
+        #[arg(long, env = "PISA_SEARCH_TEI")]
+        tei: Option<String>,
         /// Write the report here as well as to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -84,6 +118,8 @@ enum Command {
     Query {
         #[arg(long)]
         bundle: PathBuf,
+        #[arg(long, env = "PISA_SEARCH_TEI")]
+        tei: Option<String>,
         #[arg(long, default_value_t = 5)]
         k: usize,
         /// Free text: natural language, LaTeX, Lean or a name.
@@ -92,14 +128,31 @@ enum Command {
 }
 
 fn load_engine(
-    bundle: &std::path::Path,
-    symbols_path: Option<&std::path::Path>,
+    bundle: &Path,
+    symbols_path: Option<&Path>,
+    tei: Option<&str>,
 ) -> anyhow::Result<Engine> {
     let symbols = match symbols_path {
         Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
         None => Symbols::parse(symbols::DEFAULT)?,
     };
-    Engine::new(Bundle::open(bundle)?, symbols)
+    let mut engine = Engine::new(Bundle::open(bundle)?, symbols)?;
+    if let (Some(d), Some(url)) = (engine.dense.take(), tei) {
+        engine.dense = Some(d.with_tei(Tei::new(url)));
+    }
+    Ok(engine)
+}
+
+/// Stored descriptions for a corpus, by declaration name.
+async fn descriptions(c: &Corpus, store: &Store) -> anyhow::Result<HashMap<String, Informal>> {
+    let all = store.load_all().await?;
+    Ok(c.decls
+        .iter()
+        .filter_map(|d| {
+            all.get(&d.content_hash)
+                .map(|e| (d.name.clone(), e.informal.clone()))
+        })
+        .collect())
 }
 
 #[tokio::main]
@@ -117,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let env_id = pisa_protocol::version::project_version(&project)?;
             let manifest = project.join("lake-manifest.json");
-            let exports: Vec<&std::path::Path> = export.iter().map(PathBuf::as_path).collect();
+            let exports: Vec<&Path> = export.iter().map(PathBuf::as_path).collect();
             let c = corpus::ingest(&exports, env_id, Some(&manifest))?;
             c.write(&out)?;
             println!("{}", serde_json::to_string_pretty(&c.manifest)?);
@@ -125,33 +178,6 @@ async fn main() -> anyhow::Result<()> {
                 let old = Corpus::read(&prev)?;
                 println!("{:?}", corpus::diff(&old.decls, &c.decls));
             }
-        }
-        Command::Build {
-            corpus,
-            informal,
-            out,
-        } => {
-            let c = Corpus::read(&corpus)?;
-            let descriptions = match informal {
-                Some(url) => {
-                    let all = pisa_search::informal_store::Store::open(&url)?
-                        .load_all()
-                        .await?;
-                    c.decls
-                        .iter()
-                        .filter_map(|d| {
-                            all.get(&d.content_hash)
-                                .map(|e| (d.name.clone(), e.informal.clone()))
-                        })
-                        .collect()
-                }
-                None => Default::default(),
-            };
-            let started = std::time::Instant::now();
-            let m = tokio::task::spawn_blocking(move || index::build(&c, &descriptions, &out))
-                .await??;
-            println!("{}", serde_json::to_string_pretty(&m)?);
-            eprintln!("built in {:.1}s", started.elapsed().as_secs_f64());
         }
         Command::ImportLsv2 {
             corpus,
@@ -161,20 +187,83 @@ async fn main() -> anyhow::Result<()> {
             pisa_search::lsv2::fetch(&file).await?;
             let c = Corpus::read(&corpus)?;
             let (entries, report) = pisa_search::lsv2::import(&file, &c.decls)?;
-            let store = pisa_search::informal_store::Store::open(&informal)?;
+            let store = Store::open(&informal)?;
             // Sorts before any later run's batches, so those win.
             store
                 .write_batch(&format!("0000-{}", pisa_search::lsv2::SOURCE), &entries)
                 .await?;
             println!("{report:#?}");
         }
+        Command::Embed {
+            corpus,
+            informal,
+            tei,
+            libraries,
+            with_deps,
+            limit,
+            batch,
+        } => {
+            let c = Corpus::read(&corpus)?;
+            let store = Store::open(&informal)?;
+            let described = descriptions(&c, &store).await?;
+            let tei = Tei::new(&tei);
+            let probe = tei.clone();
+            let model = tokio::task::spawn_blocking(move || probe.model()).await??;
+            let mut docs: Vec<String> = dense::select(&c.decls, &libraries, with_deps)
+                .into_iter()
+                .map(|d| dense::document_view(d, described.get(&d.name)))
+                .collect();
+            if let Some(n) = limit {
+                docs.truncate(n);
+            }
+            eprintln!("{} declarations selected; model {model}", docs.len());
+            let started = std::time::Instant::now();
+            let n = dense::embed_missing(&store, &tei, &model, docs, batch, 1000).await?;
+            eprintln!("embedded {n} in {:.0}s", started.elapsed().as_secs_f64());
+        }
+        Command::Build {
+            corpus,
+            informal,
+            embedding_model,
+            out,
+        } => {
+            let c = Corpus::read(&corpus)?;
+            let store = informal.as_deref().map(Store::open).transpose()?;
+            let described = match &store {
+                Some(store) => descriptions(&c, store).await?,
+                None => HashMap::new(),
+            };
+            let vectors = match (&store, &embedding_model) {
+                (Some(store), Some(model)) => {
+                    let cache = dense::load_cache(store, model).await?;
+                    Some(dense::vectors_by_name(&c.decls, &described, model, &cache))
+                }
+                (None, Some(_)) => anyhow::bail!("--embedding-model needs --informal"),
+                _ => None,
+            };
+            let started = std::time::Instant::now();
+            let m = tokio::task::spawn_blocking(move || {
+                let v = embedding_model.as_deref().zip(vectors.as_ref());
+                index::build(&c, &described, v, &out)
+            })
+            .await??;
+            println!("{}", serde_json::to_string_pretty(&m)?);
+            eprintln!("built in {:.1}s", started.elapsed().as_secs_f64());
+        }
         Command::Serve {
             bundle,
             http,
             symbols,
+            tei,
         } => {
-            let engine = Arc::new(load_engine(&bundle, symbols.as_deref())?);
-            tracing::info!(env_id = engine.env_id(), decls = engine.bundle.decls.len(), %http, "serving");
+            let engine = Arc::new(load_engine(&bundle, symbols.as_deref(), tei.as_deref())?);
+            tracing::info!(
+                env_id = engine.env_id(),
+                decls = engine.bundle.decls.len(),
+                vectors = engine.dense.as_ref().map_or(0, |d| d.len()),
+                %http,
+                "serving"
+            );
             let listener = tokio::net::TcpListener::bind(http).await?;
             axum::serve(listener, pisa_search::server::router(engine)).await?;
         }
@@ -183,10 +272,10 @@ async fn main() -> anyhow::Result<()> {
             data,
             weights,
             fused_only,
+            tei,
             out,
         } => {
-            use pisa_search::engine::Lanes;
-            let mut engine = load_engine(&bundle, None)?;
+            let mut engine = load_engine(&bundle, None, tei.as_deref())?;
             if let Some(w) = weights {
                 engine.weights = serde_json::from_str(&w)?;
             }
@@ -224,22 +313,31 @@ async fn main() -> anyhow::Result<()> {
                     ));
                 }
             }
-            let report = pisa_search::eval::run(&engine, &items, &configs);
-            let md = report.markdown(engine.env_id());
-            print!("{md}");
+            let engine = Arc::new(engine);
+            let report = tokio::task::spawn_blocking(move || {
+                let r = pisa_search::eval::run(&engine, &items, &configs);
+                r.markdown(engine.env_id())
+            })
+            .await?;
+            print!("{report}");
             if let Some(out) = out {
-                std::fs::write(out, md)?;
+                std::fs::write(out, report)?;
             }
         }
-        Command::Query { bundle, k, text } => {
-            let engine = load_engine(&bundle, None)?;
+        Command::Query {
+            bundle,
+            tei,
+            k,
+            text,
+        } => {
+            let engine = load_engine(&bundle, None, tei.as_deref())?;
             let q = pisa_protocol::search::Query {
                 q: Some(text),
                 k,
                 ..Default::default()
             };
             let started = std::time::Instant::now();
-            let r = engine.search(&q);
+            let r = tokio::task::spawn_blocking(move || engine.search(&q)).await?;
             for hit in &r.hits {
                 println!("{}  [{}]\n", hit.text, hit.lanes.join(","));
             }

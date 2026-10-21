@@ -166,7 +166,8 @@ pub fn parse(q: &Query) -> Parsed {
 }
 
 impl Engine {
-    pub fn new(bundle: Bundle, symbols: Symbols) -> anyhow::Result<Engine> {
+    pub fn new(mut bundle: Bundle, symbols: Symbols) -> anyhow::Result<Engine> {
+        let dense = bundle.dense.take();
         let reader = bundle.index.reader()?;
         let mut by_name = HashMap::new();
         let mut by_lower: HashMap<String, Vec<u32>> = HashMap::new();
@@ -202,7 +203,7 @@ impl Engine {
             by_last,
             used_by,
             symbols,
-            dense: None,
+            dense,
         })
     }
 
