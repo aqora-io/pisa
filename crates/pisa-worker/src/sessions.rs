@@ -181,7 +181,8 @@ impl Sessions {
     }
 
     /// Re-checks completed code from scratch and confirms it proves the same
-    /// statements the session started from.
+    /// statements the session started from, with the same imports: other
+    /// imports could redefine what the statements mention.
     pub async fn check(&self, pool: &Arc<Pool>, job: SessionCheckJob) -> SessionChecked {
         let failed = |error: Error| SessionChecked {
             outcome: CheckOutcome {
@@ -206,6 +207,7 @@ impl Sessions {
                 ));
             }
         };
+        let same_imports = split_header(&job.code).header_key == key.header_key;
         let outcome = run_check(
             pool,
             CheckJob {
@@ -219,8 +221,12 @@ impl Sessions {
             .as_ref()
             .map(|v| v.declarations.as_slice())
             .unwrap_or_default();
+        let mut statement_reasons = statement_changes(&session.declarations, now);
+        if !same_imports {
+            statement_reasons.push("statement: the imports differ from the session's".into());
+        }
         SessionChecked {
-            statement_reasons: statement_changes(&session.declarations, now),
+            statement_reasons,
             outcome,
         }
     }

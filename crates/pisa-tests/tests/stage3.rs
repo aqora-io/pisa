@@ -79,6 +79,13 @@ async fn session_is_a_tree_of_states_with_a_final_check() {
     let renamed = check(&c, session, "import Foo\ntheorem u : 1 = 1 := by rfl").await;
     assert_eq!(renamed["reasons"], json!(["statement: t is missing"]));
 
+    let reimported = check(&c, session, "import Bar\ntheorem t : 1 = 1 := by rfl").await;
+    assert_eq!(reimported["ok"], false);
+    assert_eq!(
+        reimported["reasons"],
+        json!(["statement: the imports differ from the session's"])
+    );
+
     let cheated = check(&c, session, "import Foo\ntheorem t : 1 = 1 := by sorry").await;
     assert_eq!(cheated["ok"], false);
     assert!(

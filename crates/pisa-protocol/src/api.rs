@@ -243,7 +243,8 @@ pub struct TacticResponse {
 }
 
 /// `POST /sessions/{session}/check`: re-checks completed code from scratch
-/// and confirms it proves the statements the session started from.
+/// and confirms it proves the statements the session started from, with the
+/// same imports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionCheckRequest {
     pub code: String,

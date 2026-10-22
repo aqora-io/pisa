@@ -20,7 +20,7 @@ Lean 4 Server in Rust*:
    - Proof states are pickled into object storage (S3, or Garage in Compose),
      so any worker can continue a session.
    - A final check re-runs the whole proof from scratch and confirms it proves
-     the original statements.
+     the original statements, with the original imports.
 
 ## Layout
 
@@ -132,7 +132,7 @@ All fields are snake_case. The request and response types are in
 | `POST /check/batch` | `{items: [{id, code}], version?, timeout?}` → `{results: [...]}`, in order |
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
-| `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements |
+| `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
 | `GET /health`, `GET /metrics` | Liveness, Prometheus metrics |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
