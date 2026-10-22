@@ -86,6 +86,20 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
   _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
     (_root_.Std.Format.text ("PISA_DECLS " ++ (_root_.Lean.Json.arr out).compress)))"#;
 
+/// The loop of [`AXIOM_REPORT`] over the declarations added after the imports.
+const REPORT_LOOP: &str = "  for (n, ci) in env.constants.map₂.toList do\n";
+
+/// [`AXIOM_REPORT`] for the declarations of one imported module, e.g. a
+/// snapshot (whose own declarations are not "after the imports").
+pub fn module_report(module: &str) -> String {
+    let report_loop = format!(
+        "  let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError \"{module} is not imported\"\n  \
+         for n in env.header.moduleData[idx.toNat]!.constNames do\n    \
+         let some ci := env.find? n | continue\n"
+    );
+    AXIOM_REPORT.replacen(REPORT_LOOP, &report_loop, 1)
+}
+
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub allowed_axioms: Vec<String>,
@@ -265,6 +279,18 @@ mod tests {
 
     fn response(v: serde_json::Value) -> CommandResponse {
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn module_report_walks_the_module() {
+        assert!(AXIOM_REPORT.contains(REPORT_LOOP));
+        let report = module_report("PisaSnap.s0f");
+        assert!(!report.contains("map₂"), "{report}");
+        assert!(
+            report.contains("env.getModuleIdx? `PisaSnap.s0f |"),
+            "{report}"
+        );
+        assert!(report.contains("    let some ci := env.find? n | continue\n    if n.isInternal"));
     }
 
     #[test]

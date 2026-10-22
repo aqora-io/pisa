@@ -14,13 +14,14 @@ use pisa_protocol::api::{
     self, BatchRequest, BatchResponse, CheckRequest, CheckResult, ErrorKind, ErrorResponse,
 };
 use pisa_protocol::header::split_header;
+use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckJob, CheckOutcome, Job, JobResult};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::dispatch::{DispatchError, Dispatcher, Priority, Route};
 use crate::metrics as m;
-use crate::sessions;
+use crate::{sessions, snapshots};
 
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
@@ -53,6 +54,11 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/sessions", post(sessions::start))
         .route("/sessions/{id}/check", post(sessions::check))
         .route("/states/{id}/tactic", post(sessions::tactic))
+        .route("/snapshots", post(snapshots::create))
+        .route(
+            "/snapshots/{name}",
+            get(snapshots::get).delete(snapshots::delete),
+        )
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
 }
@@ -157,7 +163,7 @@ async fn check_one(
     let route = Route {
         version,
         header_key: Some(split.header_key),
-        header: Some(split.header),
+        header: prewarm_header(split.header),
         affinity: None,
     };
     let job = Job::Check(CheckJob { code, timeout_secs });
@@ -168,31 +174,33 @@ async fn check_one(
     })
 }
 
+/// The header to remember for pre-warming new workers. Headers that import
+/// snapshots are left out: there is a new one for every statement, and a new
+/// worker would mostly pre-warm abandoned ones.
+pub fn prewarm_header(header: String) -> Option<String> {
+    snapshot::imports(&header)
+        .is_ok_and(|ids| ids.is_empty())
+        .then_some(header)
+}
+
 /// Turns a worker's check outcome into the API result, recording metrics.
 pub fn check_result(o: CheckOutcome, kind: &'static str) -> CheckResult {
     let hit = if o.warm { "hit" } else { "miss" };
     metrics::counter!(m::HEADER_CACHE, "result" => hit).increment(1);
-    let (messages, sorries) = o.response.map_or_else(Default::default, |r| {
-        let sorries = r.sorries.into_iter().map(Into::into).collect();
-        (api::messages(r.messages), sorries)
-    });
-    let (verified, reasons, declarations) =
-        o.verification.map_or((false, Vec::new(), Vec::new()), |v| {
-            (v.ok, v.reasons, v.declarations)
-        });
-    reasons.iter().for_each(|r| record_rejection(r));
-    let outcome = if o.error.is_some() { "error" } else { "ok" };
+    let result = CheckResult::from(o);
+    record_result(&result, kind);
+    result
+}
+
+/// Counts a finished job and the reasons it was rejected.
+pub fn record_result(result: &CheckResult, kind: &'static str) {
+    result.reasons.iter().for_each(|r| record_rejection(r));
+    let outcome = if result.error.is_some() {
+        "error"
+    } else {
+        "ok"
+    };
     metrics::counter!(m::JOBS, "kind" => kind, "outcome" => outcome).increment(1);
-    CheckResult {
-        id: None,
-        ok: verified && o.error.is_none(),
-        time: o.time,
-        error: o.error,
-        messages,
-        sorries,
-        reasons,
-        declarations,
-    }
 }
 
 /// A worker answered with something other than a check outcome.
@@ -212,4 +220,20 @@ pub fn failed_result(result: JobResult, kind: &'static str) -> CheckResult {
 pub fn record_rejection(reason: &str) {
     let kind = reason.split(':').next().unwrap_or(reason).to_string();
     metrics::counter!(m::REJECTIONS, "reason" => kind).increment(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_headers_are_not_prewarmed() {
+        assert_eq!(
+            prewarm_header("import Mathlib".into()),
+            Some("import Mathlib".into())
+        );
+        let snapshot = format!("import Mathlib\nimport PisaSnap.s{}", "0".repeat(32));
+        assert_eq!(prewarm_header(snapshot), None);
+        assert_eq!(prewarm_header("import PisaSnap.oops".into()), None);
+    }
 }

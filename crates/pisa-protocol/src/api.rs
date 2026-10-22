@@ -13,6 +13,11 @@
 //! | `POST /sessions` | [`StartRequest`] → [`StartResponse`] |
 //! | `POST /states/{state}/tactic` | [`TacticRequest`] → [`TacticResponse`] |
 //! | `POST /sessions/{session}/check` | [`SessionCheckRequest`] → [`CheckResult`] |
+//! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
+//! | `GET /snapshots/{snapshot}` | → [`SnapshotInfo`] |
+//! | `DELETE /snapshots/{snapshot}` | → [`Deleted`] |
+//!
+//! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -250,6 +255,68 @@ pub struct SessionCheckRequest {
     pub code: String,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+}
+
+/// `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
+/// keeps it as a module that later code can import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRequest {
+    pub code: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Lean's time limit in seconds, for building the module including its
+    /// imports.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotResponse {
+    /// The module to import, e.g. `PisaSnap.s1a2b…`. Absent when the code was
+    /// not kept: Lean reported errors, or the check could not complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// The header to start code on top of this snapshot with: this code's
+    /// imports with its snapshots replaced by the new one. Code with exactly
+    /// this header reuses the Lean process the snapshot's builder keeps warm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// The worker pool version the snapshot belongs to.
+    pub version: String,
+    /// Kept although a declaration uses `sorry` or another axiom outside the
+    /// allowed list; `result.reasons` says which.
+    pub dirty: bool,
+    /// The check, as for `/check`. It has no `sorries`, and `time` includes
+    /// importing the module's imports.
+    pub result: CheckResult,
+}
+
+/// `GET /snapshots/{snapshot}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotInfo {
+    pub snapshot: String,
+    /// The snapshots it imports.
+    pub imports: Vec<String>,
+    /// As in [`SnapshotResponse::header`].
+    pub header: String,
+    pub code: String,
+    pub dirty: bool,
+    pub result: CheckResult,
+    /// Seconds since the Unix epoch.
+    pub created: u64,
+}
+
+/// `DELETE /snapshots/{snapshot}`: deletes it and every snapshot that
+/// imports it, directly or not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Deleted {
+    pub deleted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VersionQuery {
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// A state key or session ID: `<version>~<header key>~<id>`. Carrying the

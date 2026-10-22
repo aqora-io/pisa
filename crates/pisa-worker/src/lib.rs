@@ -19,6 +19,7 @@ pub mod launcher;
 pub mod policy;
 pub mod pool;
 pub mod sessions;
+pub mod snapshots;
 pub mod store;
 
 pub use config::WorkerConfig;
@@ -51,9 +52,16 @@ pub async fn run_with_store(
 ) -> anyhow::Result<()> {
     let version = cfg.version()?;
     let worker_id = cfg.worker_id();
-    let launcher = launcher::Launcher::new(&cfg, &worker_id).await?;
+    let launcher = launcher::Launcher::new(&cfg, &worker_id, &version).await?;
+    let snapshots = snapshots::Snapshots::new(
+        store.clone(),
+        version.clone(),
+        launcher.snapshot_root().to_path_buf(),
+        Duration::from_secs(cfg.snapshot_confirm_secs),
+    );
     let (pool, warm_rx, mut restarts_rx) = Pool::new(
         launcher,
+        Arc::new(snapshots),
         PoolConfig {
             slots: cfg.slots(),
             max_uses: cfg.max_uses,
@@ -221,6 +229,15 @@ async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
         Job::SessionStart(j) => JobResult::SessionStarted(sessions.start(pool, j).await),
         Job::SessionTactic(j) => JobResult::TacticApplied(sessions.tactic(pool, j).await),
         Job::SessionCheck(j) => JobResult::SessionChecked(sessions.check(pool, j).await),
+        Job::SnapshotCreate(j) => {
+            JobResult::SnapshotCreated(Box::new(pool.snapshots().create(pool, j).await))
+        }
+        Job::SnapshotGet(j) => {
+            JobResult::Snapshot(pool.snapshots().get(&j.snapshot).await.map(Box::new))
+        }
+        Job::SnapshotDelete(j) => {
+            JobResult::SnapshotDeleted(pool.snapshots().delete(&j.snapshot).await)
+        }
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the router".into(),
         },

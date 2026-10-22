@@ -1,0 +1,132 @@
+//! What fake-repl and fake-lean share: finding snapshot modules on
+//! `LEAN_PATH` and reading declarations out of code.
+//!
+//! A fake module file is the module's code. A line declares a name when it
+//! starts with `theorem`, `def` or `axiom` (or `private` and one of those),
+//! and a line `needs NAME` is an error unless `NAME` is declared earlier in
+//! the same code or, without `private`, in a module it imports.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use serde_json::{Value, json};
+
+/// The file of `module`, looked up as Lean does: in the first `LEAN_PATH` root
+/// that has the module's top-level directory.
+pub fn find_module(module: &str) -> Option<PathBuf> {
+    let lean_path = std::env::var_os("LEAN_PATH")?;
+    let top = module.split('.').next()?;
+    let root = std::env::split_paths(&lean_path).find(|root| root.join(top).is_dir())?;
+    let file = module
+        .split('.')
+        .fold(root, |p, part| p.join(part))
+        .with_extension("olean");
+    file.exists().then_some(file)
+}
+
+/// The modules `code`'s import lines name.
+pub fn imports(code: &str) -> Vec<&str> {
+    code.lines()
+        .filter_map(|l| l.trim().strip_prefix("import "))
+        .flat_map(str::split_whitespace)
+        .collect()
+}
+
+/// The code of every snapshot module `code` imports, directly or not, or the
+/// first one that is missing.
+pub fn imported_code(code: &str) -> Result<String, String> {
+    fn visit(code: &str, seen: &mut HashSet<String>, out: &mut String) -> Result<(), String> {
+        for module in imports(code)
+            .into_iter()
+            .filter(|m| m.starts_with("PisaSnap."))
+        {
+            if !seen.insert(module.to_string()) {
+                continue;
+            }
+            let file = find_module(module).ok_or_else(|| module.to_string())?;
+            let text = std::fs::read_to_string(file).map_err(|_| module.to_string())?;
+            visit(&text, seen, out)?;
+            out.push_str(&text);
+            out.push('\n');
+        }
+        Ok(())
+    }
+    let mut out = String::new();
+    visit(code, &mut HashSet::new(), &mut out)?;
+    Ok(out)
+}
+
+/// The name a line declares, and whether it is private.
+fn declared(line: &str) -> Option<(&str, bool)> {
+    let mut words = line.split_whitespace();
+    let mut keyword = words.next()?;
+    let private = keyword == "private";
+    if private {
+        keyword = words.next()?;
+    }
+    matches!(keyword, "theorem" | "def" | "axiom").then(|| words.next().map(|n| (n, private)))?
+}
+
+/// Whether `name` is declared in `local`, or non-privately in `imported`.
+pub fn declares(imported: &str, local: &str, name: &str) -> bool {
+    imported
+        .lines()
+        .filter_map(declared)
+        .any(|(n, private)| n == name && !private)
+        || local.lines().filter_map(declared).any(|(n, _)| n == name)
+}
+
+/// The names `needs` lines of `code` ask for, with their line numbers.
+pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
+    code.lines().enumerate().filter_map(|(i, l)| {
+        let name = l.trim().strip_prefix("needs ")?.split_whitespace().next()?;
+        Some((i + 1, name))
+    })
+}
+
+/// The worker's axiom report for `code`: one declaration per line starting
+/// with `theorem`, `def` or `axiom`. Theorems depend on `sorryAx` if the code
+/// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, and on any
+/// axiom it declares. A "type hash" is the statement text between the name
+/// and `:=`.
+pub fn declarations(code: &str) -> String {
+    let mut used = vec!["propext".to_string()];
+    if code.contains("sorry") {
+        used.push("sorryAx".into());
+    }
+    if code.contains("native_decide") {
+        used.push("Lean.ofReduceBool".into());
+    }
+    let mut decls = Vec::new();
+    for line in code.lines() {
+        let mut words = line.split_whitespace();
+        let (Some(keyword), Some(name)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let statement = line
+            .split_once(name)
+            .map_or("", |(_, rest)| rest.split(":=").next().unwrap_or("").trim());
+        let (kind, axioms) = match keyword {
+            "axiom" => {
+                used.push(name.to_string());
+                ("axiom", vec![name.to_string()])
+            }
+            "def" => ("def", vec![]),
+            "theorem" => ("theorem", Vec::new()),
+            _ => continue,
+        };
+        decls.push((kind, name.to_string(), axioms, statement.to_string()));
+    }
+    let decls: Vec<Value> = decls
+        .into_iter()
+        .map(|(kind, name, axioms, statement)| {
+            let axioms = if kind == "theorem" {
+                used.clone()
+            } else {
+                axioms
+            };
+            json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement})
+        })
+        .collect();
+    Value::Array(decls).to_string()
+}

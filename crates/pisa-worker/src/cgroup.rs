@@ -77,6 +77,12 @@ impl Cgroups {
             .unwrap_or(0)
     }
 
+    /// Whether no process is in the slot's cgroup (true if it doesn't exist).
+    pub fn is_empty(&self, slot: usize) -> bool {
+        std::fs::read_to_string(self.slot_dir(slot).join("cgroup.procs"))
+            .map_or(true, |procs| procs.trim().is_empty())
+    }
+
     pub fn memory_current(&self, slot: usize) -> Option<u64> {
         std::fs::read_to_string(self.slot_dir(slot).join("memory.current"))
             .ok()?

@@ -12,8 +12,9 @@ use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplRespon
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
-use crate::launcher::Launcher;
+use crate::launcher::{Compiled, Launcher};
 use crate::policy::{Policy, header_with_report_import};
+use crate::snapshots::Snapshots;
 
 /// Succeeds only in an environment where the header's imports loaded.
 const IMPORT_PROBE: &str = "#check @Lean.Elab.Command.elabCommand";
@@ -33,6 +34,7 @@ pub struct Pool {
     warm: watch::Sender<BTreeMap<usize, String>>,
     restarts: mpsc::UnboundedSender<String>,
     launcher: Launcher,
+    snapshots: Arc<Snapshots>,
     cfg: PoolConfig,
 }
 
@@ -73,6 +75,7 @@ pub enum HeaderFailure {
 impl Pool {
     pub fn new(
         launcher: Launcher,
+        snapshots: Arc<Snapshots>,
         cfg: PoolConfig,
     ) -> (
         Arc<Self>,
@@ -99,6 +102,7 @@ impl Pool {
             warm,
             restarts,
             launcher,
+            snapshots,
             cfg,
         };
         (Arc::new(pool), warm_rx, restarts_rx)
@@ -106,6 +110,14 @@ impl Pool {
 
     pub fn slots(&self) -> usize {
         self.cfg.slots
+    }
+
+    pub fn policy(&self) -> &Policy {
+        &self.cfg.policy
+    }
+
+    pub fn snapshots(&self) -> &Arc<Snapshots> {
+        &self.snapshots
     }
 
     /// Waits for a free slot, preferring one that holds proof state `state`,
@@ -198,6 +210,23 @@ impl Lease {
     /// Makes sure this slot's process has `header` imported and returns its
     /// environment ID and whether it was already warm.
     pub async fn warm_up(&mut self, header: &str, key: &str) -> Result<(u64, bool), HeaderFailure> {
+        self.warm_up_with(header, key, None).await
+    }
+
+    /// Like [`warm_up`](Self::warm_up), but the header may import snapshot
+    /// `pending`, which this job built and has not stored yet.
+    pub async fn warm_up_with(
+        &mut self,
+        header: &str,
+        key: &str,
+        pending: Option<&str>,
+    ) -> Result<(u64, bool), HeaderFailure> {
+        // Even on a warm hit, so that a deleted snapshot stops working
+        // everywhere; and before evicting anything, so that a bad import
+        // doesn't cost a warm process.
+        if let Err(e) = self.pool.snapshots.ensure(header, pending).await {
+            return Err(HeaderFailure::Failed(e));
+        }
         let alive = self.repl.as_ref().is_some_and(Repl::is_alive);
         if alive && let Some(w) = self.header.as_ref().filter(|w| w.key == key) {
             return Ok((w.env, true));
@@ -311,6 +340,21 @@ impl Lease {
         self.pool.cfg.import_timeout
     }
 
+    /// Compiles a module in this slot's sandbox and cgroup; see
+    /// [`Launcher::compile`].
+    pub async fn compile(
+        &self,
+        root: &std::path::Path,
+        file: &std::path::Path,
+        olean: &std::path::Path,
+        timeout: Duration,
+    ) -> std::io::Result<Compiled> {
+        self.pool
+            .launcher
+            .compile(self.id, root, file, olean, timeout)
+            .await
+    }
+
     pub fn policy(&self) -> &Policy {
         &self.pool.cfg.policy
     }
@@ -331,6 +375,21 @@ impl Lease {
             tokio::spawn(async move { repl.kill().await });
             let _ = self.pool.restarts.send(cause.to_string());
         }
+        self.forget();
+    }
+
+    /// Like [`retire`](Self::retire), but returns only once the process, and
+    /// anything it started, has exited, so the slot's memory is free.
+    pub async fn retire_and_wait(&mut self, cause: &str) {
+        if let Some(mut repl) = self.repl.take() {
+            repl.kill().await;
+            let _ = self.pool.restarts.send(cause.to_string());
+        }
+        self.forget();
+        self.pool.launcher.wait_idle(self.id).await;
+    }
+
+    fn forget(&mut self) {
         self.states.clear();
         if self.header.take().is_some() {
             self.pool.set_warm(self.id, None);

@@ -5,6 +5,7 @@ pub mod api;
 pub mod header;
 pub mod repl;
 pub mod search;
+pub mod snapshot;
 pub mod verify;
 pub mod version;
 pub mod wire;

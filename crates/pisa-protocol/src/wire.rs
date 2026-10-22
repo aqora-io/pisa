@@ -60,6 +60,9 @@ pub enum Job {
     SessionStart(SessionStartJob),
     SessionTactic(SessionTacticJob),
     SessionCheck(SessionCheckJob),
+    SnapshotCreate(SnapshotCreateJob),
+    SnapshotGet(SnapshotJob),
+    SnapshotDelete(SnapshotJob),
     /// A job kind this worker doesn't know, sent by a newer router. It is
     /// answered with [`JobResult::Failed`] rather than dropping the connection.
     #[serde(other)]
@@ -93,12 +96,28 @@ pub struct SessionCheckJob {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotCreateJob {
+    pub code: String,
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotJob {
+    /// The snapshot's module name.
+    pub snapshot: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobResult {
     Check(CheckOutcome),
     SessionStarted(Result<api::StartResponse, api::Error>),
     TacticApplied(Result<api::TacticResponse, api::Error>),
     SessionChecked(SessionChecked),
+    /// Failures are in-band, in `result.error`, as for checks.
+    SnapshotCreated(Box<api::SnapshotResponse>),
+    Snapshot(Result<Box<api::SnapshotInfo>, api::Error>),
+    SnapshotDeleted(Result<api::Deleted, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,
@@ -117,6 +136,29 @@ pub struct CheckOutcome {
     pub verification: Option<Verification>,
     /// Whether the header was already imported in the process that ran the job.
     pub warm: bool,
+}
+
+impl From<CheckOutcome> for api::CheckResult {
+    fn from(o: CheckOutcome) -> Self {
+        let (messages, sorries) = o.response.map_or_else(Default::default, |r| {
+            let sorries = r.sorries.into_iter().map(Into::into).collect();
+            (api::messages(r.messages), sorries)
+        });
+        let (verified, reasons, declarations) =
+            o.verification.map_or((false, Vec::new(), Vec::new()), |v| {
+                (v.ok, v.reasons, v.declarations)
+            });
+        api::CheckResult {
+            id: None,
+            ok: verified && o.error.is_none(),
+            time: o.time,
+            error: o.error,
+            messages,
+            sorries,
+            reasons,
+            declarations,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

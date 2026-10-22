@@ -1756,6 +1756,7 @@ dependencies = [
 name = "pisa-tests"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "object_store",
  "pisa-client",
  "pisa-protocol",
@@ -1765,6 +1766,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "zstd",
 ]
 
 [[package]]

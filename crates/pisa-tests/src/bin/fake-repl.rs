@@ -5,23 +5,34 @@
 //! - `error_here` gives an error message on that line
 //! - `sorry` gives a warning and a sorry with a fresh proof state
 //! - `SLEEP <ms>` sleeps before answering; `CRASH` exits
+//! - `needs NAME` errors unless `NAME` is declared (see `pisa_tests`)
 //!
 //! Without `env`, a command is an import header; `import Missing` fails, and
 //! `import Clash` silently yields an empty environment, like the real REPL
 //! when two imported modules declare the same name: every `#check` in it fails.
+//! Snapshot modules (`import PisaSnap.s…`) are read from `LEAN_PATH`, with
+//! the snapshots they import.
 //! The worker's axiom report (`run_cmd` … `PISA_DECLS`) lists each `theorem`,
-//! `def` and `axiom` seen so far; theorems depend on `sorryAx` if the code used
-//! `sorry`, on `Lean.ofReduceBool` if it used `native_decide`, and on any
-//! declared axiom.
+//! `def` and `axiom` seen since the imports, or, for a module report, those
+//! of that module (see `pisa_tests::declarations`).
 //! Tactic `rfl` closes the goal, `fail` errors, anything else leaves a goal open.
 
 use std::io::{BufRead, Write};
 
+use pisa_tests::{declarations, declares, find_module, imported_code, needs};
 use serde_json::{Value, json};
 
 struct State {
-    envs: Vec<String>,
+    envs: Vec<Env>,
     goals: Vec<String>,
+}
+
+#[derive(Clone)]
+struct Env {
+    /// The code of the snapshot modules the header imports.
+    imported: String,
+    /// The header, then every command run since.
+    local: String,
 }
 
 fn main() {
@@ -73,7 +84,7 @@ fn respond(s: &mut State, input: &Value) -> Value {
             return step(s, vec![goal], "Incomplete: open goals remain");
         }
         let env = input["env"].as_u64().unwrap() as usize;
-        std::fs::write(path, json!({"env": s.envs[env]}).to_string()).unwrap();
+        std::fs::write(path, json!({"env": s.envs[env].local}).to_string()).unwrap();
         return json!({"env": env});
     }
     if let Some(path) = input.get("unpickleProofStateFrom").and_then(Value::as_str) {
@@ -114,26 +125,48 @@ fn apply_tactic(s: &mut State, goal: &str, tactic: &str) -> Value {
 }
 
 fn import(s: &mut State, header: &str) -> Value {
+    let empty = Env {
+        imported: String::new(),
+        local: String::new(),
+    };
     if let Some(line) = header.lines().position(|l| l.contains("import Missing")) {
-        s.envs.push(String::new());
+        s.envs.push(empty);
         return json!({"env": s.envs.len() - 1, "messages": [message(line + 1, "error",
             "unknown module prefix 'Missing'")]});
     }
+    let imported = match imported_code(header) {
+        Ok(code) => code,
+        Err(module) => {
+            s.envs.push(empty);
+            let error = format!("unknown module prefix '{module}'");
+            return json!({"env": s.envs.len() - 1, "messages": [message(1, "error", &error)]});
+        }
+    };
     if header.contains("import Slow") {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    s.envs.push(header.to_string());
+    s.envs.push(Env {
+        imported,
+        local: header.to_string(),
+    });
     json!({"env": s.envs.len() - 1})
 }
 
-fn run(s: &mut State, prev: &str, cmd: &str) -> Value {
+fn run(s: &mut State, prev: &Env, cmd: &str) -> Value {
     if cmd.starts_with("run_cmd") && cmd.contains("PISA_DECLS") {
-        s.envs.push(prev.to_string());
-        let report = format!("PISA_DECLS {}", declarations(prev));
+        let code = match cmd.split_once("getModuleIdx? `") {
+            None => prev.local.clone(),
+            Some((_, rest)) => {
+                let module = rest.split_whitespace().next().unwrap();
+                std::fs::read_to_string(find_module(module).unwrap()).unwrap()
+            }
+        };
+        s.envs.push(prev.clone());
+        let report = format!("PISA_DECLS {}", declarations(&code));
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
     }
-    if prev.contains("import Clash") && cmd.starts_with("#check") {
-        s.envs.push(prev.to_string());
+    if prev.local.contains("import Clash") && cmd.starts_with("#check") {
+        s.envs.push(prev.clone());
         return json!({"env": s.envs.len() - 1,
                       "messages": [message(1, "error", "Unknown identifier")]});
     }
@@ -168,7 +201,16 @@ fn run(s: &mut State, prev: &str, cmd: &str) -> Value {
             }));
         }
     }
-    s.envs.push(format!("{prev}\n{cmd}"));
+    let local = format!("{}\n{cmd}", prev.local);
+    for (n, name) in needs(cmd) {
+        if !declares(&prev.imported, &local, name) {
+            messages.push(message(n, "error", &format!("Unknown identifier `{name}`")));
+        }
+    }
+    s.envs.push(Env {
+        imported: prev.imported.clone(),
+        local,
+    });
     let mut out = json!({"env": s.envs.len() - 1});
     if !messages.is_empty() {
         out["messages"] = messages.into();
@@ -177,50 +219,6 @@ fn run(s: &mut State, prev: &str, cmd: &str) -> Value {
         out["sorries"] = sorries.into();
     }
     out
-}
-
-/// One declaration per line starting with `theorem`, `def` or `axiom`. Its
-/// "type hash" is the statement text between the name and `:=`.
-fn declarations(code: &str) -> String {
-    let mut used = vec!["propext".to_string()];
-    if code.contains("sorry") {
-        used.push("sorryAx".into());
-    }
-    if code.contains("native_decide") {
-        used.push("Lean.ofReduceBool".into());
-    }
-    let mut decls = Vec::new();
-    for line in code.lines() {
-        let mut words = line.split_whitespace();
-        let (Some(keyword), Some(name)) = (words.next(), words.next()) else {
-            continue;
-        };
-        let statement = line
-            .split_once(name)
-            .map_or("", |(_, rest)| rest.split(":=").next().unwrap_or("").trim());
-        let (kind, axioms) = match keyword {
-            "axiom" => {
-                used.push(name.to_string());
-                ("axiom", vec![name.to_string()])
-            }
-            "def" => ("def", vec![]),
-            "theorem" => ("theorem", Vec::new()),
-            _ => continue,
-        };
-        decls.push((kind, name.to_string(), axioms, statement.to_string()));
-    }
-    let decls: Vec<Value> = decls
-        .into_iter()
-        .map(|(kind, name, axioms, statement)| {
-            let axioms = if kind == "theorem" {
-                used.clone()
-            } else {
-                axioms
-            };
-            json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement})
-        })
-        .collect();
-    Value::Array(decls).to_string()
 }
 
 fn message(line: usize, severity: &str, data: &str) -> Value {

@@ -60,6 +60,7 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         allow_metaprogramming: false,
         store: StoreKind::Memory,
         state_ttl_secs: 0,
+        snapshot_confirm_secs: 60,
         drain_timeout_secs: 30,
     }
 }

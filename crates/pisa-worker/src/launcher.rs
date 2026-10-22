@@ -23,13 +23,27 @@ pub struct Launcher {
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
     env: Option<Vec<(OsString, OsString)>>,
+    /// The project's module search path plus the snapshot cache.
+    lean_path: OsString,
     sandbox: Sandbox,
     work_dir: PathBuf,
+    snapshot_root: PathBuf,
     cgroups: Option<Cgroups>,
 }
 
+/// What `lean -o` reported for one module.
+#[derive(Debug)]
+pub struct Compiled {
+    pub messages: Vec<Message>,
+    /// `None` when the time limit killed it.
+    pub status: Option<std::process::ExitStatus>,
+    pub stderr: String,
+    /// OOM kills in the slot's cgroup while it ran.
+    pub oom_kills: u64,
+}
+
 impl Launcher {
-    pub async fn new(cfg: &WorkerConfig, worker_id: &str) -> anyhow::Result<Self> {
+    pub async fn new(cfg: &WorkerConfig, worker_id: &str, version: &str) -> anyhow::Result<Self> {
         let env = match &cfg.project {
             Some(project) => Some(lake_env(project).await?),
             None => None,
@@ -40,6 +54,25 @@ impl Launcher {
             .unwrap_or_else(|| std::env::temp_dir().join(format!("pisa-{worker_id}")));
         std::fs::create_dir_all(&work_dir)
             .with_context(|| format!("creating {}", work_dir.display()))?;
+        // Snapshot modules live under `<root>/PisaSnap/`. Lean looks a module up
+        // only in the first search-path root that has its top-level directory, so
+        // this is the only root with one. It starts empty: modules are fetched
+        // again from the store, so nothing stale survives a restart.
+        let snapshot_root = work_dir.join("snapshots").join(version);
+        let _ = std::fs::remove_dir_all(&snapshot_root);
+        std::fs::create_dir_all(snapshot_root.join(pisa_protocol::snapshot::ROOT))
+            .with_context(|| format!("creating {}", snapshot_root.display()))?;
+        let base = env
+            .as_ref()
+            .and_then(|env| env.iter().find(|(k, _)| k == "LEAN_PATH"))
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var_os("LEAN_PATH"));
+        let lean_path = std::env::join_paths(
+            base.iter()
+                .flat_map(std::env::split_paths)
+                .chain([snapshot_root.clone()]),
+        )
+        .context("building LEAN_PATH")?;
         let cgroups = match &cfg.cgroup_root {
             None => None,
             Some(root) => {
@@ -60,8 +93,10 @@ impl Launcher {
             lean: cfg.lean.clone(),
             project: cfg.project.clone(),
             env,
+            lean_path,
             sandbox: cfg.sandbox,
             work_dir,
+            snapshot_root,
             cgroups,
         })
     }
@@ -70,6 +105,11 @@ impl Launcher {
     /// at the same path.
     pub fn slot_dir(&self, slot: usize) -> PathBuf {
         self.work_dir.join(format!("slot-{slot}"))
+    }
+
+    /// The search-path root of snapshot modules, read-only in the sandbox.
+    pub fn snapshot_root(&self) -> &Path {
+        &self.snapshot_root
     }
 
     pub fn spawn(&self, slot: usize) -> std::io::Result<Repl> {
@@ -90,7 +130,9 @@ impl Launcher {
             }
             Sandbox::Bwrap => {
                 let mut cmd = Command::new("bwrap");
-                cmd.args(bwrap_args(&dir, &cwd)).arg("--").arg(program);
+                cmd.args(bwrap_args(&dir, &self.snapshot_root, &cwd))
+                    .arg("--")
+                    .arg(program);
                 cmd
             }
         };
@@ -98,6 +140,7 @@ impl Launcher {
         if let Some(env) = &self.env {
             cmd.env_clear().envs(env.iter().cloned());
         }
+        cmd.env("LEAN_PATH", &self.lean_path);
         if let Some(cg) = &self.cgroups {
             cg.apply(slot, &mut cmd)?;
         }
@@ -139,6 +182,61 @@ impl Launcher {
             .collect()
     }
 
+    /// Compiles `file` to the module `olean`, named by its path below `root`,
+    /// set up like the slot's REPL (same environment, sandbox and cgroup).
+    pub async fn compile(
+        &self,
+        slot: usize,
+        root: &Path,
+        file: &Path,
+        olean: &Path,
+        timeout: Duration,
+    ) -> std::io::Result<Compiled> {
+        let before = self.oom_kills(slot);
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        let (root, file, olean) = (path(root), path(file), path(olean));
+        let args = ["-R", &root, "-o", &olean, "--json", &file];
+        let mut cmd = self.command(slot, &self.lean, &args)?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn()?;
+        let output = tokio::time::timeout(timeout, child.wait_with_output()).await;
+        let oom_kills = self.oom_kills(slot).saturating_sub(before);
+        let Ok(output) = output else {
+            return Ok(Compiled {
+                messages: Vec::new(),
+                status: None,
+                stderr: String::new(),
+                oom_kills,
+            });
+        };
+        let output = output?;
+        Ok(Compiled {
+            messages: String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect(),
+            status: Some(output.status),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            oom_kills,
+        })
+    }
+
+    /// Waits (up to two seconds) until no process is left in the slot's
+    /// cgroup, e.g. a sandboxed REPL that outlives the killed bwrap briefly.
+    pub async fn wait_idle(&self, slot: usize) {
+        let Some(cg) = &self.cgroups else { return };
+        for _ in 0..40 {
+            if cg.is_empty(slot) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        tracing::warn!(slot, "processes linger in the slot's cgroup");
+    }
+
     /// OOM kills so far in the slot's cgroup (0 without cgroups).
     pub fn oom_kills(&self, slot: usize) -> u64 {
         self.cgroups.as_ref().map_or(0, |c| c.oom_kills(slot))
@@ -156,8 +254,9 @@ impl Launcher {
 }
 
 /// No network, no view of other processes, a read-only filesystem except
-/// for the slot directory, and a fresh /tmp.
-fn bwrap_args(slot_dir: &Path, cwd: &Path) -> Vec<OsString> {
+/// for the slot directory, and a fresh /tmp. The snapshot cache is bound
+/// read-only after the tmpfs, since it usually lives under /tmp.
+fn bwrap_args(slot_dir: &Path, snapshot_root: &Path, cwd: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "--unshare-all",
         "--die-with-parent",
@@ -176,6 +275,11 @@ fn bwrap_args(slot_dir: &Path, cwd: &Path) -> Vec<OsString> {
     .map(OsString::from)
     .collect();
     args.extend(["--bind".into(), slot_dir.into(), slot_dir.into()]);
+    args.extend([
+        "--ro-bind".into(),
+        snapshot_root.into(),
+        snapshot_root.into(),
+    ]);
     args.extend(["--chdir".into(), cwd.into()]);
     args
 }

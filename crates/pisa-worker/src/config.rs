@@ -72,6 +72,10 @@ pub struct WorkerConfig {
     /// Delete stored proof states and sessions older than this (0 keeps them).
     #[arg(long, env = "PISA_STATE_TTL_SECS", default_value_t = 0)]
     pub state_ttl_secs: u64,
+    /// How long a lookup in the store vouches for a snapshot this worker has
+    /// cached. A deleted snapshot keeps working here for at most this long.
+    #[arg(long, env = "PISA_SNAPSHOT_CONFIRM_SECS", default_value_t = 60)]
+    pub snapshot_confirm_secs: u64,
     /// On shutdown, how long to wait for in-flight jobs before exiting anyway.
     #[arg(long, env = "PISA_DRAIN_TIMEOUT_SECS", default_value_t = 600)]
     pub drain_timeout_secs: u64,

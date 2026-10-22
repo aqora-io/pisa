@@ -16,7 +16,9 @@ use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{Job, JobResult, SessionCheckJob, SessionStartJob, SessionTacticJob};
 
 use crate::dispatch::{Priority, Route};
-use crate::http::{ApiError, App, Body, check_result, failed_result, record_rejection};
+use crate::http::{
+    ApiError, App, Body, check_result, failed_result, prewarm_header, record_rejection,
+};
 use crate::metrics as m;
 
 /// Bound on remembered state locations; the map is reset when it fills up.
@@ -46,7 +48,7 @@ fn parse_key(id: &str) -> Result<Key, ApiError> {
     Key::parse(id).ok_or_else(|| ApiError::new(ErrorKind::BadRequest, format!("invalid key: {id}")))
 }
 
-fn unexpected(result: JobResult) -> ApiError {
+pub(crate) fn unexpected(result: JobResult) -> ApiError {
     let message = match result {
         JobResult::Failed { error } => error,
         other => format!("unexpected worker result: {other:?}"),
@@ -67,7 +69,7 @@ pub async fn start(
     let route = Route {
         version: app.versions.resolve(req.version.as_deref()),
         header_key: Some(split.header_key),
-        header: Some(split.header),
+        header: prewarm_header(split.header),
         affinity: None,
     };
     let job = Job::SessionStart(SessionStartJob {
