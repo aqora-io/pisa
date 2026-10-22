@@ -25,4 +25,5 @@ pisa-router.workspace = true
 pisa-worker.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 tokio.workspace = true

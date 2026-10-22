@@ -21,6 +21,9 @@ pub struct Cluster {
     pub client: reqwest::Client,
     /// Shared by all workers, standing in for S3.
     pub store: Arc<dyn ObjectStore>,
+    /// Workers' scratch space, private to this cluster so that tests running
+    /// in parallel with the same worker names don't share files.
+    pub dir: tempfile::TempDir,
 }
 
 pub fn router_config() -> RouterConfig {
@@ -81,6 +84,7 @@ impl Cluster {
             workers: Vec::new(),
             client: reqwest::Client::new(),
             store: Arc::new(InMemory::new()),
+            dir: tempfile::tempdir().unwrap(),
         };
         for (name, version, slots) in workers {
             cluster.add_worker(tweak(worker_config(
@@ -109,9 +113,12 @@ impl Cluster {
 
     fn spawn_worker(
         &mut self,
-        cfg: WorkerConfig,
+        mut cfg: WorkerConfig,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) {
+        let name = cfg.worker_id.clone().unwrap_or_default();
+        cfg.work_dir
+            .get_or_insert_with(|| self.dir.path().join(name));
         let store = self.store.clone();
         self.workers.push(tokio::spawn(async move {
             pisa_worker::run_with_store(cfg, store, shutdown)
