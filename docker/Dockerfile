@@ -65,15 +65,21 @@ EXPOSE 8100
 ENTRYPOINT ["pisa-search"]
 CMD ["serve"]
 
-# Exports every declaration of the project (about 25 minutes) and ingests it.
+# Exports every declaration of the project (about 40 minutes) and ingests it.
+# QuantumInfo can't be imported alongside Mathlib (both declare
+# `Commute.log_left`), so it comes from a second environment and its
+# declarations record the header that loads them.
 FROM lean AS search-export
 COPY search/exporter /opt/exporter
 COPY --from=build-search /usr/local/bin/pisa-search /usr/local/bin/
 RUN lake env lean --run /opt/exporter/PisaExport.lean --env mathlib-physlib Mathlib Physlib \
         > /tmp/decls.ndjson \
+    && lake env lean --run /opt/exporter/PisaExport.lean --env physlib-quantuminfo Physlib QuantumInfo \
+        > /tmp/quantuminfo.ndjson \
     && lake env lean --run /opt/exporter/ToAdditive.lean Mathlib Physlib > /tmp/additive.ndjson \
-    && pisa-search ingest --export /tmp/decls.ndjson --export /tmp/additive.ndjson \
-        --project /opt/project --out /corpus
+    && pisa-search ingest --export /tmp/decls.ndjson --export /tmp/quantuminfo.ndjson \
+        --export /tmp/additive.ndjson --project /opt/project --out /corpus \
+        --env-imports "physlib-quantuminfo=import Physlib; import QuantumInfo"
 
 FROM scratch AS corpus
 COPY --from=search-export /corpus /

@@ -134,6 +134,10 @@ pub struct Flags {
     /// The `to_additive` counterpart, folded into this hit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additive_sibling: Option<String>,
+    /// The import header that loads it, when the index's default header
+    /// (`import Mathlib` and `import Physlib`) doesn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -44,6 +44,12 @@ pub struct Decl {
     pub concl_keys: Vec<String>,
     #[serde(default)]
     pub additive_sibling: Option<String>,
+    /// The exporter environment it came from; only read during ingest.
+    #[serde(default, skip_serializing)]
+    pub env: String,
+    /// The import header that loads it, when not the default one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<String>,
     /// Hash of the name, signature and docstring.
     #[serde(default)]
     pub statement_hash: String,
@@ -120,11 +126,13 @@ fn hash(parts: &[&str]) -> String {
 }
 
 /// Reads exporter output (plain or `.zst`, one or more files) into a corpus
-/// with hashes.
+/// with hashes. A declaration in several exports keeps its first copy.
+/// Declarations from an environment in `env_imports` record its header.
 pub fn ingest(
     exports: &[&Path],
     env_id: String,
     lake_manifest: Option<&Path>,
+    env_imports: &BTreeMap<String, String>,
 ) -> anyhow::Result<Corpus> {
     let mut decls = Vec::new();
     let mut modules = Vec::new();
@@ -147,6 +155,10 @@ pub fn ingest(
     decls.retain(|d| !is_syntax(d));
     decls.sort_by(|a, b| a.name.cmp(&b.name));
     decls.dedup_by(|a, b| a.name == b.name);
+    for d in &mut decls {
+        d.imports = env_imports.get(&d.env).cloned();
+        d.env.clear();
+    }
     let index: HashMap<String, usize> = decls
         .iter()
         .enumerate()
@@ -434,7 +446,13 @@ pub mod tests {
                        {"name":"Physlib","url":"https://github.com/leanprover-community/physlib.git","rev":"def"}]}"#;
         let lake_path = dir.path().join("lake-manifest.json");
         std::fs::write(&lake_path, lake).unwrap();
-        let corpus = ingest(&[export.as_path()], "v4.35.0-x".into(), Some(&lake_path)).unwrap();
+        let corpus = ingest(
+            &[export.as_path()],
+            "v4.35.0-x".into(),
+            Some(&lake_path),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(
             corpus
                 .decls
@@ -457,5 +475,54 @@ pub mod tests {
         let back = Corpus::read(&out).unwrap();
         assert_eq!(back.decls, corpus.decls);
         assert_eq!(back.modules[0].doc, "About M.");
+    }
+
+    #[test]
+    fn second_environment_adds_its_own_declarations_with_their_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.ndjson");
+        std::fs::write(
+            &main,
+            r#"{"record":"decl","env":"main","name":"a","kind":"def","module":"Mathlib.A","library":"Mathlib","signature":"a : Nat","type_pp_full":"Nat"}"#,
+        )
+        .unwrap();
+        let qi = dir.path().join("qi.ndjson");
+        std::fs::write(
+            &qi,
+            concat!(
+                r#"{"record":"decl","env":"qi","name":"a","kind":"def","module":"QuantumInfo.A","library":"QuantumInfo","signature":"a : Int","type_pp_full":"Int"}"#,
+                "\n",
+                r#"{"record":"decl","env":"qi","name":"MState","kind":"structure","module":"QuantumInfo.MState","library":"QuantumInfo","signature":"MState : Type","type_pp_full":"Type"}"#,
+            ),
+        )
+        .unwrap();
+        let headers = BTreeMap::from([(
+            "qi".to_string(),
+            "import Physlib; import QuantumInfo".to_string(),
+        )]);
+        let c = ingest(
+            &[main.as_path(), qi.as_path()],
+            "v4.35.0-x".into(),
+            None,
+            &headers,
+        )
+        .unwrap();
+        // The first export's copy of a shared name wins.
+        assert_eq!(
+            (c.decls[0].name.as_str(), c.decls[0].library.as_str()),
+            ("MState", "QuantumInfo")
+        );
+        assert_eq!(
+            c.decls[0].imports.as_deref(),
+            Some("import Physlib; import QuantumInfo")
+        );
+        assert_eq!(
+            (c.decls[1].name.as_str(), c.decls[1].library.as_str()),
+            ("a", "Mathlib")
+        );
+        assert_eq!(c.decls[1].imports, None);
+        let out = dir.path().join("corpus");
+        c.write(&out).unwrap();
+        assert_eq!(Corpus::read(&out).unwrap().decls, c.decls);
     }
 }

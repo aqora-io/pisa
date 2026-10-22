@@ -299,9 +299,12 @@ search tests, first run `cargo build -p pisa-search`.
 - `search/pilot/2026-10-22/report.md`: the informalization pilot, with cost,
   a full-run estimate, check pass rates and samples to review.
 
-**Imports.** The index covers `import Mathlib` together with `import Physlib`.
-Standalone QuantumInfo can't be imported alongside Mathlib, because both
-declare `Commute.log_left`. pisa reports that clash as a header error.
+**Imports.** Most of the index loads with `import Mathlib` and `import Physlib`.
+QuantumInfo (density matrices, entropies, channels) can't be imported
+alongside Mathlib, because both declare `Commute.log_left`; pisa reports that
+clash as a header error. Its declarations are exported from a second
+environment, and each hit carries the header that loads it in
+`flags.imports` (`import Physlib; import QuantumInfo`) and in its `text`.
 
 ## Verification policy
 

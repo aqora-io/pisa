@@ -55,6 +55,9 @@ pub struct StoredDecl {
     pub additive_sibling: Option<String>,
     #[serde(default)]
     pub uses_sorry: bool,
+    /// The import header that loads it, when not the default one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<String>,
     /// A Physlib informal result (stated, not proved).
     #[serde(default)]
     pub informal_result: bool,
@@ -274,6 +277,7 @@ fn stored_decl(
         additive_sibling: d.additive_sibling.clone(),
         uses_sorry: d.uses_sorry,
         informal_result: d.informal,
+        imports: d.imports.clone(),
         informal,
         source_url: corpus::source_url(&corpus.manifest.sources, d),
         deps,

@@ -602,6 +602,7 @@ fn flags(d: &StoredDecl, sibling: Option<String>) -> Flags {
         informal: d.informal_result,
         deprecated_to: d.deprecated_to.clone(),
         additive_sibling: sibling.or_else(|| d.additive_sibling.clone()),
+        imports: d.imports.clone(),
     }
 }
 
@@ -669,6 +670,9 @@ fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) -> Str
     }
     if let Some(s) = &flags.additive_sibling {
         notes.push(format!("additive/multiplicative counterpart: {s}"));
+    }
+    if let Some(h) = &flags.imports {
+        notes.push(format!("load with `{h}` instead of the default imports"));
     }
     if !notes.is_empty() {
         out.push_str("\n   ⚠ ");

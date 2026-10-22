@@ -98,6 +98,7 @@ class Flags(TypedDict):
     informal: NotRequired[bool]
     deprecated_to: NotRequired[str]
     additive_sibling: NotRequired[str]
+    imports: NotRequired[str]
 
 class Hit(TypedDict):
     name: str
