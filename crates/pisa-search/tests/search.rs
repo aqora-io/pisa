@@ -185,6 +185,26 @@ fn corpus() -> Corpus {
             )
         },
         D {
+            doc: Some("Equality of matrices built from their entries; trace helper."),
+            ..d(
+                "Matrix.mk.injEq",
+                "theorem",
+                "Mathlib",
+                "Matrix.mk.injEq : trace",
+                &[],
+            )
+        },
+        D {
+            doc: Some("A tactic helper for the trace of a matrix."),
+            ..d(
+                "Mathlib.Tactic.TraceHelper.trace_matrix",
+                "def",
+                "Mathlib",
+                "Mathlib.Tactic.TraceHelper.trace_matrix : Unit",
+                &[],
+            )
+        },
+        D {
             doc: Some("The Lorentz group is connected."),
             ..d(
                 "LorentzGroup.isConnected",
@@ -534,4 +554,82 @@ async fn rust_client() {
             .unwrap()[0]
             .exists
     );
+}
+
+#[test]
+fn queries_skip_blanks_noise_and_bad_filters() {
+    let (_d, e) = engine();
+    let names = |q: Query| {
+        e.search(&q)
+            .hits
+            .into_iter()
+            .map(|h| h.name)
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        names(Query {
+            q: Some("   ".into()),
+            ..Default::default()
+        })
+        .is_empty()
+    );
+    assert!(
+        names(Query {
+            nl: Some("trace".into()),
+            k: 0,
+            ..Default::default()
+        })
+        .is_empty()
+    );
+
+    // Generated helpers and tooling stay out of results unless named exactly.
+    let trace = names(Query {
+        nl: Some("trace of a matrix".into()),
+        k: 20,
+        ..Default::default()
+    });
+    assert!(trace.contains(&"Matrix.trace".to_string()), "{trace:?}");
+    assert!(
+        !trace
+            .iter()
+            .any(|n| n.contains("injEq") || n.contains("Tactic")),
+        "{trace:?}"
+    );
+    assert_eq!(
+        names(Query {
+            q: Some("Matrix.mk.injEq".into()),
+            k: 1,
+            ..Default::default()
+        }),
+        ["Matrix.mk.injEq"]
+    );
+
+    // So does a declaration that depends on sorry, flagged.
+    let sorried = "QuantumMechanics.HarmonicOscillator.eigenstates_orthonormal";
+    let hits = e
+        .search(&Query {
+            q: Some(sorried.into()),
+            k: 1,
+            ..Default::default()
+        })
+        .hits;
+    assert_eq!(hits[0].name, sorried);
+    assert!(hits[0].flags.uses_sorry);
+
+    let mut q = Query {
+        libraries: vec!["physlib".into()],
+        kinds: vec!["THEOREM".into()],
+        ..Default::default()
+    };
+    e.check_filters(&mut q).unwrap();
+    assert_eq!(
+        (q.libraries, q.kinds),
+        (vec!["Physlib".to_string()], vec!["theorem".to_string()])
+    );
+    let mut q = Query {
+        libraries: vec!["nope".into()],
+        ..Default::default()
+    };
+    let err = e.check_filters(&mut q).unwrap_err();
+    assert!(err.contains("known: Mathlib, Physlib"), "{err}");
 }

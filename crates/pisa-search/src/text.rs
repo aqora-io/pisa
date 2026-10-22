@@ -356,9 +356,47 @@ pub fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+/// Undoes LaTeX that was written into JSON unescaped, as in some LeanSearch v2
+/// records and a few model outputs: `\times` was read as a tab and `imes`, `\frac` as a form
+/// feed, `\rho` as a carriage return, `\beta` as a backspace. A newline
+/// followed by a letter inside `$…$` was `\n…` (`\nabla`, `\neq`, `\nu`).
+pub fn repair_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_math = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' => {
+                in_math = !in_math;
+                out.push(c);
+            }
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\u{c}' => out.push_str("\\f"),
+            '\u{8}' => out.push_str("\\b"),
+            '\n' if in_math && chars.peek().is_some_and(|n| n.is_ascii_lowercase()) => {
+                out.push_str("\\n")
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repairs_latex_read_as_control_characters() {
+        // As the faulty records decode: tab, form feed, carriage return, backspace, newline.
+        let broken = "the $ n \times n $ matrix, $\u{c}rac{1}{2}$, $\rho \to \\sigma$, $\u{8}eta$, $\nabla f$\nnext line";
+        assert_eq!(
+            repair_escapes(broken),
+            "the $ n \\times n $ matrix, $\\frac{1}{2}$, $\\rho \\to \\sigma$, $\\beta$, $\\nabla f$\nnext line"
+        );
+        assert_eq!(repair_escapes("plain $x$"), "plain $x$");
+    }
 
     #[test]
     fn names_split_on_dots_underscores_and_camel_case() {

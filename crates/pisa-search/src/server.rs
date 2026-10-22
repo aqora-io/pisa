@@ -88,15 +88,19 @@ async fn health(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
 
 async fn search(
     State(engine): State<Arc<Engine>>,
-    Body(req): Body<SearchRequest>,
+    Body(mut req): Body<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     check_env(&engine, req.env_id.as_deref())?;
     check_batch(req.queries.len())?;
+    for q in &mut req.queries {
+        engine
+            .check_filters(q)
+            .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    }
     let env_id = engine.env_id().to_string();
-    let results =
-        tokio::task::spawn_blocking(move || req.queries.iter().map(|q| engine.search(q)).collect())
-            .await
-            .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
+    let results = tokio::task::spawn_blocking(move || engine.search_batch(&req.queries))
+        .await
+        .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
     Ok(Json(SearchResponse { env_id, results }))
 }
 

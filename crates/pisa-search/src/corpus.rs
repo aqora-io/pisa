@@ -215,6 +215,47 @@ const SYNTAX_TYPES: &[&str] = &[
     "Lean.Elab.Tactic.Tactic",
 ];
 
+/// Auxiliary declarations Lean generates that the exporter's `isAutoDecl`
+/// doesn't catch (`ctorIdx`, `sizeOf_spec`, `injEq`, ...).
+const GENERATED: &[&str] = &[
+    "ctorIdx",
+    "ctorElim",
+    "ctorElimType",
+    "ofNat_ctorIdx",
+    "sizeOf_spec",
+    "injEq",
+    "inj",
+    "congr_simp",
+    "noConfusion",
+    "noConfusionType",
+    "eq_def",
+    "below",
+    "ibelow",
+    "brecOn",
+    "binductionOn",
+    "recOn",
+    "casesOn",
+];
+
+pub fn is_generated(name: &str) -> bool {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    GENERATED.contains(&last)
+        || last
+            .strip_prefix("eq_")
+            .is_some_and(|n| n.parse::<u32>().is_ok())
+}
+
+/// Metaprogramming and implementation internals (`Mathlib.Tactic.…`,
+/// `Nat.Internal.…`, `Lean.…`), which mathematical searches don't want.
+pub fn is_tooling(name: &str) -> bool {
+    let mut parts: Vec<&str> = name.split('.').collect();
+    parts.pop();
+    matches!(parts.first(), Some(&("Lean" | "Lake")))
+        || parts
+            .iter()
+            .any(|p| matches!(*p, "Tactic" | "Meta" | "Internal"))
+}
+
 pub fn is_syntax(d: &Decl) -> bool {
     SYNTAX_TYPES.contains(&d.type_pp_full.as_str())
 }

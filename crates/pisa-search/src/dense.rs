@@ -67,7 +67,10 @@ pub fn quantize(v: &[f32]) -> Vec<i8> {
 pub struct Embedder {
     url: String,
     api: Api,
+    /// For bulk embedding: patient, and retries rate limits and server errors.
     http: reqwest::blocking::Client,
+    /// For search queries: fails fast, so a search degrades rather than waits.
+    query_http: reqwest::blocking::Client,
 }
 
 #[derive(Clone)]
@@ -104,11 +107,15 @@ impl Embedder {
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(600))
             .build()?;
+        let query_http = reqwest::blocking::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .build()?;
         let Some(rest) = spec.strip_prefix("openai+") else {
             return Ok(Embedder {
                 url: spec.trim_end_matches('/').to_string(),
                 api: Api::Tei,
                 http,
+                query_http,
             });
         };
         let mut url = url::Url::parse(rest)?;
@@ -133,10 +140,33 @@ impl Embedder {
                 key,
             },
             http,
+            query_http,
         })
     }
 
     pub fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.embed_with(&self.http, texts, None)
+    }
+
+    /// Search queries, in one request: no retries, and a timeout of 8 s
+    /// plus 0.1 s per query.
+    pub fn embed_queries(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let timeout = std::time::Duration::from_millis(8000 + 100 * texts.len() as u64);
+        self.embed_with(&self.query_http, texts, Some(timeout))
+    }
+
+    fn embed_with(
+        &self,
+        http: &reqwest::blocking::Client,
+        texts: &[String],
+        // Set for queries, which fail fast instead of retrying.
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
+        let retry = timeout.is_none();
+        let with_timeout = |r: reqwest::blocking::RequestBuilder| match timeout {
+            Some(t) => r.timeout(t),
+            None => r,
+        };
         let vectors = match &self.api {
             Api::Tei => {
                 let req = TeiRequest {
@@ -144,9 +174,7 @@ impl Embedder {
                     normalize: true,
                     truncate: true,
                 };
-                let r = self
-                    .http
-                    .post(format!("{}/embed", self.url))
+                let r = with_timeout(http.post(format!("{}/embed", self.url)))
                     .json(&req)
                     .send()?
                     .error_for_status()?;
@@ -157,16 +185,14 @@ impl Embedder {
                 let mut attempt = 0;
                 let r = loop {
                     attempt += 1;
-                    let mut req = self
-                        .http
-                        .post(format!("{}/embeddings", self.url))
-                        .json(&body);
+                    let mut req =
+                        with_timeout(http.post(format!("{}/embeddings", self.url)).json(&body));
                     if let Some(key) = key {
                         req = req.bearer_auth(key);
                     }
                     let r = req.send()?;
                     let status = r.status().as_u16();
-                    if (status == 429 || status >= 500) && attempt < 6 {
+                    if retry && (status == 429 || status >= 500) && attempt < 6 {
                         tracing::warn!(status, attempt, "embedding request failed, retrying");
                         std::thread::sleep(std::time::Duration::from_secs(1 << attempt));
                         continue;
@@ -383,18 +409,19 @@ impl Dense {
         scored.into_iter().map(|(_, id)| id).collect()
     }
 
-    /// Declaration ids nearest to `text`, or `None` without an embedder.
-    pub fn search(&self, text: &str, n: usize) -> Option<Vec<u32>> {
+    /// For each text, the declaration ids nearest to it, from one embedding
+    /// request; `None` without an embedder, an error when the embedder failed.
+    pub fn search_many(&self, texts: &[&str], n: usize) -> Option<anyhow::Result<Vec<Vec<u32>>>> {
         let embedder = self.embedder.as_ref()?;
-        let query = format!("{QUERY_INSTRUCTION}{text}");
-        match embedder.embed(&[query]) {
-            Ok(mut v) if !v.is_empty() => Some(self.nearest(&v.swap_remove(0), n)),
-            Ok(_) => None,
-            Err(e) => {
-                tracing::warn!("query embedding failed: {e}");
-                None
-            }
-        }
+        let queries: Vec<String> = texts
+            .iter()
+            .map(|t| format!("{QUERY_INSTRUCTION}{t}"))
+            .collect();
+        Some(
+            embedder
+                .embed_queries(&queries)
+                .map(|vs| vs.iter().map(|v| self.nearest(v, n)).collect()),
+        )
     }
 }
 

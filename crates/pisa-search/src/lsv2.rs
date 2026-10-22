@@ -109,8 +109,8 @@ pub fn import(path: &Path, decls: &[Decl]) -> anyhow::Result<(Vec<Entry>, Report
             content_hash: d.content_hash.clone(),
             name: d.name.clone(),
             informal: Informal {
-                informal_name,
-                statement_nl: description,
+                informal_name: crate::text::repair_escapes(&informal_name),
+                statement_nl: crate::text::repair_escapes(&description),
                 source: SOURCE.into(),
                 ..Default::default()
             },
@@ -149,6 +149,7 @@ fn compatible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::corpus::tests::decl;
 
     #[test]

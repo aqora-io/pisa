@@ -224,8 +224,10 @@ declarations it returns exist in the matching worker pool.
   worse; see `search/bench/2026-10-22/report.md`.
 
 PageRank over the dependency graph is a prior. Declarations that depend on
-`sorry` are hidden unless `include_sorried` is set. Deprecated aliases and
-`to_additive` pairs fold into one hit.
+`sorry` are hidden unless `include_sorried` is set, and so are Lean-generated
+helpers (`….mk.injEq`) and metaprogramming internals (`Mathlib.Tactic.…`);
+any of them is still returned, flagged, when a query names it exactly.
+Deprecated aliases and `to_additive` pairs fold into one hit.
 
 **Descriptions.** Mathlib declarations reuse LeanSearch v2's descriptions
 (Apache-2.0, see `search/NOTICE`), matched by name and by the constants in
@@ -278,8 +280,11 @@ Each hit carries:
 - the lanes that found it, and a source link;
 - `text`, about 150 tokens ready for a model's context.
 
-Unknown names and empty results are answers, not errors. Pinning an `env_id`
-the server doesn't have is a 404.
+Unknown names and empty results are answers, not errors. A `libraries` or
+`kinds` filter matches case-insensitively; an unknown one is a 400 that lists
+the known ones. Pinning an `env_id` the server doesn't have is a 404. If the
+embedding API fails, the query still returns results from the other lanes,
+after at most a few seconds, and says so in the result's `warnings`.
 
 ```python
 from pisa_client import SearchClient

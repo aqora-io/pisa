@@ -142,29 +142,7 @@ impl Config {
     }
 }
 
-/// Auxiliary declarations Lean generates that the exporter's `isAutoDecl`
-/// doesn't catch (`ctorIdx`, `sizeOf_spec`, `injEq`, ...).
-const GENERATED: &[&str] = &[
-    "ctorIdx",
-    "ctorElim",
-    "ctorElimType",
-    "ofNat_ctorIdx",
-    "sizeOf_spec",
-    "injEq",
-    "inj",
-    "congr_simp",
-    "noConfusion",
-    "noConfusionType",
-    "eq_def",
-];
-
-pub fn is_generated(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    GENERATED.contains(&last)
-        || last
-            .strip_prefix("eq_")
-            .is_some_and(|n| n.parse::<u32>().is_ok())
-}
+pub use crate::corpus::is_generated;
 
 /// Declarations worth an LLM description. Instances (and what `deriving`
 /// generates inside them) are found through their class, structures' `mk`
@@ -591,9 +569,10 @@ impl<'a> Context<'a> {
             content_hash: d.content_hash.clone(),
             name: d.name.clone(),
             informal: Informal {
-                informal_name: out.informal_name,
-                statement_nl: out.statement_nl,
-                statement_latex: Some(out.statement_latex).filter(|s| !s.trim().is_empty()),
+                informal_name: crate::text::repair_escapes(&out.informal_name),
+                statement_nl: crate::text::repair_escapes(&out.statement_nl),
+                statement_latex: Some(crate::text::repair_escapes(&out.statement_latex))
+                    .filter(|s| !s.trim().is_empty()),
                 aliases: out.aliases,
                 source: r.model.clone(),
             },

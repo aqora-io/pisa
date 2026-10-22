@@ -8,6 +8,7 @@ use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query as TQuery, TermQuery
 use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::{IndexReader, TantivyDocument, Term};
 
+use crate::corpus::{is_generated, is_tooling};
 use crate::index::{Bundle, StoredDecl};
 use crate::symbols::Symbols;
 use crate::text::{latex_to_unicode, lean_identifiers, levenshtein, tokens};
@@ -92,6 +93,7 @@ pub struct Engine {
     by_last: HashMap<String, Vec<u32>>,
     used_by: Vec<Vec<u32>>,
     symbols: Symbols,
+    kinds: std::collections::BTreeSet<String>,
     pub dense: Option<crate::dense::Dense>,
 }
 
@@ -127,12 +129,22 @@ pub fn classify(q: &str) -> &'static str {
 }
 
 pub fn parse(q: &Query) -> Parsed {
+    // Blank fields count as absent.
+    let field = |f: &Option<String>| {
+        f.as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+    };
     let mut p = Parsed::default();
-    let mut nl = q.nl.clone();
-    let mut latex = q.latex.clone();
-    let mut lean: Vec<String> = q.pattern.iter().chain(&q.goal).cloned().collect();
-    p.name = q.name.clone();
-    if let Some(text) = &q.q {
+    let mut nl = field(&q.nl);
+    let mut latex = field(&q.latex);
+    let mut lean: Vec<String> = field(&q.pattern)
+        .into_iter()
+        .chain(field(&q.goal))
+        .collect();
+    p.name = field(&q.name);
+    if let Some(text) = &field(&q.q) {
         match classify(text) {
             "lean" => lean.push(text.clone()),
             "latex" => latex = Some(latex.map_or(text.clone(), |l| format!("{l} {text}"))),
@@ -196,6 +208,7 @@ impl Engine {
             users.truncate(50);
         }
         let symbols = symbols.retain_known(|n| by_name.contains_key(n));
+        let bundle_kinds = bundle.decls.iter().map(|d| d.kind.clone()).collect();
         Ok(Engine {
             bundle,
             weights: Weights::default(),
@@ -205,8 +218,31 @@ impl Engine {
             by_last,
             used_by,
             symbols,
+            kinds: bundle_kinds,
             dense,
         })
+    }
+
+    /// Spells a query's library and kind filters as the index does, matching
+    /// case-insensitively; an unknown one is an error listing the known ones.
+    pub fn check_filters(&self, q: &mut Query) -> Result<(), String> {
+        let libraries: Vec<&String> = self.bundle.manifest.libraries.keys().collect();
+        let kinds: Vec<&String> = self.kinds.iter().collect();
+        for (wanted, known, what) in [
+            (&mut q.libraries, &libraries, "library"),
+            (&mut q.kinds, &kinds, "kind"),
+        ] {
+            for w in wanted.iter_mut() {
+                match known.iter().find(|k| k.eq_ignore_ascii_case(w)) {
+                    Some(k) => *w = k.to_string(),
+                    None => {
+                        let names: Vec<String> = known.iter().map(|k| k.to_string()).collect();
+                        return Err(format!("unknown {what} {w:?}; known: {}", names.join(", ")));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn env_id(&self) -> &str {
@@ -225,9 +261,71 @@ impl Engine {
         self.search_with(q, Lanes::ALL)
     }
 
+    /// Several queries, embedded for the dense lane in one request and
+    /// otherwise searched in parallel; results in order.
+    pub fn search_batch(&self, queries: &[Query]) -> Vec<QueryResult> {
+        use rayon::prelude::*;
+        let parsed: Vec<Parsed> = queries.iter().map(parse).collect();
+        let wanted: Vec<usize> = (0..queries.len())
+            .filter(|&i| queries[i].k > 0 && !parsed[i].dense_text.is_empty())
+            .collect();
+        let mut dense: Vec<Option<Result<Vec<u32>, String>>> = vec![None; queries.len()];
+        if let Some(d) = &self.dense
+            && !wanted.is_empty()
+        {
+            let texts: Vec<&str> = wanted
+                .iter()
+                .map(|&i| parsed[i].dense_text.as_str())
+                .collect();
+            match d.search_many(&texts, LANE_DEPTH) {
+                Some(Ok(found)) => {
+                    for (&i, ids) in wanted.iter().zip(found) {
+                        dense[i] = Some(Ok(ids));
+                    }
+                }
+                Some(Err(e)) => {
+                    for &i in &wanted {
+                        dense[i] = Some(Err(e.to_string()));
+                    }
+                }
+                None => {}
+            }
+        }
+        queries
+            .par_iter()
+            .zip(parsed)
+            .zip(dense)
+            .map(|((q, p), d)| self.search_parsed(q, p, Lanes::ALL, d))
+            .collect()
+    }
+
     pub fn search_with(&self, q: &Query, use_lanes: Lanes) -> QueryResult {
-        let w = &self.weights;
         let parsed = parse(q);
+        let dense = match &self.dense {
+            Some(d) if use_lanes.dense && q.k > 0 && !parsed.dense_text.is_empty() => d
+                .search_many(&[parsed.dense_text.as_str()], LANE_DEPTH)
+                .map(|r| {
+                    r.map(|mut v| v.pop().unwrap_or_default())
+                        .map_err(|e| e.to_string())
+                }),
+            _ => None,
+        };
+        self.search_parsed(q, parsed, use_lanes, dense)
+    }
+
+    /// `dense`: the dense lane's ids for this query, or why there are none.
+    fn search_parsed(
+        &self,
+        q: &Query,
+        parsed: Parsed,
+        use_lanes: Lanes,
+        dense: Option<Result<Vec<u32>, String>>,
+    ) -> QueryResult {
+        if q.k == 0 {
+            return QueryResult::default();
+        }
+        let w = &self.weights;
+        let mut warnings = Vec::new();
         let mut lanes: Vec<(&'static str, f64, Vec<u32>)> = Vec::new();
 
         if use_lanes.lexical && (!parsed.prose.is_empty() || !parsed.lean.is_empty()) {
@@ -260,10 +358,16 @@ impl Engine {
             lanes.push(("structural", weight, self.structural(&consts, LANE_DEPTH)));
         }
         if use_lanes.dense
+            && let Some(found) = dense
             && let Some(dense) = &self.dense
-            && !parsed.dense_text.is_empty()
-            && let Some(ids) = dense.search(&parsed.dense_text, LANE_DEPTH)
         {
+            let ids = found.unwrap_or_else(|e| {
+                tracing::warn!("query embedding failed: {e}");
+                warnings.push(format!(
+                    "dense lane unavailable, results from the other lanes only: {e}"
+                ));
+                Vec::new()
+            });
             // Only some declarations have vectors. Trust the lane as far as it
             // covers the lexical lane's top hits, so a query about uncovered
             // declarations isn't flooded with the nearest covered ones.
@@ -275,7 +379,7 @@ impl Engine {
                 }
                 _ => 1.0,
             };
-            if coverage > 0.0 {
+            if coverage > 0.0 && !ids.is_empty() {
                 lanes.push(("dense", w.dense * coverage, ids));
             }
         }
@@ -314,6 +418,7 @@ impl Engine {
         .any(|w| prose.contains(w));
 
         // Priors, filters, and folding duplicates into one hit.
+        let exact_id = parsed.name.as_deref().and_then(|n| self.id_of(n));
         let mut scored: HashMap<u32, (f64, Vec<&'static str>, Option<String>)> = HashMap::new();
         for (id, (mut score, lanes)) in fused {
             let d = self.decl(id);
@@ -323,7 +428,13 @@ impl Engine {
             if !q.kinds.is_empty() && !q.kinds.contains(&d.kind) {
                 continue;
             }
-            if d.uses_sorry && !q.include_sorried {
+            // An exact name match is shown whatever it is, flagged.
+            let exact = exact_id == Some(id);
+            if !exact
+                && (d.uses_sorry && !q.include_sorried
+                    || is_generated(&d.name)
+                    || is_tooling(&d.name))
+            {
                 continue;
             }
             score += w.pagerank * (1.0 + d.pagerank as f64).ln().min(w.pagerank_cap);
@@ -377,7 +488,7 @@ impl Engine {
             b.1.total_cmp(&a.1)
                 .then_with(|| self.decl(a.0).name.cmp(&self.decl(b.0).name))
         });
-        let k = q.k.clamp(1, MAX_K);
+        let k = q.k.min(MAX_K);
         let hits = ranked
             .into_iter()
             .take(k)
@@ -387,6 +498,7 @@ impl Engine {
         QueryResult {
             hits,
             verification: q.verify.then(|| "unavailable".to_string()),
+            warnings,
         }
     }
 
@@ -560,10 +672,18 @@ impl Engine {
             informal: d.informal.clone(),
             flags: flags(d, None),
             source_url: d.source_url.clone(),
-            deps: d.deps.iter().map(|&i| self.decl(i).name.clone()).collect(),
+            deps: d
+                .deps
+                .iter()
+                .map(|&i| self.decl(i))
+                .filter(|dep| !is_plumbing(d, dep))
+                .map(|dep| dep.name.clone())
+                .collect(),
             used_by: self.used_by[id as usize]
                 .iter()
-                .map(|&i| self.decl(i).name.clone())
+                .map(|&i| self.decl(i))
+                .filter(|user| !is_plumbing(d, user))
+                .map(|user| user.name.clone())
                 .collect(),
         })
     }
@@ -606,7 +726,17 @@ fn flags(d: &StoredDecl, sibling: Option<String>) -> Flags {
     }
 }
 
-/// The signature without its leading name, shortened for display.
+/// Instances, typeclasses and Lean's own logic and notation (`Eq`,
+/// `HMul.hMul`, `congrArg`) that `d` mentions without being about them.
+fn is_plumbing(d: &StoredDecl, other: &StoredDecl) -> bool {
+    let core = |l: &str| matches!(l, "Init" | "Std" | "Lean");
+    matches!(other.kind.as_str(), "instance" | "class")
+        || is_generated(&other.name)
+        || (core(&other.library) && !core(&d.library))
+}
+
+/// The signature without its leading name, universe parameters or instance
+/// arguments (`[Fintype n]`), shortened for display.
 pub fn short_signature(d: &StoredDecl) -> String {
     let mut sig = d.signature.strip_prefix(&d.name).unwrap_or(&d.signature);
     // Universe parameters: `.{u_1, u_2}`.
@@ -615,9 +745,49 @@ pub fn short_signature(d: &StoredDecl) -> String {
     {
         sig = &rest[end + 1..];
     }
-    let sig = sig.trim();
+    let sig = drop_instance_binders(sig.trim());
     let sig: String = sig.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate(&sig, 400)
+}
+
+/// Removes `[...]` binders, and `{inst✝ : ...}` ones, from the binders before
+/// a signature's type; brackets inside the type are left alone.
+fn drop_instance_binders(sig: &str) -> String {
+    let mut out = String::new();
+    let mut rest = sig;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(open) = trimmed.chars().next().filter(|c| "([{⦃".contains(*c)) else {
+            out.push_str(trimmed);
+            return out;
+        };
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in trimmed.char_indices() {
+            match c {
+                '(' | '[' | '{' | '⦃' => depth += 1,
+                ')' | ']' | '}' | '⦄' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + c.len_utf8());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            out.push_str(trimmed);
+            return out;
+        };
+        let group = &trimmed[..end];
+        let instance = open == '[' || (open == '{' && group[1..].trim_start().starts_with("inst"));
+        if !instance {
+            out.push_str(group);
+            out.push(' ');
+        }
+        rest = &trimmed[end..];
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -684,6 +854,24 @@ fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signatures_drop_instance_binders() {
+        assert_eq!(
+            drop_instance_binders(
+                "{n : Type u_3} [Fintype n] [DecidableEq n] {inst✝ : Ring R} (A : Matrix n n R) : (A * 1).trace = A.trace"
+            ),
+            "{n : Type u_3} (A : Matrix n n R) : (A * 1).trace = A.trace"
+        );
+        assert_eq!(
+            drop_instance_binders(": [a, b].length = 2"),
+            ": [a, b].length = 2"
+        );
+        assert_eq!(
+            drop_instance_binders("[(c : C) → AddCommGroup (V c)] (x : V c) : x = x"),
+            "(x : V c) : x = x"
+        );
+    }
 
     #[test]
     fn classifies_free_text() {

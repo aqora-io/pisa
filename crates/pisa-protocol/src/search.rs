@@ -93,6 +93,9 @@ pub struct QueryResult {
     /// Set when `verify` was asked for, e.g. "unavailable".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<String>,
+    /// What made this result worse than usual, e.g. a lane that failed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

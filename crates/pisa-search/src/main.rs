@@ -201,6 +201,12 @@ enum Command {
         /// Free text: natural language, LaTeX, Lean or a name.
         text: String,
     },
+    /// Repair stored descriptions whose LaTeX was decoded as control
+    /// characters (`\times` read as a tab), writing the fixed ones as a new batch.
+    RepairDescriptions {
+        #[arg(long)]
+        informal: String,
+    },
     /// Compare two cached sets of vectors for the same document views.
     CompareVectors {
         #[arg(long)]
@@ -634,6 +640,40 @@ async fn main() -> anyhow::Result<()> {
             if let Some(out) = out {
                 std::fs::write(out, report)?;
             }
+        }
+        Command::RepairDescriptions { informal } => {
+            let store = Store::open(&informal)?;
+            let fix = pisa_search::text::repair_escapes;
+            let repaired: Vec<_> = store
+                .load_all()
+                .await?
+                .into_values()
+                .filter_map(|mut e| {
+                    let i = &mut e.informal;
+                    let before = (
+                        i.informal_name.clone(),
+                        i.statement_nl.clone(),
+                        i.statement_latex.clone(),
+                    );
+                    i.informal_name = fix(&i.informal_name);
+                    i.statement_nl = fix(&i.statement_nl);
+                    i.statement_latex = i.statement_latex.as_deref().map(fix);
+                    (before
+                        != (
+                            i.informal_name.clone(),
+                            i.statement_nl.clone(),
+                            i.statement_latex.clone(),
+                        ))
+                        .then_some(e)
+                })
+                .collect();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+            if !repaired.is_empty() {
+                store
+                    .write_batch(&format!("{}-repair", now.as_millis()), &repaired)
+                    .await?;
+            }
+            println!("repaired {} descriptions", repaired.len());
         }
         Command::CompareVectors {
             corpus,

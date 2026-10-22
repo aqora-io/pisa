@@ -117,6 +117,7 @@ class Hit(TypedDict):
 class QueryResult(TypedDict):
     hits: list[Hit]
     verification: NotRequired[str]
+    warnings: NotRequired[list[str]]
 
 class Suggestion(TypedDict):
     name: str
