@@ -183,6 +183,12 @@ impl Connection<'_> {
                 Some(out) = rx.recv() => {
                     if matches!(out, WorkerMessage::Result { .. }) {
                         outstanding -= 1;
+                        // A header the job warmed is announced first, so the
+                        // client's next request can be routed here.
+                        if warm_rx.has_changed().unwrap_or(false) {
+                            let msg = status(&warm_rx.borrow_and_update());
+                            wire::send(&mut sink, &msg).await?;
+                        }
                     }
                     wire::send(&mut sink, &out).await?;
                 }

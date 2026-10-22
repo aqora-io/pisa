@@ -50,6 +50,47 @@ async fn second_request_with_same_header_is_a_warm_hit() {
     );
 }
 
+/// The router must learn that a worker is warm before the client sees the
+/// result, or the client's next request may be routed elsewhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_reports_a_new_warm_header_before_the_result() {
+    use pisa_protocol::header::split_header;
+    use pisa_protocol::wire::{self, CheckJob, Job, RouterMessage, WorkerMessage};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cfg = common::worker_config(listener.local_addr().unwrap(), "w0", "v", 1);
+    let store: std::sync::Arc<dyn object_store::ObjectStore> =
+        std::sync::Arc::new(object_store::memory::InMemory::new());
+    tokio::spawn(pisa_worker::run_with_store(cfg, store, std::future::pending()));
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut conn = wire::connection(stream);
+    async fn recv(conn: &mut wire::Connection<tokio::net::TcpStream>) -> WorkerMessage {
+        wire::recv(conn).await.unwrap().unwrap()
+    }
+    assert!(matches!(recv(&mut conn).await, WorkerMessage::Hello { .. }));
+    assert!(matches!(recv(&mut conn).await, WorkerMessage::Status { .. }));
+    for i in 0..8 {
+        let code = format!("import H{i}\ntheorem t : 1 = 1 := rfl");
+        let key = split_header(&code).header_key;
+        let job = Job::Check(CheckJob {
+            code,
+            timeout_secs: 5,
+        });
+        let msg = RouterMessage::Job { request_id: i, job };
+        wire::send(&mut conn, &msg).await.unwrap();
+        let mut warm = false;
+        loop {
+            match recv(&mut conn).await {
+                WorkerMessage::Status { warm_headers } => warm = warm_headers.contains(&key),
+                WorkerMessage::Result { .. } => break,
+                WorkerMessage::Restart { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert!(warm, "job {i}: result arrived before the warm status");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn batch_results_keep_order() {
     let c = Cluster::start(&[("w0", "v", 2), ("w1", "v", 2)]).await;
