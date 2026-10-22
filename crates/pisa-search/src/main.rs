@@ -83,6 +83,14 @@ enum Command {
         limit: Option<usize>,
         #[arg(long, default_value_t = 16)]
         batch: usize,
+        /// Requests in flight at once (for remote endpoints).
+        #[arg(long, default_value_t = 1)]
+        concurrency: usize,
+        /// Keep running alongside `informalize`: embed declarations as their
+        /// descriptions arrive, skipping those still waiting for one, until
+        /// this file exists; then embed everything left and stop.
+        #[arg(long)]
+        follow: Option<PathBuf>,
     },
     /// Describe declarations in natural language with Claude or an OpenAI
     /// model, in dependency order, caching the descriptions. Needs
@@ -291,34 +299,72 @@ async fn main() -> anyhow::Result<()> {
             with_deps,
             limit,
             batch,
+            concurrency,
+            follow,
         } => {
             let c = Corpus::read(&corpus)?;
             let store = Store::open(&informal)?;
-            let described = descriptions(&c, &store).await?;
             let embedder = Embedder::parse(&embedder)?;
             let probe = embedder.clone();
             let model = match label {
                 Some(l) => l,
                 None => tokio::task::spawn_blocking(move || probe.model()).await??,
             };
-            let selected = match &names {
+            let selected: Vec<&corpus::Decl> = match &names {
                 Some(path) => {
                     let names = read_names(path)?;
                     c.decls.iter().filter(|d| names.contains(&d.name)).collect()
                 }
                 None => dense::select(&c.decls, &libraries, with_deps),
             };
-            let mut docs: Vec<String> = selected
-                .into_iter()
-                .map(|d| dense::document_view(d, described.get(&d.name)))
-                .collect();
-            if let Some(n) = limit {
-                docs.truncate(n);
-            }
-            eprintln!("{} declarations selected; model {model}", docs.len());
+            let mut known = dense::cached_hashes(&store, &model).await?;
             let started = std::time::Instant::now();
-            let n = dense::embed_missing(&store, &embedder, &model, docs, batch, 1000).await?;
-            eprintln!("embedded {n} in {:.0}s", started.elapsed().as_secs_f64());
+            let mut total = 0;
+            loop {
+                let last = follow.as_ref().is_none_or(|f| f.exists());
+                let described = descriptions(&c, &store).await?;
+                // While following, a declaration that will get a description
+                // waits for it, so its view is embedded once.
+                let waiting = |d: &corpus::Decl| {
+                    !last
+                        && (d.informal || informalize::needs_description(d))
+                        && !described.contains_key(&d.name)
+                };
+                let mut docs: Vec<String> = selected
+                    .iter()
+                    .filter(|d| !waiting(d))
+                    .map(|d| dense::document_view(d, described.get(&d.name)))
+                    .collect();
+                if let Some(n) = limit {
+                    docs.truncate(n);
+                }
+                eprintln!(
+                    "{} of {} declarations ready; model {model}",
+                    docs.len(),
+                    selected.len()
+                );
+                let n = dense::embed_missing(
+                    &store,
+                    &embedder,
+                    &model,
+                    docs,
+                    &mut known,
+                    batch,
+                    concurrency,
+                )
+                .await?;
+                total += n;
+                if last {
+                    break;
+                }
+                if n == 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            }
+            eprintln!(
+                "embedded {total} in {:.0}s",
+                started.elapsed().as_secs_f64()
+            );
         }
         Command::Informalize {
             corpus,

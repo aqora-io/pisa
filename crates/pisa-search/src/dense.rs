@@ -7,7 +7,7 @@
 //! (Matryoshka). Search is exact brute force: fine for the tens of thousands
 //! of vectors embedded on CPU.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 
 use rayon::prelude::*;
@@ -415,6 +415,23 @@ pub async fn load_cache(
     Ok(out)
 }
 
+/// Vectors saved per cache object, so an interrupted run keeps its progress.
+const SAVE_EVERY: usize = 1000;
+
+/// Hashes of the texts a model's cache already has vectors for.
+pub async fn cached_hashes(
+    store: &crate::informal_store::Store,
+    model: &str,
+) -> anyhow::Result<HashSet<[u8; 16]>> {
+    let mut out = HashSet::new();
+    for bytes in store.get_all(&cache_dir(model)).await? {
+        let mut batch = HashMap::new();
+        decode_batch(&bytes, &mut batch)?;
+        out.extend(batch.into_keys());
+    }
+    Ok(out)
+}
+
 /// Document vectors by declaration name, for the declarations that have one.
 pub fn vectors_by_name(
     decls: &[Decl],
@@ -454,39 +471,43 @@ pub fn select<'a>(decls: &'a [Decl], libraries: &[String], with_deps: bool) -> V
 }
 
 /// Embeds the document views not yet cached, saving a batch object every
-/// `save_every` documents so an interrupted run keeps its progress.
+/// `SAVE_EVERY` documents so an interrupted run keeps its progress.
 pub async fn embed_missing(
     store: &crate::informal_store::Store,
     embedder: &Embedder,
     model: &str,
     docs: Vec<String>,
+    known: &mut HashSet<[u8; 16]>,
     batch: usize,
-    save_every: usize,
+    concurrency: usize,
 ) -> anyhow::Result<usize> {
-    let cache = load_cache(store, model).await?;
+    use futures::StreamExt;
     let mut todo: Vec<String> = docs
         .into_iter()
-        .filter(|t| !cache.contains_key(&text_hash(model, t)))
+        .filter(|t| !known.contains(&text_hash(model, t)))
         .collect();
     todo.sort();
     todo.dedup();
     let total = todo.len();
     tracing::info!(
-        cached = cache.len(),
+        cached = known.len(),
         to_embed = total,
         "embedding document views"
     );
     let started = std::time::Instant::now();
     let mut done = 0;
-    for chunk in todo.chunks(save_every) {
+    for chunk in todo.chunks(SAVE_EVERY) {
         let mut pending = Vec::with_capacity(chunk.len());
-        for texts in chunk.chunks(batch) {
+        // `concurrency` requests in flight at once.
+        let mut results = futures::stream::iter(chunk.chunks(batch).map(|texts| {
             let texts = texts.to_vec();
             let embedder = embedder.clone();
-            let vectors =
-                tokio::task::spawn_blocking(move || embedder.embed(&texts).map(|v| (texts, v)))
-                    .await??;
-            for (t, v) in vectors.0.iter().zip(vectors.1) {
+            tokio::task::spawn_blocking(move || embedder.embed(&texts).map(|v| (texts, v)))
+        }))
+        .buffer_unordered(concurrency.max(1));
+        while let Some(r) = results.next().await {
+            let (texts, vectors) = r??;
+            for (t, v) in texts.iter().zip(vectors) {
                 pending.push((text_hash(model, t), v));
             }
         }
@@ -499,6 +520,7 @@ pub async fn embed_missing(
                 encode_batch(&pending)?,
             )
             .await?;
+        known.extend(pending.iter().map(|(h, _)| *h));
         done += pending.len();
         let rate = done as f64 / started.elapsed().as_secs_f64();
         tracing::info!(done, total, rate = format!("{rate:.1}/s"), "saved vectors");
