@@ -71,6 +71,8 @@ pub struct Pos {
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Trace,
+    /// `lean --json` spells it "information".
+    #[serde(alias = "information")]
     Info,
     Warning,
     Error,
@@ -234,6 +236,18 @@ mod tests {
         let err: ReplResponse =
             serde_json::from_value(json!({"message": "Unknown environment."})).unwrap();
         assert!(matches!(err, ReplResponse::Error(_)));
+    }
+
+    #[test]
+    fn lean_json_messages_parse() {
+        let m: Message = serde_json::from_value(json!({
+            "caption": "", "data": "Nat : Type", "endPos": {"column": 6, "line": 1},
+            "fileName": "<stdin>", "isSilent": false, "keepFullRange": false,
+            "kind": "[anonymous]", "pos": {"column": 0, "line": 1}, "severity": "information"
+        }))
+        .unwrap();
+        assert_eq!(m.severity, Severity::Info);
+        assert_eq!(serde_json::to_value(m.severity).unwrap(), json!("info"));
     }
 
     #[test]
