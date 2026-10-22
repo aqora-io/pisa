@@ -35,7 +35,7 @@ def url():
     )
     worker = subprocess.Popen(
         [BIN / "pisa-worker", "--router", f"127.0.0.1:{workers}", "--version", "v",
-         "--slots", "2", "--repl", BIN / "fake-repl"],
+         "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean"],
         env=env,
     )
     url = f"http://127.0.0.1:{http}"
@@ -135,3 +135,21 @@ def test_threads_share_a_client(url):
     for t in threads:
         t.join()
     assert len(results) == 8 and all(r["ok"] for r in results)
+
+
+def test_snapshots(url):
+    client = Client(url, timeout=5)
+    base = client.create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
+    assert base["result"]["ok"] and not base["dirty"]
+    name = base["snapshot"]
+    assert base["header"] == f"import Foo\nimport {name}"
+    assert client.check(base["header"] + "\nneeds base")["ok"]
+
+    rejected = client.create_snapshot("theorem t : 1 = 1 := error_here")
+    assert "snapshot" not in rejected and not rejected["result"]["ok"]
+
+    info = client.snapshot(name)
+    assert info["header"] == base["header"] and info["imports"] == []
+    assert client.delete_snapshot(name) == [name]
+    with pytest.raises(NotFoundError):
+        client.snapshot(name)

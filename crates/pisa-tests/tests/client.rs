@@ -50,6 +50,32 @@ async fn client_covers_checks_and_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn client_covers_snapshots() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let base = client
+        .create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
+        .await
+        .unwrap();
+    let name = base.snapshot.unwrap();
+    let header = base.header.unwrap();
+    assert!(base.result.ok, "{:?}", base.result);
+
+    let r = client
+        .check(&format!("{header}\nneeds base"))
+        .await
+        .unwrap();
+    assert!(r.ok, "{r:?}");
+    let info = client.snapshot(&name).await.unwrap();
+    assert_eq!(info.header, header);
+    assert!(!info.dirty);
+
+    assert_eq!(client.delete_snapshot(&name).await.unwrap(), [name.clone()]);
+    let err = client.snapshot(&name).await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn missing_version_is_out_of_capacity() {
     let mut cfg = common::router_config();
     cfg.max_wait_secs = 1;

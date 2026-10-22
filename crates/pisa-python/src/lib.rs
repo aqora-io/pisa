@@ -187,6 +187,18 @@ impl Client {
             self.inner.check_session(&session, &code).await
         })
     }
+
+    fn create_snapshot<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.create_snapshot(&code).await })
+    }
+
+    fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.snapshot(&name).await })
+    }
+
+    fn delete_snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.delete_snapshot(&name).await })
+    }
 }
 
 /// A client for one declaration search server. Safe to share between threads.

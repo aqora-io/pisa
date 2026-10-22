@@ -15,6 +15,12 @@
 //!     .await?;
 //! assert!(verdict.ok);
 //!
+//! // Keep accepted code as a module, and build on it without re-checking it.
+//! let base = client.create_snapshot("import Mathlib\ndef double (n : Nat) := 2 * n").await?;
+//! let header = base.header.expect("kept");
+//! let next = client.check(&format!("{header}\nexample : double 2 = 4 := rfl")).await?;
+//! assert!(next.ok);
+//!
 //! let search = pisa_client::SearchClient::new("http://localhost:8100")?;
 //! let hits = search
 //!     .search(&pisa_client::Query { nl: Some("trace of a density matrix is one".into()), ..Default::default() })
@@ -24,8 +30,8 @@
 //! ```
 
 use pisa_protocol::api::{
-    BatchItem, BatchRequest, BatchResponse, CheckRequest, ErrorResponse, SessionCheckRequest,
-    StartRequest, TacticRequest,
+    BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse,
+    SessionCheckRequest, SnapshotRequest, StartRequest, TacticRequest,
 };
 use pisa_protocol::search::{
     DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
@@ -35,8 +41,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    CheckResult, Declaration, ErrorKind, Message, Pos, Severity, Sorry, StartResponse as Session,
-    StateInfo, TacticResponse as Step,
+    CheckResult, Declaration, ErrorKind, Message, Pos, Severity, SnapshotInfo,
+    SnapshotResponse as Snapshot, Sorry, StartResponse as Session, StateInfo,
+    TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, Suggestion,
@@ -104,6 +111,11 @@ impl Endpoint {
 
     async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
         let r = self.http.get(url).send().await?;
+        Ok(server_error(r).await?.json().await?)
+    }
+
+    async fn delete<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
+        let r = self.http.delete(url).send().await?;
         Ok(server_error(r).await?.json().await?)
     }
 
@@ -212,6 +224,42 @@ impl Client {
             timeout: self.timeout,
         };
         self.post(&format!("sessions/{session}/check"), &req).await
+    }
+
+    /// Checks code like [`check`](Self::check) and, unless Lean reports
+    /// errors, keeps it as a module that later code can import. Start that
+    /// code with the returned `header` to reuse the Lean process that already
+    /// has the snapshot loaded. Code with `sorry` is kept but `dirty`.
+    pub async fn create_snapshot(&self, code: &str) -> Result<Snapshot, Error> {
+        let req = SnapshotRequest {
+            code: code.to_string(),
+            version: self.version.clone(),
+            timeout: self.timeout,
+        };
+        self.post("snapshots", &req).await
+    }
+
+    /// A snapshot's code, imports and check result, by its module name.
+    pub async fn snapshot(&self, name: &str) -> Result<SnapshotInfo, Error> {
+        self.endpoint.get(self.snapshot_url(name)?).await
+    }
+
+    /// Deletes a snapshot and every snapshot that imports it, and returns
+    /// their names.
+    pub async fn delete_snapshot(&self, name: &str) -> Result<Vec<String>, Error> {
+        let deleted: Deleted = self.endpoint.delete(self.snapshot_url(name)?).await?;
+        Ok(deleted.deleted)
+    }
+
+    fn snapshot_url(&self, name: &str) -> Result<Url, Error> {
+        let mut url = self.endpoint.url("snapshots")?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(name.to_string()))?
+            .push(name);
+        if let Some(v) = &self.version {
+            url.query_pairs_mut().append_pair("version", v);
+        }
+        Ok(url)
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(
