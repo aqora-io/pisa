@@ -171,7 +171,9 @@ struct VectorsHeader {
 }
 
 impl Dense {
-    pub fn new(model: String, entries: Vec<(u32, Vec<i8>)>) -> Dense {
+    pub fn new(model: String, mut entries: Vec<(u32, Vec<i8>)>) -> Dense {
+        // Sorted, so `contains` can binary-search.
+        entries.sort_by_key(|(id, _)| *id);
         let mut ids = Vec::with_capacity(entries.len());
         let mut vectors = Vec::with_capacity(entries.len() * DIMS);
         for (id, v) in entries {
@@ -195,7 +197,7 @@ impl Dense {
     }
 
     pub fn contains(&self, id: u32) -> bool {
-        self.ids.contains(&id)
+        self.ids.binary_search(&id).is_ok()
     }
 
     pub fn with_tei(mut self, tei: Tei) -> Dense {
@@ -238,12 +240,13 @@ impl Dense {
             body.len() == ids_len + header.count * DIMS,
             "truncated vectors.bin"
         );
-        let ids = body[..ids_len]
+        let ids: Vec<u32> = body[..ids_len]
             .as_chunks::<4>()
             .0
             .iter()
             .map(|&b| u32::from_le_bytes(b))
             .collect();
+        anyhow::ensure!(ids.is_sorted(), "vector ids are out of order");
         let vectors = body[ids_len..].iter().map(|&b| b as i8).collect();
         Ok(Dense {
             model: header.model,

@@ -14,6 +14,8 @@ use crate::text::{latex_to_unicode, lean_identifiers, levenshtein, tokens};
 
 /// Candidates each lane contributes to fusion.
 const LANE_DEPTH: usize = 100;
+/// Lexical hits checked for vectors to weight the dense lane.
+const COVERAGE_PROBE: usize = 20;
 /// Reciprocal-rank-fusion constant.
 const RRF_K: f64 = 60.0;
 const MAX_K: usize = 50;
@@ -262,7 +264,20 @@ impl Engine {
             && !parsed.dense_text.is_empty()
             && let Some(ids) = dense.search(&parsed.dense_text, LANE_DEPTH)
         {
-            lanes.push(("dense", w.dense, ids));
+            // Only some declarations have vectors. Trust the lane as far as it
+            // covers the lexical lane's top hits, so a query about uncovered
+            // declarations isn't flooded with the nearest covered ones.
+            let coverage = match lanes.iter().find(|(lane, ..)| *lane == "lexical") {
+                Some((_, _, lexical)) if !lexical.is_empty() => {
+                    let top = &lexical[..lexical.len().min(COVERAGE_PROBE)];
+                    let covered = top.iter().filter(|&&id| dense.contains(id)).count();
+                    covered as f64 / top.len() as f64
+                }
+                _ => 1.0,
+            };
+            if coverage > 0.0 {
+                lanes.push(("dense", w.dense * coverage, ids));
+            }
         }
 
         let mut fused: HashMap<u32, (f64, Vec<&'static str>)> = HashMap::new();

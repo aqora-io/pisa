@@ -97,7 +97,12 @@ impl Metrics {
 pub struct Report {
     pub targets: usize,
     pub missing: Vec<String>,
-    /// (lanes label, style or "all") → metrics.
+    /// Vectors per library, when the engine has a dense lane.
+    pub coverage: Option<BTreeMap<String, usize>>,
+    /// Targets that have a vector.
+    pub covered_targets: usize,
+    /// (lanes label, style or "all") → metrics. Labels ending in
+    /// " (covered)" count only targets that have a vector.
     pub rows: BTreeMap<(String, String), Metrics>,
 }
 
@@ -117,9 +122,21 @@ pub fn run(engine: &Engine, items: &[Item], configs: &[(&str, Lanes)]) -> Report
             None => missing.push(item.full_name.clone()),
         }
     }
+    let covered = |name: &str| {
+        engine
+            .dense
+            .as_ref()
+            .zip(engine.id_of(name))
+            .is_some_and(|(d, id)| d.contains(id))
+    };
     let mut rows: BTreeMap<(String, String), Metrics> = BTreeMap::new();
     for (label, lanes) in configs {
         for (item, target) in &targets {
+            let labels = if covered(target) {
+                vec![label.to_string(), format!("{label} (covered)")]
+            } else {
+                vec![label.to_string()]
+            };
             for style in STYLES {
                 let Some(text) = item.query(style) else {
                     continue;
@@ -131,19 +148,28 @@ pub fn run(engine: &Engine, items: &[Item], configs: &[(&str, Lanes)]) -> Report
                 };
                 let hits = engine.search_with(&q, *lanes).hits;
                 let rank = hits.iter().position(|h| &h.name == target).map(|i| i + 1);
-                rows.entry((label.to_string(), style.to_string()))
-                    .or_default()
-                    .add(rank);
-                rows.entry((label.to_string(), "all".to_string()))
-                    .or_default()
-                    .add(rank);
+                for label in &labels {
+                    rows.entry((label.clone(), style.to_string()))
+                        .or_default()
+                        .add(rank);
+                    rows.entry((label.clone(), "all".to_string()))
+                        .or_default()
+                        .add(rank);
+                }
             }
         }
     }
     let rows = rows.into_iter().map(|(k, m)| (k, m.finish())).collect();
+    let coverage = engine.dense.as_ref().map(|d| {
+        crate::dense::coverage(&engine.bundle.decls, d)
+            .into_iter()
+            .collect()
+    });
     Report {
+        covered_targets: targets.iter().filter(|(_, t)| covered(t)).count(),
         targets: targets.len(),
         missing,
+        coverage,
         rows,
     }
 }
@@ -151,9 +177,7 @@ pub fn run(engine: &Engine, items: &[Item], configs: &[(&str, Lanes)]) -> Report
 impl Report {
     pub fn markdown(&self, env_id: &str) -> String {
         let mut out = format!(
-            "# MathlibQR baseline ({env_id})\n\n{} of {} targets found in this index; missing: {}.\n\n\
-             | Lanes | Style | Queries | R@1 | R@5 | R@10 | R@50 | MRR | nDCG@10 |\n\
-             | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
+            "# MathlibQR baseline ({env_id})\n\n{} of {} targets found in this index; missing: {}.\n\n",
             self.targets,
             self.targets + self.missing.len(),
             if self.missing.is_empty() {
@@ -161,6 +185,21 @@ impl Report {
             } else {
                 self.missing.join(", ")
             },
+        );
+        if let Some(coverage) = &self.coverage {
+            let per_library: Vec<String> =
+                coverage.iter().map(|(l, n)| format!("{l} {n}")).collect();
+            out.push_str(&format!(
+                "The dense lane has vectors for {} declarations ({}), including {} of the targets. \
+                 Rows labelled `(covered)` count only those targets.\n\n",
+                coverage.values().sum::<usize>(),
+                per_library.join(", "),
+                self.covered_targets
+            ));
+        }
+        out.push_str(
+            "| Lanes | Style | Queries | R@1 | R@5 | R@10 | R@50 | MRR | nDCG@10 |\n\
+             | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",
         );
         for ((lanes, style), m) in &self.rows {
             out.push_str(&format!(
