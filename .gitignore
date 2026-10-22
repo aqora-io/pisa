@@ -6,3 +6,5 @@ __pycache__/
 /search/corpus
 /search/bundle
 /search/store
+/search/work
+/search/lsv2.jsonl

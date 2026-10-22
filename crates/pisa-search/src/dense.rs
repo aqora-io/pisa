@@ -1,5 +1,6 @@
 //! The dense lane: embedding similarity, through a Text Embeddings Inference
-//! (TEI) server running an instruction-aware model (Qwen3-Embedding).
+//! (TEI) server or an OpenAI-compatible `/embeddings` endpoint running an
+//! instruction-aware model (Qwen3-Embedding).
 //!
 //! Documents are embedded once, cached by (model, text hash) in object
 //! storage, and stored in bundles as int8 vectors truncated to `DIMS`
@@ -61,61 +62,147 @@ pub fn quantize(v: &[f32]) -> Vec<i8> {
         .collect()
 }
 
+/// Where vectors come from.
 #[derive(Clone)]
-pub struct Tei {
+pub struct Embedder {
     url: String,
+    api: Api,
     http: reqwest::blocking::Client,
 }
 
+#[derive(Clone)]
+enum Api {
+    /// TEI's `/embed` and `/info`.
+    Tei,
+    /// `/embeddings` as OpenAI defines it (Scaleway, llama.cpp, ...).
+    OpenAi { model: String, key: Option<String> },
+}
+
 #[derive(Serialize)]
-struct EmbedRequest<'a> {
+struct TeiRequest<'a> {
     inputs: &'a [String],
     normalize: bool,
     truncate: bool,
 }
 
-impl Tei {
-    pub fn new(url: &str) -> Tei {
-        Tei {
-            url: url.trim_end_matches('/').to_string(),
-            http: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(600))
-                .build()
-                .expect("http client"),
+#[derive(Deserialize)]
+struct OpenAiResponse {
+    data: Vec<OpenAiVector>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiVector {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
+impl Embedder {
+    /// A TEI server at `spec`, or, for
+    /// `openai+<base url>?model=<model>[&key_env=<VAR>]`, an OpenAI-compatible
+    /// endpoint whose bearer key is read from the environment variable `VAR`.
+    pub fn parse(spec: &str) -> anyhow::Result<Embedder> {
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .build()?;
+        let Some(rest) = spec.strip_prefix("openai+") else {
+            return Ok(Embedder {
+                url: spec.trim_end_matches('/').to_string(),
+                api: Api::Tei,
+                http,
+            });
+        };
+        let mut url = url::Url::parse(rest)?;
+        let mut model = None;
+        let mut key = None;
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "model" => model = Some(v.into_owned()),
+                "key_env" => {
+                    key = Some(
+                        std::env::var(v.as_ref()).map_err(|_| anyhow::anyhow!("{v} is not set"))?,
+                    )
+                }
+                other => anyhow::bail!("unknown embedder option {other}"),
+            }
         }
+        url.set_query(None);
+        Ok(Embedder {
+            url: url.as_str().trim_end_matches('/').to_string(),
+            api: Api::OpenAi {
+                model: model.ok_or_else(|| anyhow::anyhow!("{spec}: no model= given"))?,
+                key,
+            },
+            http,
+        })
     }
 
     pub fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-        let req = EmbedRequest {
-            inputs: texts,
-            normalize: true,
-            truncate: true,
+        let vectors = match &self.api {
+            Api::Tei => {
+                let req = TeiRequest {
+                    inputs: texts,
+                    normalize: true,
+                    truncate: true,
+                };
+                let r = self
+                    .http
+                    .post(format!("{}/embed", self.url))
+                    .json(&req)
+                    .send()?
+                    .error_for_status()?;
+                r.json::<Vec<Vec<f32>>>()?
+            }
+            Api::OpenAi { model, key } => {
+                let body = serde_json::json!({"model": model, "input": texts});
+                let mut attempt = 0;
+                let r = loop {
+                    attempt += 1;
+                    let mut req = self
+                        .http
+                        .post(format!("{}/embeddings", self.url))
+                        .json(&body);
+                    if let Some(key) = key {
+                        req = req.bearer_auth(key);
+                    }
+                    let r = req.send()?;
+                    let status = r.status().as_u16();
+                    if (status == 429 || status >= 500) && attempt < 6 {
+                        tracing::warn!(status, attempt, "embedding request failed, retrying");
+                        std::thread::sleep(std::time::Duration::from_secs(1 << attempt));
+                        continue;
+                    }
+                    break r.error_for_status()?;
+                };
+                let mut data = r.json::<OpenAiResponse>()?.data;
+                data.sort_by_key(|v| v.index);
+                anyhow::ensure!(
+                    data.len() == texts.len(),
+                    "got {} vectors for {} texts",
+                    data.len(),
+                    texts.len()
+                );
+                data.into_iter().map(|v| v.embedding).collect()
+            }
         };
-        let r = self
-            .http
-            .post(format!("{}/embed", self.url))
-            .json(&req)
-            .send()?;
-        let r = r.error_for_status()?;
-        Ok(r.json::<Vec<Vec<f32>>>()?
-            .into_iter()
-            .map(truncate_normalize)
-            .collect())
+        Ok(vectors.into_iter().map(truncate_normalize).collect())
     }
 
-    /// The model id TEI reports.
+    /// The model it serves: as TEI reports it, or as configured.
     pub fn model(&self) -> anyhow::Result<String> {
         #[derive(Deserialize)]
         struct Info {
             model_id: String,
         }
-        Ok(self
-            .http
-            .get(format!("{}/info", self.url))
-            .send()?
-            .error_for_status()?
-            .json::<Info>()?
-            .model_id)
+        match &self.api {
+            Api::Tei => Ok(self
+                .http
+                .get(format!("{}/info", self.url))
+                .send()?
+                .error_for_status()?
+                .json::<Info>()?
+                .model_id),
+            Api::OpenAi { model, .. } => Ok(model.clone()),
+        }
     }
 }
 
@@ -160,7 +247,7 @@ pub struct Dense {
     pub model: String,
     ids: Vec<u32>,
     vectors: Vec<i8>,
-    tei: Option<Tei>,
+    embedder: Option<Embedder>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -184,7 +271,7 @@ impl Dense {
             model,
             ids,
             vectors,
-            tei: None,
+            embedder: None,
         }
     }
 
@@ -200,8 +287,8 @@ impl Dense {
         self.ids.binary_search(&id).is_ok()
     }
 
-    pub fn with_tei(mut self, tei: Tei) -> Dense {
-        self.tei = Some(tei);
+    pub fn with_embedder(mut self, embedder: Embedder) -> Dense {
+        self.embedder = Some(embedder);
         self
     }
 
@@ -252,7 +339,7 @@ impl Dense {
             model: header.model,
             ids,
             vectors,
-            tei: None,
+            embedder: None,
         })
     }
 
@@ -298,9 +385,9 @@ impl Dense {
 
     /// Declaration ids nearest to `text`, or `None` without an embedder.
     pub fn search(&self, text: &str, n: usize) -> Option<Vec<u32>> {
-        let tei = self.tei.as_ref()?;
+        let embedder = self.embedder.as_ref()?;
         let query = format!("{QUERY_INSTRUCTION}{text}");
-        match tei.embed(&[query]) {
+        match embedder.embed(&[query]) {
             Ok(mut v) if !v.is_empty() => Some(self.nearest(&v.swap_remove(0), n)),
             Ok(_) => None,
             Err(e) => {
@@ -370,7 +457,7 @@ pub fn select<'a>(decls: &'a [Decl], libraries: &[String], with_deps: bool) -> V
 /// `save_every` documents so an interrupted run keeps its progress.
 pub async fn embed_missing(
     store: &crate::informal_store::Store,
-    tei: &Tei,
+    embedder: &Embedder,
     model: &str,
     docs: Vec<String>,
     batch: usize,
@@ -395,9 +482,9 @@ pub async fn embed_missing(
         let mut pending = Vec::with_capacity(chunk.len());
         for texts in chunk.chunks(batch) {
             let texts = texts.to_vec();
-            let tei = tei.clone();
+            let embedder = embedder.clone();
             let vectors =
-                tokio::task::spawn_blocking(move || tei.embed(&texts).map(|v| (texts, v)))
+                tokio::task::spawn_blocking(move || embedder.embed(&texts).map(|v| (texts, v)))
                     .await??;
             for (t, v) in vectors.0.iter().zip(vectors.1) {
                 pending.push((text_hash(model, t), v));

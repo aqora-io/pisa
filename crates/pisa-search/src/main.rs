@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use pisa_protocol::search::Informal;
-use pisa_search::anthropic::Client;
 use pisa_search::corpus::{self, Corpus};
-use pisa_search::dense::{self, Tei};
+use pisa_search::dense::{self, Embedder};
 use pisa_search::engine::{Engine, Lanes};
 use pisa_search::index::{self, Bundle};
 use pisa_search::informal_store::Store;
 use pisa_search::informalize;
+use pisa_search::llm::Llm;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
 
@@ -49,15 +49,29 @@ enum Command {
         #[arg(long)]
         informal: String,
     },
-    /// Embed document views through a TEI server, caching the vectors.
+    /// Embed document views through an embedding server, caching the vectors.
     Embed {
         #[arg(long)]
         corpus: PathBuf,
         /// Description and vector store (a directory or s3:// URL).
         #[arg(long)]
         informal: String,
-        #[arg(long, env = "PISA_SEARCH_TEI", default_value = "http://localhost:8090")]
-        tei: String,
+        /// A TEI URL, or `openai+<base url>?model=<model>[&key_env=<VAR>]`.
+        #[arg(
+            long,
+            alias = "tei",
+            env = "PISA_SEARCH_TEI",
+            default_value = "http://localhost:8090"
+        )]
+        embedder: String,
+        /// Cache the vectors under this name instead of the model's, e.g. to
+        /// keep one model's vectors from two backends apart.
+        #[arg(long)]
+        label: Option<String>,
+        /// Embed exactly the declarations named in this file (one per line)
+        /// instead of `--libraries`.
+        #[arg(long)]
+        names: Option<PathBuf>,
         /// Libraries to embed.
         #[arg(long, value_delimiter = ',', default_value = "Physlib")]
         libraries: Vec<String>,
@@ -70,8 +84,9 @@ enum Command {
         #[arg(long, default_value_t = 16)]
         batch: usize,
     },
-    /// Describe declarations in natural language with Claude, in dependency
-    /// order, caching the descriptions. Needs ANTHROPIC_API_KEY.
+    /// Describe declarations in natural language with Claude or an OpenAI
+    /// model, in dependency order, caching the descriptions. Needs
+    /// ANTHROPIC_API_KEY or OPENAI_API_KEY.
     Informalize {
         #[arg(long)]
         corpus: PathBuf,
@@ -84,6 +99,9 @@ enum Command {
         /// modules stratified by area, instead of all of them.
         #[arg(long)]
         sample: Option<usize>,
+        /// Describe exactly the declarations named in this file (one per line).
+        #[arg(long, conflicts_with = "sample")]
+        names: Option<PathBuf>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
         #[arg(long, default_value = "claude-haiku-5-5")]
@@ -103,6 +121,9 @@ enum Command {
         /// A bundle with vectors, for the report's discrimination test.
         #[arg(long)]
         bundle: Option<PathBuf>,
+        /// Models that judge the discrimination test (default: `--model`).
+        #[arg(long)]
+        judge: Vec<String>,
         /// Print the plan and the first prompts instead of calling the API.
         #[arg(long)]
         dry_run: bool,
@@ -114,9 +135,12 @@ enum Command {
         /// Description and vector store (a directory or s3:// URL), if any.
         #[arg(long)]
         informal: Option<String>,
-        /// Include cached document vectors of this embedding model.
+        /// Include cached document vectors of this embedding model (or label).
         #[arg(long)]
         embedding_model: Option<String>,
+        /// Include vectors only for the declarations named in this file.
+        #[arg(long)]
+        vector_names: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -129,9 +153,9 @@ enum Command {
         /// Symbol dictionary; defaults to the shipped search/symbols.toml.
         #[arg(long, env = "PISA_SEARCH_SYMBOLS")]
         symbols: Option<PathBuf>,
-        /// TEI server for embedding queries (enables the dense lane).
-        #[arg(long, env = "PISA_SEARCH_TEI")]
-        tei: Option<String>,
+        /// Embedding server for queries (enables the dense lane); see `embed`.
+        #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+        embedder: Option<String>,
     },
     /// Measure retrieval quality on MathlibQR.
     Eval {
@@ -146,9 +170,9 @@ enum Command {
         /// Only the fused result, not each lane alone.
         #[arg(long)]
         fused_only: bool,
-        /// TEI server for embedding queries (enables the dense lane).
-        #[arg(long, env = "PISA_SEARCH_TEI")]
-        tei: Option<String>,
+        /// Embedding server for queries (enables the dense lane); see `embed`.
+        #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+        embedder: Option<String>,
         /// Write the report here as well as to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
@@ -157,27 +181,51 @@ enum Command {
     Query {
         #[arg(long)]
         bundle: PathBuf,
-        #[arg(long, env = "PISA_SEARCH_TEI")]
-        tei: Option<String>,
+        #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+        embedder: Option<String>,
         #[arg(long, default_value_t = 5)]
         k: usize,
         /// Free text: natural language, LaTeX, Lean or a name.
         text: String,
     },
+    /// Compare two cached sets of vectors for the same document views.
+    CompareVectors {
+        #[arg(long)]
+        corpus: PathBuf,
+        #[arg(long)]
+        informal: String,
+        /// Declarations to compare, one name per line.
+        #[arg(long)]
+        names: PathBuf,
+        /// Model names or labels of the two caches.
+        #[arg(long)]
+        a: String,
+        #[arg(long)]
+        b: String,
+    },
+}
+
+fn read_names(path: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn load_engine(
     bundle: &Path,
     symbols_path: Option<&Path>,
-    tei: Option<&str>,
+    embedder: Option<&str>,
 ) -> anyhow::Result<Engine> {
     let symbols = match symbols_path {
         Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
         None => Symbols::parse(symbols::DEFAULT)?,
     };
     let mut engine = Engine::new(Bundle::open(bundle)?, symbols)?;
-    if let (Some(d), Some(url)) = (engine.dense.take(), tei) {
-        engine.dense = Some(d.with_tei(Tei::new(url)));
+    if let (Some(d), Some(spec)) = (engine.dense.take(), embedder) {
+        engine.dense = Some(d.with_embedder(Embedder::parse(spec)?));
     }
     Ok(engine)
 }
@@ -236,7 +284,9 @@ async fn main() -> anyhow::Result<()> {
         Command::Embed {
             corpus,
             informal,
-            tei,
+            embedder,
+            label,
+            names,
             libraries,
             with_deps,
             limit,
@@ -245,10 +295,20 @@ async fn main() -> anyhow::Result<()> {
             let c = Corpus::read(&corpus)?;
             let store = Store::open(&informal)?;
             let described = descriptions(&c, &store).await?;
-            let tei = Tei::new(&tei);
-            let probe = tei.clone();
-            let model = tokio::task::spawn_blocking(move || probe.model()).await??;
-            let mut docs: Vec<String> = dense::select(&c.decls, &libraries, with_deps)
+            let embedder = Embedder::parse(&embedder)?;
+            let probe = embedder.clone();
+            let model = match label {
+                Some(l) => l,
+                None => tokio::task::spawn_blocking(move || probe.model()).await??,
+            };
+            let selected = match &names {
+                Some(path) => {
+                    let names = read_names(path)?;
+                    c.decls.iter().filter(|d| names.contains(&d.name)).collect()
+                }
+                None => dense::select(&c.decls, &libraries, with_deps),
+            };
+            let mut docs: Vec<String> = selected
                 .into_iter()
                 .map(|d| dense::document_view(d, described.get(&d.name)))
                 .collect();
@@ -257,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
             }
             eprintln!("{} declarations selected; model {model}", docs.len());
             let started = std::time::Instant::now();
-            let n = dense::embed_missing(&store, &tei, &model, docs, batch, 1000).await?;
+            let n = dense::embed_missing(&store, &embedder, &model, docs, batch, 1000).await?;
             eprintln!("embedded {n} in {:.0}s", started.elapsed().as_secs_f64());
         }
         Command::Informalize {
@@ -265,6 +325,7 @@ async fn main() -> anyhow::Result<()> {
             informal,
             libraries,
             sample,
+            names,
             seed,
             model,
             effort,
@@ -273,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
             force,
             report,
             bundle,
+            judge,
             dry_run,
         } => {
             let c = Corpus::read(&corpus)?;
@@ -280,9 +342,11 @@ async fn main() -> anyhow::Result<()> {
             let stored = store.load_all().await?;
             let described = descriptions(&c, &store).await?;
             let undescribed = informalize::undescribed(&c, &stored);
-            let mut targets = match sample {
-                Some(n) => informalize::pilot_sample(&c.decls, &libraries, n, seed),
-                None => c
+            let names = names.as_deref().map(read_names).transpose()?;
+            let mut targets = match (sample, &names) {
+                (_, Some(names)) => c.decls.iter().filter(|d| names.contains(&d.name)).collect(),
+                (Some(n), None) => informalize::pilot_sample(&c.decls, &libraries, n, seed),
+                (None, None) => c
                     .decls
                     .iter()
                     .filter(|d| {
@@ -293,14 +357,15 @@ async fn main() -> anyhow::Result<()> {
             };
             let modules: std::collections::HashSet<&str> =
                 targets.iter().map(|d| d.module.as_str()).collect();
-            let sample_text = match sample {
-                Some(n) => format!(
+            let sample_text = match (sample, &names) {
+                (_, Some(_)) => format!("{} named declarations", targets.len()),
+                (Some(n), None) => format!(
                     "{} declarations from {} {} modules (about {n} requested, whole modules stratified by area, seed {seed})",
                     targets.len(),
                     modules.len(),
                     libraries.join("/")
                 ),
-                None => format!("all of {}", libraries.join(", ")),
+                (None, None) => format!("all of {}", libraries.join(", ")),
             };
             if !force {
                 targets.retain(|d| !stored.contains_key(&d.content_hash));
@@ -336,7 +401,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let client = Client::from_env()?;
+            let client = Llm::for_model(&cfg.model)?;
             let started = std::time::Instant::now();
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
             let batch = format!("{}-{}", now.as_millis(), cfg.model);
@@ -351,20 +416,30 @@ async fn main() -> anyhow::Result<()> {
                 outcomes.len()
             );
             if let Some(path) = report {
-                let discrimination = match bundle {
-                    Some(b) => {
-                        let bundle = Bundle::open(&b)?;
-                        let mut entries: Vec<_> =
-                            outcomes.iter().filter_map(|o| o.entry.as_ref()).collect();
-                        entries.sort_by_key(|e| informalize::rank(seed + 1, &e.name));
-                        entries.truncate(20);
-                        Some(
-                            informalize::discriminate(&client, &cfg, &bundle, &entries, seed)
+                let mut discrimination = Vec::new();
+                if let Some(b) = bundle {
+                    let bundle = Bundle::open(&b)?;
+                    let mut entries: Vec<_> =
+                        outcomes.iter().filter_map(|o| o.entry.as_ref()).collect();
+                    entries.sort_by_key(|e| informalize::rank(seed + 1, &e.name));
+                    entries.truncate(20);
+                    let judges = if judge.is_empty() {
+                        vec![cfg.model.clone()]
+                    } else {
+                        judge
+                    };
+                    for model in judges {
+                        let judge_cfg = informalize::Config {
+                            model,
+                            ..cfg.clone()
+                        };
+                        let client = Llm::for_model(&judge_cfg.model)?;
+                        discrimination.push(
+                            informalize::discriminate(&client, &judge_cfg, &bundle, &entries, seed)
                                 .await?,
-                        )
+                        );
                     }
-                    None => None,
-                };
+                }
                 let input = informalize::ReportInput {
                     date: path
                         .parent()
@@ -391,6 +466,7 @@ async fn main() -> anyhow::Result<()> {
             corpus,
             informal,
             embedding_model,
+            vector_names,
             out,
         } => {
             let c = Corpus::read(&corpus)?;
@@ -402,7 +478,12 @@ async fn main() -> anyhow::Result<()> {
             let vectors = match (&store, &embedding_model) {
                 (Some(store), Some(model)) => {
                     let cache = dense::load_cache(store, model).await?;
-                    Some(dense::vectors_by_name(&c.decls, &described, model, &cache))
+                    let mut v = dense::vectors_by_name(&c.decls, &described, model, &cache);
+                    if let Some(path) = &vector_names {
+                        let names = read_names(path)?;
+                        v.retain(|name, _| names.contains(name));
+                    }
+                    Some(v)
                 }
                 (None, Some(_)) => anyhow::bail!("--embedding-model needs --informal"),
                 _ => None,
@@ -420,9 +501,13 @@ async fn main() -> anyhow::Result<()> {
             bundle,
             http,
             symbols,
-            tei,
+            embedder,
         } => {
-            let engine = Arc::new(load_engine(&bundle, symbols.as_deref(), tei.as_deref())?);
+            let engine = Arc::new(load_engine(
+                &bundle,
+                symbols.as_deref(),
+                embedder.as_deref(),
+            )?);
             tracing::info!(
                 env_id = engine.env_id(),
                 decls = engine.bundle.decls.len(),
@@ -438,10 +523,10 @@ async fn main() -> anyhow::Result<()> {
             data,
             weights,
             fused_only,
-            tei,
+            embedder,
             out,
         } => {
-            let mut engine = load_engine(&bundle, None, tei.as_deref())?;
+            let mut engine = load_engine(&bundle, None, embedder.as_deref())?;
             if let Some(w) = weights {
                 engine.weights = serde_json::from_str(&w)?;
             }
@@ -490,13 +575,52 @@ async fn main() -> anyhow::Result<()> {
                 std::fs::write(out, report)?;
             }
         }
+        Command::CompareVectors {
+            corpus,
+            informal,
+            names,
+            a,
+            b,
+        } => {
+            let c = Corpus::read(&corpus)?;
+            let store = Store::open(&informal)?;
+            let described = descriptions(&c, &store).await?;
+            let names = read_names(&names)?;
+            let (cache_a, cache_b) = (
+                dense::load_cache(&store, &a).await?,
+                dense::load_cache(&store, &b).await?,
+            );
+            let mut cosines: Vec<f32> = c
+                .decls
+                .iter()
+                .filter(|d| names.contains(&d.name))
+                .filter_map(|d| {
+                    let text = dense::document_view(d, described.get(&d.name));
+                    let va = cache_a.get(&dense::text_hash(&a, &text))?;
+                    let vb = cache_b.get(&dense::text_hash(&b, &text))?;
+                    Some(va.iter().zip(vb).map(|(x, y)| x * y).sum())
+                })
+                .collect();
+            anyhow::ensure!(
+                !cosines.is_empty(),
+                "no document has vectors in both caches"
+            );
+            cosines.sort_by(f32::total_cmp);
+            let mean = cosines.iter().sum::<f32>() / cosines.len() as f32;
+            println!(
+                "{} documents: mean cosine {mean:.4}, min {:.4}, 5th percentile {:.4}",
+                cosines.len(),
+                cosines[0],
+                cosines[cosines.len() / 20]
+            );
+        }
         Command::Query {
             bundle,
-            tei,
+            embedder,
             k,
             text,
         } => {
-            let engine = load_engine(&bundle, None, tei.as_deref())?;
+            let engine = load_engine(&bundle, None, embedder.as_deref())?;
             let q = pisa_protocol::search::Query {
                 q: Some(text),
                 k,
