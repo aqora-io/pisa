@@ -70,7 +70,8 @@ async fn client_covers_snapshots() {
     assert_eq!(info.header, header);
     assert!(!info.dirty);
 
-    assert_eq!(client.delete_snapshot(&name).await.unwrap(), [name.clone()]);
+    let deleted = client.delete_snapshot(&name).await.unwrap();
+    assert_eq!(deleted, std::slice::from_ref(&name));
     let err = client.snapshot(&name).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
 }

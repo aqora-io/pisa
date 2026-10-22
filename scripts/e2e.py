@@ -137,6 +137,64 @@ def core(failover=True):
     step("metrics")
 
 
+SNAPSHOT_ROOT = """namespace Snap
+def double (n : Nat) : Nat := 2 * n
+@[simp] theorem double_eq (n : Nat) : double n = n + n := by unfold double; omega
+private def hidden : Nat := 7
+class Shape (α : Type) where
+  sides : α → Nat
+instance : Shape Nat := ⟨fun _ => 4⟩
+end Snap
+notation "⟪" x "⟫" => Snap.double x
+open Snap
+"""
+
+
+def snapshots():
+    def create(code):
+        start = time.monotonic()
+        r = post("/snapshots", {"code": code, "timeout": 600})
+        return r, time.monotonic() - start
+
+    def on(snapshot, body):
+        return check(f"{snapshot['header']}\n\n{body}")
+
+    root, took = create(SNAPSHOT_ROOT)
+    assert root["result"]["ok"] and not root["dirty"], root
+    assert root["header"] == f"import {root['snapshot']}", root
+    start = time.monotonic()
+    r = on(root, "example : Snap.double 3 = 6 := by simp\n"
+                 "example : Snap.Shape.sides (5 : Nat) = 4 := rfl\n"
+                 "example : ⟪2⟫ = 4 := rfl")
+    assert r["ok"], r
+    step(f"snapshot: definitions, simp lemmas, instances and notation carry "
+         f"(create {took:.1f}s, check {time.monotonic() - start:.1f}s)")
+    assert not on(root, "#check Snap.hidden")["ok"]
+    assert not on(root, "example : double 1 = 2 := rfl")["ok"]
+    step("snapshot: private declarations and `open` don't carry")
+
+    child, _ = create(f"{root['header']}\n\ntheorem Snap.later (n : Nat) : Snap.double n ≥ n := by sorry")
+    assert child["dirty"] and child["result"]["reasons"] == ["axiom: Snap.later uses sorryAx"], child
+    r = on(child, "theorem uses_later : Snap.double 2 ≥ 2 := Snap.later 2\n"
+                  "theorem clean : Snap.double 2 = 4 := rfl")
+    assert r["reasons"] == ["axiom: uses_later uses sorryAx"], r
+    sibling, _ = create(f"{root['header']}\n\ntheorem Snap.zero : Snap.double 0 = 0 := rfl")
+    merged, _ = create(f"import {child['snapshot']}\nimport {sibling['snapshot']}\n\n"
+                       "theorem Snap.both : Snap.double 0 = 0 ∧ Snap.double 1 ≥ 1 := ⟨Snap.zero, by simp⟩")
+    assert merged["result"]["ok"] and not merged["dirty"], merged
+    step("snapshot: sorry marks it dirty; branches merge")
+
+    rejected, _ = create("theorem broken : 1 = 2 := rfl")
+    assert "snapshot" not in rejected and rejected["result"]["messages"][0]["severity"] == "error", rejected
+    status, info = call("GET", f"/snapshots/{child['snapshot']}")
+    assert status == 200 and info["imports"] == [root["snapshot"]], info
+    status, gone = call("DELETE", f"/snapshots/{root['snapshot']}")
+    assert status == 200 and len(gone["deleted"]) == 4, gone
+    r = on(merged, "example : True := trivial")
+    assert r["error"]["kind"] == "not_found", r
+    step("snapshot: errors aren't kept; read and cascading delete")
+
+
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
     assert r["ok"], r
@@ -161,6 +219,7 @@ if __name__ == "__main__":
     if not args.no_failover:
         wait_for_workers(2)
     core(failover=not args.no_failover)
+    snapshots()
     if args.mathlib:
         mathlib()
     print("all end-to-end checks passed")

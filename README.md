@@ -22,6 +22,10 @@ Lean 4 Server in Rust*:
    - A final check re-runs the whole proof from scratch and confirms it proves
      the original statements, with the original imports.
 
+On top of these, [snapshots](#snapshots) let a client build a library
+incrementally: accepted code is kept as a compiled module, and later code
+imports it instead of re-checking it.
+
 ## Layout
 
 | Crate | Role |
@@ -133,6 +137,9 @@ All fields are snake_case. The request and response types are in
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
+| `POST /snapshots` | `{code, version?, timeout?}` → `{snapshot?, header?, version, dirty, result}`; see [Snapshots](#snapshots) |
+| `GET /snapshots/{snapshot}` | `?version=` → `{snapshot, imports, header, code, dirty, result, created}` |
+| `DELETE /snapshots/{snapshot}` | `?version=` → `{deleted: [...]}`, the snapshot and every snapshot that imports it |
 | `GET /health`, `GET /metrics` | Liveness, Prometheus metrics |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
@@ -155,8 +162,55 @@ an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds
 | `lean`, `policy` | 422 | Lean or the policy refused the input, e.g. an unknown tactic |
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request; retry later |
-| `bad_request`, `not_found` | 400, 404 | Malformed request, unknown state or session |
+| `bad_request`, `not_found` | 400, 404 | Malformed request, unknown state, session or snapshot |
 | `internal` | 500 | A bug |
+
+## Snapshots
+
+A formalizer that builds a library statement by statement would otherwise
+resend, and Lean re-check, the whole library on every compile. Instead it
+keeps each accepted chunk as a snapshot and builds on it:
+
+```text
+POST /snapshots {"code": "import Mathlib\n\ndef double (n : ℕ) := 2 * n"}
+  → {"snapshot": "PisaSnap.s1f…", "header": "import Mathlib\nimport PisaSnap.s1f…",
+     "dirty": false, "result": {"ok": true, …}}
+POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double 2 = 4 := rfl"}
+```
+
+**How it works.**
+- **Building.** A snapshot is its code compiled with `lean -o` to the module
+  `PisaSnap.s<id>`, where `id` is a hash of the code. The same code is the same
+  snapshot.
+- **Using.** Later code imports it like any module, in `/check`, `/sessions`
+  or another snapshot. A chunk can import several snapshots, which merges
+  parallel branches.
+- **Hits.** The worker that built a snapshot keeps a Lean process with the
+  returned `header` imported, and code that starts with exactly that header
+  goes there. It then costs only its own elaboration. Other workers fetch the
+  module from the store and import it (seconds at Mathlib scale).
+
+**What carries over.** Snapshots follow Lean's module semantics. Children see
+a parent's declarations, instances, `@[simp]` lemmas and notation, but not its
+`private` declarations, `open`s, `variable`s, `set_option`s or unclosed
+sections. Re-open what a chunk needs. Module-system files (`module`,
+`public import`) are not supported.
+
+**Results.**
+- Code is kept only if Lean reports no errors. `result` is a check result, as
+  for `/check`, without `sorries`.
+- A chunk with `sorry` or another axiom outside the allowed list is kept but
+  `dirty`, and checks that use it report the axiom.
+- Imports of an unknown or deleted snapshot are `not_found`.
+
+**Retention.** Snapshots are kept until deleted; a delete also removes every
+snapshot that imports it. Each worker checks a snapshot it has cached against
+the store at most every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a delete takes
+effect everywhere within that time.
+
+**Trust.** Imported modules are not re-checked by Lean's kernel, as with
+Mathlib's cache. Whoever can write the store can forge snapshots, as for
+pickled proof states; a recorded SHA-256 catches only corruption.
 
 ## Clients
 
@@ -169,6 +223,8 @@ assert!(result.ok);
 let session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry").await?;
 let step = client.tactic(&session.states[0].state, "simp").await?; // Error::Server { kind: Lean, .. } if it fails
 let verdict = client.check_session(&session.session, "theorem t (n : Nat) : n + 0 = n := by simp").await?;
+let base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n").await?;
+let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header.unwrap())).await?;
 ```
 
 Python (`pisa_client`), built from `crates/pisa-python` with `maturin build` or `maturin develop`:
@@ -181,6 +237,8 @@ client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")["ok"]
 session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry")
 step = client.tactic(session["states"][0]["state"], "simp")   # raises LeanError if it fails
 client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]
+base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n")
+client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
 ```
 
 Calls are synchronous. They release the GIL, so one `Client` can be shared
@@ -189,7 +247,7 @@ Exceptions carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
 - `LimitError`: the input hit a timeout, the memory limit, or crashed Lean.
 - `CapacityError`: no worker was free; retry later.
-- `NotFoundError`: unknown or expired state or session.
+- `NotFoundError`: unknown or expired state or session, or unknown snapshot.
 - `PisaError`: the base class; also raised for transport failures, with no
   `kind` or `status`.
 
