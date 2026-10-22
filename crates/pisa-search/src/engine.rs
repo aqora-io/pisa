@@ -51,7 +51,7 @@ impl Default for Weights {
             lexical: 1.0,
             name: 3.0,
             structural: 0.3,
-            dense: 1.0,
+            dense: 2.0,
             prose_name: 1.0,
             prose_informal: 2.0,
             prose_statement: 1.5,

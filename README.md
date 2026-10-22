@@ -216,11 +216,12 @@ declarations it returns exist in the matching worker pool.
 - **structural:** constants the query names or implies, matched against each
   type's constants. LaTeX symbols map to constants through
   `search/symbols.toml`;
-- **dense:** Qwen3-Embedding-0.6B vectors served by TEI. So far these cover
-  Physlib and the declarations it uses directly, about 21,000 in all;
-  embedding all of Mathlib needs a GPU. The lane's weight scales with how many
-  of the lexical lane's top hits have vectors, so partial coverage doesn't
-  crowd out other results.
+- **dense:** Qwen3-Embedding-8B vectors for every declaration, from Scaleway's
+  serverless API, which also embeds each query. The lane's weight scales with
+  how many of the lexical lane's top hits have vectors, so a partially embedded
+  bundle doesn't crowd out other results. Qwen3-Embedding-0.6B is a free,
+  local alternative (TEI on CPU, or llama.cpp on a GPU) that retrieves somewhat
+  worse; see `search/bench/2026-10-22/report.md`.
 
 PageRank over the dependency graph is a prior. Declarations that depend on
 `sorry` are hidden unless `include_sorried` is set. Deprecated aliases and
@@ -228,7 +229,9 @@ PageRank over the dependency graph is a prior. Declarations that depend on
 
 **Descriptions.** Mathlib declarations reuse LeanSearch v2's descriptions
 (Apache-2.0, see `search/NOTICE`), matched by name and by the constants in
-their type. `pisa-search informalize` writes the rest with Claude:
+their type. `pisa-search informalize` writes the rest with Claude Haiku 5.5
+(about $38 for the 128k declarations left, in about 3 hours; other Claude and
+OpenAI models are a flag away):
 - It works in dependency order, so each prompt shows descriptions of what the
   declaration uses.
 - It caches by content hash, so after a library update only changed
@@ -242,15 +245,18 @@ their type. `pisa-search informalize` writes the rest with Claude:
 docker build -f docker/Dockerfile --target corpus --output search/corpus .
 # Reuse LeanSearch v2's Mathlib descriptions (downloads 332 MB, verified by sha256).
 pisa-search import-lsv2 --corpus search/corpus --file search/lsv2.jsonl --informal search/store
-# Optional: describe Physlib with Claude (needs ANTHROPIC_API_KEY). Try a sample first.
-pisa-search informalize --corpus search/corpus --informal search/store \
-  --sample 500 --report search/pilot/$(date +%F)/report.md
-# Optional: embed Physlib and what it uses for the dense lane (about 3.5 hours on 8 CPU cores).
-docker compose --profile search up -d tei
-pisa-search embed --corpus search/corpus --informal search/store --libraries Physlib --with-deps
+# Describe everything else with Claude (needs ANTHROPIC_API_KEY), and embed every
+# declaration as its description lands (needs SCW_SECRET_KEY). Try --sample 500 first.
+LIBS=Mathlib,Physlib,Batteries,Init,Std,QuantumInfo
+EMBEDDER="openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"
+pisa-search embed --corpus search/corpus --informal search/store --libraries $LIBS \
+  --embedder "$EMBEDDER" --label qwen3-embedding-8b@scaleway --batch 32 --concurrency 32 \
+  --follow search/work/described &
+pisa-search informalize --corpus search/corpus --informal search/store --libraries $LIBS \
+  --concurrency 40 && touch search/work/described; wait
 # Build the bundle and serve it on :8100.
 pisa-search build --corpus search/corpus --informal search/store \
-  --embedding-model Qwen/Qwen3-Embedding-0.6B --out search/bundle
+  --embedding-model qwen3-embedding-8b@scaleway --out search/bundle
 docker compose --profile search up --build
 ```
 

@@ -6,8 +6,9 @@
 # PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
 #
 # Declaration search is an optional profile; it serves a bundle built with
-# `pisa-search build` (see the README) and embeds queries with TEI:
-#   PISA_SEARCH_BUNDLE=./search/bundle docker compose --profile search up --build
+# `pisa-search build` (see the README) and embeds queries with Qwen3-Embedding-8B
+# on Scaleway:
+#   SCW_SECRET_KEY=... docker compose --profile search up --build
 
 x-worker: &worker
   build:
@@ -83,19 +84,23 @@ services:
       dockerfile: docker/Dockerfile
       target: search
     image: pisa-search
-    depends_on: [tei]
     ports: ["8100:8100"]
     # Writable: tantivy takes a lock file when it opens the index.
     volumes:
       - ${PISA_SEARCH_BUNDLE:-./search/bundle}:/bundle
+    # Queries are embedded by the model that embedded the bundle: by default
+    # Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a bundle
+    # embedded with the local 0.6B model, set PISA_SEARCH_EMBEDDER=http://tei:80
+    # and add --profile search-local.
     environment:
       PISA_SEARCH_BUNDLE: /bundle
-      PISA_SEARCH_TEI: http://tei:80
+      PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
+      SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
       RUST_LOG: info
 
-  # Embeds search queries; the bundle's vectors must come from the same model.
+  # Qwen3-Embedding-0.6B on the CPU, for bundles embedded with it.
   tei:
-    profiles: [search]
+    profiles: [search-local]
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
     command: ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-client-batch-size", "64"]
     ports: ["127.0.0.1:8090:80"]
