@@ -240,6 +240,40 @@ OpenAI models are a flag away):
   declarations cost anything.
 - It checks LaTeX against KaTeX and checks that cited Lean names exist.
 
+**Prebuilt indexes.** Each index is a GitHub release tagged `index-<env_id>`,
+on the commit that built it. Its assets are archives of the gitignored `search/`
+directories, each with `NOTICE`:
+- `bundle.tar.zst`: `search/bundle`, which the service serves;
+- `store.tar.zst`: `search/store`, the descriptions and vectors. A rebuild that
+  starts from it only describes and embeds new or changed declarations;
+- `corpus.tar.zst`: `search/corpus`, the exported declarations.
+
+```sh
+# Serve a published index (the repository is private, so gh must be logged in).
+# Swap bundle for store or corpus to fetch the others.
+gh release list -R aqora-io/pisa
+gh release download index-v4.35.0-da683984 -R aqora-io/pisa -p bundle.tar.zst -O - \
+  | tar -I zstd -x -C search
+docker compose --profile search up --build
+```
+
+To publish an index after building it (below), from the pushed commit that built
+it:
+
+```sh
+ENV_ID=$(jq -r .env_id search/bundle/manifest.json)
+mkdir -p search/release
+for d in bundle store corpus; do
+  tar -I 'zstd -T0' -cf search/release/$d.tar.zst -C search $d NOTICE
+done
+# A new env_id gets a new release.
+gh release create index-$ENV_ID -R aqora-io/pisa --target "$(git rev-parse main)" \
+  --title "Search index $ENV_ID" --notes "$(jq -c . search/bundle/manifest.json)" \
+  search/release/*.tar.zst
+# A rebuild for an env_id that already has a release replaces its assets.
+gh release upload index-$ENV_ID -R aqora-io/pisa --clobber search/release/*.tar.zst
+```
+
 **Building an index:**
 
 ```sh
