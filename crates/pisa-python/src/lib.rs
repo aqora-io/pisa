@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use pisa_client::Error;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyList, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -95,6 +95,38 @@ fn to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
     })
 }
 
+/// Converts Python dicts, lists and scalars into JSON.
+fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    Ok(if obj.is_none() {
+        Value::Null
+    } else if let Ok(b) = obj.cast::<PyBool>() {
+        Value::Bool(b.is_true())
+    } else if obj.is_instance_of::<PyInt>() {
+        Value::from(obj.extract::<i64>()?)
+    } else if obj.is_instance_of::<PyFloat>() {
+        Value::from(obj.extract::<f64>()?)
+    } else if let Ok(s) = obj.cast::<PyString>() {
+        Value::String(s.to_str()?.to_string())
+    } else if let Ok(d) = obj.cast::<PyDict>() {
+        let mut fields = serde_json::Map::new();
+        for (k, v) in d.iter() {
+            fields.insert(k.extract::<String>()?, from_py(&v)?);
+        }
+        Value::Object(fields)
+    } else if obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>() {
+        Value::Array(
+            obj.try_iter()?
+                .map(|x| from_py(&x?))
+                .collect::<PyResult<_>>()?,
+        )
+    } else {
+        return Err(PyValueError::new_err(format!(
+            "can't send a {} to the server",
+            obj.get_type().name()?
+        )));
+    })
+}
+
 /// A client for one pisa server. Safe to share between threads.
 #[pyclass(frozen, module = "pisa_client")]
 struct Client {
@@ -157,7 +189,91 @@ impl Client {
     }
 }
 
+/// A client for one declaration search server. Safe to share between threads.
+#[pyclass(frozen, module = "pisa_client")]
+struct SearchClient {
+    inner: pisa_client::SearchClient,
+}
+
+#[pymethods]
+impl SearchClient {
+    #[new]
+    #[pyo3(signature = (url, *, env_id = None))]
+    fn new(url: &str, env_id: Option<String>) -> PyResult<Self> {
+        let mut inner = pisa_client::SearchClient::new(url)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Some(env) = env_id {
+            inner = inner.with_env(env);
+        }
+        Ok(SearchClient { inner })
+    }
+
+    fn health(&self, py: Python<'_>) -> PyResult<()> {
+        let result = py.detach(|| runtime().block_on(self.inner.health()));
+        result.map_err(|e| to_py_err(py, e))
+    }
+
+    #[pyo3(signature = (
+        q = None, *, nl = None, latex = None, pattern = None, goal = None, name = None,
+        libraries = Vec::new(), kinds = Vec::new(), k = 5, include_sorried = false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn search<'py>(
+        &self,
+        py: Python<'py>,
+        q: Option<String>,
+        nl: Option<String>,
+        latex: Option<String>,
+        pattern: Option<String>,
+        goal: Option<String>,
+        name: Option<String>,
+        libraries: Vec<String>,
+        kinds: Vec<String>,
+        k: usize,
+        include_sorried: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let query = pisa_client::Query {
+            q,
+            nl,
+            latex,
+            pattern,
+            goal,
+            name,
+            libraries,
+            kinds,
+            k,
+            include_sorried,
+            verify: false,
+        };
+        call(py, async move { self.inner.search(&query).await })
+    }
+
+    fn search_batch<'py>(
+        &self,
+        py: Python<'py>,
+        queries: Vec<Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let queries = queries
+            .iter()
+            .map(|q| {
+                serde_json::from_value(from_py(q.as_any())?)
+                    .map_err(|e| PyValueError::new_err(format!("invalid query: {e}")))
+            })
+            .collect::<PyResult<Vec<pisa_client::Query>>>()?;
+        call(py, self.inner.search_batch(queries))
+    }
+
+    fn resolve<'py>(&self, py: Python<'py>, names: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+        call(py, self.inner.resolve(names))
+    }
+
+    fn decl<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.decl(&name).await })
+    }
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Client>()
+    m.add_class::<Client>()?;
+    m.add_class::<SearchClient>()
 }

@@ -1,3 +1,6 @@
 target
 .git
 .jj
+search/corpus
+search/bundle
+search/store

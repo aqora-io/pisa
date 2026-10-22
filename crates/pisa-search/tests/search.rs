@@ -478,3 +478,60 @@ async fn http_api() {
         .unwrap();
     assert_eq!(r.status(), 400);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rust_client() {
+    use pisa_client::{ErrorKind, SearchClient};
+
+    let (_d, e) = engine();
+    let app = pisa_search::server::router(Arc::new(e));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let c = SearchClient::new(&format!("http://{addr}")).unwrap();
+    c.health().await.unwrap();
+
+    let r = c
+        .search(&Query {
+            nl: Some("trace of the identity matrix".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.hits[0].name, "Matrix.trace_one");
+    let batch = c
+        .search_batch(vec![
+            Query {
+                name: Some("Nat.succ_le_succ".into()),
+                ..Default::default()
+            },
+            Query::default(),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0].hits[0].name, "Nat.succ_le_succ");
+
+    let r = c
+        .resolve(["Real.sqrt_mul_sefl", "Matrix.trace"])
+        .await
+        .unwrap();
+    assert!(!r[0].exists && r[0].suggestions[0].name == "Real.sqrt_mul_self");
+    assert!(r[1].exists);
+
+    let d = c.decl("Matrix.trace").await.unwrap();
+    assert_eq!(d.deps, ["Matrix"]);
+    let err = c.decl("Real.sqrt_mul_sefl").await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+
+    let pinned = c.clone().with_env("other");
+    let err = pinned.search(&Query::default()).await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+    assert!(
+        c.with_env("v4.35.0-test")
+            .resolve(["Matrix"])
+            .await
+            .unwrap()[0]
+            .exists
+    );
+}

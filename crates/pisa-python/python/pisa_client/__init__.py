@@ -11,9 +11,12 @@
     assert step["complete"]
     verdict = client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")
     assert verdict["ok"]
+
+    search = SearchClient("http://localhost:8100")
+    hits = search.search(nl="trace of a density matrix is one")["hits"]
 """
 
-from ._native import Client
+from ._native import Client, SearchClient
 from .errors import CapacityError, LeanError, LimitError, NotFoundError, PisaError
 
-__all__ = ["Client", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]
+__all__ = ["Client", "SearchClient", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]

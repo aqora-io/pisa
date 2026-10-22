@@ -1734,6 +1734,7 @@ dependencies = [
  "futures",
  "hex",
  "object_store",
+ "pisa-client",
  "pisa-protocol",
  "rayon",
  "reqwest",

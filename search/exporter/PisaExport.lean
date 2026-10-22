@@ -2,7 +2,7 @@
 Exports every user-facing declaration of an environment as one JSON line, for
 pisa-search to index. Run from the Lake project that pins the libraries:
 
-  lake env lean --run PisaExport.lean --env E1 Mathlib Physlib PhyslibAlpha > e1.ndjson
+  lake env lean --run PisaExport.lean --env mathlib-physlib Mathlib Physlib > decls.ndjson
 
 Lines are `{"record":"decl",...}` per declaration, sorted by name, then
 `{"record":"module",...}` per module with a module docstring. Internal,

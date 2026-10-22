@@ -33,6 +33,7 @@ Lean 4 Server in Rust*:
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
 | `pisa-tests` | `fake-repl` (speaks the REPL protocol without Lean) and in-process integration tests |
+| `pisa-search` | Declaration search over Mathlib and Physlib: corpus, descriptions, index, HTTP API (see [Search](#search)) |
 
 ## Running
 
@@ -195,9 +196,106 @@ Exceptions carry `.kind` and `.status`, and their class says what to do:
 To run the Python tests:
 
 ```sh
-cargo build -p pisa-router -p pisa-worker -p pisa-tests
+cargo build -p pisa-router -p pisa-worker -p pisa-tests -p pisa-search
 cd crates/pisa-python && maturin develop && pytest tests
 ```
+
+## Search
+
+`pisa-search` finds Mathlib and Physlib declarations from a description,
+LaTeX, a Lean pattern or goal, or a partial or misspelled name. It is meant for
+agents that know what they need but not what it is called. It runs as its own
+service. Its index is built from the same pinned project as the workers, and
+every response carries that project's version label as `env_id`, so the
+declarations it returns exist in the matching worker pool.
+
+**How it ranks.** Four lanes each return candidates, and reciprocal rank fusion
+(k = 60) merges them:
+- **lexical:** BM25 over names, descriptions, signatures and docstrings;
+- **name:** exact, case-insensitive, last-component and fuzzy name matches;
+- **structural:** constants the query names or implies, matched against each
+  type's constants. LaTeX symbols map to constants through
+  `search/symbols.toml`;
+- **dense:** Qwen3-Embedding-0.6B vectors served by TEI. So far these cover
+  Physlib and the declarations it uses directly, about 21,000 in all;
+  embedding all of Mathlib needs a GPU. The lane's weight scales with how many
+  of the lexical lane's top hits have vectors, so partial coverage doesn't
+  crowd out other results.
+
+PageRank over the dependency graph is a prior. Declarations that depend on
+`sorry` are hidden unless `include_sorried` is set. Deprecated aliases and
+`to_additive` pairs fold into one hit.
+
+**Descriptions.** Mathlib declarations reuse LeanSearch v2's descriptions
+(Apache-2.0, see `search/NOTICE`), matched by name and by the constants in
+their type. `pisa-search informalize` writes the rest with Claude:
+- It works in dependency order, so each prompt shows descriptions of what the
+  declaration uses.
+- It caches by content hash, so after a library update only changed
+  declarations cost anything.
+- It checks LaTeX against KaTeX and checks that cited Lean names exist.
+
+**Building an index:**
+
+```sh
+# Export the pinned project's declarations (about 25 minutes).
+docker build -f docker/Dockerfile --target corpus --output search/corpus .
+# Reuse LeanSearch v2's Mathlib descriptions (downloads 332 MB, verified by sha256).
+pisa-search import-lsv2 --corpus search/corpus --file search/lsv2.jsonl --informal search/store
+# Optional: describe Physlib with Claude (needs ANTHROPIC_API_KEY). Try a sample first.
+pisa-search informalize --corpus search/corpus --informal search/store \
+  --sample 500 --report search/pilot/$(date +%F)/report.md
+# Optional: embed Physlib and what it uses for the dense lane (about 3.5 hours on 8 CPU cores).
+docker compose --profile search up -d tei
+pisa-search embed --corpus search/corpus --informal search/store --libraries Physlib --with-deps
+# Build the bundle and serve it on :8100.
+pisa-search build --corpus search/corpus --informal search/store \
+  --embedding-model Qwen/Qwen3-Embedding-0.6B --out search/bundle
+docker compose --profile search up --build
+```
+
+`--informal` takes a directory or an `s3://bucket/prefix` URL (credentials come
+from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
+
+**API** (types in `crates/pisa-protocol/src/search.rs`):
+
+| Endpoint | Request → response |
+| --- | --- |
+| `POST /v1/search` | `{queries: [{q?, nl?, latex?, pattern?, goal?, name?, libraries?, kinds?, k?, include_sorried?}], env_id?}` → `{env_id, results: [{hits}]}`, at most 64 queries |
+| `POST /v1/resolve` | `{names, env_id?}` → `{env_id, results: [{name, exists, deprecated_to?, suggestions}]}` |
+| `GET /v1/decl/{name}` | → `{env_id, decl}`: signature, description, flags, dependencies and users |
+
+Each hit carries:
+- name, kind, library, module and signature;
+- a description, when one exists;
+- flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
+- the lanes that found it, and a source link;
+- `text`, about 150 tokens ready for a model's context.
+
+Unknown names and empty results are answers, not errors. Pinning an `env_id`
+the server doesn't have is a 404.
+
+```python
+from pisa_client import SearchClient
+
+search = SearchClient("http://localhost:8100")
+for hit in search.search(nl="trace of a density matrix is one", libraries=["Physlib"])["hits"]:
+    print(hit["text"])
+search.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqrt_mul_self"
+```
+
+The Rust `pisa_client::SearchClient` has the same methods. To run the Python
+search tests, first run `cargo build -p pisa-search`.
+
+**Quality.** Two reports track it:
+- `search/eval/<env_id>.md`: recall, MRR and nDCG on LeanSearch v2's MathlibQR
+  benchmark, per lane and per query style;
+- `search/pilot/2026-10-22/report.md`: the informalization pilot, with cost,
+  a full-run estimate, check pass rates and samples to review.
+
+**Imports.** The index covers `import Mathlib` together with `import Physlib`.
+Standalone QuantumInfo can't be imported alongside Mathlib, because both
+declare `Commute.log_left`. pisa reports that clash as a header error.
 
 ## Verification policy
 

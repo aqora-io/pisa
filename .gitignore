@@ -2,3 +2,7 @@
 __pycache__/
 *.so
 .envrc
+# Generated search data (see the README)
+/search/corpus
+/search/bundle
+/search/store

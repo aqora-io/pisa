@@ -4,6 +4,10 @@
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
 # PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
+#
+# Declaration search is an optional profile; it serves a bundle built with
+# `pisa-search build` (see the README) and embeds queries with TEI:
+#   PISA_SEARCH_BUNDLE=./search/bundle docker compose --profile search up --build
 
 x-worker: &worker
   build:
@@ -71,3 +75,32 @@ services:
     environment:
       <<: *worker-env
       PISA_WORKER_ID: worker-2
+
+  search:
+    profiles: [search]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: search
+    image: pisa-search
+    depends_on: [tei]
+    ports: ["8100:8100"]
+    # Writable: tantivy takes a lock file when it opens the index.
+    volumes:
+      - ${PISA_SEARCH_BUNDLE:-./search/bundle}:/bundle
+    environment:
+      PISA_SEARCH_BUNDLE: /bundle
+      PISA_SEARCH_TEI: http://tei:80
+      RUST_LOG: info
+
+  # Embeds search queries; the bundle's vectors must come from the same model.
+  tei:
+    profiles: [search]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+    command: ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-client-batch-size", "64"]
+    ports: ["127.0.0.1:8090:80"]
+    volumes:
+      - tei-models:/data
+
+volumes:
+  tei-models:
