@@ -61,14 +61,21 @@ async fn worker_reports_a_new_warm_header_before_the_result() {
     let cfg = common::worker_config(listener.local_addr().unwrap(), "w0", "v", 1);
     let store: std::sync::Arc<dyn object_store::ObjectStore> =
         std::sync::Arc::new(object_store::memory::InMemory::new());
-    tokio::spawn(pisa_worker::run_with_store(cfg, store, std::future::pending()));
+    tokio::spawn(pisa_worker::run_with_store(
+        cfg,
+        store,
+        std::future::pending(),
+    ));
     let (stream, _) = listener.accept().await.unwrap();
     let mut conn = wire::connection(stream);
     async fn recv(conn: &mut wire::Connection<tokio::net::TcpStream>) -> WorkerMessage {
         wire::recv(conn).await.unwrap().unwrap()
     }
     assert!(matches!(recv(&mut conn).await, WorkerMessage::Hello { .. }));
-    assert!(matches!(recv(&mut conn).await, WorkerMessage::Status { .. }));
+    assert!(matches!(
+        recv(&mut conn).await,
+        WorkerMessage::Status { .. }
+    ));
     for i in 0..8 {
         let code = format!("import H{i}\ntheorem t : 1 = 1 := rfl");
         let key = split_header(&code).header_key;

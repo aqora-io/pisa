@@ -60,6 +60,10 @@ pub enum Job {
     SessionStart(SessionStartJob),
     SessionTactic(SessionTacticJob),
     SessionCheck(SessionCheckJob),
+    /// A job kind this worker doesn't know, sent by a newer router. It is
+    /// answered with [`JobResult::Failed`] rather than dropping the connection.
+    #[serde(other)]
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,5 +193,21 @@ mod tests {
         assert_eq!(c.code.len(), 15 * 200);
         drop(a);
         assert!(recv::<_, RouterMessage>(&mut b).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn unknown_job_kinds_parse_as_unsupported() {
+        let msg: RouterMessage = serde_json::from_value(serde_json::json!({
+            "type": "job", "request_id": 1,
+            "job": {"kind": "from_the_future", "code": "x", "timeout_secs": 1}
+        }))
+        .unwrap();
+        assert!(matches!(
+            msg,
+            RouterMessage::Job {
+                job: Job::Unsupported,
+                ..
+            }
+        ));
     }
 }
