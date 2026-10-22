@@ -65,3 +65,74 @@ The plan settled on chunk replay only, with modules "later, if the numbers call 
   - Replay can stay as the fallback when a module build fails.
 - **Recycling:** keep slots holding snapshots alive longer than `PISA_MAX_USES` allows, or recycle on memory instead. Even with modules, a miss costs an import.
 - **Axiom report:** scope it to the chunk from the start.
+
+## Snapshots as built (measured through the API)
+
+Snapshots were then built as compiled modules that later code imports (see
+the README). The `api` phase of `scripts/bench_snapshots.py` drove them
+through `POST /snapshots` and `/check`, against `docker compose` with two
+workers and Garage.
+
+**How it was run.**
+- Each module became one snapshot, importing the snapshots of the modules it
+  imports. That preserves Physlib's import graph, so many snapshots merge
+  several others.
+- Twelve checks followed each create, as a formalizer's next compiles would
+  (MerLean averages 13 compiles per statement).
+- `raw-api.json` has the per-module numbers, `cold.json` the restart and
+  memory figures, and `determinism.json` the rebuild comparison.
+
+**Which modules.** 47 of the 86 modules, 9,530 lines.
+- **Plain Lean.** Snapshots take plain Lean, so the chunks drop Physlib's
+  module-system markers, as in M2. The 7 modules that failed in M2 fail here
+  too, with the same errors.
+- **Not from leaked state.** Each snapshot imports only its real
+  dependencies, so these failures don't come from other chunks' declarations
+  leaking in. They come from dropping the module system, under which only
+  exposed definitions unfold.
+- **The rest.** 32 more modules depend on those 7, which leaves 47
+  (`--skip-replay-failures`).
+- **Policy.** Physlib's own code needs a `macro` and `backward.*` options, so
+  the bench workers allowed both. MerLean's output needs neither.
+
+| | Result |
+| --- | --- |
+| Create a snapshot (47) | median 7.2 s, p90 9.3 s, max 17.8 s; 369 s in total |
+| of which `lean -o`, including its 3.4 s Mathlib import | median 3.7 s, max 14.3 s |
+| of which the builder importing the new snapshot, the axiom report and the upload | 3.5 s, nearly constant |
+| Checks right after each create (12 × 47) | all warm hits: median 40 ms, max 46 ms |
+| One snapshot importing all 21 leaves (the whole library) | created in 7.0 s |
+| Checks on it, warm | 41 ms |
+| Checks on it with another header (a fresh import) | 3.4–3.5 s |
+| Checks on it after restarting both workers (empty caches, modules downloaded from Garage) | 3.6 s |
+| Memory of the warm whole-library process | RSS 6.6 GB, of which 465 MB private dirty; 5.5 GB is clean, file-backed `.olean` pages that other processes on the host share |
+
+**Findings.**
+1. **A statement costs seconds, not minutes.**
+   - In MerLean's pattern of 12 checks and then one create, a statement on
+     this 9.5k-line library costs about 7.7 s.
+   - Resending the prefix (M1) costs about 12 s per 1k lines, so about 115 s
+     per compile and about 1,500 s per statement.
+2. **Checks follow the snapshot to its builder.** The builder is warm on the
+   returned header, and the router sends code with that header there: all 564
+   checks were hits.
+3. **The library size barely matters.**
+   - Importing the whole library costs what importing Mathlib alone costs
+     (3.4 s), because modules are memory-mapped.
+   - A worker with empty caches downloads and imports it in 3.6 s.
+   - So recycling processes (`PISA_MAX_USES`) and restarts stay cheap.
+4. **The fixed cost of a snapshot is two Mathlib imports, about 7 s:** the
+   build's, and the builder's REPL. If that matters, running the axiom report
+   inside the build and warming the builder in the background would halve it.
+5. **Builds are deterministic at scale.** The three largest chunks (670, 504
+   and 475 lines), rebuilt in each worker container, gave `.olean` files
+   identical to each other and to the one the store served. So two workers
+   building the same snapshot store the same bytes.
+6. **A warm snapshot costs about 0.5 GB of anonymous memory.** The rest is
+   page cache shared across processes, so slots can be sized by private
+   memory rather than RSS.
+7. **Module-system files are a follow-up.** `lean -o` on a `module` file
+   writes five files (`.olean`, `.olean.private`, `.olean.server`, `.ir`,
+   `.ir.sig`). Supporting them as snapshots means storing all five and parsing
+   `module`/`public import` headers. That would let Physlib-style libraries
+   build unchanged.

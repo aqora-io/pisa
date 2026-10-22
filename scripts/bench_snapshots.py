@@ -16,17 +16,32 @@ container of the worker image, driving the REPL directly:
   M4  pisa's axiom report on the chained env, whole and scoped to one chunk
   M5  compiled modules: each chunk built as a module, then imported
 
+The `api` phase measures the snapshots pisa built from these results, through
+a running pisa (`--url`, e.g. `docker compose up`): each chunk becomes a
+snapshot that imports the snapshots of the modules it imports, and checks
+follow each one, as a formalizer's next compiles would. Then, against the
+same compose stack:
+
+  restart      checks on the whole library after restarting both workers,
+               and the memory of each REPL process
+  determinism  the largest chunks rebuilt in each worker container, compared
+               with the module the store served
+
 usage: python3 scripts/bench_snapshots.py [--out DIR] [--limit N] [--phases ...]
 """
 
 import argparse
+import hashlib
 import io
 import json
 import re
+import statistics
 import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,18 +149,24 @@ def closure(src, target):
 SCOPE = re.compile(r"^\s*(?:(?:@\[[^\]]*\]\s*)?(?:public\s+)?(?:noncomputable\s+)?section\b\s*(\S*)|namespace\s+(\S+)|end\b\s*(\S*))")
 
 
+def plain_lines(text):
+    """A module's source without its imports, and with the module system's
+    `public` markers made plain Lean."""
+    for line in text.splitlines():
+        if line.strip() == "module" or IMPORT.match(line):
+            continue
+        line = re.sub(r"^(\s*)(?:@\[expose\]\s*)?public\s+(noncomputable\s+)?section\b", r"\1\2section", line)
+        yield re.sub(r"^(\s*)public\s+(?=meta\b|def\b|theorem\b|lemma\b|abbrev\b|instance\b|structure\b|class\b|inductive\b|noncomputable\b|opaque\b|@\[)", r"\1", line)
+
+
 def as_command(text):
     """A module's source as one REPL command. Imports go; the module system's
     `public` markers become plain Lean; the chunk is wrapped in a section, with
     any scopes it leaves open closed, so its `open`s and options end with it as
     they would at the end of a file."""
     out, stack = [], []
-    for line in text.splitlines():
+    for line in plain_lines(text):
         s = line.strip()
-        if s == "module" or IMPORT.match(line):
-            continue
-        line = re.sub(r"^(\s*)(?:@\[expose\]\s*)?public\s+(noncomputable\s+)?section\b", r"\1\2section", line)
-        line = re.sub(r"^(\s*)public\s+(?=meta\b|def\b|theorem\b|lemma\b|abbrev\b|instance\b|structure\b|class\b|inductive\b|noncomputable\b|opaque\b|@\[)", r"\1", line)
         m = SCOPE.match(line)
         if m:
             if m.group(3) is not None and s.startswith("end"):
@@ -305,6 +326,137 @@ def phase_modules(src, order, replayed, out):
     return res
 
 
+def api(url, method, path, body=None):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url + path, data=data, method=method,
+                                 headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=3600) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"null")
+
+
+def timed_check(url, code):
+    t = time.time()
+    status, r = api(url, "POST", "/check", {"code": code, "timeout": 600})
+    assert status == 200, r
+    return r, time.time() - t
+
+
+def phase_api(src, order, url, checks, out):
+    """Each chunk as a snapshot through pisa's API, importing the snapshots of
+    the modules it imports, followed by `checks` checks on its header."""
+    chunked = set(order)
+    snaps, res = {}, {"api": {"creates": [], "checks": []}}
+    for i, m in enumerate(order):
+        deps = [d for d in IMPORT.findall(src[m]) if d in chunked]
+        header = "\n".join(f"import {snaps[d]['snapshot']}" for d in deps) if deps else HEADER
+        code = header + "\n\n" + "\n".join(plain_lines(src[m]))
+        t = time.time()
+        status, r = api(url, "POST", "/snapshots", {"code": code, "timeout": 1200})
+        dt = time.time() - t
+        assert status == 200, r
+        result = r["result"]
+        row = {"module": m, "seconds": dt, "build_seconds": result["time"], "imports": len(deps),
+               "kept": "snapshot" in r, "dirty": r.get("dirty"), "lines": lines_of(code)}
+        if "snapshot" not in r:
+            row["error"] = result.get("error") or [x["data"][:300] for x in result["messages"] if x["severity"] == "error"][:3]
+            res["api"]["creates"].append(row)
+            print(f"API create {i + 1}/{len(order)} {m}: NOT KEPT {row['error']}", flush=True)
+            return res
+        snaps[m] = r
+        hits = [timed_check(url, f"{r['header']}\n\n{HIT}") for _ in range(checks)]
+        assert all(h["ok"] for h, _ in hits), hits
+        row["checks"] = [dt for _, dt in hits]
+        res["api"]["creates"].append(row)
+        print(f"API create {i + 1}/{len(order)} {m}: {dt:.1f}s (build {result['time']:.1f}s), "
+              f"checks {', '.join(f'{x:.2f}' for x in row['checks'])}s", flush=True)
+        (out / "raw-api.json").write_text(json.dumps(res, indent=1))
+
+    # One snapshot that imports every leaf holds the whole library.
+    imported = {d for m in order for d in IMPORT.findall(src[m])}
+    leaves = [m for m in order if m not in imported]
+    code = "\n".join(f"import {snaps[m]['snapshot']}" for m in leaves) + "\n\ntheorem pisa_bench_library : True := trivial"
+    t = time.time()
+    status, final = api(url, "POST", "/snapshots", {"code": code, "timeout": 1200})
+    assert status == 200 and "snapshot" in final, final
+    res["api"]["library"] = {"snapshot": final["snapshot"], "leaves": len(leaves), "seconds": time.time() - t,
+                             "build_seconds": final["result"]["time"]}
+    print(f"API library of {len(leaves)} leaves: {res['api']['library']['seconds']:.1f}s", flush=True)
+    hits = [timed_check(url, f"{final['header']}\n\n{HIT}") for _ in range(10)]
+    res["api"]["hits"] = [dt for _, dt in hits]
+    # Other headers on the same snapshot are misses: a fresh import, wherever
+    # they land (the builder or the other worker).
+    misses = []
+    for extra in ["Mathlib.Tactic.Ring", "Mathlib.Tactic.Linarith", "Mathlib.Tactic.Positivity",
+                  "Mathlib.Tactic.NormNum", "Mathlib.Tactic.FieldSimp", "Mathlib.Tactic.Abel"]:
+        r, dt = timed_check(url, f"{final['header']}\nimport {extra}\n\n{HIT}")
+        assert r["ok"], r
+        misses.append(dt)
+    res["api"]["misses"] = misses
+    print(f"API final {final['snapshot']}: hits {statistics.median(res['api']['hits']):.2f}s median, "
+          f"misses {', '.join(f'{x:.1f}' for x in misses)}s", flush=True)
+    return res
+
+
+WORKERS = ["pisa-worker-1-1", "pisa-worker-2-1"]
+
+
+def phase_restart(url, out):
+    """Restarts both workers, so their snapshot caches are empty, then checks
+    on the whole-library snapshot of the api phase; and reads the memory of
+    every REPL process."""
+    lib = json.loads((out / "raw-api.json").read_text())["api"]["library"]["snapshot"]
+    _, info = api(url, "GET", f"/snapshots/{lib}")
+    sh("docker", "compose", "restart", "worker-1", "worker-2")
+    for _ in range(120):
+        try:
+            with urllib.request.urlopen(url + "/metrics") as r:
+                if "pisa_workers 2" in r.read().decode():
+                    break
+        except OSError:
+            pass
+        time.sleep(1)
+    checks = [timed_check(url, f"{info['header']}\n\n{HIT}") for _ in range(11)]
+    assert all(r["ok"] for r, _ in checks), checks
+    res = {"cold": [checks[0][1]], "hits": [dt for _, dt in checks[1:]], "memory_mb": []}
+    script = ('for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = repl ] && echo "$p $(grep -E '
+              '"^(Rss|Pss|Shared_Clean|Shared_Dirty|Private_Clean|Private_Dirty):" $p/smaps_rollup | tr -s " " | tr "\\n" " ")"; done; true')
+    for w in WORKERS:
+        for line in sh("docker", "exec", w, "bash", "-c", script).decode().splitlines():
+            parts = line.split()
+            fields = {parts[i].rstrip(":"): int(parts[i + 1]) // 1024 for i in range(1, len(parts) - 1, 3)}
+            res["memory_mb"].append({"worker": w, "pid": parts[0], **fields})
+    print(f"restart: cold {res['cold'][0]:.1f}s, hits {statistics.median(res['hits']):.3f}s", flush=True)
+    return res
+
+
+def phase_determinism(src, out, n=3):
+    """Rebuilds the largest chunks without snapshot imports in each worker
+    container and compares the modules with the one the store served."""
+    creates = json.loads((out / "raw-api.json").read_text())["api"]["creates"]
+    roots = sorted((c for c in creates if c["imports"] == 0), key=lambda c: -c["lines"])[:n]
+    res = []
+    for c in roots:
+        code = HEADER + "\n\n" + "\n".join(plain_lines(src[c["module"]]))
+        sid = hashlib.sha256(code.encode()).hexdigest()[:32]  # pisa_protocol::snapshot::id
+        fresh, cached = set(), set()
+        for w in WORKERS:
+            script = (f"mkdir -p /tmp/det/PisaSnap && cat > /tmp/det/PisaSnap/s{sid}.lean && cd {PROJECT} && "
+                      f"LEAN_PATH=$(lake env printenv LEAN_PATH) lean -R /tmp/det -o /tmp/det/PisaSnap/s{sid}.olean "
+                      f"/tmp/det/PisaSnap/s{sid}.lean >/dev/null && sha256sum /tmp/det/PisaSnap/s{sid}.olean | cut -c1-64; "
+                      f"find /tmp -path '*snapshots*' -name 's{sid}.olean' -exec sha256sum {{}} + | cut -c1-64; rm -rf /tmp/det")
+            shas = subprocess.run(["docker", "exec", "-i", w, "bash", "-c", script], input=code.encode(),
+                                  capture_output=True).stdout.decode().split()
+            fresh.add(shas[0] if shas else None)
+            cached.update(shas[1:])
+        res.append({"module": c["module"], "lines": c["lines"], "fresh": sorted(map(str, fresh)),
+                    "cached": sorted(cached), "identical": len(fresh) == 1 and None not in fresh and cached <= fresh})
+        print(f"determinism {c['module']}: {'identical' if res[-1]['identical'] else 'DIFFERENT'}", flush=True)
+    return res
+
+
 def render(raw):
     """The report's tables, from raw.json."""
     m2 = raw.get("m2", [])
@@ -358,6 +510,10 @@ def main():
     ap.add_argument("--out", type=Path, default=ROOT / "bench/snapshots" / time.strftime("%Y-%m-%d"))
     ap.add_argument("--limit", type=int, help="use only the first N chunks")
     ap.add_argument("--phases", default="chain,resend,modules")
+    ap.add_argument("--url", default="http://localhost:8000", help="pisa, for the api phase")
+    ap.add_argument("--checks", type=int, default=3, help="checks after each snapshot in the api phase")
+    ap.add_argument("--skip-replay-failures", action="store_true",
+                    help="api phase: leave out modules that failed in the chain phase (raw.json), and their dependents")
     ap.add_argument("--keep", action="store_true", help="leave the container running")
     ap.add_argument("--report-only", action="store_true", help="render tables from an existing raw.json")
     args = ap.parse_args()
@@ -390,6 +546,23 @@ def main():
         if "modules" in phases:
             raw.update(phase_modules(src, order, replayed, args.out))
             (args.out / "raw.json").write_text(json.dumps(raw, indent=1))
+        if "api" in phases:
+            if args.skip_replay_failures:
+                m2 = json.loads((args.out / "raw.json").read_text())["m2"]
+                bad = {c["module"] for c in m2 if c.get("error_count")}
+                for m in order:
+                    if any(d in bad for d in IMPORT.findall(src[m])):
+                        bad.add(m)
+                order = [m for m in order if m not in bad]
+            api_raw = {"target": args.target, "modules": len(order), "header": HEADER}
+            api_raw.update(phase_api(src, order, args.url, args.checks, args.out))
+            (args.out / "raw-api.json").write_text(json.dumps(api_raw, indent=1))
+        if "restart" in phases:
+            (args.out / "cold.json").write_text(json.dumps(phase_restart(args.url, args.out), indent=1))
+        if "determinism" in phases:
+            (args.out / "determinism.json").write_text(json.dumps(phase_determinism(src, args.out), indent=1))
+        if not {"chain", "resend", "modules"} & set(phases):
+            return
         (args.out / "tables.md").write_text(render(raw))
     finally:
         if not args.keep:
