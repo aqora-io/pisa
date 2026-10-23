@@ -1,0 +1,49 @@
+{
+ "cold": [
+  1.829113245010376
+ ],
+ "hits": [
+  0.05840706825256348,
+  0.05769944190979004,
+  0.05949735641479492,
+  0.057450056076049805,
+  0.05691981315612793,
+  0.05841374397277832,
+  0.05768537521362305,
+  0.05657315254211426,
+  0.05753636360168457,
+  0.05760073661804199
+ ],
+ "memory_mb": [
+  {
+   "worker": "pisa-worker-1-1",
+   "pid": "/proc/101",
+   "Rss": 688,
+   "Pss": 323,
+   "Shared_Clean": 612,
+   "Shared_Dirty": 0,
+   "Private_Clean": 17,
+   "Private_Dirty": 58
+  },
+  {
+   "worker": "pisa-worker-1-1",
+   "pid": "/proc/110",
+   "Rss": 1819,
+   "Pss": 1576,
+   "Shared_Clean": 367,
+   "Shared_Dirty": 0,
+   "Private_Clean": 1178,
+   "Private_Dirty": 273
+  },
+  {
+   "worker": "pisa-worker-2-1",
+   "pid": "/proc/101",
+   "Rss": 688,
+   "Pss": 322,
+   "Shared_Clean": 614,
+   "Shared_Dirty": 0,
+   "Private_Clean": 16,
+   "Private_Dirty": 58
+  }
+ ]
+}

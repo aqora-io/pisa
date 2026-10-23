@@ -131,8 +131,40 @@ workers and Garage.
 6. **A warm snapshot costs about 0.5 GB of anonymous memory.** The rest is
    page cache shared across processes, so slots can be sized by private
    memory rather than RSS.
-7. **Module-system files are a follow-up.** `lean -o` on a `module` file
-   writes five files (`.olean`, `.olean.private`, `.olean.server`, `.ir`,
-   `.ir.sig`). Supporting them as snapshots means storing all five and parsing
-   `module`/`public import` headers. That would let Physlib-style libraries
-   build unchanged.
+7. **Module-system files were a follow-up**, now built; see the next section.
+
+## Module-system snapshots on the whole closure
+
+Snapshots now take module-system files and keep the five files Lean writes
+for each. `--as-modules` passes every Physlib file through unchanged, except
+that imports of other closure modules point at their snapshots.
+
+| | Result |
+| --- | --- |
+| Modules kept | **86 of 86** (21,046 lines), including the 7 that fail as plain Lean |
+| Dirty | 1, correctly: Physlib's `HarmonicOscillator.Eigenstates` has a `sorry` |
+| Create a snapshot | median 2.9 s, p90 5.5 s, max 10.1 s; 302 s in total |
+| of which `lean -o` | median 1.6 s |
+| of which the builder importing it, the report and the upload | 1.4 s |
+| Checks right after each create (12 × 86) | all warm: median 58 ms, max 82 ms |
+| One snapshot importing all 25 leaves (the whole library) | created in 2.8 s |
+| Checks on it, warm | 58 ms |
+| Checks on it with another header (a fresh import) | 1.4–1.6 s |
+| Checks on it after restarting both workers | 1.8 s |
+| Memory of the warm whole-library process | RSS 1.8 GB, of which 273 MB private dirty |
+
+**Findings.**
+1. **The whole library builds.** Kept as module-system files, all 86 modules
+   build as snapshots, including the 7 that elaborate differently as plain
+   Lean (M2, and the plain run above).
+2. **A statement costs about 3.6 s** in MerLean's pattern (twelve checks,
+   then a snapshot), against about 3,350 s for 13 resends of this 21k-line
+   library (M1).
+3. **Module-system snapshots are about twice as fast as plain ones.** Each
+   module imports only the Mathlib modules it needs, not all of Mathlib, so
+   a build takes 1.6 s and a fresh import 1.4 s, against 3.7 s and 3.4 s.
+4. **Builds are deterministic.** All five files match when rebuilt on each
+   worker.
+5. **Policy.** `backward.*` options are now allowed by default. The bench
+   still allowed metaprogramming for the one Physlib module that defines a
+   `macro`.
