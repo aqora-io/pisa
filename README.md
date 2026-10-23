@@ -412,7 +412,11 @@ A check is `ok` only when all of these hold:
   `Quot.sound`. This rejects `sorry`, `admit`, `native_decide` and new axioms.
 - The code contains no metaprogramming: `#eval`, `run_cmd`, `macro`, `elab`,
   `syntax`, elaborator attributes, `unsafe`, `implemented_by` and similar.
-- Any `set_option` changes only an allowlisted option.
+- Any `set_option` changes only an allowlisted option: resource limits
+  (`maxHeartbeats` and similar), `linter.*`, `pp.*`, `trace.*`, and
+  `backward.*`, which restores older elaborator behaviour that Mathlib-style
+  code often asks for. Options that skip the kernel, such as
+  `debug.skipKernelTC`, are rejected.
 
 The axiom report is a `run_cmd` metaprogram. It needs `Lean.Elab.Command`, so
 workers add `import Lean.Elab.Command` to every header they load.

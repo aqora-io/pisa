@@ -36,9 +36,12 @@ const FORBIDDEN: &[&str] = &[
 ];
 
 pub const DEFAULT_AXIOMS: &str = "propext,Classical.choice,Quot.sound";
+/// `backward.*` options restore older elaborator behaviour (unification,
+/// `dsimp`, match compilation, equation lemmas); the kernel still checks the
+/// result. Mathlib-style code sets them often.
 pub const DEFAULT_OPTIONS: &str = "maxHeartbeats,maxRecDepth,synthInstance.maxHeartbeats,\
 synthInstance.maxSize,autoImplicit,relaxedAutoImplicit,linter.*,pp.*,trace.*,\
-exponentiation.threshold";
+exponentiation.threshold,backward.*";
 
 /// `run_cmd` needs this module, so every header a worker imports gets it.
 /// Mathlib and most projects import it anyway.
@@ -265,6 +268,10 @@ mod tests {
         assert_eq!(
             p.scan("set_option debug.skipKernelTC true in\ntheorem x : False := sorry"),
             ["option: debug.skipKernelTC"]
+        );
+        assert!(
+            p.scan("set_option backward.isDefEq.respectTransparency false in\ntheorem x : True := trivial")
+                .is_empty()
         );
         assert_eq!(
             p.scan("@[command_elab foo] def f := 1"),
