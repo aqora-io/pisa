@@ -28,7 +28,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     };
 
     let mut slot = pool.acquire(&split.header_key, None).await;
-    let rejected = slot.policy().scan(&split.body);
+    let rejected = slot.policy().scan(&split.body, false);
     if !rejected.is_empty() {
         outcome.error = Some(policy_error(&rejected));
         outcome.verification = Some(Verification {

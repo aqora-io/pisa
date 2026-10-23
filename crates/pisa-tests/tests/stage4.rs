@@ -429,3 +429,36 @@ async fn module_system_snapshots_keep_all_their_files() {
     assert_eq!(status, 200, "{gone}");
     assert!(stored_objects(&c).await.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshots_allow_macros_and_reject_forged_declarations() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    // Macros are allowed on a default worker, because the result is re-verified.
+    let macro_snap = kept(
+        &c,
+        "import Foo\n\nmacro \"twice\" : term => `(2)\ndef m : Nat := twice",
+    )
+    .await;
+    assert_eq!(macro_snap["result"]["ok"], true, "{macro_snap}");
+
+    // The kernel re-check rejects a forged declaration; nothing is stored.
+    let before = stored_objects(&c).await.len();
+    let r = create(&c, "import Foo\n\ntheorem forge : False := by trivial").await;
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(r["result"]["ok"], false, "{r}");
+    assert!(
+        r["result"]["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("kernel re-check")),
+        "{r}"
+    );
+    assert_eq!(
+        stored_objects(&c).await.len(),
+        before,
+        "forged snapshot not stored"
+    );
+
+    // elab still runs code at elaboration time, so it stays rejected.
+    let r = create(&c, "import Foo\n\nelab \"x\" : term => pure default").await;
+    assert_eq!(r["result"]["error"]["kind"], "policy", "{r}");
+}

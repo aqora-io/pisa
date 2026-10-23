@@ -59,7 +59,7 @@ impl Sessions {
     ) -> Result<StartResponse, Error> {
         let split = split_header(&job.code);
         let mut slot = pool.acquire(&split.header_key, None).await;
-        let rejected = slot.policy().scan(&split.body);
+        let rejected = slot.policy().scan(&split.body, false);
         if !rejected.is_empty() {
             return Err(policy_error(&rejected));
         }
@@ -136,7 +136,7 @@ impl Sessions {
     ) -> Result<TacticResponse, Error> {
         let key = self.parse(&job.state)?;
         let mut slot = pool.acquire(&key.header_key, Some(&key.id)).await;
-        let rejected = slot.policy().scan(&job.tactic);
+        let rejected = slot.policy().scan(&job.tactic, false);
         if !rejected.is_empty() {
             return Err(policy_error(&rejected));
         }

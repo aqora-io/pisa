@@ -16,12 +16,8 @@ const FORBIDDEN: &[&str] = &[
     "run_elab",
     "run_meta",
     "run_tac",
-    "macro",
-    "macro_rules",
-    "syntax",
     "elab",
     "elab_rules",
-    "declare_syntax_cat",
     "initialize",
     "builtin_initialize",
     "unsafe",
@@ -35,6 +31,11 @@ const FORBIDDEN: &[&str] = &[
     "builtin_tactic",
     "builtin_macro",
 ];
+
+/// Pure syntax transformers: they can't run code, do IO or add declarations,
+/// so their only risk is what they expand into. Snapshots allow them because
+/// the result is re-checked through the kernel; other endpoints don't.
+const MACRO_FAMILY: &[&str] = &["macro", "macro_rules", "syntax", "declare_syntax_cat"];
 
 pub const DEFAULT_AXIOMS: &str = "propext,Classical.choice,Quot.sound";
 /// `backward.*` options restore older elaborator behaviour (unification,
@@ -106,20 +107,6 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
   _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
     (_root_.Std.Format.text ("PISA_DECLS " ++ (_root_.Lean.Json.arr out).compress)))"#;
 
-/// The loop of [`AXIOM_REPORT`] over the declarations added after the imports.
-const REPORT_LOOP: &str = "  for (n, ci) in env.constants.map₂.toList do\n";
-
-/// [`AXIOM_REPORT`] for the declarations of one imported module, e.g. a
-/// snapshot (whose own declarations are not "after the imports").
-pub fn module_report(module: &str) -> String {
-    let report_loop = format!(
-        "  let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError \"{module} is not imported\"\n  \
-         for n in env.header.moduleData[idx.toNat]!.constNames do\n    \
-         let some ci := env.find? n | continue\n"
-    );
-    AXIOM_REPORT.replacen(REPORT_LOOP, &report_loop, 1)
-}
-
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub allowed_axioms: Vec<String>,
@@ -128,12 +115,17 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// Reasons to reject `body` without running it.
-    pub fn scan(&self, body: &str) -> Vec<String> {
+    /// Reasons to reject `body` without running it. `allow_macros` permits
+    /// the macro family, for code whose result is re-checked through the
+    /// kernel (snapshots).
+    pub fn scan(&self, body: &str, allow_macros: bool) -> Vec<String> {
         let tokens = tokens(body);
         let mut reasons = Vec::new();
         for (i, t) in tokens.iter().enumerate() {
-            if !self.allow_metaprogramming && FORBIDDEN.contains(&t.as_str()) {
+            let t_str = t.as_str();
+            let forbidden =
+                FORBIDDEN.contains(&t_str) || (!allow_macros && MACRO_FAMILY.contains(&t_str));
+            if !self.allow_metaprogramming && forbidden {
                 reasons.push(format!("forbidden: {t}"));
             }
             if t == "set_option"
@@ -162,17 +154,28 @@ impl Policy {
         response: &CommandResponse,
         report: Option<&CommandResponse>,
     ) -> Verification {
+        let decls = report.and_then(parse_report);
+        self.judge_decls(response.has_errors(), decls)
+    }
+
+    /// Judges from whether the body had errors and the declarations the axiom
+    /// report found (from the REPL report, or a snapshot's kernel re-check).
+    pub fn judge_decls(
+        &self,
+        errors: bool,
+        declarations: Option<Vec<Declaration>>,
+    ) -> Verification {
         let mut v = Verification {
             ok: true,
             reasons: Vec::new(),
             declarations: Vec::new(),
         };
-        if response.has_errors() {
+        if errors {
             v.reasons.push("error: Lean reported errors".into());
         }
-        match report.and_then(parse_report) {
+        match declarations {
             Some(decls) => v.declarations = decls,
-            None if response.has_errors() => {}
+            None if errors => {}
             None => v.reasons.push("error: axiom report unavailable".into()),
         }
         for d in &v.declarations {
@@ -273,31 +276,46 @@ mod tests {
     fn scan_flags_metaprogramming_and_options_outside_comments_and_strings() {
         let p = policy();
         assert!(
-            p.scan("theorem x : True := trivial -- #eval 1\n/- run_cmd -/")
-                .is_empty()
+            p.scan(
+                "theorem x : True := trivial -- #eval 1\n/- run_cmd -/",
+                false
+            )
+            .is_empty()
         );
-        assert!(p.scan("example : String := \"#eval macro\"").is_empty());
         assert!(
-            p.scan("set_option maxHeartbeats 400000 in\nset_option linter.unusedVariables false")
+            p.scan("example : String := \"#eval macro\"", false)
                 .is_empty()
         );
-        assert_eq!(p.scan("#eval 1"), ["forbidden: #eval"]);
+        assert!(
+            p.scan(
+                "set_option maxHeartbeats 400000 in\nset_option linter.unusedVariables false",
+                false
+            )
+            .is_empty()
+        );
+        assert_eq!(p.scan("#eval 1", false), ["forbidden: #eval"]);
         assert_eq!(
-            p.scan("set_option debug.skipKernelTC true in\ntheorem x : False := sorry"),
+            p.scan(
+                "set_option debug.skipKernelTC true in\ntheorem x : False := sorry",
+                false
+            ),
             ["option: debug.skipKernelTC"]
         );
         assert!(
-            p.scan("set_option backward.isDefEq.respectTransparency false in\ntheorem x : True := trivial")
+            p.scan("set_option backward.isDefEq.respectTransparency false in\ntheorem x : True := trivial", false)
                 .is_empty()
         );
         assert_eq!(
-            p.scan("@[command_elab foo] def f := 1"),
+            p.scan("@[command_elab foo] def f := 1", false),
             ["forbidden: command_elab"]
         );
         // Names merely containing a forbidden word are fine.
         assert!(
-            p.scan("theorem elab_ok : True := trivial\n#check Lean.Elab.Command")
-                .is_empty()
+            p.scan(
+                "theorem elab_ok : True := trivial\n#check Lean.Elab.Command",
+                false
+            )
+            .is_empty()
         );
     }
 
@@ -326,15 +344,27 @@ mod tests {
     }
 
     #[test]
-    fn module_report_walks_the_module() {
-        assert!(AXIOM_REPORT.contains(REPORT_LOOP));
-        let report = module_report("PisaSnap.s0f");
-        assert!(!report.contains("map₂"), "{report}");
-        assert!(
-            report.contains("env.getModuleIdx? `PisaSnap.s0f |"),
-            "{report}"
+    fn snapshots_allow_the_macro_family_only() {
+        let p = policy();
+        let macros = "macro \"twice\" : term => `(2)\nmacro_rules | `(twice) => `(2)\n\
+                      syntax \"x\" : term\ndeclare_syntax_cat foo";
+        assert_eq!(
+            p.scan(macros, false),
+            [
+                "forbidden: macro",
+                "forbidden: macro_rules",
+                "forbidden: syntax",
+                "forbidden: declare_syntax_cat"
+            ]
         );
-        assert!(report.contains("    let some ci := env.find? n | continue\n    if n.isInternal"));
+        assert!(p.scan(macros, true).is_empty());
+        // Code that runs at elaboration time stays forbidden.
+        assert_eq!(
+            p.scan("elab \"x\" : term => pure x", true),
+            ["forbidden: elab"]
+        );
+        assert_eq!(p.scan("run_cmd pure ()", true), ["forbidden: run_cmd"]);
+        assert_eq!(p.scan("#eval 1", true), ["forbidden: #eval"]);
     }
 
     #[test]
