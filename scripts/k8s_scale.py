@@ -105,7 +105,8 @@ def main():
     pods = kubectl(args, "get", "pods", "-l", "app.kubernetes.io/component=worker", "-o", "name").split()
     threads, results = run_burst(1, args.seconds)
     time.sleep(5)
-    kubectl(args, "delete", "--wait=false", *pods)
+    # Pods removed by the scale-down may still be listed and exit before the delete.
+    kubectl(args, "delete", "--wait=false", "--ignore-not-found", *pods)
     threads[0].join()
     assert results[0].get("ok"), results[0]
     print("ok  check finished on a worker that was deleted mid-job (drained)")
