@@ -2,9 +2,12 @@
 //! `LEAN_PATH` and reading declarations out of code.
 //!
 //! A fake module file is the module's code. A line declares a name when it
-//! starts with `theorem`, `def` or `axiom` (or `private` and one of those),
-//! and a line `needs NAME` is an error unless `NAME` is declared earlier in
-//! the same code or, without `private`, in a module it imports.
+//! starts with `theorem`, `def` or `axiom` (or `private` or `public` and one
+//! of those), and a line `needs NAME` is an error unless `NAME` is declared
+//! in the same code or, visibly, in a module it imports: without `private`,
+//! or, for module-system code (starting with `module`), with `public`. Like
+//! Lean, a module-system module whose `.olean.private` is missing imports as
+//! empty.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -24,12 +27,42 @@ pub fn find_module(module: &str) -> Option<PathBuf> {
     file.exists().then_some(file)
 }
 
-/// The modules `code`'s import lines name.
+/// Whether `code` is module-system code.
+pub fn is_module(code: &str) -> bool {
+    code.trim_start().starts_with("module")
+}
+
+/// The modules `code`'s import lines name, with or without `public`, `meta`
+/// and `all`.
 pub fn imports(code: &str) -> Vec<&str> {
     code.lines()
-        .filter_map(|l| l.trim().strip_prefix("import "))
-        .flat_map(str::split_whitespace)
+        .filter_map(|l| {
+            let words: Vec<&str> = l.split_whitespace().collect();
+            let at = words.iter().position(|w| *w == "import")?;
+            let modules: Vec<&str> = words[at + 1..]
+                .iter()
+                .copied()
+                .filter(|w| *w != "all")
+                .collect();
+            words[..at]
+                .iter()
+                .all(|w| matches!(*w, "public" | "meta"))
+                .then_some(modules)
+        })
+        .flatten()
         .collect()
+}
+
+/// The declarations of a module that its importers see: module-system code
+/// shows only its `public` declarations.
+fn visible(code: &str) -> String {
+    if !is_module(code) {
+        return code.to_string();
+    }
+    code.lines()
+        .filter_map(|l| l.strip_prefix("public "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The code of every snapshot module `code` imports, directly or not, or the
@@ -44,9 +77,12 @@ pub fn imported_code(code: &str) -> Result<String, String> {
                 continue;
             }
             let file = find_module(module).ok_or_else(|| module.to_string())?;
-            let text = std::fs::read_to_string(file).map_err(|_| module.to_string())?;
+            let text = std::fs::read_to_string(&file).map_err(|_| module.to_string())?;
+            if is_module(&text) && !file.with_extension("olean.private").exists() {
+                continue;
+            }
             visit(&text, seen, out)?;
-            out.push_str(&text);
+            out.push_str(&visible(&text));
             out.push('\n');
         }
         Ok(())
@@ -61,7 +97,7 @@ fn declared(line: &str) -> Option<(&str, bool)> {
     let mut words = line.split_whitespace();
     let mut keyword = words.next()?;
     let private = keyword == "private";
-    if private {
+    if private || keyword == "public" {
         keyword = words.next()?;
     }
     matches!(keyword, "theorem" | "def" | "axiom").then(|| words.next().map(|n| (n, private)))?
@@ -99,6 +135,7 @@ pub fn declarations(code: &str) -> String {
     }
     let mut decls = Vec::new();
     for line in code.lines() {
+        let line = line.strip_prefix("public ").unwrap_or(line);
         let mut words = line.split_whitespace();
         let (Some(keyword), Some(name)) = (words.next(), words.next()) else {
             continue;

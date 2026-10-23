@@ -382,3 +382,50 @@ async fn snapshots_work_in_the_sandbox() {
     let r = check(&c, &on(&child, "needs base\nneeds c")).await;
     assert_eq!(r["ok"], true, "{r}");
 }
+
+const MODULE_ROOT: &str = "module\npublic import Foo\n\npublic theorem mbase : 1 = 1 := rfl\ntheorem mhidden : 2 = 2 := rfl";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn module_system_snapshots_keep_all_their_files() {
+    let mut c = Cluster::start(&[("w0", "v", 1)]).await;
+    let root = kept(&c, MODULE_ROOT).await;
+    let name = root["snapshot"].as_str().unwrap();
+    assert_eq!(
+        root["header"],
+        format!("module\npublic import Foo\npublic import {name}")
+    );
+    let objects = stored_objects(&c).await;
+    let id = &name["PisaSnap.s".len()..];
+    for ext in ["olean", "olean.server", "olean.private", "ir", "ir.sig"] {
+        let object = format!("snapshots/v/{id}.{ext}.zst");
+        assert!(objects.contains(&object), "{objects:?}");
+    }
+    let child = kept(
+        &c,
+        &on(&root, "public theorem mchild : 3 = 3 := rfl\nneeds mbase"),
+    )
+    .await;
+    let child_name = child["snapshot"].as_str().unwrap();
+    assert_eq!(
+        child["header"],
+        format!("module\npublic import Foo\npublic import {child_name}")
+    );
+
+    // Another worker must fetch every file: a module-system module without
+    // its .olean.private imports as empty.
+    c.add_worker(common::worker_config(c.router.worker_addr, "w1", "v", 1));
+    c.wait_for_workers(2).await;
+    c.workers[0].abort();
+    c.wait_for_workers(1).await;
+    let r = check(&c, &on(&child, "needs mbase\nneeds mchild")).await;
+    assert_eq!(r["ok"], true, "{r}");
+    let r = check(&c, &on(&child, "needs mhidden")).await;
+    assert_eq!(r["ok"], false, "only public declarations are visible: {r}");
+    // Plain code can import module-system snapshots.
+    let r = check(&c, &format!("import {child_name}\n\nneeds mchild")).await;
+    assert_eq!(r["ok"], true, "{r}");
+
+    let (status, gone) = request(&c, reqwest::Method::DELETE, &format!("/snapshots/{name}")).await;
+    assert_eq!(status, 200, "{gone}");
+    assert!(stored_objects(&c).await.is_empty());
+}

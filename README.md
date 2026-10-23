@@ -128,7 +128,8 @@ python3 scripts/k8s_scale.py           # scales up under load, back down, drains
 ## API
 
 All fields are snake_case. The request and response types are in
-`crates/pisa-protocol/src/api.rs`.
+`crates/pisa-protocol/src/api.rs`. Code is a Lean file: plain, or
+module-system (a `module` header with `public`, `meta` and `all` imports).
 
 | Endpoint | Request → response |
 | --- | --- |
@@ -193,8 +194,17 @@ POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double
 **What carries over.** Snapshots follow Lean's module semantics. Children see
 a parent's declarations, instances, `@[simp]` lemmas and notation, but not its
 `private` declarations, `open`s, `variable`s, `set_option`s or unclosed
-sections. Re-open what a chunk needs. Module-system files (`module`,
-`public import`) are not supported.
+sections. Re-open what a chunk needs.
+
+**Module-system code.** A chunk can be a module-system file (`module`,
+`public import`, `@[expose]`):
+- **Visibility.** Children then see what the module system exports: `public`
+  declarations, with bodies only for `@[expose]` definitions.
+- **Imports between kinds.** A `module` file can import only module-system
+  snapshots; plain files can import either.
+- **The returned `header`.** It keeps `module` and imports the new snapshot
+  with the modifiers the chunk used for its snapshot imports. If the chunk
+  had none, it uses `public import`, so chains stay transitive.
 
 **Results.**
 - Code is kept only if Lean reports no errors. `result` is a check result, as
@@ -419,7 +429,8 @@ A check is `ok` only when all of these hold:
   `debug.skipKernelTC`, are rejected.
 
 The axiom report is a `run_cmd` metaprogram. It needs `Lean.Elab.Command`, so
-workers add `import Lean.Elab.Command` to every header they load.
+workers add `import Lean.Elab.Command` to every header they load, or
+`meta import Lean.Elab.Command` to a module-system header.
 
 ## Limits
 

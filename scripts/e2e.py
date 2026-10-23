@@ -195,6 +195,62 @@ def snapshots():
     step("snapshot: errors aren't kept; read and cascading delete")
 
 
+MODULE_ROOT = """module
+
+@[expose] public section
+namespace MSnap
+def double (n : Nat) : Nat := 2 * n
+theorem double_eq (n : Nat) : double n = n + n := by unfold double; omega
+end MSnap
+end
+
+public def MSnap.opaque (n : Nat) : Nat := n + 1
+def MSnap.hidden : Nat := 7
+"""
+
+
+def module_snapshots():
+    def create(code):
+        return post("/snapshots", {"code": code, "timeout": 600})
+
+    def on(snapshot, body):
+        return check(f"{snapshot['header']}\n\n{body}")
+
+    root = create(MODULE_ROOT)
+    assert root["result"]["ok"] and not root["dirty"], root
+    assert root["header"] == f"module\npublic import {root['snapshot']}", root
+    assert on(root, "example : MSnap.double 3 = 6 := by simp [MSnap.double_eq]")["ok"]
+    assert not on(root, "#check MSnap.hidden")["ok"]
+    # In a module, an imported definition unfolds only if it is exposed; plain
+    # code sees through it.
+    assert not on(root, "example : MSnap.opaque 1 = 2 := rfl")["ok"]
+    assert check(f"import {root['snapshot']}\n\nexample : MSnap.opaque 1 = 2 := rfl")["ok"]
+    step("module snapshot: public and exposed declarations carry, the rest doesn't")
+
+    child = create(f"{root['header']}\n\npublic theorem MSnap.cheat : 1 = 2 := by\n"
+                   "  have h : False := sorry\n  exact h.elim")
+    assert child["dirty"] and child["result"]["reasons"] == ["axiom: MSnap.cheat uses sorryAx"], child
+    r = on(child, "public theorem uses : 1 = 2 := MSnap.cheat")
+    assert r["reasons"] == ["axiom: uses uses sorryAx"], r
+    step("module snapshot: sorry in a proof body is still reported")
+
+    code = f"{root['header']}\n\npublic theorem t (n : Nat) : MSnap.double n = n + n := by sorry"
+    s = post("/sessions", {"code": code})
+    done = post(f"/states/{s['states'][0]['state']}/tactic", {"tactic": "exact MSnap.double_eq n"})
+    assert done["complete"], done
+    proof = code.replace("by sorry", "MSnap.double_eq n")
+    assert post(f"/sessions/{s['session']}/check", {"code": proof, "timeout": 600})["ok"]
+    step("module snapshot: sessions in module mode")
+
+    plain = create(f"import {root['snapshot']}\n\ntheorem on_module : MSnap.double 1 = 2 := rfl")
+    assert plain["result"]["ok"], plain
+    mixed = create(f"module\npublic import {plain['snapshot']}\n\npublic def x : Nat := 1")
+    assert "snapshot" not in mixed and "non-`module`" in mixed["result"]["messages"][0]["data"], mixed
+    status, gone = call("DELETE", f"/snapshots/{root['snapshot']}")
+    assert status == 200 and len(gone["deleted"]) == 3, gone
+    step("module snapshot: plain code imports it, a module can't import plain code")
+
+
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
     assert r["ok"], r
@@ -220,6 +276,7 @@ if __name__ == "__main__":
         wait_for_workers(2)
     core(failover=not args.no_failover)
     snapshots()
+    module_snapshots()
     if args.mathlib:
         mathlib()
     print("all end-to-end checks passed")

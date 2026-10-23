@@ -5,6 +5,7 @@
 //! which could otherwise rewrite the environment or fake the axiom report, and
 //! options that weaken checking, such as `debug.skipKernelTC`.
 
+use pisa_protocol::header::import_parts;
 use pisa_protocol::repl::{CommandResponse, Severity};
 use pisa_protocol::verify::{Declaration, Verification};
 
@@ -47,13 +48,29 @@ exponentiation.threshold,backward.*";
 /// Mathlib and most projects import it anyway.
 pub const REPORT_IMPORT: &str = "import Lean.Elab.Command";
 
+/// In a module-system header, `run_cmd` runs at compile time, so it needs a
+/// `meta` import.
+pub const MODULE_REPORT_IMPORT: &str = "meta import Lean.Elab.Command";
+
 pub fn header_with_report_import(header: &str) -> String {
-    if header.lines().any(|l| l.trim() == REPORT_IMPORT) {
+    let module_system = header.lines().next() == Some("module");
+    let imported = header
+        .lines()
+        .filter_map(import_parts)
+        .any(|(prefix, modules)| {
+            modules.contains(&"Lean.Elab.Command") && (!module_system || prefix.contains("meta"))
+        });
+    let import = if module_system {
+        MODULE_REPORT_IMPORT
+    } else {
+        REPORT_IMPORT
+    };
+    if imported {
         header.to_string()
     } else if header.trim().is_empty() {
-        REPORT_IMPORT.to_string()
+        import.to_string()
     } else {
-        format!("{header}\n{REPORT_IMPORT}")
+        format!("{header}\n{import}")
     }
 }
 
@@ -286,6 +303,26 @@ mod tests {
 
     fn response(v: serde_json::Value) -> CommandResponse {
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn report_import_is_added_once_in_either_kind_of_header() {
+        assert_eq!(header_with_report_import(""), REPORT_IMPORT);
+        assert_eq!(
+            header_with_report_import("import Mathlib\nimport Lean.Elab.Command"),
+            "import Mathlib\nimport Lean.Elab.Command"
+        );
+        assert_eq!(
+            header_with_report_import("module\npublic import Mathlib"),
+            "module\npublic import Mathlib\nmeta import Lean.Elab.Command"
+        );
+        // A module needs the `meta` import even if it imports the module.
+        assert_eq!(
+            header_with_report_import("module\nimport Lean.Elab.Command"),
+            "module\nimport Lean.Elab.Command\nmeta import Lean.Elab.Command"
+        );
+        let has = "module\npublic meta import Lean.Elab.Command";
+        assert_eq!(header_with_report_import(has), has);
     }
 
     #[test]

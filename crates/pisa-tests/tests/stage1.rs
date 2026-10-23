@@ -24,6 +24,18 @@ async fn check_reports_messages_at_submitted_positions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn module_system_code_is_checked_with_its_header() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let r = check(
+        &c,
+        json!({"code": "module\npublic import Foo\n\n@[expose] public section\n#check Nat"}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["messages"][0]["pos"]["line"], 5, "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn second_request_with_same_header_is_a_warm_hit() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     for i in 0..3 {

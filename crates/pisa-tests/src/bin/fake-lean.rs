@@ -4,14 +4,16 @@
 //! line on stdin, as Lean does.
 //!
 //! `lean -R <root> -o <olean> --json <file>` compiles a module: the "olean" is
-//! a copy of the code. It reports the file's lines like fake-repl: `#check Nat`
-//! gives an information message, `error_here` and an unmet `needs NAME` an
-//! error, `sorry` a warning, `SLEEP <ms>` sleeps and `CRASH` exits. On errors,
-//! like Lean, it exits 1 and writes nothing.
+//! a copy of the code, and module-system code also gets the `.olean.server`,
+//! `.olean.private`, `.ir` and `.ir.sig` files Lean writes for it. It reports
+//! the file's lines like fake-repl: `#check Nat` gives an information
+//! message, `error_here` and an unmet `needs NAME` an error, `sorry` a
+//! warning, `SLEEP <ms>` sleeps and `CRASH` exits. On errors, like Lean, it
+//! exits 1 and writes nothing.
 
 use std::io::Read;
 
-use pisa_tests::{declares, imported_code, needs};
+use pisa_tests::{declares, imported_code, is_module, needs};
 use serde_json::json;
 
 fn main() {
@@ -89,6 +91,12 @@ fn compile(olean: &str, file: &str) {
     }
     if failed {
         std::process::exit(1);
+    }
+    if is_module(&code) {
+        for ext in ["olean.server", "olean.private", "ir", "ir.sig"] {
+            let path = std::path::Path::new(olean).with_extension(ext);
+            std::fs::write(path, ext).unwrap();
+        }
     }
     std::fs::write(olean, code).unwrap();
 }

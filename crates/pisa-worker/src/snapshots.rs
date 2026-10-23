@@ -3,7 +3,9 @@
 //! of the version can import it.
 //!
 //! Layout, per pool version:
-//! - `snapshots/<version>/<id>.olean.zst`: the module, zstd-compressed
+//! - `snapshots/<version>/<id>.<ext>.zst`: the module's files, zstd-compressed:
+//!   its `.olean`, and for module-system code also `.olean.server`,
+//!   `.olean.private`, `.ir` and `.ir.sig`
 //! - `snapshots/<version>/<id>.json`: [`SnapshotMeta`]. Written last, so a
 //!   snapshot exists once its metadata does.
 //! - `snapshots/<version>/<id>.children/<child id>`: an empty marker for each
@@ -42,7 +44,7 @@ const REPORT_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct SnapshotMeta {
     /// Ids of the snapshots it imports.
     pub imports: Vec<String>,
-    /// Every module it needs, its own last, with their SHA-256.
+    /// Every module it needs, its own last.
     pub modules: Vec<Module>,
     /// See [`SnapshotResponse::header`].
     pub header: String,
@@ -55,17 +57,26 @@ pub struct SnapshotMeta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Module {
     pub id: String,
+    /// The `.olean` last: it is written last, because Lean imports a
+    /// module-system `.olean` without its other files as an empty module.
+    pub files: Vec<ModuleFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleFile {
+    /// What follows `s<id>.` in the file's name, e.g. `olean.server`.
+    pub ext: String,
     pub sha256: String,
 }
 
 pub struct Snapshots {
     store: Arc<dyn ObjectStore>,
     version: String,
-    /// Holds `PisaSnap/s<id>.olean`.
+    /// Holds `PisaSnap/s<id>.<ext>`.
     root: PathBuf,
     confirm_every: Duration,
-    /// SHA-256 of each module in the local cache.
-    cached: Mutex<HashMap<String, String>>,
+    /// The files of each module in the local cache.
+    cached: Mutex<HashMap<String, Vec<ModuleFile>>>,
     /// When the store last confirmed that each snapshot exists.
     confirmed: Mutex<HashMap<String, Instant>>,
     /// One task at a time loads or builds a given snapshot.
@@ -85,6 +96,37 @@ fn not_found(id: &str) -> Error {
 
 fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// The files `lean -o` wrote for module `s<id>` in `dir`, by extension, the
+/// `.olean` last.
+fn outputs(dir: &Path, id: &str) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let prefix = format!("s{id}.");
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if let Some(ext) = name.strip_prefix(&prefix)
+            && ext != "lean"
+        {
+            files.push((ext.to_string(), path.clone()));
+        }
+    }
+    files.sort_by_key(|(ext, _)| (ext == "olean", ext.clone()));
+    Ok(files)
+}
+
+/// Removes every file of module `s<id>` from `dir`.
+fn remove_module(dir: &Path, id: &str) {
+    let prefix = format!("s{id}.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn now() -> u64 {
@@ -118,8 +160,12 @@ impl Snapshots {
         ObjectPath::from(format!("snapshots/{}/{name}", self.version))
     }
 
-    fn file(&self, id: &str) -> PathBuf {
-        self.root.join(snapshot::ROOT).join(format!("s{id}.olean"))
+    fn dir(&self) -> PathBuf {
+        self.root.join(snapshot::ROOT)
+    }
+
+    fn file(&self, id: &str, ext: &str) -> PathBuf {
+        self.dir().join(format!("s{id}.{ext}"))
     }
 
     fn lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -184,38 +230,43 @@ impl Snapshots {
     /// Downloads a module into the local cache unless it is already there.
     async fn fetch(&self, module: &Module) -> Result<(), Error> {
         let cached = self.cached.lock().unwrap().get(&module.id).cloned();
-        if cached.as_ref() == Some(&module.sha256) {
+        if cached.as_ref() == Some(&module.files) {
             return Ok(());
         }
-        let path = self.object(&format!("{}.olean.zst", module.id));
-        let compressed = match self.store.get(&path).await {
-            Ok(r) => r.bytes().await.map_err(internal)?,
-            Err(object_store::Error::NotFound { .. }) => return Err(not_found(&module.id)),
-            Err(e) => return Err(internal(e)),
-        };
-        let bytes = zstd::decode_all(&compressed[..]).map_err(internal)?;
-        if sha256(&bytes) != module.sha256 {
-            return Err(internal(format!(
-                "snapshot {} is corrupt in storage",
-                snapshot::module(&module.id)
-            )));
+        for file in &module.files {
+            let path = self.object(&format!("{}.{}.zst", module.id, file.ext));
+            let compressed = match self.store.get(&path).await {
+                Ok(r) => r.bytes().await.map_err(internal)?,
+                Err(object_store::Error::NotFound { .. }) => return Err(not_found(&module.id)),
+                Err(e) => return Err(internal(e)),
+            };
+            let bytes = zstd::decode_all(&compressed[..]).map_err(internal)?;
+            if sha256(&bytes) != file.sha256 {
+                return Err(internal(format!(
+                    "snapshot {} is corrupt in storage",
+                    snapshot::module(&module.id)
+                )));
+            }
+            // Lean processes may have the old file mapped: replace it, don't
+            // overwrite it.
+            let dest = self.file(&module.id, &file.ext);
+            let tmp = self.file(
+                &module.id,
+                &format!("tmp.{}", uuid::Uuid::new_v4().simple()),
+            );
+            tokio::fs::write(&tmp, &bytes).await.map_err(internal)?;
+            tokio::fs::rename(&tmp, &dest).await.map_err(internal)?;
         }
-        // Lean processes may have the old file mapped: replace it, don't
-        // overwrite it.
-        let file = self.file(&module.id);
-        let tmp = file.with_extension(format!("olean.{}", uuid::Uuid::new_v4().simple()));
-        tokio::fs::write(&tmp, &bytes).await.map_err(internal)?;
-        tokio::fs::rename(&tmp, &file).await.map_err(internal)?;
         self.cached
             .lock()
             .unwrap()
-            .insert(module.id.clone(), module.sha256.clone());
+            .insert(module.id.clone(), module.files.clone());
         Ok(())
     }
 
     /// Forgets a snapshot on this worker. Processes that imported it keep it.
     fn discard(&self, id: &str) {
-        let _ = std::fs::remove_file(self.file(id));
+        remove_module(&self.dir(), id);
         self.cached.lock().unwrap().remove(id);
         self.confirmed.lock().unwrap().remove(id);
     }
@@ -318,10 +369,12 @@ impl Snapshots {
         let start = Instant::now();
         let compiled = slot.compile(&root, &file, &olean, limit).await;
         outcome.time = (start.elapsed().as_secs_f64() * 1e6).round() / 1e6;
-        let _ = tokio::fs::remove_file(&file).await;
         let compiled = match compiled {
             Ok(c) => c,
-            Err(e) => return fail(outcome, internal(format!("failed to start Lean: {e}"))),
+            Err(e) => {
+                remove_module(&dir, id);
+                return fail(outcome, internal(format!("failed to start Lean: {e}")));
+            }
         };
         // The file is the submitted code, so positions need no shifting.
         let response = CommandResponse {
@@ -349,11 +402,11 @@ impl Snapshots {
             )),
         };
         if let Err(e) = built {
-            let _ = tokio::fs::remove_file(&olean).await;
+            remove_module(&dir, id);
             return fail(outcome, e);
         }
         if errors {
-            let _ = tokio::fs::remove_file(&olean).await;
+            remove_module(&dir, id);
             let judged = slot
                 .policy()
                 .judge(outcome.response.as_ref().unwrap(), None);
@@ -362,9 +415,14 @@ impl Snapshots {
         }
 
         // Judge it in the slot that will serve code on top of it.
-        let bytes = match self.install(id, &olean).await {
-            Ok(bytes) => bytes,
-            Err(e) => return fail(outcome, e),
+        let installed = self.install(id, &dir).await;
+        remove_module(&dir, id);
+        let files = match installed {
+            Ok(files) => files,
+            Err(e) => {
+                self.discard(id);
+                return fail(outcome, e);
+            }
         };
         let report = match slot
             .warm_up_with(header, &header_key(header), Some(id))
@@ -403,7 +461,8 @@ impl Snapshots {
         let dirty = !verification.ok;
         outcome.verification = Some(verification);
 
-        let modules = match self.modules(&split.header, id, &bytes).await {
+        let own = files.iter().map(|(f, _)| f.clone()).collect();
+        let modules = match self.modules(&split.header, id, own).await {
             Ok(m) => m,
             Err(e) => {
                 self.unbuild(slot, id);
@@ -419,24 +478,32 @@ impl Snapshots {
             result: outcome.clone().into(),
             created: now(),
         };
-        if let Err(e) = self.commit(id, &bytes, &meta).await {
+        if let Err(e) = self.commit(id, &files, &meta).await {
             self.unbuild(slot, id);
             return fail(outcome, e);
         }
         Ok(Some(meta))
     }
 
-    /// Moves a freshly built module into the local cache, not yet confirmed.
-    async fn install(&self, id: &str, olean: &Path) -> Result<Vec<u8>, Error> {
-        let bytes = tokio::fs::read(olean).await.map_err(internal)?;
-        tokio::fs::rename(olean, self.file(id))
-            .await
-            .map_err(internal)?;
-        self.cached
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), sha256(&bytes));
-        Ok(bytes)
+    /// Moves a freshly built module's files from `dir` into the local cache,
+    /// not yet confirmed, and returns them with their contents.
+    async fn install(&self, id: &str, dir: &Path) -> Result<Vec<(ModuleFile, Vec<u8>)>, Error> {
+        let outputs = outputs(dir, id).map_err(internal)?;
+        if !outputs.iter().any(|(ext, _)| ext == "olean") {
+            return Err(internal("Lean wrote no .olean"));
+        }
+        let mut files = Vec::new();
+        for (ext, path) in outputs {
+            let bytes = tokio::fs::read(&path).await.map_err(internal)?;
+            tokio::fs::rename(&path, self.file(id, &ext))
+                .await
+                .map_err(internal)?;
+            let sha256 = sha256(&bytes);
+            files.push((ModuleFile { ext, sha256 }, bytes));
+        }
+        let cached = files.iter().map(|(f, _)| f.clone()).collect();
+        self.cached.lock().unwrap().insert(id.to_string(), cached);
+        Ok(files)
     }
 
     /// Undoes [`install`](Self::install) after a failure, including the slot
@@ -447,7 +514,12 @@ impl Snapshots {
     }
 
     /// Every module a snapshot needs: its imports' modules, then its own.
-    async fn modules(&self, header: &str, id: &str, bytes: &[u8]) -> Result<Vec<Module>, Error> {
+    async fn modules(
+        &self,
+        header: &str,
+        id: &str,
+        files: Vec<ModuleFile>,
+    ) -> Result<Vec<Module>, Error> {
         let mut modules: Vec<Module> = Vec::new();
         for import in snapshot::imports(header).map_err(internal)? {
             for m in self.meta(&import).await?.modules {
@@ -458,20 +530,27 @@ impl Snapshots {
         }
         modules.push(Module {
             id: id.to_string(),
-            sha256: sha256(bytes),
+            files,
         });
         Ok(modules)
     }
 
-    async fn commit(&self, id: &str, bytes: &[u8], meta: &SnapshotMeta) -> Result<(), Error> {
-        let compressed = zstd::encode_all(bytes, 3).map_err(internal)?;
+    async fn commit(
+        &self,
+        id: &str,
+        files: &[(ModuleFile, Vec<u8>)],
+        meta: &SnapshotMeta,
+    ) -> Result<(), Error> {
         let put = |name: String, bytes: Vec<u8>| async move {
             self.store
                 .put(&self.object(&name), PutPayload::from(bytes))
                 .await
                 .map_err(internal)
         };
-        put(format!("{id}.olean.zst"), compressed).await?;
+        for (file, bytes) in files {
+            let compressed = zstd::encode_all(&bytes[..], 3).map_err(internal)?;
+            put(format!("{id}.{}.zst", file.ext), compressed).await?;
+        }
         put(
             format!("{id}.json"),
             serde_json::to_vec(meta).map_err(internal)?,
@@ -533,8 +612,11 @@ impl Snapshots {
             // Metadata first: the snapshot stops existing before its parts go.
             self.delete_object(&self.object(&format!("{id}.json")))
                 .await?;
-            self.delete_object(&self.object(&format!("{id}.olean.zst")))
-                .await?;
+            let own = meta.modules.iter().filter(|m| m.id == id);
+            for file in own.flat_map(|m| &m.files) {
+                self.delete_object(&self.object(&format!("{id}.{}.zst", file.ext)))
+                    .await?;
+            }
             for parent in &meta.imports {
                 self.delete_object(&self.object(&format!("{parent}.children/{id}")))
                     .await?;

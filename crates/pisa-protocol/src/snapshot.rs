@@ -4,6 +4,8 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::header::import_parts;
+
 /// The root of every snapshot module name.
 pub const ROOT: &str = "PisaSnap";
 
@@ -38,21 +40,10 @@ pub fn parse_module(name: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The modules each line of a normalised header imports, keeping the lines.
-fn import_lines(header: &str) -> impl Iterator<Item = (&str, Vec<&str>)> {
-    header.lines().map(|line| {
-        let modules = line
-            .strip_prefix("import ")
-            .map(|rest| rest.split_whitespace().collect())
-            .unwrap_or_default();
-        (line, modules)
-    })
-}
-
 /// Ids of the snapshots a normalised header imports, in order.
 pub fn imports(header: &str) -> Result<Vec<String>, String> {
     let mut ids = Vec::new();
-    for (_, modules) in import_lines(header) {
+    for (_, modules) in header.lines().filter_map(import_parts) {
         for m in modules {
             if let Some(id) = parse_module(m)?
                 && !ids.contains(&id)
@@ -65,26 +56,43 @@ pub fn imports(header: &str) -> Result<Vec<String>, String> {
 }
 
 /// The header for code on top of snapshot `id`, built from a header with
-/// snapshot imports (the header of `id`'s own code): the same imports, with
-/// the snapshots replaced by `id`. Code that starts with it reuses the
+/// snapshot imports (the header of `id`'s own code): the same lines, with the
+/// snapshots replaced by `id`. Code that starts with it reuses the
 /// environment the snapshot's creator keeps warm.
+///
+/// The new import takes the modifiers of the snapshot imports it replaces.
+/// Without any, a module-system header gets `public import`, so that chains of
+/// snapshots stay transitive, and a plain one `import`.
 pub fn next_header(header: &str, id: &str) -> String {
-    let mut lines: Vec<String> = import_lines(header)
-        .filter_map(|(line, modules)| {
-            let kept: Vec<&str> = modules
-                .into_iter()
-                .filter(|m| !matches!(parse_module(m), Ok(Some(_)) | Err(_)))
-                .collect();
-            if kept.is_empty() {
-                None
-            } else if line.split_whitespace().count() == kept.len() + 1 {
-                Some(line.to_string())
-            } else {
-                Some(format!("import {}", kept.join(" ")))
-            }
-        })
-        .collect();
-    lines.push(format!("import {}", module(id)));
+    let mut lines = Vec::new();
+    let mut modifiers = None;
+    for line in header.lines() {
+        let Some((prefix, modules)) = import_parts(line) else {
+            lines.push(line.to_string());
+            continue;
+        };
+        let (snapshots, kept): (Vec<&str>, Vec<&str>) = modules
+            .into_iter()
+            .partition(|m| matches!(parse_module(m), Ok(Some(_)) | Err(_)));
+        if snapshots.is_empty() {
+            lines.push(line.to_string());
+            continue;
+        }
+        if !kept.is_empty() {
+            lines.push(format!("{prefix} {}", kept.join(" ")));
+        }
+        modifiers.get_or_insert(prefix);
+    }
+    let modifiers = modifiers.unwrap_or_else(|| {
+        let module_system = lines.first().is_some_and(|l| l == "module");
+        if module_system {
+            "public import"
+        } else {
+            "import"
+        }
+        .to_string()
+    });
+    lines.push(format!("{modifiers} {}", module(id)));
     lines.join("\n")
 }
 
@@ -144,5 +152,25 @@ mod tests {
         // Code that starts with it has exactly that header.
         let split = split_header(&format!("{next}\n\ntheorem t : True := trivial"));
         assert_eq!(split.header, next);
+    }
+
+    #[test]
+    fn module_headers_keep_their_modifiers() {
+        let header = format!("module\npublic import Mathlib\nimport all PisaSnap.s{B}");
+        assert_eq!(imports(&header), Ok(vec![B.to_string()]));
+        assert_eq!(
+            next_header(&header, A),
+            format!("module\npublic import Mathlib\nimport all PisaSnap.s{A}")
+        );
+        assert_eq!(
+            next_header("module\npublic import Mathlib", A),
+            format!("module\npublic import Mathlib\npublic import PisaSnap.s{A}")
+        );
+        let next = next_header(&format!("module\npublic import PisaSnap.s{B}"), A);
+        assert_eq!(next, format!("module\npublic import PisaSnap.s{A}"));
+        assert_eq!(
+            split_header(&format!("{next}\n\npublic section")).header,
+            next
+        );
     }
 }
