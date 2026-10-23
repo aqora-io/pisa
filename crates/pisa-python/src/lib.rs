@@ -127,6 +127,11 @@ fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     })
 }
 
+fn parse_detail(detail: Vec<String>) -> PyResult<Vec<pisa_client::Detail>> {
+    serde_json::from_value(detail.into())
+        .map_err(|e| PyValueError::new_err(format!("invalid detail: {e}")))
+}
+
 /// A client for one pisa server. Safe to share between threads.
 #[pyclass(frozen, module = "pisa_client")]
 struct Client {
@@ -152,16 +157,30 @@ impl Client {
         result.map_err(|e| to_py_err(py, e))
     }
 
-    fn check<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.check(&code).await })
+    #[pyo3(signature = (code, *, detail = Vec::new()))]
+    fn check<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let detail = parse_detail(detail)?;
+        call(py, async move {
+            self.inner.check_with_detail(&code, &detail).await
+        })
     }
 
+    #[pyo3(signature = (items, *, detail = Vec::new()))]
     fn check_batch<'py>(
         &self,
         py: Python<'py>,
         items: Vec<(String, String)>,
+        detail: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        call(py, self.inner.check_batch(items))
+        let detail = parse_detail(detail)?;
+        call(py, async move {
+            self.inner.check_batch_with_detail(items, &detail).await
+        })
     }
 
     fn start_session<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {

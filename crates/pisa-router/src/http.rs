@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::join_all;
 use pisa_protocol::api::{
-    self, BatchRequest, BatchResponse, CheckRequest, CheckResult, ErrorKind, ErrorResponse,
+    self, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail, ErrorKind, ErrorResponse,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -123,7 +123,9 @@ async fn check(
     Body(req): Body<CheckRequest>,
 ) -> Result<Json<CheckResult>, ApiError> {
     let version = app.versions.resolve(req.version.as_deref());
-    Ok(Json(check_one(&app, req.code, req.timeout, version).await?))
+    Ok(Json(
+        check_one(&app, req.code, req.timeout, req.detail, version).await?,
+    ))
 }
 
 /// Every item gets a result; failures, including running out of capacity,
@@ -136,8 +138,9 @@ async fn check_batch(
     let items = req.items.into_iter().map(|item| {
         let app = &app;
         let version = version.clone();
+        let detail = req.detail.clone();
         async move {
-            let mut result = match check_one(app, item.code, req.timeout, version).await {
+            let mut result = match check_one(app, item.code, req.timeout, detail, version).await {
                 Ok(r) => r,
                 Err(e) => CheckResult {
                     error: Some(e.into()),
@@ -157,6 +160,7 @@ async fn check_one(
     app: &App,
     code: String,
     timeout_secs: u64,
+    detail: Vec<Detail>,
     version: Option<String>,
 ) -> Result<CheckResult, DispatchError> {
     let split = split_header(&code);
@@ -166,7 +170,11 @@ async fn check_one(
         header: prewarm_header(split.header),
         affinity: None,
     };
-    let job = Job::Check(CheckJob { code, timeout_secs });
+    let job = Job::Check(CheckJob {
+        code,
+        timeout_secs,
+        detail,
+    });
     let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
     Ok(match done.result {
         JobResult::Check(o) => check_result(o, "check"),

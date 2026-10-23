@@ -75,6 +75,16 @@ def test_check(url):
     assert results[0]["messages"][0]["pos"] == {"line": 1, "column": 0}
     assert results[1]["reasons"] == ["axiom: t uses sorryAx"]
 
+    code = "import Foo\ntheorem t : True := by\n  trivial"
+    assert "tactics" not in client.check(code)
+    [tactic] = client.check(code, detail=["tactics"])["tactics"]
+    assert tactic["tactic"] == "trivial" and tactic["pos"] == {"line": 3, "column": 2}
+    assert tactic["goals_before"] == ["⊢ goal 2"] and tactic["goals_after"] == []
+    [result] = client.check_batch([("a", code)], detail=["tactics"])
+    assert result["tactics"] == [tactic]
+    with pytest.raises(ValueError):
+        client.check(code, detail=["bogus"])
+
     timed_out = Client(url, timeout=1).check("SLEEP 3000")
     assert not timed_out["ok"] and timed_out["error"]["kind"] == "timeout"
 

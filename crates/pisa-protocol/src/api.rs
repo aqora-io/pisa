@@ -18,6 +18,7 @@
 //! | `DELETE /snapshots/{snapshot}` | → [`Deleted`] |
 //!
 //! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
+//! Checks can ask for more in `detail` ([`Detail`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +137,14 @@ pub struct Sorry {
     pub end_pos: Option<Pos>,
 }
 
+/// Extra detail a check can return, requested in `detail`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Detail {
+    /// Every tactic Lean ran, with the goals before it: [`CheckResult::tactics`].
+    Tactics,
+}
+
 /// `POST /check`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckRequest {
@@ -146,6 +155,8 @@ pub struct CheckRequest {
     /// Lean's time limit in seconds.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<Detail>,
 }
 
 /// `POST /check/batch`
@@ -156,6 +167,9 @@ pub struct BatchRequest {
     pub version: Option<String>,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Applies to every item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<Detail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +209,24 @@ pub struct CheckResult {
     /// Declarations the code added, with the axioms each depends on.
     #[serde(default)]
     pub declarations: Vec<Declaration>,
+    /// With `detail: ["tactics"]`, one entry each time a tactic in the code
+    /// ran, in the order Lean ran them. A tactic run on several goals, as
+    /// under `all_goals` or `<;>`, appears once per run, and so does every
+    /// alternative `first` tried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tactics: Vec<TacticInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TacticInfo {
+    /// The tactic's source text.
+    pub tactic: String,
+    pub goals_before: Vec<String>,
+    /// The goals left after it ran. A tactic that failed, such as an
+    /// alternative `first` dropped, leaves them as they were before.
+    pub goals_after: Vec<String>,
+    pub pos: Pos,
+    pub end_pos: Pos,
 }
 
 /// `POST /sessions`: runs code containing `sorry`; each `sorry` becomes a
@@ -392,6 +424,18 @@ impl From<repl::Sorry> for Sorry {
             goal: s.goal,
             pos: s.pos.map(Into::into),
             end_pos: s.end_pos.map(Into::into),
+        }
+    }
+}
+
+impl From<repl::Tactic> for TacticInfo {
+    fn from(t: repl::Tactic) -> Self {
+        TacticInfo {
+            tactic: t.tactic,
+            goals_before: t.goals_before,
+            goals_after: t.goals_after,
+            pos: t.pos.into(),
+            end_pos: t.end_pos.into(),
         }
     }
 }

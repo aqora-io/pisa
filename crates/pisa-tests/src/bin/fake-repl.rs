@@ -6,6 +6,8 @@
 //! - `sorry` gives a warning and a sorry with a fresh proof state
 //! - `SLEEP <ms>` sleeps before answering; `CRASH` exits
 //! - `needs NAME` errors unless `NAME` is declared (see `pisa_tests`)
+//! - with `infotree: "original"`, every indented line is a tactic that
+//!   closes `⊢ goal <line>`, inside one `by` node
 //!
 //! Without `env`, a command is an import header; `import Missing` fails, and
 //! `import Clash` silently yields an empty environment, like the real REPL
@@ -97,7 +99,7 @@ fn respond(s: &mut State, input: &Value) -> Value {
         None => import(s, cmd),
         Some(env) => match s.envs.get(env as usize).cloned() {
             None => json!({"message": "Unknown environment."}),
-            Some(prev) => run(s, &prev, cmd),
+            Some(prev) => run(s, &prev, cmd, input["infotree"] == "original"),
         },
     }
 }
@@ -152,7 +154,7 @@ fn import(s: &mut State, header: &str) -> Value {
     json!({"env": s.envs.len() - 1})
 }
 
-fn run(s: &mut State, prev: &Env, cmd: &str) -> Value {
+fn run(s: &mut State, prev: &Env, cmd: &str, infotree: bool) -> Value {
     if cmd.starts_with("run_cmd") && cmd.contains("PISA_DECLS") {
         let code = match cmd.split_once("getModuleIdx? `") {
             None => prev.local.clone(),
@@ -172,8 +174,14 @@ fn run(s: &mut State, prev: &Env, cmd: &str) -> Value {
     }
     let mut messages = Vec::new();
     let mut sorries = Vec::new();
+    let mut tactics = Vec::new();
     for (i, line) in cmd.lines().enumerate() {
         let n = i + 1;
+        let tactic = line.trim_start();
+        if infotree && !tactic.is_empty() && tactic.len() < line.len() {
+            let range = ((n, line.len() - tactic.len()), (n, line.len()));
+            tactics.push(info_node("Lean.Parser.Tactic.fake", range, n, vec![]));
+        }
         if let Some(ms) = line.split("SLEEP ").nth(1) {
             let ms: u64 = ms.trim().parse().unwrap_or(1000);
             std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -218,7 +226,33 @@ fn run(s: &mut State, prev: &Env, cmd: &str) -> Value {
     if !sorries.is_empty() {
         out["sorries"] = sorries.into();
     }
+    if let (Some(first), Some(last)) = (tactics.first(), tactics.last()) {
+        let line = |t: &Value, end: &str| t["node"]["stx"]["range"][end]["line"].as_u64().unwrap();
+        let (start, finish) = (line(first, "start") as usize, line(last, "finish") as usize);
+        let by = info_node(
+            "Lean.Parser.Term.byTactic",
+            ((start, 0), (finish, 0)),
+            start,
+            tactics,
+        );
+        out["infotree"] = json!([by]);
+    }
     out
+}
+
+/// A `TacticInfo` node shaped like the REPL's, closing `⊢ goal <goal>`.
+fn info_node(
+    name: &str,
+    ((line, column), (end_line, end_column)): ((usize, usize), (usize, usize)),
+    goal: usize,
+    children: Vec<Value>,
+) -> Value {
+    json!({"kind": "TacticInfo", "node": {
+        "name": name,
+        "stx": {"range": {"synthetic": false, "start": {"line": line, "column": column},
+                          "finish": {"line": end_line, "column": end_column}}},
+        "goalsBefore": [format!("⊢ goal {goal}")], "goalsAfter": []},
+        "children": children})
 }
 
 fn message(line: usize, severity: &str, data: &str) -> Value {

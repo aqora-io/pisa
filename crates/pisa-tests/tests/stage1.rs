@@ -36,6 +36,34 @@ async fn module_system_code_is_checked_with_its_header() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn check_reports_tactics_only_when_asked() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let code = "import Foo\n\ntheorem t : True := by\n  trivial";
+    let r = check(&c, json!({"code": code})).await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert!(r.get("tactics").is_none(), "{r}");
+
+    let tactics = json!([{"tactic": "trivial", "goals_before": ["⊢ goal 3"], "goals_after": [],
+                          "pos": {"line": 4, "column": 2}, "end_pos": {"line": 4, "column": 9}}]);
+    let r = check(&c, json!({"code": code, "detail": ["tactics"]})).await;
+    assert_eq!(r["tactics"], tactics, "{r}");
+    let (status, r) = c
+        .post(
+            "/check/batch",
+            json!({"items": [{"id": "a", "code": code}], "detail": ["tactics"]}),
+        )
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["results"][0]["tactics"], tactics, "{r}");
+
+    let (status, r) = c
+        .post("/check", json!({"code": code, "detail": ["bogus"]}))
+        .await;
+    assert_eq!(status, 400, "{r}");
+    assert_eq!(r["error"]["kind"], "bad_request", "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn second_request_with_same_header_is_a_warm_hit() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     for i in 0..3 {
@@ -94,6 +122,7 @@ async fn worker_reports_a_new_warm_header_before_the_result() {
         let job = Job::Check(CheckJob {
             code,
             timeout_secs: 5,
+            detail: Vec::new(),
         });
         let msg = RouterMessage::Job { request_id: i, job };
         wire::send(&mut conn, &msg).await.unwrap();

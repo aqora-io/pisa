@@ -1,0 +1,380 @@
+[
+ {
+  "kind": "TacticInfo",
+  "node": {
+   "name": "Lean.Parser.Term.byTactic",
+   "stx": {
+    "range": {
+     "synthetic": false,
+     "start": {
+      "line": 1,
+      "column": 27
+     },
+     "finish": {
+      "line": 1,
+      "column": 55
+     }
+    }
+   },
+   "goalsBefore": [
+    "⊢ True ∧ True"
+   ],
+   "goalsAfter": []
+  },
+  "children": [
+   {
+    "kind": "TacticInfo",
+    "node": {
+     "name": null,
+     "stx": {
+      "range": {
+       "synthetic": false,
+       "start": {
+        "line": 1,
+        "column": 27
+       },
+       "finish": {
+        "line": 1,
+        "column": 29
+       }
+      }
+     },
+     "goalsBefore": [
+      "⊢ True ∧ True"
+     ],
+     "goalsAfter": []
+    },
+    "children": [
+     {
+      "kind": "TacticInfo",
+      "node": {
+       "name": "Lean.Parser.Tactic.tacticSeq",
+       "stx": {
+        "range": {
+         "synthetic": false,
+         "start": {
+          "line": 1,
+          "column": 30
+         },
+         "finish": {
+          "line": 1,
+          "column": 55
+         }
+        }
+       },
+       "goalsBefore": [
+        "⊢ True ∧ True"
+       ],
+       "goalsAfter": []
+      },
+      "children": [
+       {
+        "kind": "TacticInfo",
+        "node": {
+         "name": "Lean.Parser.Tactic.tacticSeq1Indented",
+         "stx": {
+          "range": {
+           "synthetic": false,
+           "start": {
+            "line": 1,
+            "column": 30
+           },
+           "finish": {
+            "line": 1,
+            "column": 55
+           }
+          }
+         },
+         "goalsBefore": [
+          "⊢ True ∧ True"
+         ],
+         "goalsAfter": []
+        },
+        "children": [
+         {
+          "kind": "TacticInfo",
+          "node": {
+           "name": "Lean.Parser.Tactic.«tactic_<;>_»",
+           "stx": {
+            "range": {
+             "synthetic": false,
+             "start": {
+              "line": 1,
+              "column": 30
+             },
+             "finish": {
+              "line": 1,
+              "column": 55
+             }
+            }
+           },
+           "goalsBefore": [
+            "⊢ True ∧ True"
+           ],
+           "goalsAfter": []
+          },
+          "children": [
+           {
+            "kind": "TacticInfo",
+            "node": {
+             "name": "Lean.Parser.Tactic.constructor",
+             "stx": {
+              "range": {
+               "synthetic": false,
+               "start": {
+                "line": 1,
+                "column": 30
+               },
+               "finish": {
+                "line": 1,
+                "column": 41
+               }
+              }
+             },
+             "goalsBefore": [
+              "⊢ True ∧ True"
+             ],
+             "goalsAfter": [
+              "case left\n⊢ True",
+              "case right\n⊢ True"
+             ]
+            },
+            "children": []
+           },
+           {
+            "kind": "TacticInfo",
+            "node": {
+             "name": null,
+             "stx": {
+              "range": {
+               "synthetic": false,
+               "start": {
+                "line": 1,
+                "column": 42
+               },
+               "finish": {
+                "line": 1,
+                "column": 45
+               }
+              }
+             },
+             "goalsBefore": [
+              "case left\n⊢ True",
+              "case right\n⊢ True"
+             ],
+             "goalsAfter": [
+              "case left\n⊢ True",
+              "case right\n⊢ True"
+             ]
+            },
+            "children": []
+           },
+           {
+            "kind": "TacticInfo",
+            "node": {
+             "name": "Lean.Parser.Tactic.paren",
+             "stx": {
+              "range": {
+               "synthetic": false,
+               "start": {
+                "line": 1,
+                "column": 46
+               },
+               "finish": {
+                "line": 1,
+                "column": 55
+               }
+              }
+             },
+             "goalsBefore": [
+              "case left\n⊢ True"
+             ],
+             "goalsAfter": []
+            },
+            "children": [
+             {
+              "kind": "TacticInfo",
+              "node": {
+               "name": "Lean.Parser.Tactic.tacticSeq",
+               "stx": {
+                "range": {
+                 "synthetic": false,
+                 "start": {
+                  "line": 1,
+                  "column": 47
+                 },
+                 "finish": {
+                  "line": 1,
+                  "column": 54
+                 }
+                }
+               },
+               "goalsBefore": [
+                "case left\n⊢ True"
+               ],
+               "goalsAfter": []
+              },
+              "children": [
+               {
+                "kind": "TacticInfo",
+                "node": {
+                 "name": "Lean.Parser.Tactic.tacticSeq1Indented",
+                 "stx": {
+                  "range": {
+                   "synthetic": false,
+                   "start": {
+                    "line": 1,
+                    "column": 47
+                   },
+                   "finish": {
+                    "line": 1,
+                    "column": 54
+                   }
+                  }
+                 },
+                 "goalsBefore": [
+                  "case left\n⊢ True"
+                 ],
+                 "goalsAfter": []
+                },
+                "children": [
+                 {
+                  "kind": "TacticInfo",
+                  "node": {
+                   "name": "Lean.Parser.Tactic.tacticTrivial",
+                   "stx": {
+                    "range": {
+                     "synthetic": false,
+                     "start": {
+                      "line": 1,
+                      "column": 47
+                     },
+                     "finish": {
+                      "line": 1,
+                      "column": 54
+                     }
+                    }
+                   },
+                   "goalsBefore": [
+                    "case left\n⊢ True"
+                   ],
+                   "goalsAfter": []
+                  },
+                  "children": []
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "kind": "TacticInfo",
+            "node": {
+             "name": "Lean.Parser.Tactic.paren",
+             "stx": {
+              "range": {
+               "synthetic": false,
+               "start": {
+                "line": 1,
+                "column": 46
+               },
+               "finish": {
+                "line": 1,
+                "column": 55
+               }
+              }
+             },
+             "goalsBefore": [
+              "case right\n⊢ True"
+             ],
+             "goalsAfter": []
+            },
+            "children": [
+             {
+              "kind": "TacticInfo",
+              "node": {
+               "name": "Lean.Parser.Tactic.tacticSeq",
+               "stx": {
+                "range": {
+                 "synthetic": false,
+                 "start": {
+                  "line": 1,
+                  "column": 47
+                 },
+                 "finish": {
+                  "line": 1,
+                  "column": 54
+                 }
+                }
+               },
+               "goalsBefore": [
+                "case right\n⊢ True"
+               ],
+               "goalsAfter": []
+              },
+              "children": [
+               {
+                "kind": "TacticInfo",
+                "node": {
+                 "name": "Lean.Parser.Tactic.tacticSeq1Indented",
+                 "stx": {
+                  "range": {
+                   "synthetic": false,
+                   "start": {
+                    "line": 1,
+                    "column": 47
+                   },
+                   "finish": {
+                    "line": 1,
+                    "column": 54
+                   }
+                  }
+                 },
+                 "goalsBefore": [
+                  "case right\n⊢ True"
+                 ],
+                 "goalsAfter": []
+                },
+                "children": [
+                 {
+                  "kind": "TacticInfo",
+                  "node": {
+                   "name": "Lean.Parser.Tactic.tacticTrivial",
+                   "stx": {
+                    "range": {
+                     "synthetic": false,
+                     "start": {
+                      "line": 1,
+                      "column": 47
+                     },
+                     "finish": {
+                      "line": 1,
+                      "column": 54
+                     }
+                    }
+                   },
+                   "goalsBefore": [
+                    "case right\n⊢ True"
+                   ],
+                   "goalsAfter": []
+                  },
+                  "children": []
+                 }
+                ]
+               }
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+]

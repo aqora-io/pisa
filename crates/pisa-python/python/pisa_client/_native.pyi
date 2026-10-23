@@ -31,6 +31,13 @@ class Declaration(TypedDict):
     type_hash: str
     value_hash: NotRequired[str]
 
+class Tactic(TypedDict):
+    tactic: str
+    goals_before: list[str]
+    goals_after: list[str]
+    pos: Pos
+    end_pos: Pos
+
 class CheckResult(TypedDict):
     id: NotRequired[str]
     ok: bool
@@ -40,6 +47,7 @@ class CheckResult(TypedDict):
     sorries: list[Sorry]
     reasons: list[str]
     declarations: list[Declaration]
+    tactics: NotRequired[list[Tactic]]
 
 class StateInfo(TypedDict):
     state: str
@@ -82,11 +90,16 @@ class Client:
         """`version` selects a worker pool label or alias; `timeout` is Lean's
         limit per request in seconds."""
     def health(self) -> None: ...
-    def check(self, code: str) -> CheckResult:
+    def check(self, code: str, *, detail: list[Literal["tactics"]] = []) -> CheckResult:
         """Check one piece of code. `ok` is the verdict; a check that could not
-        complete (timeout, policy, ...) has `error` set instead of raising."""
-    def check_batch(self, items: list[tuple[str, str]]) -> list[CheckResult]:
-        """Check `(id, code)` pairs in one request; results keep their order."""
+        complete (timeout, policy, ...) has `error` set instead of raising.
+        `detail=["tactics"]` adds `tactics`: each tactic Lean ran, with the
+        goals before and after it."""
+    def check_batch(
+        self, items: list[tuple[str, str]], *, detail: list[Literal["tactics"]] = []
+    ) -> list[CheckResult]:
+        """Check `(id, code)` pairs in one request; results keep their order.
+        `detail` applies to every item."""
     def start_session(self, code: str) -> Session:
         """Run code containing `sorry`; returns one proof state per `sorry`."""
     def tactic(self, state: str, tactic: str) -> Step:

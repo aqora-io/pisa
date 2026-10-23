@@ -73,6 +73,8 @@ pub enum Job {
 pub struct CheckJob {
     pub code: String,
     pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<api::Detail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,9 +142,10 @@ pub struct CheckOutcome {
 
 impl From<CheckOutcome> for api::CheckResult {
     fn from(o: CheckOutcome) -> Self {
-        let (messages, sorries) = o.response.map_or_else(Default::default, |r| {
+        let (messages, sorries, tactics) = o.response.map_or_else(Default::default, |r| {
             let sorries = r.sorries.into_iter().map(Into::into).collect();
-            (api::messages(r.messages), sorries)
+            let tactics = r.tactics.into_iter().map(Into::into).collect();
+            (api::messages(r.messages), sorries, tactics)
         });
         let (verified, reasons, declarations) =
             o.verification.map_or((false, Vec::new(), Vec::new()), |v| {
@@ -157,6 +160,7 @@ impl From<CheckOutcome> for api::CheckResult {
             sorries,
             reasons,
             declarations,
+            tactics,
         }
     }
 }
@@ -220,6 +224,7 @@ mod tests {
             job: Job::Check(CheckJob {
                 code: "import Mathlib\n".repeat(200),
                 timeout_secs: 5,
+                detail: Vec::new(),
             }),
         };
         send(&mut a, &job).await.unwrap();

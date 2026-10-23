@@ -213,6 +213,7 @@ impl Sessions {
             CheckJob {
                 code: job.code,
                 timeout_secs: job.timeout_secs,
+                detail: Vec::new(),
             },
         )
         .await;

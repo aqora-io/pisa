@@ -88,6 +88,14 @@ def core(failover=True):
     assert check("theorem t (a b : Nat) : a + b = b + a := Nat.add_comm a b")["ok"]
     step("verification policy")
 
+    r = check(TACTIC_PROOF, detail=["tactics"])
+    assert r["ok"] and [t["tactic"] for t in r["tactics"]] == ["constructor", "simp", "simp"], r
+    first, left = r["tactics"][0], r["tactics"][1]
+    assert first["goals_before"] == ["n : Nat\n⊢ n + 0 = n ∧ 0 + n = n"], r
+    assert first["goals_after"] == ["case left\nn : Nat\n⊢ n + 0 = n", "case right\nn : Nat\n⊢ 0 + n = n"], r
+    assert left["goals_before"] == first["goals_after"][:1] and left["goals_after"] == [], r
+    step("tactic detail")
+
     code = "theorem t (n : Nat) : n + 0 = n ∧ 0 + n = n := by sorry"
     s = post("/sessions", {"code": code})
     assert "error" not in s, s
@@ -136,6 +144,8 @@ def core(failover=True):
         assert series in metrics, series
     step("metrics")
 
+
+TACTIC_PROOF = "theorem t (n : Nat) : n + 0 = n ∧ 0 + n = n := by\n  constructor\n  · simp\n  · simp"
 
 SNAPSHOT_ROOT = """namespace Snap
 def double (n : Nat) : Nat := 2 * n
@@ -265,6 +275,8 @@ def mathlib():
     assert not r["ok"] and "Commute.log_left" in r["messages"][0]["data"], r
     r = check("import Physlib\n\n#check SpaceTime")
     assert r["messages"][0]["pos"]["line"] == 3, r
+    r = check("import Mathlib\n\n" + TACTIC_PROOF, detail=["tactics"])
+    assert r["tactics"][0]["pos"] == {"line": 4, "column": 2}, r
     s = post("/sessions", {"code": "import Mathlib\n\ntheorem t (x : ℝ) (h : 0 < x) : 0 < x ^ 2 := by sorry"})
     assert "error" not in s, s
     done = post(f"/states/{s['states'][0]['state']}/tactic", {"tactic": "positivity"})

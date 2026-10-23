@@ -408,6 +408,7 @@ mod tests {
         Job::Check(CheckJob {
             code: String::new(),
             timeout_secs: 1,
+            detail: Vec::new(),
         })
     }
 

@@ -41,8 +41,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    CheckResult, Declaration, ErrorKind, Message, Pos, Severity, SnapshotInfo,
-    SnapshotResponse as Snapshot, Sorry, StartResponse as Session, StateInfo,
+    CheckResult, Declaration, Detail, ErrorKind, Message, Pos, Severity, SnapshotInfo,
+    SnapshotResponse as Snapshot, Sorry, StartResponse as Session, StateInfo, TacticInfo,
     TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
@@ -165,10 +165,21 @@ impl Client {
     /// Checks one piece of code. `ok` is the verdict; a check that could not
     /// complete has `error` set rather than failing.
     pub async fn check(&self, code: &str) -> Result<CheckResult, Error> {
+        self.check_with_detail(code, &[]).await
+    }
+
+    /// Like [`Client::check`], also returning the `detail` asked for, e.g.
+    /// [`Detail::Tactics`] for the goals before and after every tactic.
+    pub async fn check_with_detail(
+        &self,
+        code: &str,
+        detail: &[Detail],
+    ) -> Result<CheckResult, Error> {
         let req = CheckRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
+            detail: detail.to_vec(),
         };
         self.post("check", &req).await
     }
@@ -176,6 +187,21 @@ impl Client {
     /// Checks `(id, code)` pairs in one request. Results come back in order;
     /// each item's failures are in its own `error`.
     pub async fn check_batch<I, S, C>(&self, items: I) -> Result<Vec<CheckResult>, Error>
+    where
+        I: IntoIterator<Item = (S, C)>,
+        S: Into<String>,
+        C: Into<String>,
+    {
+        self.check_batch_with_detail(items, &[]).await
+    }
+
+    /// Like [`Client::check_batch`], returning the `detail` asked for with
+    /// every item.
+    pub async fn check_batch_with_detail<I, S, C>(
+        &self,
+        items: I,
+        detail: &[Detail],
+    ) -> Result<Vec<CheckResult>, Error>
     where
         I: IntoIterator<Item = (S, C)>,
         S: Into<String>,
@@ -191,6 +217,7 @@ impl Client {
                 .collect(),
             version: self.version.clone(),
             timeout: self.timeout,
+            detail: detail.to_vec(),
         };
         let resp: BatchResponse = self.post("check/batch", &req).await?;
         Ok(resp.results)

@@ -4,9 +4,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pisa_protocol::api::{Error, ErrorKind};
+use pisa_protocol::api::{Detail, Error, ErrorKind};
 use pisa_protocol::header::split_header;
-use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
+use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity, tactics};
 use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
@@ -57,7 +57,16 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         }
     };
 
-    let cmd = ReplCommand::cmd(split.body.clone(), Some(env));
+    let cmd = ReplCommand::Cmd {
+        cmd: split.body.clone(),
+        env: Some(env),
+        all_tactics: None,
+        root_goals: None,
+        infotree: job
+            .detail
+            .contains(&Detail::Tactics)
+            .then(|| "original".to_string()),
+    };
     let start = Instant::now();
     let result = run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await;
     outcome.time = round6(start.elapsed().as_secs_f64());
@@ -66,6 +75,12 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         Ok(ReplResponse::Command(mut r)) => {
             let report = axiom_report(&mut slot, &r).await;
             outcome.verification = Some(slot.policy().judge(&r, report.as_ref()));
+            if let Some(tree) = r.infotree.take() {
+                match tactics(&tree, &split.body) {
+                    Ok(t) => r.tactics = t,
+                    Err(e) => tracing::warn!("unreadable info tree: {e}"),
+                }
+            }
             r.shift_lines(split.header_lines);
             outcome.response = Some(r);
         }

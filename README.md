@@ -133,8 +133,8 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /check` | `{code, version?, timeout?}` → check result |
-| `POST /check/batch` | `{items: [{id, code}], version?, timeout?}` → `{results: [...]}`, in order |
+| `POST /check` | `{code, version?, timeout?, detail?}` → check result |
+| `POST /check/batch` | `{items: [{id, code}], version?, timeout?, detail?}` → `{results: [...]}`, in order |
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
@@ -147,6 +147,17 @@ A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`
 - `ok` is the verdict.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
 - `declarations` lists each new declaration with the axioms it uses.
+
+With `detail: ["tactics"]`, a check result also has `tactics`, the goals at
+every step of the proof. Each entry is one run of a tactic, in the order Lean
+ran them, as `{tactic, goals_before, goals_after, pos, end_pos}`:
+- `tactic` is its source text, and `pos` and `end_pos` locate it.
+- `goals_before` and `goals_after` list the goals as Lean prints them.
+- Structure such as `by`, `·`, `<;>` and parentheses has no entry of its own,
+  but the tactics inside it do.
+- A tactic run on several goals, e.g. under `all_goals` or `<;>`, appears once
+  per run, and so does every alternative `first` tried. One that failed has
+  the same goals after as before.
 
 `version` selects a worker pool, by label (such as `v4.35.0-1a2b3c4d`) or by
 an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds
