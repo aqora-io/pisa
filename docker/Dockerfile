@@ -45,6 +45,8 @@ RUN git clone --depth 1 --branch ${REPL_REV} https://github.com/leanprover-commu
     && ln -s /opt/repl/.lake/build/bin/repl /usr/local/bin/repl
 ARG PROJECT=lean-project
 COPY docker/${PROJECT} /opt/project
+# The snapshot kernel re-verifier, run with `lean --run` (imports only Lean core).
+COPY docker/verifier /opt/verifier
 WORKDIR /opt/project
 # Dependencies follow the committed lake-manifest.json; without one, resolve them.
 # Mathlib comes prebuilt from its cache; Physlib compiles from source (slow, once).

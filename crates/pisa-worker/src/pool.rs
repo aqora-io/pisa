@@ -12,7 +12,7 @@ use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplRespon
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
-use crate::launcher::{Compiled, Launcher};
+use crate::launcher::{Compiled, Launcher, Verified};
 use crate::policy::{Policy, header_with_report_import};
 use crate::snapshots::Snapshots;
 
@@ -353,6 +353,12 @@ impl Lease {
             .launcher
             .compile(self.id, root, file, olean, timeout)
             .await
+    }
+
+    /// Re-verifies a snapshot module through the kernel; see
+    /// [`Launcher::verify`].
+    pub async fn verify(&self, module: &str, timeout: Duration) -> Verified {
+        self.pool.launcher.verify(self.id, module, timeout).await
     }
 
     pub fn policy(&self) -> &Policy {

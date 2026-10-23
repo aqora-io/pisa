@@ -19,9 +19,18 @@ pub struct WorkerConfig {
     /// The REPL executable.
     #[arg(long, env = "PISA_REPL", default_value = "repl")]
     pub repl: PathBuf,
-    /// The `lean` executable, used to explain imports the REPL fails to load.
+    /// The `lean` executable, used to explain imports the REPL fails to load,
+    /// to compile snapshots, and to re-verify them.
     #[arg(long, env = "PISA_LEAN", default_value = "lean")]
     pub lean: PathBuf,
+    /// The script `lean --run` executes to re-verify a snapshot module through
+    /// the kernel.
+    #[arg(
+        long,
+        env = "PISA_VERIFIER",
+        default_value = "/opt/verifier/PisaVerify.lean"
+    )]
+    pub verifier: PathBuf,
     /// Lake project whose dependencies the REPL imports (run through `lake env`).
     #[arg(long, env = "PISA_PROJECT")]
     pub project: Option<PathBuf>,

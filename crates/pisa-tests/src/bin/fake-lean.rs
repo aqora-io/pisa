@@ -3,6 +3,11 @@
 //! `lean --stdin --json` reports an import conflict for each `import Clash`
 //! line on stdin, as Lean does.
 //!
+//! `lean --run <verifier> <module>` re-verifies a snapshot: it loads the
+//! module's own code from its fake olean and prints a `PISA_VERIFY` line with
+//! its declarations, reporting `ok:false` when the code contains a `forge`
+//! marker (standing in for the kernel catching a forged declaration).
+//!
 //! `lean -R <root> -o <olean> --json <file>` compiles a module: the "olean" is
 //! a copy of the code, and module-system code also gets the `.olean.server`,
 //! `.olean.private`, `.ir` and `.ir.sig` files Lean writes for it. It reports
@@ -13,15 +18,35 @@
 
 use std::io::Read;
 
-use pisa_tests::{declares, imported_code, is_module, needs};
+use pisa_tests::{declarations, declares, find_module, imported_code, is_module, needs};
 use serde_json::json;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.iter().position(|a| a == "-o") {
-        Some(i) => compile(&args[i + 1], args.last().unwrap()),
-        None => diagnose(),
+    if args.first().map(String::as_str) == Some("--run") {
+        // `lean --run <verifier> <module>`: re-verify a snapshot module.
+        verify(args.last().unwrap());
+    } else if let Some(i) = args.iter().position(|a| a == "-o") {
+        compile(&args[i + 1], args.last().unwrap());
+    } else {
+        diagnose();
     }
+}
+
+/// The snapshot verifier's stand-in: load the module's own code from its fake
+/// olean on LEAN_PATH, report its declarations, and reject it when the code
+/// carries a `forge` marker (standing in for the kernel catching a forgery).
+fn verify(module: &str) {
+    let code = find_module(module)
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .unwrap_or_default();
+    let verdict = if code.contains("forge") {
+        json!({"ok": false, "reason": "kernel re-check: forged declaration"})
+    } else {
+        let decls: serde_json::Value = serde_json::from_str(&declarations(&code)).unwrap();
+        json!({"ok": true, "declarations": decls})
+    };
+    println!("PISA_VERIFY {verdict}");
 }
 
 fn report(line: usize, severity: &str, data: &str) {

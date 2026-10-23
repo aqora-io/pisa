@@ -25,16 +25,18 @@ use std::time::{Duration, Instant, SystemTime};
 use futures::StreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
-use pisa_protocol::api::{CheckResult, Deleted, Error, ErrorKind, SnapshotInfo, SnapshotResponse};
+use pisa_protocol::api::{
+    CheckResult, Declaration, Deleted, Error, ErrorKind, SnapshotInfo, SnapshotResponse,
+};
 use pisa_protocol::header::{Split, header_key, split_header};
-use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
+use pisa_protocol::repl::CommandResponse;
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::check::{header_error, policy_error, run, unexpected};
-use crate::policy::{module_report, parse_report};
+use crate::check::{header_error, policy_error};
+
 use crate::pool::{Lease, Pool};
 
 /// Time allowed for the report on a snapshot's declarations.
@@ -296,7 +298,8 @@ impl Snapshots {
             response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
             return response;
         }
-        let rejected = pool.policy().scan(&split.body);
+        // Macros are allowed: the build is re-checked through the kernel.
+        let rejected = pool.policy().scan(&split.body, true);
         if !rejected.is_empty() {
             response.result.error = Some(policy_error(&rejected));
             response.result.reasons = rejected;
@@ -424,42 +427,33 @@ impl Snapshots {
                 return fail(outcome, e);
             }
         };
-        let report = match slot
+        // Re-check the module through the kernel in a clean process, and take
+        // its axioms from there: the verdict then doesn't depend on whatever
+        // ran during the build.
+        let verified = slot.verify(&snapshot::module(id), REPORT_TIMEOUT).await;
+        if !verified.ok {
+            self.unbuild(slot, id);
+            let reason = verified
+                .reason
+                .unwrap_or_else(|| "snapshot rejected".into());
+            return fail(outcome, Error::new(ErrorKind::Lean, reason));
+        }
+        let Ok(decls) = serde_json::from_value::<Vec<Declaration>>(verified.declarations) else {
+            self.unbuild(slot, id);
+            return fail(outcome, internal("unreadable verifier declarations"));
+        };
+        let verification = slot.policy().judge_decls(false, Some(decls));
+        let dirty = !verification.ok;
+        outcome.verification = Some(verification);
+
+        // Keep the builder warm on the snapshot so the next checks are hits.
+        if let Err(f) = slot
             .warm_up_with(header, &header_key(header), Some(id))
             .await
         {
-            Ok((env, _)) => {
-                let cmd = ReplCommand::cmd(module_report(&snapshot::module(id)), Some(env));
-                match run(slot, &cmd, REPORT_TIMEOUT).await {
-                    Ok(ReplResponse::Command(r)) => Ok(r),
-                    Ok(ReplResponse::Error(e)) => Err(Error::new(ErrorKind::Lean, e.message)),
-                    Ok(other) => Err(unexpected(other)),
-                    Err(e) => Err(e),
-                }
-            }
-            Err(f) => Err(header_error(f, slot.import_timeout())),
-        };
-        let report = match report {
-            Ok(r) if parse_report(&r).is_some() => r,
-            Ok(r) => {
-                let why = r
-                    .messages
-                    .iter()
-                    .find(|m| m.severity == Severity::Error)
-                    .map_or("no output".to_string(), |m| m.data.clone());
-                self.unbuild(slot, id);
-                return fail(outcome, internal(format!("the axiom report failed: {why}")));
-            }
-            Err(e) => {
-                self.unbuild(slot, id);
-                return fail(outcome, e);
-            }
-        };
-        let verification = slot
-            .policy()
-            .judge(outcome.response.as_ref().unwrap(), Some(&report));
-        let dirty = !verification.ok;
-        outcome.verification = Some(verification);
+            self.unbuild(slot, id);
+            return fail(outcome, header_error(f, slot.import_timeout()));
+        }
 
         let own = files.iter().map(|(f, _)| f.clone()).collect();
         let modules = match self.modules(&split.header, id, own).await {

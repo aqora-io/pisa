@@ -19,6 +19,7 @@ use crate::config::{Sandbox, WorkerConfig};
 pub struct Launcher {
     repl: PathBuf,
     lean: PathBuf,
+    verifier: PathBuf,
     project: Option<PathBuf>,
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
@@ -40,6 +41,18 @@ pub struct Compiled {
     pub stderr: String,
     /// OOM kills in the slot's cgroup while it ran.
     pub oom_kills: u64,
+}
+
+/// The snapshot verifier's `PISA_VERIFY` verdict. `ok` is false when the
+/// kernel rejected a declaration; `report` carries its axiom report (the
+/// JSON array the policy already parses).
+#[derive(Debug, serde::Deserialize)]
+pub struct Verified {
+    pub ok: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub declarations: serde_json::Value,
 }
 
 impl Launcher {
@@ -91,6 +104,7 @@ impl Launcher {
             repl: std::path::absolute(&cfg.repl).unwrap_or_else(|_| cfg.repl.clone()),
             // Usually a bare `lean`, found on the project environment's PATH.
             lean: cfg.lean.clone(),
+            verifier: cfg.verifier.clone(),
             project: cfg.project.clone(),
             env,
             lean_path,
@@ -222,6 +236,40 @@ impl Launcher {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             oom_kills,
         })
+    }
+
+    /// Re-verifies snapshot `module` through the kernel with `lean --run`, in
+    /// the slot's sandbox and cgroup. A timeout or a missing `PISA_VERIFY`
+    /// line is reported as `ok: false`.
+    pub async fn verify(&self, slot: usize, module: &str, timeout: Duration) -> Verified {
+        let not_ok = |reason: String| Verified {
+            ok: false,
+            reason: Some(reason),
+            declarations: serde_json::Value::Null,
+        };
+        let verifier = self.verifier.to_string_lossy().into_owned();
+        let args = ["--run", &verifier, module];
+        let run = async {
+            let mut cmd = self.command(slot, &self.lean, &args)?;
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            cmd.spawn()?.wait_with_output().await
+        };
+        let output = match tokio::time::timeout(timeout, run).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return not_ok(format!("running the verifier failed: {e}")),
+            Err(_) => return not_ok("the verifier timed out".into()),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(line) = stdout.lines().find_map(|l| l.strip_prefix("PISA_VERIFY ")) else {
+            return not_ok("the verifier produced no verdict".into());
+        };
+        match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => not_ok(format!("unreadable verifier verdict: {e}")),
+        }
     }
 
     /// Waits (up to two seconds) until no process is left in the slot's

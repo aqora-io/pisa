@@ -45,6 +45,7 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         slots: Some(slots),
         repl: PathBuf::from(env!("CARGO_BIN_EXE_fake-repl")),
         lean: PathBuf::from(env!("CARGO_BIN_EXE_fake-lean")),
+        verifier: PathBuf::from("PisaVerify.lean"),
         project: None,
         max_uses: 100,
         max_rss_mb: 0,
