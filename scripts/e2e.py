@@ -186,6 +186,11 @@ def snapshots():
 
     rejected, _ = create("theorem broken : 1 = 2 := rfl")
     assert "snapshot" not in rejected and rejected["result"]["messages"][0]["severity"] == "error", rejected
+
+    # Macros are allowed on a default pool, because snapshots are kernel-re-verified.
+    macro_snap, _ = create("import Mathlib\n\nmacro \"two\" : term => `((2 : Nat))\ndef via_macro : Nat := two")
+    assert macro_snap["result"]["ok"] and "snapshot" in macro_snap, macro_snap
+    assert on(macro_snap, "example : via_macro = 2 := rfl")["ok"]
     status, info = call("GET", f"/snapshots/{child['snapshot']}")
     assert status == 200 and info["imports"] == [root["snapshot"]], info
     status, gone = call("DELETE", f"/snapshots/{root['snapshot']}")

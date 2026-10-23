@@ -168,3 +168,37 @@ that imports of other closure modules point at their snapshots.
 5. **Policy.** `backward.*` options are now allowed by default. The bench
    still allowed metaprogramming for the one Physlib module that defines a
    `macro`.
+
+### With kernel re-verification
+
+Snapshots are now re-checked through the kernel after they are built (a clean
+`lean --run` process re-adds the module's own declarations to a
+dependency-only environment, the kernel checking each, and collects their
+axioms there). This made it safe to allow the macro family on a default pool,
+so the whole closure was re-run with **no metaprogramming override**.
+
+| Measurement | Before re-verification | With re-verification |
+| --- | --- | --- |
+| Modules kept | 86 of 86 | 86 of 86 |
+| Create a snapshot | median 2.9 s, p90 5.5 s | median 12.0 s, p90 36 s, max 66 s |
+| of which `lean -o` build | median 1.6 s | median 1.7 s |
+| Checks right after a create (1,032) | 58 ms median | 59 ms median, 79 ms max |
+| Whole library on a miss | 1.4 s | 1.4 s |
+
+**Findings.**
+1. **The guarantee holds on a default pool.** All 86 modules, macros included,
+   build and are re-checked; the one dirty snapshot (Physlib's
+   `HarmonicOscillator.Eigenstates`, a real `sorry`) is still flagged; a forged
+   declaration is rejected (stage 4 test).
+2. **Create latency roughly quadruples**, with a long tail (max 66 s): the
+   re-check re-runs the kernel over the chunk's own declarations, which for
+   proof-heavy modules is real work, plus a dependency import. The build itself
+   is unchanged (~1.7 s).
+3. **The hot path is untouched.** Checks on a snapshot are still ~60 ms, and a
+   miss is still ~1.4 s. In MerLean's pattern (twelve checks, then one create),
+   a statement costs about 12.7 s — still ~260× cheaper than the ~3,350 s of
+   resending this 21k-line library 13 times.
+4. **Room to optimize** (not done): the create now does three sequential
+   dependency imports (build, verify, warm-up); verify and warm-up are
+   independent and could overlap, and the verifier could be precompiled rather
+   than run through `lean --run`.

@@ -207,8 +207,9 @@ sections. Re-open what a chunk needs.
   had none, it uses `public import`, so chains stay transitive.
 
 **Results.**
-- Code is kept only if Lean reports no errors. `result` is a check result, as
-  for `/check`, without `sorries`.
+- Code is kept only if Lean reports no errors **and the kernel re-check
+  passes** (see the [verification policy](#verification-policy)). `result` is a
+  check result, as for `/check`, without `sorries`.
 - A chunk with `sorry` or another axiom outside the allowed list is kept but
   `dirty`, and checks that use it report the axiom.
 - Imports of an unknown or deleted snapshot are `not_found`.
@@ -218,9 +219,12 @@ snapshot that imports it. Each worker checks a snapshot it has cached against
 the store at most every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a delete takes
 effect everywhere within that time.
 
-**Trust.** Imported modules are not re-checked by Lean's kernel, as with
-Mathlib's cache. Whoever can write the store can forge snapshots, as for
-pickled proof states; a recorded SHA-256 catches only corruption.
+**Trust.** A snapshot's own declarations are re-checked through the kernel
+when it is created, so a forged proof is caught at creation. Thereafter the
+`.olean` is imported without re-checking, as with Mathlib's cache: whoever can
+write the store can still install an unchecked module, and the recorded
+SHA-256 catches only corruption, not a malicious write. The base
+Mathlib/Physlib oleans and the kernel are the trusted base.
 
 ## Clients
 
@@ -420,8 +424,8 @@ A check is `ok` only when all of these hold:
 - The code elaborated without errors.
 - Every new declaration depends only on `propext`, `Classical.choice` and
   `Quot.sound`. This rejects `sorry`, `admit`, `native_decide` and new axioms.
-- The code contains no metaprogramming: `#eval`, `run_cmd`, `macro`, `elab`,
-  `syntax`, elaborator attributes, `unsafe`, `implemented_by` and similar.
+- The code contains no metaprogramming: `#eval`, `run_cmd`, `elab`,
+  elaborator attributes, `unsafe`, `implemented_by` and similar.
 - Any `set_option` changes only an allowlisted option: resource limits
   (`maxHeartbeats` and similar), `linter.*`, `pp.*`, `trace.*`, and
   `backward.*`, which restores older elaborator behaviour that Mathlib-style
@@ -431,6 +435,21 @@ A check is `ok` only when all of these hold:
 The axiom report is a `run_cmd` metaprogram. It needs `Lean.Elab.Command`, so
 workers add `import Lean.Elab.Command` to every header they load, or
 `meta import Lean.Elab.Command` to a module-system header.
+
+This scan is a conservative pre-filter, not the last word: it over-approximates
+"the kernel checked every declaration with sound options" by forbidding
+anything that could subvert the kernel or the report. Snapshots don't rely on
+it. A [snapshot](#snapshots) is re-checked through the kernel after it is
+built, in a separate clean process (`docker/verifier/PisaVerify.lean`, run with
+`lean --run`): it re-adds the module's own declarations to an environment of
+just its dependencies, with the kernel checking each one, and collects their
+axioms by walking the re-checked constants. So a declaration added during the
+build with the kernel check skipped is caught even though no forbidden keyword
+appears in the source. Because the verdict no longer depends on the build being
+honest, snapshot creation allows the **macro family** (`macro`, `macro_rules`,
+`syntax`, `declare_syntax_cat`) — pure syntax transformers whose only risk is
+what they expand into, which the re-check covers. `/check` and `/sessions`,
+which don't produce a module to re-check, keep the scan as-is.
 
 ## Limits
 
