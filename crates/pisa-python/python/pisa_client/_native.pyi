@@ -71,6 +71,7 @@ class Snapshot(TypedDict):
     header: NotRequired[str]
     version: str
     dirty: bool
+    verified: bool
     result: CheckResult
 
 class SnapshotInfo(TypedDict):
@@ -79,8 +80,20 @@ class SnapshotInfo(TypedDict):
     header: str
     code: str
     dirty: bool
+    verified: bool
     result: CheckResult
     created: int
+
+class SnapshotFailure(TypedDict):
+    snapshot: str
+    reason: str
+
+class SnapshotVerified(TypedDict):
+    snapshot: str
+    verified: bool
+    dirty: bool
+    checked: list[str]
+    failure: NotRequired[SnapshotFailure]
 
 class Client:
     """A client for one pisa server. Safe to share between threads; calls
@@ -108,11 +121,21 @@ class Client:
     def check_session(self, session: str, code: str) -> CheckResult:
         """Re-check a completed proof from scratch; `ok` also requires that it
         proves the session's original statements, with its imports."""
-    def create_snapshot(self, code: str) -> Snapshot:
+    def create_snapshot(self, code: str, *, verify: bool | None = None) -> Snapshot:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module (`snapshot`) that later code can import. Start that code with
         the returned `header` to reuse the Lean process that has it loaded.
-        Code with `sorry` is kept but `dirty`."""
+        Code with `sorry` is kept but `dirty`.
+
+        The kernel re-check runs by default only if the code uses macros, its
+        own or an import's. `verify=True` always runs it and also re-checks the
+        imports, so the snapshot ends `verified` or the result has an error.
+        `verify=False` skips it, and the snapshot stays not `verified`."""
+    def verify_snapshot(self, name: str) -> SnapshotVerified:
+        """Re-check a snapshot and everything it imports through the kernel,
+        imports first, skipping what already passed. A module the kernel
+        rejects is reported in `failure` and stays usable. Raises NotFoundError
+        for an unknown or deleted snapshot."""
     def snapshot(self, name: str) -> SnapshotInfo:
         """A snapshot's code, imports and check result. Raises NotFoundError
         for an unknown or deleted one."""

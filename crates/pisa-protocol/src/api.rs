@@ -16,6 +16,7 @@
 //! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
 //! | `GET /snapshots/{snapshot}` | → [`SnapshotInfo`] |
 //! | `DELETE /snapshots/{snapshot}` | → [`Deleted`] |
+//! | `POST /snapshots/{snapshot}/verify` | → [`SnapshotVerified`] |
 //!
 //! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
 //! Checks can ask for more in `detail` ([`Detail`]).
@@ -300,6 +301,12 @@ pub struct SnapshotRequest {
     /// imports.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Whether to re-check the code through the kernel. `true` also re-checks
+    /// its imports, so the result ends [`verified`](SnapshotResponse::verified)
+    /// or has an error. `false` never re-checks. By default, only code that
+    /// uses macros, its own or an import's, is re-checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +325,9 @@ pub struct SnapshotResponse {
     /// Kept although a declaration uses `sorry` or another axiom outside the
     /// allowed list; `result.reasons` says which.
     pub dirty: bool,
+    /// This snapshot and everything it imports have passed the kernel
+    /// re-check.
+    pub verified: bool,
     /// The check, as for `/check`. It has no `sorries`, and `time` includes
     /// importing the module's imports.
     pub result: CheckResult,
@@ -333,9 +343,35 @@ pub struct SnapshotInfo {
     pub header: String,
     pub code: String,
     pub dirty: bool,
+    /// As in [`SnapshotResponse::verified`].
+    pub verified: bool,
     pub result: CheckResult,
     /// Seconds since the Unix epoch.
     pub created: u64,
+}
+
+/// `POST /snapshots/{snapshot}/verify`: re-checks a snapshot and everything it
+/// imports through the kernel, imports first, skipping what already passed. A
+/// module that fails stops the run and stays usable, marked as not verified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotVerified {
+    pub snapshot: String,
+    /// As in [`SnapshotResponse::verified`].
+    pub verified: bool,
+    /// As in [`SnapshotResponse::dirty`], from the re-check if it got this far.
+    pub dirty: bool,
+    /// The modules this run re-checked and passed, in order.
+    pub checked: Vec<String>,
+    /// The module that failed, if one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<SnapshotFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotFailure {
+    pub snapshot: String,
+    /// Why the re-check failed, e.g. the kernel's error or a timeout.
+    pub reason: String,
 }
 
 /// `DELETE /snapshots/{snapshot}`: deletes it and every snapshot that

@@ -138,9 +138,10 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?}` → `{snapshot?, header?, version, dirty, result}`; see [Snapshots](#snapshots) |
-| `GET /snapshots/{snapshot}` | `?version=` → `{snapshot, imports, header, code, dirty, result, created}` |
+| `POST /snapshots` | `{code, version?, timeout?, verify?}` → `{snapshot?, header?, version, dirty, verified, result}`; see [Snapshots](#snapshots) |
+| `GET /snapshots/{snapshot}` | `?version=` → `{snapshot, imports, header, code, dirty, verified, result, created}` |
 | `DELETE /snapshots/{snapshot}` | `?version=` → `{deleted: [...]}`, the snapshot and every snapshot that imports it |
+| `POST /snapshots/{snapshot}/verify` | `?version=` → `{snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /health`, `GET /metrics` | Liveness, Prometheus metrics |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
@@ -186,7 +187,7 @@ keeps each accepted chunk as a snapshot and builds on it:
 ```text
 POST /snapshots {"code": "import Mathlib\n\ndef double (n : ℕ) := 2 * n"}
   → {"snapshot": "PisaSnap.s1f…", "header": "import Mathlib\nimport PisaSnap.s1f…",
-     "dirty": false, "result": {"ok": true, …}}
+     "dirty": false, "verified": false, "result": {"ok": true, …}}
 POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double 2 = 4 := rfl"}
 ```
 
@@ -218,23 +219,60 @@ sections. Re-open what a chunk needs.
   had none, it uses `public import`, so chains stay transitive.
 
 **Results.**
-- Code is kept only if Lean reports no errors **and the kernel re-check
-  passes** (see the [verification policy](#verification-policy)). `result` is a
-  check result, as for `/check`, without `sorries`.
+- Code is kept only if Lean reports no errors and, when it runs, the kernel
+  re-check passes (see [Verifying](#verifying)). `result` is a check result, as
+  for `/check`, without `sorries`.
 - A chunk with `sorry` or another axiom outside the allowed list is kept but
   `dirty`, and checks that use it report the axiom.
 - Imports of an unknown or deleted snapshot are `not_found`.
+
+<a id="verifying"></a>
+**Verifying.** The kernel re-check imports the snapshot's dependencies again and
+re-runs the kernel over its declarations, which adds about 9 s to a small chunk
+on `import Mathlib`. So most code skips it while exploring and runs it at the
+end. It depends on `verify` in the request:
+
+| `verify` | Kernel re-check at creation |
+| --- | --- |
+| omitted, no macros | None |
+| omitted, the code uses macros or imports a snapshot that does | This chunk; if the kernel rejects it, it isn't kept |
+| `true` | This chunk and any unverified imports; the result is `verified`, or has an `error` |
+| `false` | None, even with macros |
+
+`verified` means the snapshot and everything it imports have passed the
+re-check. So a macro chunk on top of unverified snapshots is re-checked but not
+yet `verified`.
+
+`POST /snapshots/{snapshot}/verify` re-checks a snapshot and everything it
+imports, imports first, and records each module that passes. A later run only
+covers new chunks, and a retry resumes where the last one stopped.
+- `checked` lists the modules this run re-checked and passed.
+- If the kernel rejects a module or the re-check times out (60 s per module),
+  the run stops, still with a 200, and `failure` has the module and the reason.
+  Nothing is deleted, because other code may import it: the module stays usable
+  and not `verified`. Delete it yourself if you don't want it.
+- `dirty` and `result` are updated from the re-check, whose axioms don't depend
+  on the build being honest.
+
+Check results don't say whether the snapshots they import are verified: look
+at the snapshot, or verify it, when that matters.
 
 **Retention.** Snapshots are kept until deleted; a delete also removes every
 snapshot that imports it. Each worker checks a snapshot it has cached against
 the store at most every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a delete takes
 effect everywhere within that time.
 
-**Trust.** A snapshot's own declarations are re-checked through the kernel
-when it is created, so a forged proof is caught at creation. Thereafter the
-`.olean` is imported without re-checking, as with Mathlib's cache: whoever can
-write the store can still install an unchecked module, and the recorded
-SHA-256 catches only corruption, not a malicious write. The base
+**Trust.** A snapshot that isn't `verified` has the same guarantee as a
+`/check`: the policy scan and an axiom report from the process that imported
+it. Macros go beyond that, because what they expand into isn't in the text the
+scan sees, so with `verify: false`, `ok` and `dirty` can be wrong until the
+snapshot is verified. A `verified` snapshot's own declarations and those of
+everything it imports have been re-checked through the kernel, so a forged
+proof is caught.
+
+Either way, the `.olean` is imported without re-checking, as with Mathlib's
+cache: whoever can write the store can still install an unchecked module, and
+the recorded SHA-256 catches only corruption, not a malicious write. The base
 Mathlib/Physlib oleans and the kernel are the trusted base.
 
 ## Clients
@@ -250,6 +288,7 @@ let step = client.tactic(&session.states[0].state, "simp").await?; // Error::Ser
 let verdict = client.check_session(&session.session, "theorem t (n : Nat) : n + 0 = n := by simp").await?;
 let base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n").await?;
 let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header.unwrap())).await?;
+let verified = client.verify_snapshot(&base.snapshot.unwrap()).await?;
 ```
 
 Python (`pisa_client`), built from `crates/pisa-python` with `maturin build` or `maturin develop`:
@@ -264,6 +303,7 @@ step = client.tactic(session["states"][0]["state"], "simp")   # raises LeanError
 client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]
 base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n")
 client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
+client.verify_snapshot(base["snapshot"])["verified"]
 ```
 
 Calls are synchronous. They release the GIL, so one `Client` can be shared
@@ -449,18 +489,19 @@ workers add `import Lean.Elab.Command` to every header they load, or
 
 This scan is a conservative pre-filter, not the last word: it over-approximates
 "the kernel checked every declaration with sound options" by forbidding
-anything that could subvert the kernel or the report. Snapshots don't rely on
-it. A [snapshot](#snapshots) is re-checked through the kernel after it is
-built, in a separate clean process (`docker/verifier/PisaVerify.lean`, run with
+anything that could subvert the kernel or the report. A `verified`
+[snapshot](#verifying) doesn't rely on it. The re-check runs after the build,
+in a separate clean process (`docker/verifier/PisaVerify.lean`, run with
 `lean --run`): it re-adds the module's own declarations to an environment of
 just its dependencies, with the kernel checking each one, and collects their
 axioms by walking the re-checked constants. So a declaration added during the
 build with the kernel check skipped is caught even though no forbidden keyword
-appears in the source. Because the verdict no longer depends on the build being
+appears in the source. Because that verdict doesn't depend on the build being
 honest, snapshot creation allows the **macro family** (`macro`, `macro_rules`,
 `syntax`, `declare_syntax_cat`) — pure syntax transformers whose only risk is
-what they expand into, which the re-check covers. `/check` and `/sessions`,
-which don't produce a module to re-check, keep the scan as-is.
+what they expand into, which the re-check covers. It runs by default for code
+that uses them, and `verify: false` opts out. `/check` and `/sessions`, which
+don't produce a module to re-check, keep the scan as-is.
 
 ## Limits
 

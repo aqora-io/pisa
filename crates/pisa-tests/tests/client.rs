@@ -69,11 +69,45 @@ async fn client_covers_snapshots() {
     let info = client.snapshot(&name).await.unwrap();
     assert_eq!(info.header, header);
     assert!(!info.dirty);
+    assert!(!info.verified);
+
+    let verified = client.verify_snapshot(&name).await.unwrap();
+    assert!(verified.verified);
+    assert_eq!(verified.checked, std::slice::from_ref(&name));
+    assert!(verified.failure.is_none());
+    assert!(client.snapshot(&name).await.unwrap().verified);
+    let forged = client
+        .create_snapshot_with_verify("import Foo\ntheorem forge : 1 = 1 := rfl", true)
+        .await
+        .unwrap();
+    assert!(forged.snapshot.is_none(), "{forged:?}");
+    let opted_out = client
+        .create_snapshot_with_verify("import Foo\nmacro \"m\" : term => `(1)", false)
+        .await
+        .unwrap();
+    assert!(!opted_out.verified, "{opted_out:?}");
 
     let deleted = client.delete_snapshot(&name).await.unwrap();
     assert_eq!(deleted, std::slice::from_ref(&name));
     let err = client.snapshot(&name).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_snapshot_uses_the_clients_version() {
+    let c = Cluster::start(&[("w0", "a", 1), ("w1", "b", 1)]).await;
+    let client = |version: &str| Client::new(&c.url("/")).unwrap().with_version(version);
+    let code = "import Foo\ntheorem base : 1 = 1 := rfl";
+    let name = client("b")
+        .create_snapshot(code)
+        .await
+        .unwrap()
+        .snapshot
+        .unwrap();
+
+    let err = client("a").verify_snapshot(&name).await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+    assert!(client("b").verify_snapshot(&name).await.unwrap().verified);
 }
 
 #[tokio::test(flavor = "multi_thread")]

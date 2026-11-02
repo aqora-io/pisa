@@ -207,8 +207,23 @@ impl Client {
         })
     }
 
-    fn create_snapshot<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.create_snapshot(&code).await })
+    #[pyo3(signature = (code, *, verify = None))]
+    fn create_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            match verify {
+                Some(verify) => self.inner.create_snapshot_with_verify(&code, verify).await,
+                None => self.inner.create_snapshot(&code).await,
+            }
+        })
+    }
+
+    fn verify_snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.verify_snapshot(&name).await })
     }
 
     fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {

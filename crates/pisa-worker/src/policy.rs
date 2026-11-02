@@ -34,7 +34,8 @@ const FORBIDDEN: &[&str] = &[
 
 /// Pure syntax transformers: they can't run code, do IO or add declarations,
 /// so their only risk is what they expand into. Snapshots allow them because
-/// the result is re-checked through the kernel; other endpoints don't.
+/// code that uses them is re-checked through the kernel unless the request
+/// opts out, and is then marked as not verified; other endpoints don't.
 const MACRO_FAMILY: &[&str] = &["macro", "macro_rules", "syntax", "declare_syntax_cat"];
 
 pub const DEFAULT_AXIOMS: &str = "propext,Classical.choice,Quot.sound";
@@ -107,6 +108,30 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
   _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
     (_root_.Std.Format.text ("PISA_DECLS " ++ (_root_.Lean.Json.arr out).compress)))"#;
 
+/// The loop of [`AXIOM_REPORT`] over the declarations added after the imports.
+const REPORT_LOOP: &str = "  for (n, ci) in env.constants.map₂.toList do\n";
+
+/// [`AXIOM_REPORT`] for the declarations of one imported module, e.g. a
+/// snapshot (whose own declarations are not "after the imports").
+pub fn module_report(module: &str) -> String {
+    let report_loop = format!(
+        "  let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError \"{module} is not imported\"\n  \
+         for n in env.header.moduleData[idx.toNat]!.constNames do\n    \
+         let some ci := env.find? n | continue\n"
+    );
+    AXIOM_REPORT.replacen(REPORT_LOOP, &report_loop, 1)
+}
+
+/// Whether `body` uses macros, or other code that runs at elaboration time
+/// (which only a pool with `allow_metaprogramming` lets through). What these
+/// expand into is not in the text the scan sees, so by default a snapshot that
+/// uses them is re-checked through the kernel.
+pub fn uses_macros(body: &str) -> bool {
+    tokens(body)
+        .iter()
+        .any(|t| FORBIDDEN.contains(&t.as_str()) || MACRO_FAMILY.contains(&t.as_str()))
+}
+
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub allowed_axioms: Vec<String>,
@@ -116,8 +141,8 @@ pub struct Policy {
 
 impl Policy {
     /// Reasons to reject `body` without running it. `allow_macros` permits
-    /// the macro family, for code whose result is re-checked through the
-    /// kernel (snapshots).
+    /// the macro family, for code that can be re-checked through the kernel
+    /// (snapshots).
     pub fn scan(&self, body: &str, allow_macros: bool) -> Vec<String> {
         let tokens = tokens(body);
         let mut reasons = Vec::new();
@@ -365,6 +390,40 @@ mod tests {
         );
         assert_eq!(p.scan("run_cmd pure ()", true), ["forbidden: run_cmd"]);
         assert_eq!(p.scan("#eval 1", true), ["forbidden: #eval"]);
+    }
+
+    #[test]
+    fn module_report_walks_the_module() {
+        assert!(AXIOM_REPORT.contains(REPORT_LOOP));
+        let report = module_report("PisaSnap.s0f");
+        assert!(!report.contains("map₂"), "{report}");
+        assert!(
+            report.contains("env.getModuleIdx? `PisaSnap.s0f |"),
+            "{report}"
+        );
+        assert!(report.contains("    let some ci := env.find? n | continue\n    if n.isInternal"));
+    }
+
+    #[test]
+    fn macros_are_found_outside_comments_and_strings() {
+        for code in [
+            "macro \"x\" : term => `(1)",
+            "macro_rules | `(x) => `(1)",
+            "syntax \"x\" : term",
+            "declare_syntax_cat foo",
+            "elab \"x\" : term => pure x",
+            "theorem t : True := trivial\nrun_cmd pure ()",
+        ] {
+            assert!(uses_macros(code), "{code}");
+        }
+        for code in [
+            "theorem t : True := trivial -- macro\n/- syntax -/",
+            "def s : String := \"macro\"",
+            "theorem macro_free : True := trivial",
+            "notation \"x\" => 1",
+        ] {
+            assert!(!uses_macros(code), "{code}");
+        }
     }
 
     #[test]

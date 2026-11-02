@@ -160,6 +160,17 @@ def test_snapshots(url):
 
     info = client.snapshot(name)
     assert info["header"] == base["header"] and info["imports"] == []
+    assert not base["verified"] and not info["verified"]
+
+    verified = client.verify_snapshot(name)
+    assert verified["verified"] and verified["checked"] == [name]
+    assert "failure" not in verified
+    assert client.snapshot(name)["verified"]
+    forged = client.create_snapshot("import Foo\ntheorem forge : 1 = 1 := rfl", verify=True)
+    assert "snapshot" not in forged
+    opted_out = client.create_snapshot('import Foo\nmacro "m" : term => `(1)', verify=False)
+    assert not opted_out["verified"]
+
     assert client.delete_snapshot(name) == [name]
     with pytest.raises(NotFoundError):
         client.snapshot(name)

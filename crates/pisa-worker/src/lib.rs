@@ -238,6 +238,9 @@ async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
         Job::SnapshotDelete(j) => {
             JobResult::SnapshotDeleted(pool.snapshots().delete(&j.snapshot).await)
         }
+        Job::SnapshotVerify(j) => {
+            JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.snapshot).await)
+        }
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the router".into(),
         },

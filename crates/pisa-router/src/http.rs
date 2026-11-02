@@ -59,6 +59,7 @@ pub fn router(app: Arc<App>) -> Router {
             "/snapshots/{name}",
             get(snapshots::get).delete(snapshots::delete),
         )
+        .route("/snapshots/{name}/verify", post(snapshots::verify))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
 }

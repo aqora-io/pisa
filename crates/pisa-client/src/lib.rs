@@ -41,9 +41,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    CheckResult, Declaration, Detail, ErrorKind, Message, Pos, Severity, SnapshotInfo,
-    SnapshotResponse as Snapshot, Sorry, StartResponse as Session, StateInfo, TacticInfo,
-    TacticResponse as Step,
+    CheckResult, Declaration, Detail, ErrorKind, Message, Pos, Severity, SnapshotFailure,
+    SnapshotInfo, SnapshotResponse as Snapshot, SnapshotVerified, Sorry, StartResponse as Session,
+    StateInfo, TacticInfo, TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, Suggestion,
@@ -125,6 +125,11 @@ impl Endpoint {
         body: &B,
     ) -> Result<T, Error> {
         let r = self.http.post(self.url(path)?).json(body).send().await?;
+        Ok(server_error(r).await?.json().await?)
+    }
+
+    async fn post_url<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
+        let r = self.http.post(url).send().await?;
         Ok(server_error(r).await?.json().await?)
     }
 }
@@ -256,14 +261,44 @@ impl Client {
     /// Checks code like [`check`](Self::check) and, unless Lean reports
     /// errors, keeps it as a module that later code can import. Start that
     /// code with the returned `header` to reuse the Lean process that already
-    /// has the snapshot loaded. Code with `sorry` is kept but `dirty`.
+    /// has the snapshot loaded. Code with `sorry` is kept but `dirty`. The
+    /// kernel re-check runs only if the code uses macros, its own or an
+    /// import's; see [`verify_snapshot`](Self::verify_snapshot).
     pub async fn create_snapshot(&self, code: &str) -> Result<Snapshot, Error> {
+        self.post_snapshot(code, None).await
+    }
+
+    /// Like [`create_snapshot`](Self::create_snapshot), choosing whether to
+    /// run the kernel re-check. `true` also re-checks the imports, so the
+    /// snapshot ends `verified` or the result has an error. `false` skips it
+    /// even for macros, and the snapshot stays not `verified`.
+    pub async fn create_snapshot_with_verify(
+        &self,
+        code: &str,
+        verify: bool,
+    ) -> Result<Snapshot, Error> {
+        self.post_snapshot(code, Some(verify)).await
+    }
+
+    async fn post_snapshot(&self, code: &str, verify: Option<bool>) -> Result<Snapshot, Error> {
         let req = SnapshotRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
+            verify,
         };
         self.post("snapshots", &req).await
+    }
+
+    /// Re-checks a snapshot and everything it imports through the kernel,
+    /// imports first, skipping what already passed. A module the kernel
+    /// rejects is reported in `failure`, not as an error.
+    pub async fn verify_snapshot(&self, name: &str) -> Result<SnapshotVerified, Error> {
+        let mut url = self.snapshot_url(name)?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(name.to_string()))?
+            .push("verify");
+        self.endpoint.post_url(url).await
     }
 
     /// A snapshot's code, imports and check result, by its module name.

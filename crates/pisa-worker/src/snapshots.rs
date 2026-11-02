@@ -16,6 +16,10 @@
 //! in the store vouches for it (`PISA_SNAPSHOT_CONFIRM_SECS`): a module that
 //! is still being built can't be imported, and a deleted one stops working
 //! everywhere within that time, without a store request on every check.
+//!
+//! The kernel re-check is separate from building: it runs at creation for code
+//! that uses macros or asks for it, and later on request. A snapshot's metadata
+//! is rewritten once it passes.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,17 +30,18 @@ use futures::StreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    CheckResult, Declaration, Deleted, Error, ErrorKind, SnapshotInfo, SnapshotResponse,
+    CheckResult, Declaration, Deleted, Error, ErrorKind, SnapshotFailure, SnapshotInfo,
+    SnapshotResponse, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
-use pisa_protocol::repl::CommandResponse;
+use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::check::{header_error, policy_error};
-
+use crate::check::{header_error, policy_error, run, unexpected};
+use crate::policy::{module_report, parse_report, uses_macros};
 use crate::pool::{Lease, Pool};
 
 /// Time allowed for the report on a snapshot's declarations.
@@ -52,6 +57,13 @@ pub struct SnapshotMeta {
     pub header: String,
     pub code: String,
     pub dirty: bool,
+    /// See [`SnapshotResponse::verified`].
+    #[serde(default)]
+    pub verified: bool,
+    /// Its code or anything it imports uses macros, which can expand in code
+    /// on top of it.
+    #[serde(default)]
+    pub macros: bool,
     pub result: CheckResult,
     pub created: u64,
 }
@@ -135,6 +147,72 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// What re-checking one module of a chain came to.
+enum Recheck {
+    Passed,
+    AlreadyVerified,
+    Failed(String),
+}
+
+/// Every module a snapshot needs: its imports' modules, then its own.
+fn modules(parents: &[SnapshotMeta], id: &str, files: Vec<ModuleFile>) -> Vec<Module> {
+    let mut modules: Vec<Module> = Vec::new();
+    for m in parents.iter().flat_map(|p| &p.modules) {
+        if !modules.contains(m) {
+            modules.push(m.clone());
+        }
+    }
+    modules.push(Module {
+        id: id.to_string(),
+        files,
+    });
+    modules
+}
+
+/// The error for a create that asked to verify an import or existing snapshot
+/// and couldn't.
+fn failure_error(report: &SnapshotVerified) -> Option<Error> {
+    report.failure.as_ref().map(|f| {
+        Error::new(
+            ErrorKind::Lean,
+            format!("{} failed verification: {}", f.snapshot, f.reason),
+        )
+    })
+}
+
+/// Re-checks the module through the kernel in a clean process, and returns its
+/// declarations with their axioms from there, so that they don't depend on
+/// whatever ran during the build. The error is why the re-check failed.
+async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<Declaration>, String> {
+    let verified = slot.verify(&snapshot::module(id), REPORT_TIMEOUT).await;
+    if !verified.ok {
+        return Err(verified
+            .reason
+            .unwrap_or_else(|| "snapshot rejected".into()));
+    }
+    serde_json::from_value(verified.declarations)
+        .map_err(|_| "unreadable verifier declarations".to_string())
+}
+
+/// The declarations of a module in a process that has it imported, with their
+/// axioms as that process reports them.
+async fn report_module(slot: &mut Lease, id: &str, env: u64) -> Result<Vec<Declaration>, Error> {
+    let cmd = ReplCommand::cmd(module_report(&snapshot::module(id)), Some(env));
+    let report = match run(slot, &cmd, REPORT_TIMEOUT).await? {
+        ReplResponse::Command(r) => r,
+        ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
+        other => return Err(unexpected(other)),
+    };
+    parse_report(&report).ok_or_else(|| {
+        let why = report
+            .messages
+            .iter()
+            .find(|m| m.severity == Severity::Error)
+            .map_or("no output".to_string(), |m| m.data.clone());
+        internal(format!("the axiom report failed: {why}"))
+    })
 }
 
 impl Snapshots {
@@ -279,6 +357,7 @@ impl Snapshots {
             header: Some(meta.header),
             version: self.version.clone(),
             dirty: meta.dirty,
+            verified: meta.verified,
             result: meta.result,
         }
     }
@@ -291,6 +370,7 @@ impl Snapshots {
             header: None,
             version: self.version.clone(),
             dirty: false,
+            verified: false,
             result: CheckResult::default(),
         };
         let split = split_header(&job.code);
@@ -298,7 +378,8 @@ impl Snapshots {
             response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
             return response;
         }
-        // Macros are allowed: the build is re-checked through the kernel.
+        // Macros are allowed: `build` re-checks them through the kernel unless
+        // the request opts out, which marks the snapshot as not verified.
         let rejected = pool.policy().scan(&split.body, true);
         if !rejected.is_empty() {
             response.result.error = Some(policy_error(&rejected));
@@ -306,14 +387,35 @@ impl Snapshots {
             return response;
         }
         let id = snapshot::id(&job.code);
+        let wants_verified = job.verify == Some(true);
         let lock = self.lock(&id);
-        let _building = lock.lock().await;
+        let building = lock.lock().await;
         match self.meta(&id).await {
+            Ok(meta) if wants_verified && !meta.verified => {
+                drop(building);
+                return self.verify_existing(pool, &id, response).await;
+            }
             Ok(meta) => return self.response(&id, meta),
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => {
                 response.result.error = Some(e);
                 return response;
+            }
+        }
+        if wants_verified {
+            for import in snapshot::imports(&split.header).unwrap_or_default() {
+                match self.verify_chain(pool, &import).await {
+                    Ok(report) => {
+                        if let Some(error) = failure_error(&report) {
+                            response.result.error = Some(error);
+                            return response;
+                        }
+                    }
+                    Err(e) => {
+                        response.result.error = Some(e);
+                        return response;
+                    }
+                }
             }
         }
         let header = snapshot::next_header(&split.header, &id);
@@ -355,6 +457,12 @@ impl Snapshots {
         if let Err(e) = self.ensure(&split.header, None).await {
             return fail(outcome, e);
         }
+        let parents = match self.parents(&split.header).await {
+            Ok(parents) => parents,
+            Err(e) => return fail(outcome, e),
+        };
+        let macros = uses_macros(&split.body) || parents.iter().any(|p| p.macros);
+        let recheck = job.verify.unwrap_or(macros);
         // `lean -o` imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
 
@@ -427,48 +535,52 @@ impl Snapshots {
                 return fail(outcome, e);
             }
         };
-        // Re-check the module through the kernel in a clean process, and take
-        // its axioms from there: the verdict then doesn't depend on whatever
-        // ran during the build.
-        let verified = slot.verify(&snapshot::module(id), REPORT_TIMEOUT).await;
-        if !verified.ok {
-            self.unbuild(slot, id);
-            let reason = verified
-                .reason
-                .unwrap_or_else(|| "snapshot rejected".into());
-            return fail(outcome, Error::new(ErrorKind::Lean, reason));
-        }
-        let Ok(decls) = serde_json::from_value::<Vec<Declaration>>(verified.declarations) else {
-            self.unbuild(slot, id);
-            return fail(outcome, internal("unreadable verifier declarations"));
+        let rechecked = if recheck {
+            match recheck_module(slot, id).await {
+                Ok(decls) => Some(decls),
+                Err(reason) => {
+                    self.unbuild(slot, id);
+                    return fail(outcome, Error::new(ErrorKind::Lean, reason));
+                }
+            }
+        } else {
+            None
+        };
+
+        // Keep the builder warm on the snapshot so the next checks are hits.
+        let env = match slot
+            .warm_up_with(header, &header_key(header), Some(id))
+            .await
+        {
+            Ok((env, _)) => env,
+            Err(f) => {
+                self.unbuild(slot, id);
+                return fail(outcome, header_error(f, slot.import_timeout()));
+            }
+        };
+        let decls = match rechecked {
+            Some(decls) => decls,
+            None => match report_module(slot, id, env).await {
+                Ok(decls) => decls,
+                Err(e) => {
+                    self.unbuild(slot, id);
+                    return fail(outcome, e);
+                }
+            },
         };
         let verification = slot.policy().judge_decls(false, Some(decls));
         let dirty = !verification.ok;
         outcome.verification = Some(verification);
 
-        // Keep the builder warm on the snapshot so the next checks are hits.
-        if let Err(f) = slot
-            .warm_up_with(header, &header_key(header), Some(id))
-            .await
-        {
-            self.unbuild(slot, id);
-            return fail(outcome, header_error(f, slot.import_timeout()));
-        }
-
         let own = files.iter().map(|(f, _)| f.clone()).collect();
-        let modules = match self.modules(&split.header, id, own).await {
-            Ok(m) => m,
-            Err(e) => {
-                self.unbuild(slot, id);
-                return fail(outcome, e);
-            }
-        };
         let meta = SnapshotMeta {
             imports: snapshot::imports(&split.header).unwrap_or_default(),
-            modules,
+            modules: modules(&parents, id, own),
             header: header.to_string(),
             code: job.code.clone(),
             dirty,
+            verified: recheck && parents.iter().all(|p| p.verified),
+            macros,
             result: outcome.clone().into(),
             created: now(),
         };
@@ -507,26 +619,115 @@ impl Snapshots {
         self.discard(id);
     }
 
-    /// Every module a snapshot needs: its imports' modules, then its own.
-    async fn modules(
-        &self,
-        header: &str,
-        id: &str,
-        files: Vec<ModuleFile>,
-    ) -> Result<Vec<Module>, Error> {
-        let mut modules: Vec<Module> = Vec::new();
+    /// The metadata of the snapshots `header` imports.
+    async fn parents(&self, header: &str) -> Result<Vec<SnapshotMeta>, Error> {
+        let mut parents = Vec::new();
         for import in snapshot::imports(header).map_err(internal)? {
-            for m in self.meta(&import).await?.modules {
-                if !modules.contains(&m) {
-                    modules.push(m);
+            parents.push(self.meta(&import).await?);
+        }
+        Ok(parents)
+    }
+
+    /// Re-checks a snapshot and everything it imports through the kernel, and
+    /// records each module that passes.
+    pub async fn verify(&self, pool: &Arc<Pool>, name: &str) -> Result<SnapshotVerified, Error> {
+        let id = self.parse(name)?;
+        self.verify_chain(pool, &id).await
+    }
+
+    /// A create asking to verify a snapshot that is already kept: its result
+    /// is what is stored, with the error if the re-check failed.
+    async fn verify_existing(
+        &self,
+        pool: &Arc<Pool>,
+        id: &str,
+        mut response: SnapshotResponse,
+    ) -> SnapshotResponse {
+        let report = match self.verify_chain(pool, id).await {
+            Ok(report) => report,
+            Err(e) => {
+                response.result.error = Some(e);
+                return response;
+            }
+        };
+        let meta = match self.meta(id).await {
+            Ok(meta) => meta,
+            Err(e) => {
+                response.result.error = Some(e);
+                return response;
+            }
+        };
+        let mut response = self.response(id, meta);
+        if let Some(error) = failure_error(&report) {
+            response.result.ok = false;
+            response.result.error = Some(error);
+        }
+        response
+    }
+
+    /// Walks `meta.modules`, which lists imports before what imports them, so
+    /// a module is only marked verified once its imports are. Stops at the
+    /// first module that fails.
+    async fn verify_chain(&self, pool: &Arc<Pool>, id: &str) -> Result<SnapshotVerified, Error> {
+        self.ensure_one(id).await?;
+        let modules = self.meta(id).await?.modules;
+        let mut checked = Vec::new();
+        let mut failure = None;
+        for module in &modules {
+            match self.verify_module(pool, &module.id).await? {
+                Recheck::Passed => checked.push(snapshot::module(&module.id)),
+                Recheck::AlreadyVerified => {}
+                Recheck::Failed(reason) => {
+                    failure = Some(SnapshotFailure {
+                        snapshot: snapshot::module(&module.id),
+                        reason,
+                    });
+                    break;
                 }
             }
         }
-        modules.push(Module {
-            id: id.to_string(),
-            files,
-        });
-        Ok(modules)
+        let meta = self.meta(id).await?;
+        Ok(SnapshotVerified {
+            snapshot: snapshot::module(id),
+            verified: meta.verified,
+            dirty: meta.dirty,
+            checked,
+            failure,
+        })
+    }
+
+    /// Re-checks one module, whose imports must be verified and in the local
+    /// cache, unless it is already verified. Its axioms then come from the
+    /// re-check, replacing what the build's report said.
+    ///
+    /// This doesn't take the snapshot's lock, which every check on it needs:
+    /// they shouldn't wait for the kernel, and two re-checks of a module agree.
+    async fn verify_module(&self, pool: &Arc<Pool>, id: &str) -> Result<Recheck, Error> {
+        if self.meta(id).await?.verified {
+            return Ok(Recheck::AlreadyVerified);
+        }
+        // No header to prefer: this takes a slot with nothing warm if it can.
+        let mut slot = pool.acquire("", None).await;
+        // The verifier imports everything again, so free the slot's memory first.
+        slot.retire_and_wait("evict").await;
+        let verification = match recheck_module(&slot, id).await {
+            Ok(decls) => slot.policy().judge_decls(false, Some(decls)),
+            Err(reason) => return Ok(Recheck::Failed(reason)),
+        };
+        drop(slot);
+        // Read again: a snapshot deleted during the re-check stays deleted.
+        let mut meta = self.meta(id).await?;
+        meta.verified = true;
+        meta.dirty = !verification.ok;
+        meta.result.ok = verification.ok;
+        meta.result.reasons = verification.reasons;
+        meta.result.declarations = verification.declarations;
+        let bytes = serde_json::to_vec(&meta).map_err(internal)?;
+        self.store
+            .put(&self.object(&format!("{id}.json")), PutPayload::from(bytes))
+            .await
+            .map_err(internal)?;
+        Ok(Recheck::Passed)
     }
 
     async fn commit(
@@ -579,6 +780,7 @@ impl Snapshots {
             header: meta.header,
             code: meta.code,
             dirty: meta.dirty,
+            verified: meta.verified,
             result: meta.result,
             created: meta.created,
         })

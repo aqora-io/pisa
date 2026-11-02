@@ -6,7 +6,8 @@
 //! `lean --run <verifier> <module>` re-verifies a snapshot: it loads the
 //! module's own code from its fake olean and prints a `PISA_VERIFY` line with
 //! its declarations, reporting `ok:false` when the code contains a `forge`
-//! marker (standing in for the kernel catching a forged declaration).
+//! marker (standing in for the kernel catching a forged declaration). A
+//! `SLOW_KERNEL <ms>` marker in the code makes it take that long.
 //!
 //! `lean -R <root> -o <olean> --json <file>` compiles a module: the "olean" is
 //! a copy of the code, and module-system code also gets the `.olean.server`,
@@ -40,6 +41,10 @@ fn verify(module: &str) {
     let code = find_module(module)
         .and_then(|f| std::fs::read_to_string(f).ok())
         .unwrap_or_default();
+    if let Some(ms) = code.split("SLOW_KERNEL ").nth(1) {
+        let ms: u64 = ms.lines().next().unwrap().trim().parse().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let verdict = if code.contains("forge") {
         json!({"ok": false, "reason": "kernel re-check: forged declaration"})
     } else {

@@ -197,14 +197,37 @@ def snapshots():
     rejected, _ = create("theorem broken : 1 = 2 := rfl")
     assert "snapshot" not in rejected and rejected["result"]["messages"][0]["severity"] == "error", rejected
 
-    # Macros are allowed on a default pool, because snapshots are kernel-re-verified.
+    # Macros are allowed on a default pool, because they are kernel-re-verified.
     macro_snap, _ = create("macro \"two\" : term => `((2 : Nat))\ndef via_macro : Nat := two")
-    assert macro_snap["result"]["ok"] and "snapshot" in macro_snap, macro_snap
+    assert macro_snap["result"]["ok"] and macro_snap["verified"], macro_snap
     assert on(macro_snap, "example : via_macro = 2 := rfl")["ok"]
+    inherits, _ = create(f"{macro_snap['header']}\n\ndef via_import : Nat := two")
+    assert inherits["verified"], inherits
+    opted_out = post("/snapshots", {"code": "macro \"three\" : term => `((3 : Nat))", "verify": False, "timeout": 600})
+    assert "snapshot" in opted_out and not opted_out["verified"], opted_out
+    step("snapshot: macros are re-checked unless the request opts out")
+
+    # Everything else skips the re-check, until it is asked for.
+    assert not root["verified"] and not child["verified"], (root, child)
+    status, verified = call("POST", f"/snapshots/{child['snapshot']}/verify")
+    assert status == 200 and verified["verified"], verified
+    assert verified["checked"] == [root["snapshot"], child["snapshot"]], verified
+    assert verified["dirty"] and "failure" not in verified, verified
+    assert call("GET", f"/snapshots/{root['snapshot']}")[1]["verified"]
+    assert call("POST", f"/snapshots/{child['snapshot']}/verify")[1]["checked"] == []
+    asked, _ = create(f"{sibling['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl")
+    assert not asked["verified"], asked
+    asked = post("/snapshots", {"code": f"{sibling['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl",
+                                "verify": True, "timeout": 600})
+    assert asked["verified"], asked
+    step("snapshot: verify on request, at creation or later, keeps sorry dirty")
+
     status, info = call("GET", f"/snapshots/{child['snapshot']}")
     assert status == 200 and info["imports"] == [root["snapshot"]], info
     status, gone = call("DELETE", f"/snapshots/{root['snapshot']}")
-    assert status == 200 and len(gone["deleted"]) == 4, gone
+    assert status == 200 and len(gone["deleted"]) == 5, gone
+    for leftover in (macro_snap, opted_out):
+        assert call("DELETE", f"/snapshots/{leftover['snapshot']}")[0] == 200
     r = on(merged, "example : True := trivial")
     assert r["error"]["kind"] == "not_found", r
     step("snapshot: errors aren't kept; read and cascading delete")
@@ -247,7 +270,13 @@ def module_snapshots():
     assert child["dirty"] and child["result"]["reasons"] == ["axiom: MSnap.cheat uses sorryAx"], child
     r = on(child, "public theorem uses : 1 = 2 := MSnap.cheat")
     assert r["reasons"] == ["axiom: uses uses sorryAx"], r
+    assert not child["verified"], child
     step("module snapshot: sorry in a proof body is still reported")
+
+    status, verified = call("POST", f"/snapshots/{child['snapshot']}/verify")
+    assert status == 200 and verified["verified"] and verified["dirty"], verified
+    assert verified["checked"] == [root["snapshot"], child["snapshot"]], verified
+    step("module snapshot: verify re-checks the chain")
 
     code = f"{root['header']}\n\npublic theorem t (n : Nat) : MSnap.double n = n + n := by sorry"
     s = post("/sessions", {"code": code})

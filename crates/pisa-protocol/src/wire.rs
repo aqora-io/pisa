@@ -63,6 +63,7 @@ pub enum Job {
     SnapshotCreate(SnapshotCreateJob),
     SnapshotGet(SnapshotJob),
     SnapshotDelete(SnapshotJob),
+    SnapshotVerify(SnapshotJob),
     /// A job kind this worker doesn't know, sent by a newer router. It is
     /// answered with [`JobResult::Failed`] rather than dropping the connection.
     #[serde(other)]
@@ -101,6 +102,8 @@ pub struct SessionCheckJob {
 pub struct SnapshotCreateJob {
     pub code: String,
     pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +123,7 @@ pub enum JobResult {
     SnapshotCreated(Box<api::SnapshotResponse>),
     Snapshot(Result<Box<api::SnapshotInfo>, api::Error>),
     SnapshotDeleted(Result<api::Deleted, api::Error>),
+    SnapshotVerified(Result<api::SnapshotVerified, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,
