@@ -138,8 +138,6 @@ pub struct Hit {
     pub flags: Flags,
     /// Fused score; only comparable within one query.
     pub score: f64,
-    /// Which lanes found it, e.g. `["lexical", "name"]`.
-    pub lanes: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_url: Option<String>,
     /// About 150 tokens for a model's context.

@@ -239,7 +239,6 @@ class Hit(TypedDict):
     summary: NotRequired[str]
     flags: Flags
     score: float
-    lanes: list[str]
     source_url: NotRequired[str]
     text: str
     snapshot: NotRequired[SnapshotHit]

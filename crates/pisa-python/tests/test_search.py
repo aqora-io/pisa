@@ -1,5 +1,6 @@
-"""Tests SearchClient against a real pisa-search server over a tiny corpus.
-Build the binary first:
+"""Tests SearchClient against a real pisa-search server over a tiny corpus,
+loaded into the Qdrant at PISA_TEST_QDRANT_URL (skipped when unset). Build
+the binary first:
 
     cargo build -p pisa-search
 """
@@ -9,6 +10,7 @@ import os
 import socket
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -51,6 +53,9 @@ def free_port():
 
 @pytest.fixture(scope="module")
 def url(tmp_path_factory):
+    qdrant = os.environ.get("PISA_TEST_QDRANT_URL")
+    if not qdrant:
+        pytest.skip("PISA_TEST_QDRANT_URL is unset")
     tmp = tmp_path_factory.mktemp("search")
     export = tmp / "export.ndjson"
     export.write_text(
@@ -66,9 +71,16 @@ def url(tmp_path_factory):
                     "--out", tmp / "corpus"], check=True, env=env, stdout=subprocess.DEVNULL)
     subprocess.run([exe, "build", "--corpus", tmp / "corpus", "--out", tmp / "bundle"],
                    check=True, env=env, stdout=subprocess.DEVNULL)
+    # An environment of the test's own, so loading touches nothing else.
+    env_id = f"pytest-{os.getpid()}"
+    manifest = json.loads((tmp / "bundle" / "manifest.json").read_text())
+    manifest["env_id"] = env_id
+    (tmp / "bundle" / "manifest.json").write_text(json.dumps(manifest))
+    subprocess.run([exe, "load", "--bundle", tmp / "bundle", "--qdrant", qdrant, "--min-coverage", "0"],
+                   check=True, env=env, stdout=subprocess.DEVNULL)
     port = free_port()
-    server = subprocess.Popen([exe, "serve", "--bundle", tmp / "bundle", "--http", f"127.0.0.1:{port}"],
-                              env=env)
+    server = subprocess.Popen([exe, "serve", "--qdrant", qdrant, "--env-id", env_id,
+                               "--http", f"127.0.0.1:{port}"], env=env)
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
@@ -80,13 +92,16 @@ def url(tmp_path_factory):
         pytest.fail("pisa-search did not start")
     yield url
     server.terminate()
+    for collection in [f"pisa-{env_id}", f"pisa-{env_id}-entries"]:
+        req = urllib.request.Request(f"{qdrant}/collections/{collection}", method="DELETE")
+        urllib.request.urlopen(req).close()
 
 
 def test_search(url):
     client = SearchClient(url)
     hits = client.search(nl="trace of the identity matrix")["hits"]
     assert hits[0]["name"] == "Matrix.trace_one"
-    assert "lexical" in hits[0]["lanes"] and isinstance(hits[0]["score"], float)
+    assert isinstance(hits[0]["score"], float)
 
     by_name = client.search(name="Real.sqrt_mul_sefl", k=1)["hits"]
     assert [h["name"] for h in by_name] == ["Real.sqrt_mul_self"]

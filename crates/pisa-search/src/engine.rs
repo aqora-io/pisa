@@ -855,7 +855,6 @@ fn hit(n: usize, s: Scored, snapshot: Option<SnapshotHit>) -> Hit {
         summary,
         flags,
         score: s.score,
-        lanes: Vec::new(),
         source_url: d.source_url.clone(),
         snapshot,
     }
