@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch};
 pub mod cgroup;
 pub mod check;
 pub mod config;
+pub mod kv;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
