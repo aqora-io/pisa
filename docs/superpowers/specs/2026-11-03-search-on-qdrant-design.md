@@ -198,3 +198,11 @@ A search request takes up to three Qdrant round trips, each batched across its q
 - **End to end:** compose with `--profile search`, two replicas, `scripts/e2e.py --search` against each, then stop the leader and check the snapshot flow through the other.
 - **Helm:** `helm lint` and `helm template`; on minikube, two search pods plus the Qdrant subchart, then delete a pod and confirm search keeps answering.
 - `cargo test --workspace`, `cargo clippy --workspace`, the Python tests with `PISA_TEST_QDRANT_URL`.
+
+## As built
+- The leader keeps no cursor. It reconciles every time it takes the lease, which already covers what a cursor would resume from, then tails the log from the reconcile's start minus `LOOKBACK`.
+- A name query adds `name_edit` (0.03), scaled by edit distance, to the fused candidates in the app. Weighted RRF ranks trigram matches too flatly to fix misspellings: `Real.sqrt_mul_sefl` came back as `Real`. MathlibQR doesn't move with it.
+- A lexical field that no bundle declaration has, e.g. descriptions in a bundle without any, counts as of average length rather than infinitely short.
+- `/health` is a 503 while Qdrant doesn't answer, for readiness probes.
+- The lease TTL is a parameter of `Indexer::new` (`LEASE_TTL`, 30 s, in production), so tests can hand over in seconds.
+- The gate passed: fused R@10 0.608 → 0.654, MRR 0.392 → 0.421 (`search/eval/v4.35.0-da683984-qdrant.md`). The tuned weights are RRF k 30, lexical 0.02, structural 0.02, dense 1, name 3, PageRank 0.008.
