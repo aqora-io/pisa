@@ -496,6 +496,14 @@ mod tests {
         writer.put(k.clone(), b"writer".to_vec()).await.unwrap();
         locker.commit().await.unwrap();
         assert!(matches!(writer.commit().await, Err(KvError::Conflict)));
+
+        // Snapshot clean-ups that only lock a module's record rely on this.
+        let mut first = kv.begin().await.unwrap();
+        let mut second = kv.begin().await.unwrap();
+        first.lock(k.clone()).await.unwrap();
+        second.lock(k.clone()).await.unwrap();
+        first.commit().await.unwrap();
+        assert!(matches!(second.commit().await, Err(KvError::Conflict)));
     }
 
     #[test]

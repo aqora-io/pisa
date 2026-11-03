@@ -4,6 +4,7 @@
 //! GIL released, so Python threads can issue requests concurrently. Results
 //! become plain dicts and lists.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::OnceLock;
 
@@ -207,31 +208,33 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None))]
     fn create_snapshot<'py>(
         &self,
         py: Python<'py>,
         code: String,
         verify: Option<bool>,
+        labels: Option<BTreeMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::SnapshotOptions {
+            verify,
+            labels: labels.unwrap_or_default(),
+        };
         call(py, async move {
-            match verify {
-                Some(verify) => self.inner.create_snapshot_with_verify(&code, verify).await,
-                None => self.inner.create_snapshot(&code).await,
-            }
+            self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    fn verify_snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.verify_snapshot(&name).await })
+    fn verify_snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.verify_snapshot(&entry).await })
     }
 
-    fn snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.snapshot(&name).await })
+    fn snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.snapshot(&entry).await })
     }
 
-    fn delete_snapshot<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.delete_snapshot(&name).await })
+    fn delete_snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.delete_snapshot(&entry).await })
     }
 }
 

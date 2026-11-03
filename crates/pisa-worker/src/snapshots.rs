@@ -1,15 +1,17 @@
 //! Environment snapshots: code compiled to a Lean module that later code
 //! imports, kept in object storage with its check result so that any worker
-//! of the version can import it.
+//! of the version can import it. Entries keep modules alive: the same code
+//! is one module, however many entries point at it, and a module goes once
+//! no entry or kept module needs it. The records are in the [`Catalog`].
 //!
-//! Layout, per pool version:
-//! - `snapshots/<version>/<id>.<ext>.zst`: the module's files, zstd-compressed:
-//!   its `.olean`, and for module-system code also `.olean.server`,
-//!   `.olean.private`, `.ir` and `.ir.sig`
-//! - `snapshots/<version>/<id>.json`: [`SnapshotMeta`]. Written last, so a
-//!   snapshot exists once its metadata does.
-//! - `snapshots/<version>/<id>.children/<child id>`: an empty marker for each
-//!   snapshot that imports it, so deletes can cascade
+//! Object storage, per pool version:
+//! - `snapshots/<version>/<id>.<build>.<ext>.zst`: the module's files,
+//!   zstd-compressed: its `.olean`, and for module-system code also
+//!   `.olean.server`, `.olean.private`, `.ir` and `.ir.sig`. `build` is random
+//!   per build and named in the module's record. The files are uploaded
+//!   before the record is written, so a module exists once its record does,
+//!   and a delete removes only the files of the record it removed: the same
+//!   code built again meanwhile has files of its own.
 //!
 //! Workers keep the modules they import in a local cache on every Lean
 //! process's search path. A cached snapshot is imported only while a lookup
@@ -18,15 +20,14 @@
 //! everywhere within that time, without a store request on every check.
 //!
 //! The kernel re-check is separate from building: it runs at creation for code
-//! that uses macros or asks for it, and later on request. A snapshot's metadata
+//! that uses macros or asks for it, and later on request. A module's record
 //! is rewritten once it passes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use futures::StreamExt;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
@@ -34,63 +35,32 @@ use pisa_protocol::api::{
     SnapshotResponse, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
+use pisa_protocol::labels::{check_labels, entry_id_error, is_entry_id};
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::catalog::{
+    Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, unknown_module,
+};
 use crate::check::{header_error, policy_error, run, unexpected};
+use crate::kv::Kv;
 use crate::policy::{module_report, parse_report, uses_macros};
 use crate::pool::{Lease, Pool};
 
 /// Time allowed for the report on a snapshot's declarations.
 const REPORT_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotMeta {
-    /// Ids of the snapshots it imports.
-    pub imports: Vec<String>,
-    /// Every module it needs, its own last.
-    pub modules: Vec<Module>,
-    /// See [`SnapshotResponse::header`].
-    pub header: String,
-    pub code: String,
-    pub dirty: bool,
-    /// See [`SnapshotResponse::verified`].
-    #[serde(default)]
-    pub verified: bool,
-    /// Its code or anything it imports uses macros, which can expand in code
-    /// on top of it.
-    #[serde(default)]
-    pub macros: bool,
-    pub result: CheckResult,
-    pub created: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Module {
-    pub id: String,
-    /// The `.olean` last: it is written last, because Lean imports a
-    /// module-system `.olean` without its other files as an empty module.
-    pub files: Vec<ModuleFile>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModuleFile {
-    /// What follows `s<id>.` in the file's name, e.g. `olean.server`.
-    pub ext: String,
-    pub sha256: String,
-}
-
 pub struct Snapshots {
     store: Arc<dyn ObjectStore>,
+    catalog: Catalog,
     version: String,
     /// Holds `PisaSnap/s<id>.<ext>`.
     root: PathBuf,
     confirm_every: Duration,
-    /// The files of each module in the local cache.
-    cached: Mutex<HashMap<String, Vec<ModuleFile>>>,
+    /// The build of each module in the local cache.
+    cached: Mutex<HashMap<String, Module>>,
     /// When the store last confirmed that each snapshot exists.
     confirmed: Mutex<HashMap<String, Instant>>,
     /// One task at a time loads or builds a given snapshot.
@@ -101,11 +71,13 @@ fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Internal, e.to_string())
 }
 
-fn not_found(id: &str) -> Error {
-    Error::new(
-        ErrorKind::NotFound,
-        format!("unknown snapshot {}", snapshot::module(id)),
-    )
+/// Checks that a path segment is an entry id.
+fn parse_entry(entry: &str) -> Result<&str, Error> {
+    if is_entry_id(entry) {
+        Ok(entry)
+    } else {
+        Err(Error::new(ErrorKind::BadRequest, entry_id_error(entry)))
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -157,29 +129,24 @@ enum Recheck {
 }
 
 /// Every module a snapshot needs: its imports' modules, then its own.
-fn modules(parents: &[SnapshotMeta], id: &str, files: Vec<ModuleFile>) -> Vec<Module> {
+fn modules(parents: &[ModuleMeta], own: Module) -> Vec<Module> {
     let mut modules: Vec<Module> = Vec::new();
     for m in parents.iter().flat_map(|p| &p.modules) {
         if !modules.contains(m) {
             modules.push(m.clone());
         }
     }
-    modules.push(Module {
-        id: id.to_string(),
-        files,
-    });
+    modules.push(own);
     modules
 }
 
 /// The error for a create that asked to verify an import or existing snapshot
 /// and couldn't.
-fn failure_error(report: &SnapshotVerified) -> Option<Error> {
-    report.failure.as_ref().map(|f| {
-        Error::new(
-            ErrorKind::Lean,
-            format!("{} failed verification: {}", f.snapshot, f.reason),
-        )
-    })
+fn failure_error(f: &SnapshotFailure) -> Error {
+    Error::new(
+        ErrorKind::Lean,
+        format!("{} failed verification: {}", f.snapshot, f.reason),
+    )
 }
 
 /// Re-checks the module through the kernel in a clean process, and returns its
@@ -221,12 +188,14 @@ impl Snapshots {
     /// cached snapshot for `confirm_every`.
     pub fn new(
         store: Arc<dyn ObjectStore>,
+        kv: Kv,
         version: String,
         root: PathBuf,
         confirm_every: Duration,
     ) -> Self {
         Snapshots {
             store,
+            catalog: Catalog::new(kv, version.clone()),
             version,
             root,
             confirm_every,
@@ -236,8 +205,12 @@ impl Snapshots {
         }
     }
 
-    fn object(&self, name: &str) -> ObjectPath {
-        ObjectPath::from(format!("snapshots/{}/{name}", self.version))
+    /// Where the store keeps file `ext` of a module build.
+    fn blob(&self, module: &Module, ext: &str) -> ObjectPath {
+        ObjectPath::from(format!(
+            "snapshots/{}/{}.{}.{ext}.zst",
+            self.version, module.id, module.build
+        ))
     }
 
     fn dir(&self) -> PathBuf {
@@ -255,15 +228,6 @@ impl Snapshots {
             .entry(id.to_string())
             .or_default()
             .clone()
-    }
-
-    async fn meta(&self, id: &str) -> Result<SnapshotMeta, Error> {
-        let bytes = match self.store.get(&self.object(&format!("{id}.json"))).await {
-            Ok(r) => r.bytes().await.map_err(internal)?,
-            Err(object_store::Error::NotFound { .. }) => return Err(not_found(id)),
-            Err(e) => return Err(internal(e)),
-        };
-        serde_json::from_slice(&bytes).map_err(internal)
     }
 
     /// Makes every snapshot `header` imports importable by this worker's Lean
@@ -288,7 +252,7 @@ impl Snapshots {
         if fresh {
             return Ok(());
         }
-        let meta = match self.meta(id).await {
+        let meta = match self.catalog.module(id).await {
             Ok(meta) => meta,
             Err(e) => {
                 if e.kind == ErrorKind::NotFound {
@@ -307,17 +271,20 @@ impl Snapshots {
         Ok(())
     }
 
-    /// Downloads a module into the local cache unless it is already there.
+    /// Downloads a module build into the local cache unless it is already
+    /// there.
     async fn fetch(&self, module: &Module) -> Result<(), Error> {
         let cached = self.cached.lock().unwrap().get(&module.id).cloned();
-        if cached.as_ref() == Some(&module.files) {
+        if cached.as_ref() == Some(module) {
             return Ok(());
         }
         for file in &module.files {
-            let path = self.object(&format!("{}.{}.zst", module.id, file.ext));
+            let path = self.blob(module, &file.ext);
             let compressed = match self.store.get(&path).await {
                 Ok(r) => r.bytes().await.map_err(internal)?,
-                Err(object_store::Error::NotFound { .. }) => return Err(not_found(&module.id)),
+                Err(object_store::Error::NotFound { .. }) => {
+                    return Err(unknown_module(&module.id));
+                }
                 Err(e) => return Err(internal(e)),
             };
             let bytes = zstd::decode_all(&compressed[..]).map_err(internal)?;
@@ -340,7 +307,7 @@ impl Snapshots {
         self.cached
             .lock()
             .unwrap()
-            .insert(module.id.clone(), module.files.clone());
+            .insert(module.id.clone(), module.clone());
         Ok(())
     }
 
@@ -351,28 +318,67 @@ impl Snapshots {
         self.confirmed.lock().unwrap().remove(id);
     }
 
-    fn response(&self, id: &str, meta: SnapshotMeta) -> SnapshotResponse {
+    /// Forgets a module that a delete removed, unless the same code has been
+    /// stored again since, maybe by a build on this worker.
+    async fn forget(&self, id: &str) {
+        let lock = self.lock(id);
+        let _held = lock.lock().await;
+        if self.catalog.module(id).await.is_err() {
+            self.discard(id);
+        }
+    }
+
+    /// Deletes a module build's files from the store, logging any it can't.
+    async fn delete_blobs(&self, module: &Module) {
+        for file in &module.files {
+            let path = self.blob(module, &file.ext);
+            match self.store.delete(&path).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => tracing::warn!(%path, "deleting a snapshot file failed: {e}"),
+            }
+        }
+    }
+
+    /// A kept module, with the entry that this create added to it, if any.
+    fn response(
+        &self,
+        id: &str,
+        meta: ModuleMeta,
+        entry: Option<(String, EntryMeta)>,
+    ) -> SnapshotResponse {
+        let (entry, labels) =
+            entry.map_or((None, Default::default()), |(e, m)| (Some(e), m.labels));
         SnapshotResponse {
+            entry,
             snapshot: Some(snapshot::module(id)),
             header: Some(meta.header),
             version: self.version.clone(),
             dirty: meta.dirty,
             verified: meta.verified,
+            labels,
             result: meta.result,
         }
     }
 
     /// Checks `job.code` by compiling it to a module and keeps the module
-    /// unless Lean reported errors. Failures are reported in `result`.
+    /// unless Lean reported errors, with a new entry on it. Code that is
+    /// already kept gets the new entry without being built again. Failures
+    /// are reported in `result`.
     pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> SnapshotResponse {
         let mut response = SnapshotResponse {
+            entry: None,
             snapshot: None,
             header: None,
             version: self.version.clone(),
             dirty: false,
             verified: false,
+            labels: Default::default(),
             result: CheckResult::default(),
         };
+        if let Err(e) = check_labels(&job.labels) {
+            response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
+            return response;
+        }
         let split = split_header(&job.code);
         if let Err(e) = snapshot::imports(&split.header) {
             response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
@@ -386,55 +392,124 @@ impl Snapshots {
             response.result.reasons = rejected;
             return response;
         }
+        // A kept module removed before its new entry was added is built
+        // again, once.
+        for _ in 0..2 {
+            if let Some(done) = self.create_once(pool, &job, &split, response.clone()).await {
+                return done;
+            }
+        }
+        response.result.error = Some(internal(
+            "the snapshot was deleted twice while it was being created",
+        ));
+        response
+    }
+
+    /// [`create`](Self::create) after validation. `None` if the module was
+    /// kept but removed before the entry could be added, or during the
+    /// re-check the request asked for.
+    async fn create_once(
+        &self,
+        pool: &Arc<Pool>,
+        job: &SnapshotCreateJob,
+        split: &Split,
+        mut response: SnapshotResponse,
+    ) -> Option<SnapshotResponse> {
         let id = snapshot::id(&job.code);
-        let wants_verified = job.verify == Some(true);
         let lock = self.lock(&id);
         let building = lock.lock().await;
-        match self.meta(&id).await {
-            Ok(meta) if wants_verified && !meta.verified => {
+        match self.catalog.module(&id).await {
+            Ok(meta) => {
                 drop(building);
-                return self.verify_existing(pool, &id, response).await;
+                return self.add_to_kept(pool, &id, meta, job, response).await;
             }
-            Ok(meta) => return self.response(&id, meta),
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => {
                 response.result.error = Some(e);
-                return response;
+                return Some(response);
             }
         }
-        if wants_verified {
+        if job.verify == Some(true) {
             for import in snapshot::imports(&split.header).unwrap_or_default() {
-                match self.verify_chain(pool, &import).await {
-                    Ok(report) => {
-                        if let Some(error) = failure_error(&report) {
-                            response.result.error = Some(error);
-                            return response;
-                        }
-                    }
-                    Err(e) => {
-                        response.result.error = Some(e);
-                        return response;
-                    }
-                }
+                let error = match self.verify_chain(pool, &import).await {
+                    Ok((_, Some(failure))) => failure_error(&failure),
+                    Ok((_, None)) => continue,
+                    Err(e) => e,
+                };
+                response.result.error = Some(error);
+                return Some(response);
             }
         }
         let header = snapshot::next_header(&split.header, &id);
         let mut slot = pool.acquire(&header_key(&header), None).await;
-        let built = self.build(&mut slot, &job, &split, &id, &header).await;
+        let built = self.build(&mut slot, job, split, &id, &header).await;
         slot.finish_job();
-        match built {
-            Ok(Some(meta)) => self.response(&id, meta),
+        Some(match built {
+            Ok(Some((meta, entry))) => self.response(&id, meta, Some(entry)),
             Ok(None) => response,
             Err(outcome) => {
                 response.result = (*outcome).into();
                 response
             }
-        }
+        })
     }
 
-    /// Compiles, judges and stores the snapshot. Returns its metadata, `None`
-    /// if nothing could be checked (the cause is in the result), or the
-    /// outcome of a check that failed.
+    /// A create for code that is already kept: it verifies the module's chain
+    /// first if the request asks for that and the module isn't verified, then
+    /// adds the entry. Its result is what is stored. If the re-check fails,
+    /// it has the error and no entry is added, as for new code that fails it.
+    /// `None` if the module is gone by the time it is needed.
+    async fn add_to_kept(
+        &self,
+        pool: &Arc<Pool>,
+        id: &str,
+        meta: ModuleMeta,
+        job: &SnapshotCreateJob,
+        mut response: SnapshotResponse,
+    ) -> Option<SnapshotResponse> {
+        let meta = if job.verify == Some(true) && !meta.verified {
+            let verified = async {
+                let (_, failure) = self.verify_chain(pool, id).await?;
+                Ok::<_, Error>((self.catalog.module(id).await?, failure))
+            };
+            match verified.await {
+                Ok((meta, None)) => meta,
+                Ok((meta, Some(failure))) => {
+                    let mut response = self.response(id, meta, None);
+                    response.result.ok = false;
+                    response.result.error = Some(failure_error(&failure));
+                    return Some(response);
+                }
+                Err(e) => {
+                    let gone = e.kind == ErrorKind::NotFound
+                        && matches!(self.catalog.module(id).await, Err(e) if e.kind == ErrorKind::NotFound);
+                    if gone {
+                        return None;
+                    }
+                    response.result.error = Some(e);
+                    return Some(response);
+                }
+            }
+        } else {
+            meta
+        };
+        let entry = NewEntry {
+            labels: job.labels.clone(),
+        };
+        let added = match self.catalog.add_entry(id, entry).await {
+            Ok(Some(added)) => added,
+            Ok(None) => return None,
+            Err(e) => {
+                response.result.error = Some(e);
+                return Some(response);
+            }
+        };
+        Some(self.response(id, meta, Some(added)))
+    }
+
+    /// Compiles, judges and stores the snapshot with a new entry. Returns its
+    /// record and the entry, `None` if nothing could be checked (the cause is
+    /// in the result), or the outcome of a check that failed.
     async fn build(
         &self,
         slot: &mut Lease,
@@ -442,7 +517,7 @@ impl Snapshots {
         split: &Split,
         id: &str,
         header: &str,
-    ) -> Result<Option<SnapshotMeta>, Box<CheckOutcome>> {
+    ) -> Result<Option<(ModuleMeta, (String, EntryMeta))>, Box<CheckOutcome>> {
         let mut outcome = CheckOutcome {
             time: 0.0,
             error: None,
@@ -526,10 +601,11 @@ impl Snapshots {
         }
 
         // Judge it in the slot that will serve code on top of it.
-        let installed = self.install(id, &dir).await;
+        let build = uuid::Uuid::new_v4().simple().to_string();
+        let installed = self.install(id, build, &dir).await;
         remove_module(&dir, id);
-        let files = match installed {
-            Ok(files) => files,
+        let (own, contents) = match installed {
+            Ok(installed) => installed,
             Err(e) => {
                 self.discard(id);
                 return fail(outcome, e);
@@ -572,10 +648,9 @@ impl Snapshots {
         let dirty = !verification.ok;
         outcome.verification = Some(verification);
 
-        let own = files.iter().map(|(f, _)| f.clone()).collect();
-        let meta = SnapshotMeta {
+        let meta = ModuleMeta {
             imports: snapshot::imports(&split.header).unwrap_or_default(),
-            modules: modules(&parents, id, own),
+            modules: modules(&parents, own.clone()),
             header: header.to_string(),
             code: job.code.clone(),
             dirty,
@@ -584,32 +659,53 @@ impl Snapshots {
             result: outcome.clone().into(),
             created: now(),
         };
-        if let Err(e) = self.commit(id, &files, &meta).await {
-            self.unbuild(slot, id);
-            return fail(outcome, e);
+        let entry = NewEntry {
+            labels: job.labels.clone(),
+        };
+        match self.commit(&own, &contents, &meta, entry).await {
+            Ok(stored) => Ok(Some(stored)),
+            Err(e) => {
+                self.unbuild(slot, id);
+                fail(outcome, e)
+            }
         }
-        Ok(Some(meta))
     }
 
     /// Moves a freshly built module's files from `dir` into the local cache,
-    /// not yet confirmed, and returns them with their contents.
-    async fn install(&self, id: &str, dir: &Path) -> Result<Vec<(ModuleFile, Vec<u8>)>, Error> {
+    /// not yet confirmed, and returns the build with the files' contents.
+    async fn install(
+        &self,
+        id: &str,
+        build: String,
+        dir: &Path,
+    ) -> Result<(Module, Vec<Vec<u8>>), Error> {
         let outputs = outputs(dir, id).map_err(internal)?;
         if !outputs.iter().any(|(ext, _)| ext == "olean") {
             return Err(internal("Lean wrote no .olean"));
         }
         let mut files = Vec::new();
+        let mut contents = Vec::new();
         for (ext, path) in outputs {
             let bytes = tokio::fs::read(&path).await.map_err(internal)?;
             tokio::fs::rename(&path, self.file(id, &ext))
                 .await
                 .map_err(internal)?;
-            let sha256 = sha256(&bytes);
-            files.push((ModuleFile { ext, sha256 }, bytes));
+            files.push(ModuleFile {
+                ext,
+                sha256: sha256(&bytes),
+            });
+            contents.push(bytes);
         }
-        let cached = files.iter().map(|(f, _)| f.clone()).collect();
-        self.cached.lock().unwrap().insert(id.to_string(), cached);
-        Ok(files)
+        let module = Module {
+            id: id.to_string(),
+            build,
+            files,
+        };
+        self.cached
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), module.clone());
+        Ok((module, contents))
     }
 
     /// Undoes [`install`](Self::install) after a failure, including the slot
@@ -619,58 +715,43 @@ impl Snapshots {
         self.discard(id);
     }
 
-    /// The metadata of the snapshots `header` imports.
-    async fn parents(&self, header: &str) -> Result<Vec<SnapshotMeta>, Error> {
+    /// The records of the modules `header` imports.
+    async fn parents(&self, header: &str) -> Result<Vec<ModuleMeta>, Error> {
         let mut parents = Vec::new();
         for import in snapshot::imports(header).map_err(internal)? {
-            parents.push(self.meta(&import).await?);
+            parents.push(self.catalog.module(&import).await?);
         }
         Ok(parents)
     }
 
-    /// Re-checks a snapshot and everything it imports through the kernel, and
-    /// records each module that passes.
-    pub async fn verify(&self, pool: &Arc<Pool>, name: &str) -> Result<SnapshotVerified, Error> {
-        let id = self.parse(name)?;
-        self.verify_chain(pool, &id).await
-    }
-
-    /// A create asking to verify a snapshot that is already kept: its result
-    /// is what is stored, with the error if the re-check failed.
-    async fn verify_existing(
-        &self,
-        pool: &Arc<Pool>,
-        id: &str,
-        mut response: SnapshotResponse,
-    ) -> SnapshotResponse {
-        let report = match self.verify_chain(pool, id).await {
-            Ok(report) => report,
-            Err(e) => {
-                response.result.error = Some(e);
-                return response;
-            }
-        };
-        let meta = match self.meta(id).await {
-            Ok(meta) => meta,
-            Err(e) => {
-                response.result.error = Some(e);
-                return response;
-            }
-        };
-        let mut response = self.response(id, meta);
-        if let Some(error) = failure_error(&report) {
-            response.result.ok = false;
-            response.result.error = Some(error);
-        }
-        response
+    /// Re-checks an entry's module and everything it imports through the
+    /// kernel, and records each module that passes.
+    pub async fn verify(&self, pool: &Arc<Pool>, entry: &str) -> Result<SnapshotVerified, Error> {
+        let entry = parse_entry(entry)?;
+        let id = self.catalog.entry(entry).await?.module;
+        let (checked, failure) = self.verify_chain(pool, &id).await?;
+        let meta = self.catalog.module(&id).await?;
+        Ok(SnapshotVerified {
+            entry: entry.to_string(),
+            snapshot: snapshot::module(&id),
+            verified: meta.verified,
+            dirty: meta.dirty,
+            checked,
+            failure,
+        })
     }
 
     /// Walks `meta.modules`, which lists imports before what imports them, so
     /// a module is only marked verified once its imports are. Stops at the
-    /// first module that fails.
-    async fn verify_chain(&self, pool: &Arc<Pool>, id: &str) -> Result<SnapshotVerified, Error> {
+    /// first module that fails. Returns the modules that passed, in order,
+    /// and the one that failed.
+    async fn verify_chain(
+        &self,
+        pool: &Arc<Pool>,
+        id: &str,
+    ) -> Result<(Vec<String>, Option<SnapshotFailure>), Error> {
         self.ensure_one(id).await?;
-        let modules = self.meta(id).await?.modules;
+        let modules = self.catalog.module(id).await?.modules;
         let mut checked = Vec::new();
         let mut failure = None;
         for module in &modules {
@@ -686,14 +767,7 @@ impl Snapshots {
                 }
             }
         }
-        let meta = self.meta(id).await?;
-        Ok(SnapshotVerified {
-            snapshot: snapshot::module(id),
-            verified: meta.verified,
-            dirty: meta.dirty,
-            checked,
-            failure,
-        })
+        Ok((checked, failure))
     }
 
     /// Re-checks one module, whose imports must be verified and in the local
@@ -703,7 +777,7 @@ impl Snapshots {
     /// This doesn't take the snapshot's lock, which every check on it needs:
     /// they shouldn't wait for the kernel, and two re-checks of a module agree.
     async fn verify_module(&self, pool: &Arc<Pool>, id: &str) -> Result<Recheck, Error> {
-        if self.meta(id).await?.verified {
+        if self.catalog.module(id).await?.verified {
             return Ok(Recheck::AlreadyVerified);
         }
         // No header to prefer: this takes a slot with nothing warm if it can.
@@ -715,118 +789,239 @@ impl Snapshots {
             Err(reason) => return Ok(Recheck::Failed(reason)),
         };
         drop(slot);
-        // Read again: a snapshot deleted during the re-check stays deleted.
-        let mut meta = self.meta(id).await?;
-        meta.verified = true;
-        meta.dirty = !verification.ok;
-        meta.result.ok = verification.ok;
-        meta.result.reasons = verification.reasons;
-        meta.result.declarations = verification.declarations;
-        let bytes = serde_json::to_vec(&meta).map_err(internal)?;
-        self.store
-            .put(&self.object(&format!("{id}.json")), PutPayload::from(bytes))
-            .await
-            .map_err(internal)?;
+        // A module removed during the re-check stays removed.
+        self.catalog
+            .update_module(id, |meta| {
+                meta.verified = true;
+                meta.dirty = !verification.ok;
+                meta.result.ok = verification.ok;
+                meta.result.reasons = verification.reasons.clone();
+                meta.result.declarations = verification.declarations.clone();
+            })
+            .await?;
         Ok(Recheck::Passed)
     }
 
+    /// Uploads a freshly built module's files (`own`, whose files have
+    /// `contents`), then stores its record with the new entry. Returns the
+    /// stored record and the entry. If another worker stored the module
+    /// first, its record and build are kept, and this build's files go.
     async fn commit(
         &self,
-        id: &str,
-        files: &[(ModuleFile, Vec<u8>)],
-        meta: &SnapshotMeta,
-    ) -> Result<(), Error> {
-        let put = |name: String, bytes: Vec<u8>| async move {
-            self.store
-                .put(&self.object(&name), PutPayload::from(bytes))
-                .await
-                .map_err(internal)
-        };
-        for (file, bytes) in files {
+        own: &Module,
+        contents: &[Vec<u8>],
+        meta: &ModuleMeta,
+        entry: NewEntry,
+    ) -> Result<(ModuleMeta, (String, EntryMeta)), Error> {
+        for (file, bytes) in own.files.iter().zip(contents) {
             let compressed = zstd::encode_all(&bytes[..], 3).map_err(internal)?;
-            put(format!("{id}.{}.zst", file.ext), compressed).await?;
+            self.store
+                .put(&self.blob(own, &file.ext), PutPayload::from(compressed))
+                .await
+                .map_err(internal)?;
         }
-        put(
-            format!("{id}.json"),
-            serde_json::to_vec(meta).map_err(internal)?,
-        )
-        .await?;
-        for parent in &meta.imports {
-            put(format!("{parent}.children/{id}"), Vec::new()).await?;
+        let (entry, entry_meta, stored) = self.catalog.commit(&own.id, meta, entry).await?;
+        if stored.modules.last() != Some(own) {
+            self.delete_blobs(own).await;
+            if let Some(kept) = stored.modules.last()
+                && let Err(e) = self.fetch(kept).await
+            {
+                // Not confirmed, so the next import fetches it.
+                tracing::warn!(module = %kept.id, "fetching the stored build failed: {e}");
+                self.discard(&own.id);
+                return Ok((stored, (entry, entry_meta)));
+            }
         }
         self.confirmed
             .lock()
             .unwrap()
-            .insert(id.to_string(), Instant::now());
-        Ok(())
+            .insert(own.id.clone(), Instant::now());
+        Ok((stored, (entry, entry_meta)))
     }
 
-    fn parse(&self, name: &str) -> Result<String, Error> {
-        match snapshot::parse_module(name) {
-            Ok(Some(id)) => Ok(id),
-            Ok(None) | Err(_) => Err(Error::new(
-                ErrorKind::BadRequest,
-                format!("{name} is not a snapshot module"),
-            )),
-        }
-    }
-
-    pub async fn get(&self, name: &str) -> Result<SnapshotInfo, Error> {
-        let id = self.parse(name)?;
-        let meta = self.meta(&id).await?;
+    pub async fn get(&self, entry: &str) -> Result<SnapshotInfo, Error> {
+        let entry = parse_entry(entry)?;
+        let entry_meta = self.catalog.entry(entry).await?;
+        let meta = self.catalog.module(&entry_meta.module).await?;
         Ok(SnapshotInfo {
-            snapshot: snapshot::module(&id),
+            entry: entry.to_string(),
+            snapshot: snapshot::module(&entry_meta.module),
             imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
             header: meta.header,
             code: meta.code,
+            labels: entry_meta.labels,
             dirty: meta.dirty,
             verified: meta.verified,
             result: meta.result,
-            created: meta.created,
+            created: entry_meta.created_micros / 1_000_000,
         })
     }
 
-    /// Deletes a snapshot and every snapshot that imports it.
-    pub async fn delete(&self, name: &str) -> Result<Deleted, Error> {
-        let root = self.parse(name)?;
-        self.meta(&root).await?;
-        let mut deleted = Vec::new();
-        let mut queue = vec![root];
-        while let Some(id) = queue.pop() {
-            let markers = self.object(&format!("{id}.children"));
-            let mut children = self.store.list(Some(&markers));
-            while let Some(child) = children.next().await {
-                let child = child.map_err(internal)?;
-                if let Some(child_id) = child.location.filename() {
-                    queue.push(child_id.to_string());
+    /// Deletes an entry, then each module that nothing needs any more: the
+    /// entry's own, then up the chain of imports. Once the entry is gone,
+    /// the rest is best effort: what fails is logged, and a module whose
+    /// record went is listed even if its files couldn't be deleted.
+    pub async fn delete(&self, entry: &str) -> Result<Deleted, Error> {
+        let entry = parse_entry(entry)?;
+        let (entry_meta, cleaned) = self.catalog.remove_entry(entry).await?;
+        let mut queue = VecDeque::from_iter(cleaned.map(|m| (entry_meta.module, m)));
+        let mut removed = Vec::new();
+        while let Some((id, meta)) = queue.pop_front() {
+            // The record is gone, so the files of its build can go.
+            if let Some(own) = meta.modules.last() {
+                self.delete_blobs(own).await;
+            }
+            self.forget(&id).await;
+            removed.push(snapshot::module(&id));
+            for parent in meta.imports {
+                match self.catalog.cleanup(&parent).await {
+                    Ok(Some(parent_meta)) => queue.push_back((parent, parent_meta)),
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::warn!(module = %parent, "cleaning up a snapshot failed: {e}")
+                    }
                 }
-                self.delete_object(&child.location).await?;
             }
-            let Ok(meta) = self.meta(&id).await else {
-                continue;
-            };
-            // Metadata first: the snapshot stops existing before its parts go.
-            self.delete_object(&self.object(&format!("{id}.json")))
-                .await?;
-            let own = meta.modules.iter().filter(|m| m.id == id);
-            for file in own.flat_map(|m| &m.files) {
-                self.delete_object(&self.object(&format!("{id}.{}.zst", file.ext)))
-                    .await?;
-            }
-            for parent in &meta.imports {
-                self.delete_object(&self.object(&format!("{parent}.children/{id}")))
-                    .await?;
-            }
-            self.discard(&id);
-            deleted.push(snapshot::module(&id));
         }
-        Ok(Deleted { deleted })
+        Ok(Deleted {
+            entry: entry.to_string(),
+            removed,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use object_store::memory::InMemory;
+
+    /// A worker's snapshots over `kv`, with its local cache in `dir`.
+    fn snapshots(kv: Kv, dir: &Path) -> Arc<Snapshots> {
+        std::fs::create_dir_all(dir.join(snapshot::ROOT)).unwrap();
+        let store = Arc::new(InMemory::new());
+        let s = Snapshots::new(store, kv, "v".into(), dir.into(), Duration::from_secs(60));
+        Arc::new(s)
     }
 
-    async fn delete_object(&self, path: &ObjectPath) -> Result<(), Error> {
-        match self.store.delete(path).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(e) => Err(internal(e)),
+    /// A new build of module `id`: one `.olean` that holds `content`.
+    fn built(id: &str, content: &[u8]) -> ModuleMeta {
+        let own = Module {
+            id: id.into(),
+            build: uuid::Uuid::new_v4().simple().to_string(),
+            files: vec![ModuleFile {
+                ext: "olean".into(),
+                sha256: sha256(content),
+            }],
+        };
+        ModuleMeta {
+            imports: Vec::new(),
+            modules: vec![own],
+            header: String::new(),
+            code: String::new(),
+            dirty: false,
+            verified: false,
+            macros: false,
+            result: CheckResult::default(),
+            created: 0,
         }
+    }
+
+    fn no_labels() -> NewEntry {
+        NewEntry {
+            labels: Default::default(),
+        }
+    }
+
+    async fn upload(s: &Snapshots, meta: &ModuleMeta, content: &[u8]) {
+        let compressed = zstd::encode_all(content, 3).unwrap();
+        let path = s.blob(&meta.modules[0], "olean");
+        s.store.put(&path, compressed.into()).await.unwrap();
+    }
+
+    async fn has_files(s: &Snapshots, meta: &ModuleMeta) -> bool {
+        s.store
+            .get(&s.blob(&meta.modules[0], "olean"))
+            .await
+            .is_ok()
+    }
+
+    /// The race a delete has to survive: while it removes a module, a create
+    /// of the same code on this worker builds the module again, uploads it and
+    /// stores it. The delete removes only the files of the build it removed,
+    /// and leaves the new build's local files alone.
+    #[tokio::test]
+    async fn a_delete_leaves_a_new_build_of_its_module_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let catalog = Catalog::new(kv, "v".into());
+        let id = snapshot::id("code");
+        let old = built(&id, b"old");
+        upload(&s, &old, b"old").await;
+        let (entry, _, _) = catalog.commit(&id, &old, no_labels()).await.unwrap();
+
+        // The new build is uploaded and installed here, but not stored yet.
+        let new = built(&id, b"new");
+        upload(&s, &new, b"new").await;
+        std::fs::write(s.file(&id, "olean"), b"new").unwrap();
+        s.cached
+            .lock()
+            .unwrap()
+            .insert(id.clone(), new.modules[0].clone());
+
+        // The build holds the module's lock until it has stored its record,
+        // so the delete removes the old record and files, then waits there.
+        let lock = s.lock(&id);
+        let building = lock.lock().await;
+        let deleting = tokio::spawn({
+            let s = s.clone();
+            async move { s.delete(&entry).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while has_files(&s, &old).await {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        catalog.commit(&id, &new, no_labels()).await.unwrap();
+        drop(building);
+
+        let deleted = deleting.await.unwrap().unwrap();
+        assert_eq!(deleted.removed, [snapshot::module(&id)]);
+        assert!(has_files(&s, &new).await, "the new build's files stay");
+        assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"new");
+        assert_eq!(s.cached.lock().unwrap().get(&id), Some(&new.modules[0]));
+        assert_eq!(s.catalog.module(&id).await.unwrap().modules, new.modules);
+    }
+
+    /// Two workers build the same code at once and the other one stores it
+    /// first: this one adds its entry to their record, deletes the files it
+    /// uploaded and installs their build instead.
+    #[tokio::test]
+    async fn a_commit_that_finds_the_module_stored_keeps_that_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let id = snapshot::id("code");
+        let theirs = built(&id, b"theirs");
+        upload(&s, &theirs, b"theirs").await;
+        let catalog = Catalog::new(kv, "v".into());
+        catalog.commit(&id, &theirs, no_labels()).await.unwrap();
+
+        // As `install` leaves this worker's build.
+        let ours = built(&id, b"ours");
+        std::fs::write(s.file(&id, "olean"), b"ours").unwrap();
+        let own = ours.modules[0].clone();
+        s.cached.lock().unwrap().insert(id.clone(), own.clone());
+
+        let contents = [b"ours".to_vec()];
+        let (stored, (entry, _)) = s.commit(&own, &contents, &ours, no_labels()).await.unwrap();
+        assert_eq!(stored.modules, theirs.modules);
+        assert_eq!(catalog.entry(&entry).await.unwrap().module, id);
+        assert!(!has_files(&s, &ours).await, "this build's files go");
+        assert!(has_files(&s, &theirs).await);
+        assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"theirs");
+        assert_eq!(s.cached.lock().unwrap().get(&id), Some(&theirs.modules[0]));
     }
 }

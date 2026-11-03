@@ -67,18 +67,22 @@ class Step(TypedDict):
     messages: list[Message]
 
 class Snapshot(TypedDict):
+    entry: NotRequired[str]
     snapshot: NotRequired[str]
     header: NotRequired[str]
     version: str
     dirty: bool
     verified: bool
+    labels: NotRequired[dict[str, str]]
     result: CheckResult
 
 class SnapshotInfo(TypedDict):
+    entry: str
     snapshot: str
     imports: list[str]
     header: str
     code: str
+    labels: NotRequired[dict[str, str]]
     dirty: bool
     verified: bool
     result: CheckResult
@@ -89,6 +93,7 @@ class SnapshotFailure(TypedDict):
     reason: str
 
 class SnapshotVerified(TypedDict):
+    entry: str
     snapshot: str
     verified: bool
     dirty: bool
@@ -121,27 +126,31 @@ class Client:
     def check_session(self, session: str, code: str) -> CheckResult:
         """Re-check a completed proof from scratch; `ok` also requires that it
         proves the session's original statements, with its imports."""
-    def create_snapshot(self, code: str, *, verify: bool | None = None) -> Snapshot:
+    def create_snapshot(
+        self, code: str, *, verify: bool | None = None, labels: dict[str, str] | None = None
+    ) -> Snapshot:
         """Check code like `check` and, unless Lean reports errors, keep it as
-        a module (`snapshot`) that later code can import. Start that code with
-        the returned `header` to reuse the Lean process that has it loaded.
-        Code with `sorry` is kept but `dirty`.
+        a module (`snapshot`) that later code can import, with a new `entry`
+        carrying `labels` that keeps the module until the entry is deleted.
+        Start that code with the returned `header` to reuse the Lean process
+        that has it loaded. Code with `sorry` is kept but `dirty`. Code that is
+        already kept gets a new entry on its module without being built again.
 
         The kernel re-check runs by default only if the code uses macros, its
         own or an import's. `verify=True` always runs it and also re-checks the
         imports, so the snapshot ends `verified` or the result has an error.
         `verify=False` skips it, and the snapshot stays not `verified`."""
-    def verify_snapshot(self, name: str) -> SnapshotVerified:
-        """Re-check a snapshot and everything it imports through the kernel,
-        imports first, skipping what already passed. A module the kernel
+    def verify_snapshot(self, entry: str) -> SnapshotVerified:
+        """Re-check an entry's module and everything it imports through the
+        kernel, imports first, skipping what already passed. A module the kernel
         rejects is reported in `failure` and stays usable. Raises NotFoundError
-        for an unknown or deleted snapshot."""
-    def snapshot(self, name: str) -> SnapshotInfo:
-        """A snapshot's code, imports and check result. Raises NotFoundError
-        for an unknown or deleted one."""
-    def delete_snapshot(self, name: str) -> list[str]:
-        """Delete a snapshot and every snapshot that imports it; returns their
-        names."""
+        for an unknown or deleted entry."""
+    def snapshot(self, entry: str) -> SnapshotInfo:
+        """An entry with its labels, and its module's code, imports and check
+        result. Raises NotFoundError for an unknown or deleted entry."""
+    def delete_snapshot(self, entry: str) -> list[str]:
+        """Delete an entry; returns the modules that went with it: its module,
+        if no other entry or kept module needs it, and so on up its imports."""
 
 class Query(TypedDict, total=False):
     """One search; fill as many fields as you can, each feeds different lanes."""

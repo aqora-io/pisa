@@ -35,6 +35,7 @@ pub async fn create(
         code: req.code,
         timeout_secs: req.timeout,
         verify: req.verify,
+        labels: req.labels,
     });
     let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
     let JobResult::SnapshotCreated(r) = done.result else {
@@ -46,10 +47,10 @@ pub async fn create(
 
 pub async fn get(
     State(app): State<Arc<App>>,
-    Path(name): Path<String>,
+    Path(entry): Path<String>,
     Query(q): Query<VersionQuery>,
 ) -> Result<Json<SnapshotInfo>, ApiError> {
-    let job = Job::SnapshotGet(SnapshotJob { snapshot: name });
+    let job = Job::SnapshotGet(SnapshotJob { entry });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::Snapshot(r) => Ok(Json(*r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
@@ -58,10 +59,10 @@ pub async fn get(
 
 pub async fn delete(
     State(app): State<Arc<App>>,
-    Path(name): Path<String>,
+    Path(entry): Path<String>,
     Query(q): Query<VersionQuery>,
 ) -> Result<Json<Deleted>, ApiError> {
-    let job = Job::SnapshotDelete(SnapshotJob { snapshot: name });
+    let job = Job::SnapshotDelete(SnapshotJob { entry });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::SnapshotDeleted(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
@@ -70,10 +71,10 @@ pub async fn delete(
 
 pub async fn verify(
     State(app): State<Arc<App>>,
-    Path(name): Path<String>,
+    Path(entry): Path<String>,
     Query(q): Query<VersionQuery>,
 ) -> Result<Json<SnapshotVerified>, ApiError> {
-    let job = Job::SnapshotVerify(SnapshotJob { snapshot: name });
+    let job = Job::SnapshotVerify(SnapshotJob { entry });
     match submit(&app, job, q, Priority::Batch).await? {
         JobResult::SnapshotVerified(r) => {
             let r = r.map_err(ApiError)?;

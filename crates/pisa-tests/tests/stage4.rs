@@ -7,9 +7,9 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::Cluster;
-use futures::StreamExt;
 use object_store::ObjectStoreExt;
 use object_store::path::Path;
+use pisa_worker::kv::{ROOT as KV_ROOT, key};
 use serde_json::{Value, json};
 
 async fn create(c: &Cluster, code: &str) -> Value {
@@ -45,13 +45,24 @@ fn names(result: &Value) -> Vec<&str> {
         .collect()
 }
 
-async fn stored_objects(c: &Cluster) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut list = c.store.list(Some(&Path::from("snapshots")));
-    while let Some(meta) = list.next().await {
-        out.push(meta.unwrap().location.to_string());
-    }
-    out
+/// The snapshot blobs and the KV keys of version `v`.
+async fn stored(c: &Cluster) -> (Vec<String>, Vec<Vec<String>>) {
+    (c.stored_blobs().await, c.stored_keys("v").await)
+}
+
+fn entry(snapshot: &Value) -> &str {
+    snapshot["entry"].as_str().unwrap()
+}
+
+/// Where the store keeps file `ext` of a snapshot's module: under the build
+/// its record names.
+async fn blob(c: &Cluster, snapshot: &Value, ext: &str) -> String {
+    let id = &module(snapshot)["PisaSnap.s".len()..];
+    let record = key(&[KV_ROOT, "v", "mod", id]);
+    let bytes = c.kv.begin().await.unwrap().get(&record).await.unwrap();
+    let meta: Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
+    let build = meta["modules"].as_array().unwrap().last().unwrap()["build"].clone();
+    format!("snapshots/v/{id}.{}.{ext}.zst", build.as_str().unwrap())
 }
 
 async fn request(c: &Cluster, method: reqwest::Method, path: &str) -> (u16, Value) {
@@ -153,13 +164,13 @@ async fn rejected_code_is_not_kept() {
     let r = create(&c, "import PisaSnap.oops\n\ntheorem t : True := trivial").await;
     assert_eq!(r["result"]["error"]["kind"], "bad_request", "{r}");
 
-    assert!(stored_objects(&c).await.is_empty());
+    assert_eq!(stored(&c).await, (vec![], vec![]));
     // The slot still works.
     kept(&c, ROOT).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sorry_is_kept_but_dirty_and_creates_are_idempotent() {
+async fn sorry_is_kept_but_dirty_and_same_code_shares_a_module() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let code = "import Foo\n\ntheorem d : 1 = 1 := by sorry";
     let dirty = kept(&c, code).await;
@@ -180,6 +191,38 @@ async fn sorry_is_kept_but_dirty_and_creates_are_idempotent() {
     );
     assert_eq!(first["snapshot"], again["snapshot"]);
     assert_eq!(first["result"], again["result"]);
+    assert_ne!(entry(&first), entry(&again));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn labels_belong_to_entries() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let mut created = Vec::new();
+    for run in ["1", "2"] {
+        let body = json!({"code": ROOT, "labels": {"run": run}});
+        let (status, r) = c.post("/snapshots", body).await;
+        assert_eq!(status, 200, "{r}");
+        assert_eq!(r["labels"], json!({"run": run}), "{r}");
+        created.push(r);
+    }
+    for (snapshot, run) in created.iter().zip(["1", "2"]) {
+        let i = info(&c, snapshot).await;
+        assert_eq!(i["entry"], snapshot["entry"], "{i}");
+        assert_eq!(i["labels"], json!({"run": run}), "{i}");
+        assert_eq!(i["snapshot"], created[0]["snapshot"], "{i}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_labels_are_rejected() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let body = json!({"code": ROOT, "labels": {"bad key": "x"}});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["result"]["error"]["kind"], "bad_request", "{r}");
+    assert!(r.get("entry").is_none(), "{r}");
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(stored(&c).await, (vec![], vec![]));
 }
 
 /// Checks on a snapshot go to the worker that built it, which owns its
@@ -190,10 +233,9 @@ async fn checks_go_to_the_builder_and_corrupt_modules_are_refused() {
     let c = Cluster::start(&[("w0", "v", 1), ("w1", "v", 1)]).await;
     for i in 0..3 {
         let root = kept(&c, &format!("import Foo\n\ntheorem base{i} : 1 = 1 := rfl")).await;
-        let id = &root["snapshot"].as_str().unwrap()["PisaSnap.s".len()..];
-        let blob = Path::from(format!("snapshots/v/{id}.olean.zst"));
+        let path = Path::from(blob(&c, &root, "olean").await);
         let garbage = zstd::encode_all(&b"garbage"[..], 3).unwrap();
-        c.store.put(&blob, garbage.into()).await.unwrap();
+        c.store.put(&path, garbage.into()).await.unwrap();
         for _ in 0..5 {
             let r = check(&c, &on(&root, &format!("needs base{i}"))).await;
             assert_eq!(r["ok"], true, "{r}");
@@ -283,7 +325,7 @@ async fn sessions_run_on_snapshots_and_keep_their_imports() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn snapshots_can_be_read_and_deleted_with_their_descendants() {
+async fn entries_hold_their_modules_until_the_last_reference_goes() {
     let c = Cluster::start_with(
         common::router_config(),
         &[("w0", "v", 1), ("w1", "v", 1)],
@@ -295,68 +337,133 @@ async fn snapshots_can_be_read_and_deleted_with_their_descendants() {
     .await;
     let root = kept(&c, ROOT).await;
     let child = kept(&c, &on(&root, "theorem c : 2 = 2 := rfl")).await;
-    let (root_name, child_name) = (
-        root["snapshot"].as_str().unwrap(),
-        child["snapshot"].as_str().unwrap(),
-    );
     // Both workers have used both.
     for _ in 0..4 {
         let r = check(&c, &on(&child, "needs c")).await;
         assert_eq!(r["ok"], true, "{r}");
     }
 
-    let (status, info) = request(
-        &c,
-        reqwest::Method::GET,
-        &format!("/snapshots/{child_name}"),
-    )
-    .await;
-    assert_eq!(status, 200, "{info}");
-    assert_eq!(info["imports"], json!([root_name]));
-    assert_eq!(info["header"], child["header"]);
-    assert_eq!(info["dirty"], false);
-    assert_eq!(names(&info["result"]), ["c"]);
+    let i = info(&c, &child).await;
+    assert_eq!(i["entry"], child["entry"]);
+    assert_eq!(i["snapshot"], child["snapshot"]);
+    assert_eq!(i["imports"], json!([module(&root)]));
+    assert_eq!(i["header"], child["header"]);
+    assert_eq!(i["dirty"], false);
+    assert_eq!(names(&i["result"]), ["c"]);
     assert!(
-        info["code"]
+        i["code"]
             .as_str()
             .unwrap()
             .ends_with("theorem c : 2 = 2 := rfl")
     );
 
-    let (status, gone) = request(
-        &c,
-        reqwest::Method::DELETE,
-        &format!("/snapshots/{root_name}"),
-    )
-    .await;
-    assert_eq!(status, 200, "{gone}");
-    assert_eq!(gone["deleted"], json!([root_name, child_name]));
-    assert!(
-        stored_objects(&c).await.is_empty(),
-        "{:?}",
-        stored_objects(&c).await
-    );
-
-    let (status, r) = request(
-        &c,
-        reqwest::Method::GET,
-        &format!("/snapshots/{child_name}"),
-    )
-    .await;
+    let gone = delete(&c, &root).await;
+    assert_eq!(gone, json!({"entry": entry(&root), "removed": []}));
+    let root_path = format!("/snapshots/{}", entry(&root));
+    let (status, r) = request(&c, reqwest::Method::GET, &root_path).await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
-    let (status, _) = request(
-        &c,
-        reqwest::Method::DELETE,
-        &format!("/snapshots/{root_name}"),
-    )
-    .await;
+    let (status, _) = request(&c, reqwest::Method::DELETE, &root_path).await;
     assert_eq!(status, 404);
-    let (status, _) = request(&c, reqwest::Method::GET, "/snapshots/Mathlib").await;
-    assert_eq!(status, 400);
+    for _ in 0..4 {
+        let r = check(&c, &on(&child, "needs c")).await;
+        assert_eq!(r["ok"], true, "the child still imports the root: {r}");
+    }
+
+    let gone = delete(&c, &child).await;
+    assert_eq!(gone["removed"], json!([module(&child), module(&root)]));
+    assert_eq!(stored(&c).await, (vec![], vec![]));
     for _ in 0..4 {
         let r = check(&c, &on(&child, "needs c")).await;
         assert_eq!(r["error"]["kind"], "not_found", "{r}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_one_of_two_entries_keeps_the_module() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let first = kept(&c, ROOT).await;
+    let second = kept(&c, ROOT).await;
+    assert_eq!(first["snapshot"], second["snapshot"]);
+
+    assert_eq!(delete(&c, &first).await["removed"], json!([]));
+    let r = check(&c, &on(&second, "needs base")).await;
+    assert_eq!(r["ok"], true, "{r}");
+
+    let gone = delete(&c, &second).await;
+    assert_eq!(gone["removed"], json!([module(&second)]));
+    assert_eq!(stored(&c).await, (vec![], vec![]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cleaned_up_module_can_be_created_again() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let first = kept(&c, ROOT).await;
+    let first_files = c.stored_blobs().await;
+    let gone = delete(&c, &first).await;
+    assert_eq!(gone["removed"], json!([module(&first)]));
+
+    let again = kept(&c, ROOT).await;
+    assert_eq!(again["snapshot"], first["snapshot"]);
+    let r = check(&c, &on(&again, "needs base")).await;
+    assert_eq!(r["ok"], true, "{r}");
+    // A new build, whose files a late delete of the first one can't touch.
+    let files = c.stored_blobs().await;
+    assert!(
+        files.contains(&blob(&c, &again, "olean").await),
+        "{files:?}"
+    );
+    assert!(
+        files.iter().all(|f| !first_files.contains(f)),
+        "{files:?} {first_files:?}"
+    );
+}
+
+/// The parent is deleted and built again while the child builds on its old
+/// build, whose files are gone: the child isn't stored naming them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_built_on_a_parent_built_again_meanwhile_is_not_kept() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let root = kept(&c, ROOT).await;
+    let code = on(&root, "theorem c : 2 = 2 := rfl\n-- SLEEP 1500");
+    let building = tokio::spawn({
+        let (client, url) = (c.client.clone(), c.url("/snapshots"));
+        async move {
+            let r = client.post(url).json(&json!({"code": code})).send().await;
+            r.unwrap().json::<Value>().await.unwrap()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    delete(&c, &root).await;
+    let again = kept(&c, ROOT).await;
+
+    let r = building.await.unwrap();
+    assert!(r.get("entry").is_none(), "{r}");
+    assert_eq!(r["result"]["error"]["kind"], "not_found", "{r}");
+    let message = r["result"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("{} was deleted and built again", module(&root))),
+        "{r}"
+    );
+    // Built again on the parent as it is now, it is kept.
+    let child = kept(&c, &on(&again, "theorem c : 2 = 2 := rfl\n-- SLEEP 1500")).await;
+    let r = check(&c, &on(&child, "needs base\nneeds c")).await;
+    assert_eq!(r["ok"], true, "{r}");
+}
+
+/// Deletes a snapshot's entry and returns the response.
+async fn delete(c: &Cluster, snapshot: &Value) -> Value {
+    let path = format!("/snapshots/{}", entry(snapshot));
+    let (status, r) = request(c, reqwest::Method::DELETE, &path).await;
+    assert_eq!(status, 200, "{r}");
+    r
+}
+
+/// Deletes every entry in `snapshots` and expects nothing to be left.
+async fn delete_all(c: &Cluster, snapshots: &[&Value]) {
+    for snapshot in snapshots {
+        delete(c, snapshot).await;
+    }
+    assert_eq!(stored(c).await, (vec![], vec![]));
 }
 
 fn bwrap_works() -> bool {
@@ -394,10 +501,9 @@ async fn module_system_snapshots_keep_all_their_files() {
         root["header"],
         format!("module\npublic import Foo\npublic import {name}")
     );
-    let objects = stored_objects(&c).await;
-    let id = &name["PisaSnap.s".len()..];
+    let objects = c.stored_blobs().await;
     for ext in ["olean", "olean.server", "olean.private", "ir", "ir.sig"] {
-        let object = format!("snapshots/v/{id}.{ext}.zst");
+        let object = blob(&c, &root, ext).await;
         assert!(objects.contains(&object), "{objects:?}");
     }
     let child = kept(
@@ -425,9 +531,7 @@ async fn module_system_snapshots_keep_all_their_files() {
     let r = check(&c, &format!("import {child_name}\n\nneeds mchild")).await;
     assert_eq!(r["ok"], true, "{r}");
 
-    let (status, gone) = request(&c, reqwest::Method::DELETE, &format!("/snapshots/{name}")).await;
-    assert_eq!(status, 200, "{gone}");
-    assert!(stored_objects(&c).await.is_empty());
+    delete_all(&c, &[&root, &child]).await;
 }
 
 /// fake-lean's verifier rejects any module whose code contains `forge`, so
@@ -448,14 +552,14 @@ fn module(snapshot: &Value) -> &str {
 }
 
 async fn info(c: &Cluster, snapshot: &Value) -> Value {
-    let path = format!("/snapshots/{}", module(snapshot));
+    let path = format!("/snapshots/{}", entry(snapshot));
     let (status, r) = request(c, reqwest::Method::GET, &path).await;
     assert_eq!(status, 200, "{r}");
     r
 }
 
 async fn verify(c: &Cluster, snapshot: &Value) -> Value {
-    let path = format!("/snapshots/{}/verify", module(snapshot));
+    let path = format!("/snapshots/{}/verify", entry(snapshot));
     let (status, r) = request(c, reqwest::Method::POST, &path).await;
     assert_eq!(status, 200, "{r}");
     r
@@ -496,11 +600,11 @@ async fn macros_are_re_checked_unless_the_request_opts_out() {
 
     // A rejected chunk stores nothing.
     let forged_macro = format!("{MACRO}\ntheorem forge : False := by trivial");
-    let before = stored_objects(&c).await.len();
+    let before = stored(&c).await;
     let r = create(&c, &forged_macro).await;
     assert!(r.get("snapshot").is_none(), "{r}");
     assert_rejected_by_kernel(&r);
-    assert_eq!(stored_objects(&c).await.len(), before);
+    assert_eq!(stored(&c).await, before);
 
     // A child can expand its parent's macros without any macro keyword.
     let r = create(&c, &on(&macro_snap, "theorem forge : 1 = 1 := twice")).await;
@@ -551,11 +655,10 @@ async fn a_macro_chunk_on_unverified_imports_is_not_verified_yet() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_true_re_checks_the_chunk_and_its_imports() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let before = stored_objects(&c).await.len();
     let r = create_with(&c, FORGED, true).await;
     assert!(r.get("snapshot").is_none(), "{r}");
     assert_rejected_by_kernel(&r);
-    assert_eq!(stored_objects(&c).await.len(), before);
+    assert_eq!(stored(&c).await, (vec![], vec![]));
 
     let parent = kept(&c, ROOT).await;
     let child = create_with(&c, &on(&parent, "theorem c : 2 = 2 := rfl"), true).await;
@@ -564,13 +667,13 @@ async fn verify_true_re_checks_the_chunk_and_its_imports() {
 
     // A forged import stops it, and the chunk is not built.
     let forged = kept(&c, FORGED).await;
-    let before = stored_objects(&c).await.len();
+    let before = stored(&c).await;
     let r = create_with(&c, &on(&forged, "theorem c : 2 = 2 := rfl"), true).await;
     assert!(r.get("snapshot").is_none(), "{r}");
     assert_rejected_by_kernel(&r);
     let message = r["result"]["error"]["message"].as_str().unwrap();
     assert!(message.contains(module(&forged)), "{r}");
-    assert_eq!(stored_objects(&c).await.len(), before);
+    assert_eq!(stored(&c).await, before);
 
     // Asking again for code that is already kept verifies what is there.
     let code = "import Foo\n\ntheorem existing : 1 = 1 := rfl";
@@ -580,10 +683,16 @@ async fn verify_true_re_checks_the_chunk_and_its_imports() {
     assert_eq!(again["snapshot"], first["snapshot"]);
     assert_eq!(again["verified"], true, "{again}");
 
+    // A kept module that fails the re-check gets no new entry, as new code
+    // that fails it isn't kept.
+    let before = c.stored_keys("v").await;
     let r = create_with(&c, FORGED, true).await;
     assert_eq!(r["snapshot"], forged["snapshot"], "still kept: {r}");
+    assert_eq!(r["header"], forged["header"], "{r}");
+    assert!(r.get("entry").is_none(), "{r}");
     assert_eq!(r["verified"], false, "{r}");
     assert_rejected_by_kernel(&r);
+    assert_eq!(c.stored_keys("v").await, before);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -597,6 +706,7 @@ async fn verify_checks_imports_first_and_remembers() {
     assert_eq!(
         r,
         json!({
+            "entry": entry(&leaf),
             "snapshot": module(&leaf),
             "verified": true,
             "dirty": false,
@@ -620,10 +730,7 @@ async fn verify_checks_imports_first_and_remembers() {
     // Verifying doesn't get in the way of using it, or of deleting it.
     let r = check(&c, &on(&next, "needs base\nneeds next")).await;
     assert_eq!(r["ok"], true, "{r}");
-    let path = format!("/snapshots/{}", module(&root));
-    let (status, _) = request(&c, reqwest::Method::DELETE, &path).await;
-    assert_eq!(status, 200);
-    assert!(stored_objects(&c).await.is_empty());
+    delete_all(&c, &[&root, &mid, &leaf, &next]).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -684,14 +791,16 @@ async fn verify_takes_the_axioms_from_the_kernel_re_check() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let snapshot = kept(&c, "import Foo\n\ntheorem d : 1 = 1 := by sorry").await;
     let id = &module(&snapshot)["PisaSnap.s".len()..];
-    let path = Path::from(format!("snapshots/v/{id}.json"));
-    let bytes = c.store.get(&path).await.unwrap().bytes().await.unwrap();
+    let record = key(&[KV_ROOT, "v", "mod", id]);
+    let mut txn = c.kv.begin().await.unwrap();
+    let bytes = txn.get(&record).await.unwrap().unwrap();
     let mut meta: Value = serde_json::from_slice(&bytes).unwrap();
     meta["dirty"] = json!(false);
     meta["result"]["ok"] = json!(true);
     meta["result"]["reasons"] = json!([]);
     let bytes = serde_json::to_vec(&meta).unwrap();
-    c.store.put(&path, bytes.into()).await.unwrap();
+    txn.put(record, bytes).await.unwrap();
+    txn.commit().await.unwrap();
     assert_eq!(info(&c, &snapshot).await["dirty"], false);
 
     let r = verify(&c, &snapshot).await;
@@ -724,7 +833,7 @@ async fn verify_runs_on_a_worker_that_never_saw_the_snapshot() {
 /// Starts verifying a snapshot whose code has a `SLOW_KERNEL` marker and gives
 /// the re-check time to begin.
 async fn verifying(c: &Cluster, snapshot: &Value) -> tokio::task::JoinHandle<(u16, Value)> {
-    let url = c.url(&format!("/snapshots/{}/verify", module(snapshot)));
+    let url = c.url(&format!("/snapshots/{}/verify", entry(snapshot)));
     let client = c.client.clone();
     let running = tokio::spawn(async move {
         let r = client.post(url).send().await.unwrap();
@@ -765,13 +874,40 @@ async fn a_snapshot_deleted_during_verification_stays_deleted() {
     let snapshot = kept(&c, SLOW).await;
     let running = verifying(&c, &snapshot).await;
 
-    let path = format!("/snapshots/{}", module(&snapshot));
-    let (status, _) = request(&c, reqwest::Method::DELETE, &path).await;
-    assert_eq!(status, 200);
+    delete_all(&c, &[&snapshot]).await;
 
     let (status, r) = running.await.unwrap();
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
-    assert!(stored_objects(&c).await.is_empty());
+    assert_eq!(stored(&c).await, (vec![], vec![]));
+}
+
+/// A create that asks to verify a kept module whose last entry is deleted
+/// during the re-check starts over, and builds the module again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_deleted_while_a_create_verifies_it_is_built_again() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let snapshot = kept(&c, SLOW).await;
+    let creating = tokio::spawn({
+        let (client, url) = (c.client.clone(), c.url("/snapshots"));
+        async move {
+            let body = json!({"code": SLOW, "verify": true});
+            let r = client.post(url).json(&body).send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        delete(&c, &snapshot).await["removed"],
+        json!([module(&snapshot)])
+    );
+
+    let (status, r) = creating.await.unwrap();
+    assert_eq!(status, 200, "{r}");
+    assert!(r["result"].get("error").is_none(), "{r}");
+    assert_eq!(r["snapshot"], snapshot["snapshot"], "{r}");
+    assert_eq!(r["verified"], true, "{r}");
+    assert_ne!(entry(&r), entry(&snapshot));
+    assert_eq!(info(&c, &r).await["verified"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -781,7 +917,7 @@ async fn verify_runs_on_the_requested_version() {
         .post("/snapshots", json!({"code": ROOT, "version": "b"}))
         .await;
     assert_eq!(status, 200, "{snapshot}");
-    let path = |v: &str| format!("/snapshots/{}/verify?version={v}", module(&snapshot));
+    let path = |v: &str| format!("/snapshots/{}/verify?version={v}", entry(&snapshot));
 
     let (status, r) = request(&c, reqwest::Method::POST, &path("a")).await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
@@ -792,9 +928,27 @@ async fn verify_runs_on_the_requested_version() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_rejects_unknown_snapshots_and_other_modules() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let unknown = format!("/snapshots/PisaSnap.s{}/verify", "0".repeat(32));
+    let unknown = format!("/snapshots/{}/verify", "0".repeat(32));
     let (status, r) = request(&c, reqwest::Method::POST, &unknown).await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
+
+    // Modules aren't entries, even kept ones.
+    let snapshot = kept(&c, ROOT).await;
+    let path = format!("/snapshots/{}", module(&snapshot));
+    for (method, path) in [
+        (reqwest::Method::POST, format!("{path}/verify")),
+        (reqwest::Method::GET, path.clone()),
+        (reqwest::Method::DELETE, path),
+    ] {
+        let (status, r) = request(&c, method.clone(), &path).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{method} {path}"
+        );
+        let message = r["error"]["message"].as_str().unwrap();
+        assert!(message.contains("entry"), "{message}");
+    }
     let (status, _) = request(&c, reqwest::Method::POST, "/snapshots/Mathlib/verify").await;
     assert_eq!(status, 400);
 }

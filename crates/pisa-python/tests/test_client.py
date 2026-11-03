@@ -151,26 +151,34 @@ def test_snapshots(url):
     client = Client(url, timeout=5)
     base = client.create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
     assert base["result"]["ok"] and not base["dirty"]
-    name = base["snapshot"]
+    name, entry = base["snapshot"], base["entry"]
     assert base["header"] == f"import Foo\nimport {name}"
     assert client.check(base["header"] + "\nneeds base")["ok"]
 
     rejected = client.create_snapshot("theorem t : 1 = 1 := error_here")
-    assert "snapshot" not in rejected and not rejected["result"]["ok"]
+    assert "snapshot" not in rejected and "entry" not in rejected and not rejected["result"]["ok"]
 
-    info = client.snapshot(name)
+    info = client.snapshot(entry)
+    assert info["entry"] == entry and info["snapshot"] == name
     assert info["header"] == base["header"] and info["imports"] == []
     assert not base["verified"] and not info["verified"]
 
-    verified = client.verify_snapshot(name)
-    assert verified["verified"] and verified["checked"] == [name]
+    verified = client.verify_snapshot(entry)
+    assert verified["verified"] and verified["entry"] == entry and verified["checked"] == [name]
     assert "failure" not in verified
-    assert client.snapshot(name)["verified"]
+    assert client.snapshot(entry)["verified"]
     forged = client.create_snapshot("import Foo\ntheorem forge : 1 = 1 := rfl", verify=True)
     assert "snapshot" not in forged
     opted_out = client.create_snapshot('import Foo\nmacro "m" : term => `(1)', verify=False)
     assert not opted_out["verified"]
 
-    assert client.delete_snapshot(name) == [name]
-    with pytest.raises(NotFoundError):
+    labelled = client.create_snapshot("import Foo\ntheorem labelled : 1 = 1 := rfl", labels={"k": "v"})
+    assert labelled["labels"] == {"k": "v"}
+    assert client.snapshot(labelled["entry"])["labels"] == {"k": "v"}
+    with pytest.raises(PisaError) as e:
         client.snapshot(name)
+    assert (e.value.kind, e.value.status) == ("bad_request", 400)
+
+    assert client.delete_snapshot(entry) == [name]
+    with pytest.raises(NotFoundError):
+        client.snapshot(entry)

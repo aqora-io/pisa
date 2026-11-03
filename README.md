@@ -52,13 +52,13 @@ cargo test --workspace                 # fast tests with fake-repl, no Lean need
 Compose also starts a single-node TiKV (a PD and a TiKV) and Garage. Workers keep
 session data in two places, chosen by environment variables that Compose and the
 chart set:
-- **Metadata**, the sessions and the records that make proof states loadable,
-  is in TiKV. `PISA_METADATA` is `tikv` or `memory` (the default). `memory` keeps
-  it in the worker process, so it isn't shared between workers or kept across
-  restarts. `PISA_TIKV_PD` lists the PD endpoints, comma-separated (e.g.
-  `pd:2379`), and `tikv` requires it.
-- **Blobs**, the pickled proof states, are in S3. `PISA_STORE` is `s3`, which
-  reads the `AWS_*` variables, or `memory`.
+- **Metadata**, the sessions, the records that make proof states loadable,
+  and the snapshot entries and module records, is in TiKV. `PISA_METADATA` is
+  `tikv` or `memory` (the default). `memory` keeps it in the worker process, so
+  it isn't shared between workers or kept across restarts. `PISA_TIKV_PD` lists
+  the PD endpoints, comma-separated (e.g. `pd:2379`), and `tikv` requires it.
+- **Blobs**, the pickled proof states and snapshot modules, are in S3.
+  `PISA_STORE` is `s3`, which reads the `AWS_*` variables, or `memory`.
 
 The pinned versions live in `docker/lean-project`: `lean-toolchain`,
 `lakefile.toml` and `lake-manifest.json`. Keep `REPL_REV` in `docker/Dockerfile`
@@ -82,8 +82,9 @@ own KEDA and Prometheus:
 - Keep the scrape interval short, e.g. 5–15s: it bounds how fast workers react
   to load.
 
-**Storage.** Metadata (sessions and proof-state records) lives in TiKV, and blobs
-(pickled proof states) in an S3-compatible bucket.
+**Storage.** Metadata (sessions, proof-state records, snapshot entries and module
+records) lives in TiKV, and blobs (pickled proof states, snapshot modules) in an
+S3-compatible bucket.
 - The chart doesn't deploy TiKV. Set `metadata.tikv.pdEndpoints` to the PD
   endpoints of a cluster you run, for example with the
   [TiDB Operator](https://docs.pingcap.com/tidb-in-kubernetes/stable). It is
@@ -158,10 +159,10 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?}` → `{snapshot?, header?, version, dirty, verified, result}`; see [Snapshots](#snapshots) |
-| `GET /snapshots/{snapshot}` | `?version=` → `{snapshot, imports, header, code, dirty, verified, result, created}` |
-| `DELETE /snapshots/{snapshot}` | `?version=` → `{deleted: [...]}`, the snapshot and every snapshot that imports it |
-| `POST /snapshots/{snapshot}/verify` | `?version=` → `{snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, result}`; see [Snapshots](#snapshots) |
+| `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, dirty, verified, result, created}` |
+| `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
+| `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /health`, `GET /metrics` | Liveness, Prometheus metrics |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
@@ -195,7 +196,7 @@ an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds
 | `lean`, `policy` | 422 | Lean or the policy refused the input, e.g. an unknown tactic |
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request; retry later |
-| `bad_request`, `not_found` | 400, 404 | Malformed request, unknown state, session or snapshot |
+| `bad_request`, `not_found` | 400, 404 | Malformed request, unknown state, session or snapshot entry |
 | `internal` | 500 | A bug |
 
 ## Snapshots
@@ -205,16 +206,35 @@ resend, and Lean re-check, the whole library on every compile. Instead it
 keeps each accepted chunk as a snapshot and builds on it:
 
 ```text
-POST /snapshots {"code": "import Mathlib\n\ndef double (n : ℕ) := 2 * n"}
-  → {"snapshot": "PisaSnap.s1f…", "header": "import Mathlib\nimport PisaSnap.s1f…",
-     "dirty": false, "verified": false, "result": {"ok": true, …}}
+POST /snapshots {"code": "import Mathlib\n\ndef double (n : ℕ) := 2 * n", "labels": {"run": "7"}}
+  → {"entry": "9c0e…", "snapshot": "PisaSnap.s1f…", "header": "import Mathlib\nimport PisaSnap.s1f…",
+     "dirty": false, "verified": false, "labels": {"run": "7"}, "result": {"ok": true, …}}
 POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double 2 = 4 := rfl"}
 ```
 
+**Entries and modules.** A create returns two names:
+- **The module** (`snapshot`, e.g. `PisaSnap.s1f…`) is what code imports. It
+  comes from a hash of the code, so the same code is the same module, and its
+  check result, `dirty` and `verified` belong to it.
+- **The entry** (`entry`, 32 hex digits) is what this create added: a
+  reference to the module with its own `labels` and `created` time. Creating
+  the same code again adds another entry on the same module without building
+  it again. `GET`, `DELETE` and `verify` take the entry; a module name there
+  is a `bad_request`.
+
+A create that keeps nothing has no `entry`. Neither does `verify: true` on code
+that is already kept but fails the re-check: the response then has its
+`snapshot` and `header` with the error, as new code that fails the re-check
+isn't kept.
+
+Labels are string key/value pairs, at most 64 per entry. A key is 1–128 bytes
+of letters, digits, `.`, `_`, `/` and `-`; a value is up to 512 bytes. Labels
+that break these rules are a `bad_request` in `result.error`, and nothing is
+kept.
+
 **How it works.**
-- **Building.** A snapshot is its code compiled with `lean -o` to the module
-  `PisaSnap.s<id>`, where `id` is a hash of the code. The same code is the same
-  snapshot.
+- **Building.** A module is its code compiled with `lean -o` to the module
+  `PisaSnap.s<id>`, where `id` is a hash of the code.
 - **Using.** Later code imports it like any module, in `/check`, `/sessions`
   or another snapshot. A chunk can import several snapshots, which merges
   parallel branches.
@@ -263,24 +283,30 @@ end. It depends on `verify` in the request:
 re-check. So a macro chunk on top of unverified snapshots is re-checked but not
 yet `verified`.
 
-`POST /snapshots/{snapshot}/verify` re-checks a snapshot and everything it
+`POST /snapshots/{entry}/verify` re-checks the entry's module and everything it
 imports, imports first, and records each module that passes. A later run only
-covers new chunks, and a retry resumes where the last one stopped.
+covers new chunks, and a retry resumes where the last one stopped. `verified`
+and `dirty` belong to modules, so every entry on a module shows the result.
 - `checked` lists the modules this run re-checked and passed.
 - If the kernel rejects a module or the re-check times out (60 s per module),
   the run stops, still with a 200, and `failure` has the module and the reason.
   Nothing is deleted, because other code may import it: the module stays usable
-  and not `verified`. Delete it yourself if you don't want it.
+  and not `verified`. Delete its entries if you don't want it.
 - `dirty` and `result` are updated from the re-check, whose axioms don't depend
   on the build being honest.
 
 Check results don't say whether the snapshots they import are verified: look
 at the snapshot, or verify it, when that matters.
 
-**Retention.** Snapshots are kept until deleted; a delete also removes every
-snapshot that imports it. Each worker checks a snapshot it has cached against
-the store at most every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a delete takes
-effect everywhere within that time.
+<a id="retention"></a>
+**Retention.** An entry is kept until it is deleted. A module is kept while an
+entry points at it or a kept module imports it: deleting an entry removes its
+module once nothing else needs it, then each of that module's imports on the
+same terms, and `removed` lists them. So deleting the entry of a snapshot that
+others build on removes nothing yet, and the code on top keeps working. Each
+worker checks a module it has cached against the store at most every
+`PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere within
+that time.
 
 **Trust.** A snapshot that isn't `verified` has the same guarantee as a
 `/check`: the policy scan and an axiom report from the process that imported
@@ -308,7 +334,9 @@ let step = client.tactic(&session.states[0].state, "simp").await?; // Error::Ser
 let verdict = client.check_session(&session.session, "theorem t (n : Nat) : n + 0 = n := by simp").await?;
 let base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n").await?;
 let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header.unwrap())).await?;
-let verified = client.verify_snapshot(&base.snapshot.unwrap()).await?;
+let entry = base.entry.unwrap();
+let verified = client.verify_snapshot(&entry).await?;
+let removed = client.delete_snapshot(&entry).await?; // the modules that went with it
 ```
 
 Python (`pisa_client`), built from `crates/pisa-python` with `maturin build` or `maturin develop`:
@@ -321,9 +349,10 @@ client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")["ok"]
 session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry")
 step = client.tactic(session["states"][0]["state"], "simp")   # raises LeanError if it fails
 client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]
-base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n")
+base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n", labels={"run": "7"})
 client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
-client.verify_snapshot(base["snapshot"])["verified"]
+client.verify_snapshot(base["entry"])["verified"]
+client.delete_snapshot(base["entry"])   # the modules that went with it
 ```
 
 Calls are synchronous. They release the GIL, so one `Client` can be shared
@@ -332,7 +361,7 @@ Exceptions carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
 - `LimitError`: the input hit a timeout, the memory limit, or crashed Lean.
 - `CapacityError`: no worker was free; retry later.
-- `NotFoundError`: unknown or expired state or session, or unknown snapshot.
+- `NotFoundError`: unknown or expired state or session, or unknown snapshot entry.
 - `PisaError`: the base class; also raised for transport failures, with no
   `kind` or `status`.
 

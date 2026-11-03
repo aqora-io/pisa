@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
+use object_store::path::Path;
 use pisa_router::{RouterConfig, Running};
 use pisa_worker::WorkerConfig;
 use pisa_worker::config::{MetadataKind, Sandbox, StoreKind};
-use pisa_worker::kv::Kv;
+use pisa_worker::kv::{Kv, ROOT, decode, prefix};
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -161,6 +163,23 @@ impl Cluster {
             .unwrap();
         let status = r.status().as_u16();
         (status, r.json().await.unwrap())
+    }
+
+    /// Every object in the store under `snapshots`.
+    pub async fn stored_blobs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut list = self.store.list(Some(&Path::from("snapshots")));
+        while let Some(meta) = list.next().await {
+            out.push(meta.unwrap().location.to_string());
+        }
+        out
+    }
+
+    /// Every KV key of `version`, decoded.
+    pub async fn stored_keys(&self, version: &str) -> Vec<Vec<String>> {
+        let mut txn = self.kv.begin().await.unwrap();
+        let pairs = txn.scan(prefix(&[ROOT, version]), u32::MAX).await.unwrap();
+        pairs.iter().map(|(key, _)| decode(key)).collect()
     }
 
     pub async fn metrics(&self) -> String {

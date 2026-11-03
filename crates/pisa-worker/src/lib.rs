@@ -12,6 +12,7 @@ use pisa_protocol::wire::{self, Job, JobResult, RouterMessage, WorkerMessage};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
+pub mod catalog;
 pub mod cgroup;
 pub mod check;
 pub mod config;
@@ -43,11 +44,12 @@ async fn shutdown_signal() {
     }
 }
 
-/// Runs the worker with pickled proof states kept in `store`, and the records
-/// that describe them and the sessions in `kv`. Every worker of the same
-/// version must share both. When `shutdown` completes, the worker drains: it
-/// tells the router to send no more jobs, finishes the ones it has (for at
-/// most `drain_timeout_secs`), and returns.
+/// Runs the worker with pickled proof states and snapshot modules kept in
+/// `store`, and the records that describe them, the sessions and the snapshot
+/// entries in `kv`. Every worker of the same version must share both. When
+/// `shutdown` completes, the worker drains: it tells the router to send no
+/// more jobs, finishes the ones it has (for at most `drain_timeout_secs`), and
+/// returns.
 pub async fn run_with_stores(
     cfg: WorkerConfig,
     store: Arc<dyn ObjectStore>,
@@ -59,6 +61,7 @@ pub async fn run_with_stores(
     let launcher = launcher::Launcher::new(&cfg, &worker_id, &version).await?;
     let snapshots = snapshots::Snapshots::new(
         store.clone(),
+        kv.clone(),
         version.clone(),
         launcher.snapshot_root().to_path_buf(),
         Duration::from_secs(cfg.snapshot_confirm_secs),
@@ -237,13 +240,13 @@ async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
             JobResult::SnapshotCreated(Box::new(pool.snapshots().create(pool, j).await))
         }
         Job::SnapshotGet(j) => {
-            JobResult::Snapshot(pool.snapshots().get(&j.snapshot).await.map(Box::new))
+            JobResult::Snapshot(pool.snapshots().get(&j.entry).await.map(Box::new))
         }
         Job::SnapshotDelete(j) => {
-            JobResult::SnapshotDeleted(pool.snapshots().delete(&j.snapshot).await)
+            JobResult::SnapshotDeleted(pool.snapshots().delete(&j.entry).await)
         }
         Job::SnapshotVerify(j) => {
-            JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.snapshot).await)
+            JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.entry).await)
         }
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the router".into(),

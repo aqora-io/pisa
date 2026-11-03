@@ -80,10 +80,11 @@ pub struct WorkerConfig {
     /// AWS_ALLOW_HTTP). All workers of a version must share one store.
     #[arg(long, env = "PISA_STORE", value_enum, default_value_t = StoreKind::Memory)]
     pub store: StoreKind,
-    /// Where session and proof-state records live. `tikv` stores them in the
-    /// TiKV cluster at `--tikv-pd`, shared by all workers of a version. `memory`
-    /// keeps them in this process, so they are neither shared between workers
-    /// nor kept across restarts. Pickled states always go to `--store`.
+    /// Where session, proof-state and snapshot records live. `tikv` stores
+    /// them in the TiKV cluster at `--tikv-pd`, shared by all workers of a
+    /// version. `memory` keeps them in this process, so they are neither shared
+    /// between workers nor kept across restarts. Pickled states and snapshot
+    /// modules always go to `--store`.
     #[arg(long, env = "PISA_METADATA", value_enum, default_value_t = MetadataKind::Memory)]
     pub metadata: MetadataKind,
     /// PD endpoints of the TiKV cluster, e.g. "pd-0:2379,pd-1:2379". Required

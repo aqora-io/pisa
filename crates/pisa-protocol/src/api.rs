@@ -14,12 +14,14 @@
 //! | `POST /states/{state}/tactic` | [`TacticRequest`] → [`TacticResponse`] |
 //! | `POST /sessions/{session}/check` | [`SessionCheckRequest`] → [`CheckResult`] |
 //! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
-//! | `GET /snapshots/{snapshot}` | → [`SnapshotInfo`] |
-//! | `DELETE /snapshots/{snapshot}` | → [`Deleted`] |
-//! | `POST /snapshots/{snapshot}/verify` | → [`SnapshotVerified`] |
+//! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
+//! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
+//! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
 //!
 //! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
 //! Checks can ask for more in `detail` ([`Detail`]).
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -291,7 +293,9 @@ pub struct SessionCheckRequest {
 }
 
 /// `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
-/// keeps it as a module that later code can import.
+/// keeps it as a module that later code can import, with a new entry that
+/// holds the module. Code that is already kept gets a new entry on its
+/// module without being built again.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRequest {
     pub code: String,
@@ -307,12 +311,24 @@ pub struct SnapshotRequest {
     /// uses macros, its own or an import's, is re-checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<bool>,
+    /// The new entry's labels; see [`check_labels`](crate::labels::check_labels)
+    /// for the rules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotResponse {
-    /// The module to import, e.g. `PisaSnap.s1a2b…`. Absent when the code was
-    /// not kept: Lean reported errors, or the check could not complete.
+    /// The new entry, which the other snapshot endpoints take. It keeps the
+    /// module until it is deleted. Absent when nothing new was kept: the code
+    /// was not kept, or `verify: true` found it kept but failing the re-check,
+    /// in which case `snapshot` and `header` are set and `result` has the
+    /// error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    /// The module to import, e.g. `PisaSnap.s1a2b…`, shared by every entry on
+    /// the same code. Absent when the code was not kept: Lean reported errors,
+    /// or the check could not complete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
     /// The header to start code on top of this snapshot with: this code's
@@ -328,33 +344,47 @@ pub struct SnapshotResponse {
     /// This snapshot and everything it imports have passed the kernel
     /// re-check.
     pub verified: bool,
+    /// The entry's labels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
     /// The check, as for `/check`. It has no `sorries`, and `time` includes
     /// importing the module's imports.
     pub result: CheckResult,
 }
 
-/// `GET /snapshots/{snapshot}`
+/// `GET /snapshots/{entry}`: an entry and its module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotInfo {
+    #[serde(default)]
+    pub entry: String,
+    /// The entry's module.
     pub snapshot: String,
-    /// The snapshots it imports.
+    /// The modules it imports.
     pub imports: Vec<String>,
     /// As in [`SnapshotResponse::header`].
     pub header: String,
     pub code: String,
+    /// The entry's labels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
     pub dirty: bool,
     /// As in [`SnapshotResponse::verified`].
     pub verified: bool,
     pub result: CheckResult,
-    /// Seconds since the Unix epoch.
+    /// When the entry was created, in seconds since the Unix epoch.
     pub created: u64,
 }
 
-/// `POST /snapshots/{snapshot}/verify`: re-checks a snapshot and everything it
-/// imports through the kernel, imports first, skipping what already passed. A
-/// module that fails stops the run and stays usable, marked as not verified.
+/// `POST /snapshots/{entry}/verify`: re-checks the entry's module and
+/// everything it imports through the kernel, imports first, skipping what
+/// already passed. A module that fails stops the run and stays usable, marked
+/// as not verified. `verified` and `dirty` belong to the module, so every
+/// entry on it shows the result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotVerified {
+    #[serde(default)]
+    pub entry: String,
+    /// The entry's module.
     pub snapshot: String,
     /// As in [`SnapshotResponse::verified`].
     pub verified: bool,
@@ -374,11 +404,16 @@ pub struct SnapshotFailure {
     pub reason: String,
 }
 
-/// `DELETE /snapshots/{snapshot}`: deletes it and every snapshot that
-/// imports it, directly or not.
+/// `DELETE /snapshots/{entry}`: deletes the entry. Its module goes too once
+/// no entry and no kept module needs it, and then so do the modules it
+/// imports, on the same terms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deleted {
-    pub deleted: Vec<String>,
+    #[serde(default)]
+    pub entry: String,
+    /// The modules removed, the entry's own first.
+    #[serde(default)]
+    pub removed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

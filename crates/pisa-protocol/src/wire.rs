@@ -4,6 +4,8 @@
 //! `Job`s and send back `Result`s tagged with the job's request ID. Results may
 //! arrive in any order, and the TCP connection doubles as the health check.
 
+use std::collections::BTreeMap;
+
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -104,12 +106,15 @@ pub struct SnapshotCreateJob {
     pub timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<bool>,
+    /// The new entry's labels.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotJob {
-    /// The snapshot's module name.
-    pub snapshot: String,
+    /// The entry id.
+    pub entry: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

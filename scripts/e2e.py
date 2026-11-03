@@ -160,10 +160,25 @@ open Snap
 """
 
 
+def delete_entries(created):
+    """Deletes the entry of every kept snapshot in `created` and checks that
+    the modules went with them: each exactly once, once nothing needs it."""
+    kept = [x for x in created if "entry" in x]
+    removed = []
+    for x in kept:
+        status, gone = call("DELETE", f"/snapshots/{x['entry']}")
+        assert status == 200 and gone["entry"] == x["entry"], gone
+        removed += gone["removed"]
+    assert sorted(removed) == sorted({x["snapshot"] for x in kept}), (removed, kept)
+
+
 def snapshots():
+    created = []
+
     def create(code):
         start = time.monotonic()
         r = post("/snapshots", {"code": code, "timeout": 600})
+        created.append(r)
         return r, time.monotonic() - start
 
     def on(snapshot, body):
@@ -204,33 +219,33 @@ def snapshots():
     inherits, _ = create(f"{macro_snap['header']}\n\ndef via_import : Nat := two")
     assert inherits["verified"], inherits
     opted_out = post("/snapshots", {"code": "macro \"three\" : term => `((3 : Nat))", "verify": False, "timeout": 600})
+    created.append(opted_out)
     assert "snapshot" in opted_out and not opted_out["verified"], opted_out
     step("snapshot: macros are re-checked unless the request opts out")
 
     # Everything else skips the re-check, until it is asked for.
     assert not root["verified"] and not child["verified"], (root, child)
-    status, verified = call("POST", f"/snapshots/{child['snapshot']}/verify")
-    assert status == 200 and verified["verified"], verified
+    status, verified = call("POST", f"/snapshots/{child['entry']}/verify")
+    assert status == 200 and verified["verified"] and verified["entry"] == child["entry"], verified
     assert verified["checked"] == [root["snapshot"], child["snapshot"]], verified
     assert verified["dirty"] and "failure" not in verified, verified
-    assert call("GET", f"/snapshots/{root['snapshot']}")[1]["verified"]
-    assert call("POST", f"/snapshots/{child['snapshot']}/verify")[1]["checked"] == []
+    assert call("GET", f"/snapshots/{root['entry']}")[1]["verified"]
+    assert call("POST", f"/snapshots/{child['entry']}/verify")[1]["checked"] == []
     asked, _ = create(f"{sibling['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl")
     assert not asked["verified"], asked
     asked = post("/snapshots", {"code": f"{sibling['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl",
                                 "verify": True, "timeout": 600})
+    created.append(asked)
     assert asked["verified"], asked
     step("snapshot: verify on request, at creation or later, keeps sorry dirty")
 
-    status, info = call("GET", f"/snapshots/{child['snapshot']}")
+    status, info = call("GET", f"/snapshots/{child['entry']}")
     assert status == 200 and info["imports"] == [root["snapshot"]], info
-    status, gone = call("DELETE", f"/snapshots/{root['snapshot']}")
-    assert status == 200 and len(gone["deleted"]) == 5, gone
-    for leftover in (macro_snap, opted_out):
-        assert call("DELETE", f"/snapshots/{leftover['snapshot']}")[0] == 200
+    assert info["entry"] == child["entry"] and info["snapshot"] == child["snapshot"], info
+    delete_entries(created)
     r = on(merged, "example : True := trivial")
     assert r["error"]["kind"] == "not_found", r
-    step("snapshot: errors aren't kept; read and cascading delete")
+    step("snapshot: errors aren't kept; read, and modules go with their last entry")
 
 
 MODULE_ROOT = """module
@@ -248,8 +263,12 @@ def MSnap.hidden : Nat := 7
 
 
 def module_snapshots():
+    created = []
+
     def create(code):
-        return post("/snapshots", {"code": code, "timeout": 600})
+        r = post("/snapshots", {"code": code, "timeout": 600})
+        created.append(r)
+        return r
 
     def on(snapshot, body):
         return check(f"{snapshot['header']}\n\n{body}")
@@ -273,7 +292,7 @@ def module_snapshots():
     assert not child["verified"], child
     step("module snapshot: sorry in a proof body is still reported")
 
-    status, verified = call("POST", f"/snapshots/{child['snapshot']}/verify")
+    status, verified = call("POST", f"/snapshots/{child['entry']}/verify")
     assert status == 200 and verified["verified"] and verified["dirty"], verified
     assert verified["checked"] == [root["snapshot"], child["snapshot"]], verified
     step("module snapshot: verify re-checks the chain")
@@ -290,8 +309,7 @@ def module_snapshots():
     assert plain["result"]["ok"], plain
     mixed = create(f"module\npublic import {plain['snapshot']}\n\npublic def x : Nat := 1")
     assert "snapshot" not in mixed and "non-`module`" in mixed["result"]["messages"][0]["data"], mixed
-    status, gone = call("DELETE", f"/snapshots/{root['snapshot']}")
-    assert status == 200 and len(gone["deleted"]) == 3, gone
+    delete_entries(created)
     step("module snapshot: plain code imports it, a module can't import plain code")
 
 

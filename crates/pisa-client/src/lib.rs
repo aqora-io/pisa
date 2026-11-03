@@ -20,6 +20,8 @@
 //! let header = base.header.expect("kept");
 //! let next = client.check(&format!("{header}\nexample : double 2 = 4 := rfl")).await?;
 //! assert!(next.ok);
+//! // The entry keeps the module; deleting it lets the module go.
+//! client.delete_snapshot(&base.entry.expect("kept")).await?;
 //!
 //! let search = pisa_client::SearchClient::new("http://localhost:8100")?;
 //! let hits = search
@@ -28,6 +30,8 @@
 //!     .hits;
 //! # Ok(()) }
 //! ```
+
+use std::collections::BTreeMap;
 
 use pisa_protocol::api::{
     BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse,
@@ -50,6 +54,16 @@ pub use pisa_protocol::search::{
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;
+
+/// Options for [`Client::create_snapshot_with`].
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotOptions {
+    /// Whether to run the kernel re-check; see
+    /// [`create_snapshot_with_verify`](Client::create_snapshot_with_verify).
+    pub verify: Option<bool>,
+    /// Labels for the new entry.
+    pub labels: BTreeMap<String, String>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -259,13 +273,15 @@ impl Client {
     }
 
     /// Checks code like [`check`](Self::check) and, unless Lean reports
-    /// errors, keeps it as a module that later code can import. Start that
-    /// code with the returned `header` to reuse the Lean process that already
-    /// has the snapshot loaded. Code with `sorry` is kept but `dirty`. The
-    /// kernel re-check runs only if the code uses macros, its own or an
-    /// import's; see [`verify_snapshot`](Self::verify_snapshot).
+    /// errors, keeps it as a module that later code can import, with a new
+    /// `entry` that holds it until the entry is deleted. Start that code with
+    /// the returned `header` to reuse the Lean process that already has the
+    /// snapshot loaded. Code with `sorry` is kept but `dirty`. The kernel
+    /// re-check runs only if the code uses macros, its own or an import's;
+    /// see [`verify_snapshot`](Self::verify_snapshot).
     pub async fn create_snapshot(&self, code: &str) -> Result<Snapshot, Error> {
-        self.post_snapshot(code, None).await
+        self.create_snapshot_with(code, &SnapshotOptions::default())
+            .await
     }
 
     /// Like [`create_snapshot`](Self::create_snapshot), choosing whether to
@@ -277,47 +293,59 @@ impl Client {
         code: &str,
         verify: bool,
     ) -> Result<Snapshot, Error> {
-        self.post_snapshot(code, Some(verify)).await
+        let opts = SnapshotOptions {
+            verify: Some(verify),
+            ..Default::default()
+        };
+        self.create_snapshot_with(code, &opts).await
     }
 
-    async fn post_snapshot(&self, code: &str, verify: Option<bool>) -> Result<Snapshot, Error> {
+    /// Like [`create_snapshot`](Self::create_snapshot), with options.
+    pub async fn create_snapshot_with(
+        &self,
+        code: &str,
+        opts: &SnapshotOptions,
+    ) -> Result<Snapshot, Error> {
         let req = SnapshotRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
-            verify,
+            verify: opts.verify,
+            labels: opts.labels.clone(),
         };
         self.post("snapshots", &req).await
     }
 
-    /// Re-checks a snapshot and everything it imports through the kernel,
-    /// imports first, skipping what already passed. A module the kernel
-    /// rejects is reported in `failure`, not as an error.
-    pub async fn verify_snapshot(&self, name: &str) -> Result<SnapshotVerified, Error> {
-        let mut url = self.snapshot_url(name)?;
+    /// Re-checks an entry's module and everything it imports through the
+    /// kernel, imports first, skipping what already passed. A module the
+    /// kernel rejects is reported in `failure`, not as an error.
+    pub async fn verify_snapshot(&self, entry: &str) -> Result<SnapshotVerified, Error> {
+        let mut url = self.snapshot_url(entry)?;
         url.path_segments_mut()
-            .map_err(|_| Error::Url(name.to_string()))?
+            .map_err(|_| Error::Url(entry.to_string()))?
             .push("verify");
         self.endpoint.post_url(url).await
     }
 
-    /// A snapshot's code, imports and check result, by its module name.
-    pub async fn snapshot(&self, name: &str) -> Result<SnapshotInfo, Error> {
-        self.endpoint.get(self.snapshot_url(name)?).await
+    /// An entry with its labels, and its module's code, imports and check
+    /// result.
+    pub async fn snapshot(&self, entry: &str) -> Result<SnapshotInfo, Error> {
+        self.endpoint.get(self.snapshot_url(entry)?).await
     }
 
-    /// Deletes a snapshot and every snapshot that imports it, and returns
-    /// their names.
-    pub async fn delete_snapshot(&self, name: &str) -> Result<Vec<String>, Error> {
-        let deleted: Deleted = self.endpoint.delete(self.snapshot_url(name)?).await?;
-        Ok(deleted.deleted)
+    /// Deletes an entry and returns the names of the modules that went with
+    /// it: its module, if no other entry or kept module needs it, and so on
+    /// up its imports.
+    pub async fn delete_snapshot(&self, entry: &str) -> Result<Vec<String>, Error> {
+        let deleted: Deleted = self.endpoint.delete(self.snapshot_url(entry)?).await?;
+        Ok(deleted.removed)
     }
 
-    fn snapshot_url(&self, name: &str) -> Result<Url, Error> {
+    fn snapshot_url(&self, entry: &str) -> Result<Url, Error> {
         let mut url = self.endpoint.url("snapshots")?;
         url.path_segments_mut()
-            .map_err(|_| Error::Url(name.to_string()))?
-            .push(name);
+            .map_err(|_| Error::Url(entry.to_string()))?
+            .push(entry);
         if let Some(v) = &self.version {
             url.query_pairs_mut().append_pair("version", v);
         }

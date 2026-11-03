@@ -2,8 +2,10 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::Cluster;
-use pisa_client::{Client, Error, ErrorKind};
+use pisa_client::{Client, Error, ErrorKind, SnapshotOptions};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_covers_checks_and_sessions() {
@@ -58,6 +60,7 @@ async fn client_covers_snapshots() {
         .await
         .unwrap();
     let name = base.snapshot.unwrap();
+    let entry = base.entry.unwrap();
     let header = base.header.unwrap();
     assert!(base.result.ok, "{:?}", base.result);
 
@@ -66,16 +69,21 @@ async fn client_covers_snapshots() {
         .await
         .unwrap();
     assert!(r.ok, "{r:?}");
-    let info = client.snapshot(&name).await.unwrap();
+    let info = client.snapshot(&entry).await.unwrap();
+    assert_eq!(
+        (info.entry.as_str(), info.snapshot.as_str()),
+        (entry.as_str(), name.as_str())
+    );
     assert_eq!(info.header, header);
     assert!(!info.dirty);
     assert!(!info.verified);
 
-    let verified = client.verify_snapshot(&name).await.unwrap();
+    let verified = client.verify_snapshot(&entry).await.unwrap();
     assert!(verified.verified);
+    assert_eq!(verified.entry, entry);
     assert_eq!(verified.checked, std::slice::from_ref(&name));
     assert!(verified.failure.is_none());
-    assert!(client.snapshot(&name).await.unwrap().verified);
+    assert!(client.snapshot(&entry).await.unwrap().verified);
     let forged = client
         .create_snapshot_with_verify("import Foo\ntheorem forge : 1 = 1 := rfl", true)
         .await
@@ -87,10 +95,25 @@ async fn client_covers_snapshots() {
         .unwrap();
     assert!(!opted_out.verified, "{opted_out:?}");
 
-    let deleted = client.delete_snapshot(&name).await.unwrap();
-    assert_eq!(deleted, std::slice::from_ref(&name));
-    let err = client.snapshot(&name).await.unwrap_err();
+    let removed = client.delete_snapshot(&entry).await.unwrap();
+    assert_eq!(removed, std::slice::from_ref(&name));
+    let err = client.snapshot(&entry).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_passes_labels() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let opts = SnapshotOptions {
+        labels: BTreeMap::from([("k".to_string(), "v".to_string())]),
+        ..Default::default()
+    };
+    let code = "import Foo\ntheorem base : 1 = 1 := rfl";
+    let created = client.create_snapshot_with(code, &opts).await.unwrap();
+    assert_eq!(created.labels, opts.labels);
+    let info = client.snapshot(&created.entry.unwrap()).await.unwrap();
+    assert_eq!(info.labels, opts.labels);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -98,16 +121,16 @@ async fn verify_snapshot_uses_the_clients_version() {
     let c = Cluster::start(&[("w0", "a", 1), ("w1", "b", 1)]).await;
     let client = |version: &str| Client::new(&c.url("/")).unwrap().with_version(version);
     let code = "import Foo\ntheorem base : 1 = 1 := rfl";
-    let name = client("b")
+    let entry = client("b")
         .create_snapshot(code)
         .await
         .unwrap()
-        .snapshot
+        .entry
         .unwrap();
 
-    let err = client("a").verify_snapshot(&name).await.unwrap_err();
+    let err = client("a").verify_snapshot(&entry).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
-    assert!(client("b").verify_snapshot(&name).await.unwrap().verified);
+    assert!(client("b").verify_snapshot(&entry).await.unwrap().verified);
 }
 
 #[tokio::test(flavor = "multi_thread")]
