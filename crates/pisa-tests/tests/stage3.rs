@@ -118,16 +118,17 @@ async fn sessions_resume_on_another_worker() {
 #[tokio::test(flavor = "multi_thread")]
 async fn bad_keys_unknown_states_and_policy() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let unknown = format!("{}~abc~0123", c.version("v"));
     let (status, body) = try_tactic(&c, &json!("not-a-key"), "rfl").await;
     assert_eq!(
         (status, &body["error"]["kind"]),
         (400, &json!("bad_request"))
     );
 
-    let (status, body) = try_tactic(&c, &json!("v~abc~0123"), "rfl").await;
+    let (status, body) = try_tactic(&c, &json!(unknown), "rfl").await;
     assert_eq!((status, &body["error"]["kind"]), (404, &json!("not_found")));
 
-    let (status, body) = try_tactic(&c, &json!("v~abc~0123"), "run_tac pure ()").await;
+    let (status, body) = try_tactic(&c, &json!(unknown), "run_tac pure ()").await;
     assert_eq!(status, 422);
     assert_eq!(
         body["error"],
@@ -135,7 +136,10 @@ async fn bad_keys_unknown_states_and_policy() {
     );
 
     let (status, body) = c
-        .post("/sessions/v~abc~0123/check", json!({"code": "#check Nat"}))
+        .post(
+            &format!("/sessions/{unknown}/check"),
+            json!({"code": "#check Nat"}),
+        )
         .await;
     assert_eq!((status, &body["error"]["kind"]), (404, &json!("not_found")));
 

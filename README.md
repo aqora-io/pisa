@@ -57,6 +57,11 @@ chart set:
   `tikv` or `memory` (the default). `memory` keeps it in the worker process, so
   it isn't shared between workers or kept across restarts. `PISA_TIKV_PD` lists
   the PD endpoints, comma-separated (e.g. `pd:2379`), and `tikv` requires it.
+  - TiKV holds the only copy of the snapshot entries and module records, which
+    never expire, so run it durably and back it up.
+  - Without TiDB nothing collects the old versions TiKV keeps of what was
+    rewritten or deleted, so the workers do: every 10 minutes, each moves the
+    cluster's GC safepoint to 10 minutes ago.
 - **Blobs**, the pickled proof states and snapshot modules, are in S3.
   `PISA_STORE` is `s3`, which reads the `AWS_*` variables, or `memory`.
 
@@ -88,7 +93,9 @@ S3-compatible bucket.
 - The chart doesn't deploy TiKV. Set `metadata.tikv.pdEndpoints` to the PD
   endpoints of a cluster you run, for example with the
   [TiDB Operator](https://docs.pingcap.com/tidb-in-kubernetes/stable). It is
-  required.
+  required. TiKV holds the only copy of the snapshot entries and module
+  records, which never expire, so it must be durable and backed up. The
+  workers move its GC safepoint themselves, as there is no TiDB to.
 - Give the bucket's credentials as an existing Secret, or leave
   `store.s3.credentialsSecret.name` empty to use the pod's ambient credentials
   (e.g. EKS IRSA).
@@ -146,6 +153,16 @@ python3 scripts/k8s_scale.py           # scales up under load, back down, drains
 - Auth on the API.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
+## Upgrading
+
+To the release that moved metadata into TiKV and snapshots onto entries:
+- Upgrade the router and the workers together. Their snapshot jobs changed
+  shape, and a router and workers of different releases fail each other's.
+- Nothing is carried over: the snapshot, session and proof-state metadata in
+  S3 is ignored, so snapshots, sessions and states start over.
+- The snapshot HTTP API takes entry ids where it took module names; see
+  [Snapshots](#snapshots).
+
 ## API
 
 All fields are snake_case. The request and response types are in
@@ -197,7 +214,7 @@ an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds
 | --- | --- | --- |
 | `lean`, `policy` | 422 | Lean or the policy refused the input, e.g. an unknown tactic |
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
-| `capacity`, `unavailable` | 429, 503 | No worker could take the request; retry later |
+| `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
 | `bad_request`, `not_found` | 400, 404 | Malformed request, unknown state, session or snapshot entry |
 | `internal` | 500 | A bug |
 
@@ -245,19 +262,23 @@ which then changes nothing.
   the same key match nothing, as an entry has one value per key.
 - **Order and pages.** Entries come newest first, as summaries: what
   `GET /snapshots/{entry}` returns without `code` and `result`. `limit` is 1–1000
-  (default 100). A full page has `next`, an opaque cursor: pass it as `after`
-  for the page after it, which may be empty. A cursor is a position, so it
+  (default 100), and a listing takes up to 64 `label`s. Keep requesting while a
+  page has `next`, an opaque cursor, passing it as `after`: a page may be
+  short, or even empty, and still have `next`. A cursor is a position, so it
   keeps working when its entry is deleted.
 - **Speed.** The first `label` is scanned and the others are looked up for
-  each entry it finds, so put the most selective label first. A filter that
-  matches few of the first label's entries can take a while to fill a page.
+  each entry it finds, so put the most selective label first. One request
+  reads at most about 10,000 of these index keys, then returns what it found
+  with `next`: so a filter that matches few of the first label's entries
+  gives short pages.
 
 **Retrying a create.** A create can carry an idempotency `key`, 1–256 bytes of
 letters, digits, `.`, `_`, `:`, `/` and `-` (anything else is a `bad_request`
 in `result.error`), so that a retry is safe:
 - While an entry made with the key exists, creating the same code with it
-  returns that entry, with its own labels, without building anything. A
-  different `labels` on the retry is ignored.
+  returns that entry as it is, without building anything. The retry's other
+  fields are ignored, `labels` and `verify` included, so a retry with
+  `verify: true` can return `verified: false` with no error.
 - Different code under a used key is a `bad_request` in `result.error`, and
   nothing is kept.
 - A create that keeps nothing, e.g. when Lean reports errors or a `verify: true`
@@ -398,7 +419,7 @@ across threads. Results are plain dicts; the type stubs describe their shapes.
 Exceptions carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
 - `LimitError`: the input hit a timeout, the memory limit, or crashed Lean.
-- `CapacityError`: no worker was free; retry later.
+- `CapacityError`: no worker was free, or the server is unavailable; retry later.
 - `NotFoundError`: unknown or expired state or session, or unknown snapshot entry.
 - `PisaError`: the base class; also raised for transport failures, with no
   `kind` or `status`.

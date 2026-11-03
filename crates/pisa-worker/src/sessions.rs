@@ -13,6 +13,7 @@ use pisa_protocol::wire::{
 };
 
 use crate::check::{axiom_report, header_error, policy_error, run, run_check, unexpected};
+use crate::kv::KvError;
 use crate::policy::parse_report;
 use crate::pool::{Lease, Pool, Resident};
 use crate::store::{SessionMeta, StateMeta, Store, now_secs};
@@ -27,6 +28,15 @@ pub struct Sessions {
 
 fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Internal, e.to_string())
+}
+
+/// The error for a [`Store`] call that failed: `unavailable` if the KV store
+/// did, else `internal`.
+fn store_error(e: anyhow::Error) -> Error {
+    match e.downcast::<KvError>() {
+        Ok(e) => e.into(),
+        Err(e) => internal(e),
+    }
 }
 
 impl Sessions {
@@ -122,7 +132,7 @@ impl Sessions {
         self.store
             .put_session(&session_id, &meta)
             .await
-            .map_err(internal)?;
+            .map_err(store_error)?;
         Ok(StartResponse {
             session,
             states,
@@ -202,13 +212,14 @@ impl Sessions {
             Err(e) => return failed(e),
         };
         let session = match self.store.session(&key.id).await {
-            Ok(s) => s,
-            Err(e) => {
+            Ok(Some(s)) => s,
+            Ok(None) => {
                 return failed(Error::new(
                     ErrorKind::NotFound,
-                    format!("unknown session: {e}"),
+                    format!("unknown session: {}", key.id),
                 ));
             }
+            Err(e) => return failed(store_error(e)),
         };
         let same_imports = split_header(&job.code).header_key == key.header_key;
         let outcome = run_check(
@@ -261,7 +272,7 @@ impl Sessions {
             .store
             .put_state(&bytes.map_err(internal)?, meta)
             .await
-            .map_err(internal)?;
+            .map_err(store_error)?;
         slot.remember(
             hash.clone(),
             Resident {
@@ -279,7 +290,8 @@ impl Sessions {
             .store
             .state_meta(&key.id)
             .await
-            .map_err(|e| Error::new(ErrorKind::NotFound, format!("unknown state: {e}")))?;
+            .map_err(store_error)?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("unknown state: {}", key.id)))?;
         let (env, _) = slot
             .warm_up(&meta.header, &key.header_key)
             .await

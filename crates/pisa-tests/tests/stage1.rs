@@ -140,6 +140,75 @@ async fn worker_reports_a_new_warm_header_before_the_result() {
     }
 }
 
+/// During a rolling deploy a router of another release can send a job this
+/// worker can't decode. It fails that job and keeps the connection, so the
+/// router doesn't retry everything the worker is running elsewhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_does_not_decode_fails_alone() {
+    use pisa_protocol::api::ErrorKind;
+    use pisa_protocol::wire::{self, CheckJob, Job, JobResult, RouterMessage, WorkerMessage};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut cfg = common::worker_config(listener.local_addr().unwrap(), "w0", "v", 1);
+    // Not the default, which the test above shares with any other "w0".
+    let dir = tempfile::tempdir().unwrap();
+    cfg.work_dir = Some(dir.path().into());
+    let store: std::sync::Arc<dyn object_store::ObjectStore> =
+        std::sync::Arc::new(object_store::memory::InMemory::new());
+    tokio::spawn(pisa_worker::run_with_stores(
+        cfg,
+        store,
+        pisa_worker::kv::Kv::memory(),
+        std::future::pending(),
+    ));
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut conn = wire::connection(stream);
+    async fn result(conn: &mut wire::Connection<tokio::net::TcpStream>) -> (u64, JobResult) {
+        loop {
+            match wire::recv(conn).await.unwrap().unwrap() {
+                WorkerMessage::Result { request_id, result } => return (request_id, result),
+                WorkerMessage::Hello { .. }
+                | WorkerMessage::Status { .. }
+                | WorkerMessage::Restart { .. } => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    let bad = json!({"type": "job", "request_id": 1, "job": {"kind": "check", "code": 5}});
+    wire::send(&mut conn, &bad).await.unwrap();
+    let (id, r) = result(&mut conn).await;
+    assert!(
+        id == 1 && matches!(&r, JobResult::Failed { error } if error.contains("another release")),
+        "{id} {r:?}"
+    );
+
+    // The release before entries named the entry `snapshot`.
+    let old = json!({
+        "type": "job", "request_id": 2,
+        "job": {"kind": "snapshot_get", "snapshot": "PisaSnap.s0"}
+    });
+    wire::send(&mut conn, &old).await.unwrap();
+    let (id, r) = result(&mut conn).await;
+    assert!(
+        id == 2 && matches!(&r, JobResult::Snapshot(Err(e)) if e.kind == ErrorKind::BadRequest),
+        "{id} {r:?}"
+    );
+
+    let job = Job::Check(CheckJob {
+        code: "theorem t : 1 = 1 := rfl".into(),
+        timeout_secs: 5,
+        detail: Vec::new(),
+    });
+    let msg = RouterMessage::Job { request_id: 3, job };
+    wire::send(&mut conn, &msg).await.unwrap();
+    let (id, r) = result(&mut conn).await;
+    assert!(
+        id == 3 && matches!(&r, JobResult::Check(o) if o.error.is_none()),
+        "{id} {r:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn batch_results_keep_order() {
     let c = Cluster::start(&[("w0", "v", 2), ("w1", "v", 2)]).await;

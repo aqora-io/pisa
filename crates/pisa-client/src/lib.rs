@@ -64,7 +64,7 @@ pub struct SnapshotOptions {
     /// Labels for the new entry.
     pub labels: BTreeMap<String, String>,
     /// An idempotency key: a retried create with the same key returns the
-    /// entry the first one made.
+    /// entry the first one made, as it is, ignoring the other options.
     pub key: Option<String>,
 }
 
@@ -347,10 +347,12 @@ impl Client {
     }
 
     /// Entries newest first, as summaries without code or check results: those
-    /// with every `(key, value)` label in `labels`, or all of them. A page has
-    /// up to `limit` (1 to 1000, default 100); a full one has `next`, which as
-    /// `after` gives the page after it. The first label is the one scanned, so
-    /// put the most selective first.
+    /// with every `(key, value)` label in `labels` (up to 64), or all of them.
+    /// A page has up to `limit` (1 to 1000, default 100). Keep passing its
+    /// `next` as `after` while it has one: a request reads a bounded number of
+    /// index entries, so a page may be short, even empty, and still have
+    /// `next`. The first label is the one scanned, so put the most selective
+    /// first.
     pub async fn list_snapshots(
         &self,
         labels: &[(&str, &str)],

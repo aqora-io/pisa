@@ -50,7 +50,8 @@ pub enum ErrorKind {
     Lean,
     /// No worker was free within the server's wait limit; retry later.
     Capacity,
-    /// Workers kept disconnecting while running the job; retry later.
+    /// Workers kept disconnecting while running the job, or the metadata
+    /// store failed or stayed contended; retry later.
     Unavailable,
     BadRequest,
     NotFound,
@@ -309,8 +310,9 @@ pub struct SnapshotRequest {
     pub timeout: u64,
     /// Whether to re-check the code through the kernel. `true` also re-checks
     /// its imports, so the result ends [`verified`](SnapshotResponse::verified)
-    /// or has an error. `false` never re-checks. By default, only code that
-    /// uses macros, its own or an import's, is re-checked.
+    /// or has an error, except on a [`key`](Self::key) replay. `false` never
+    /// re-checks. By default, only code that uses macros, its own or an
+    /// import's, is re-checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<bool>,
     /// The new entry's labels; see [`check_labels`](crate::labels::check_labels)
@@ -318,22 +320,25 @@ pub struct SnapshotRequest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// Makes the create safe to retry: while an entry made with this key
-    /// exists, a create with it on the same code returns that entry, with its
-    /// own labels, instead of adding another; on other code it is a
-    /// `bad_request`. Creates that keep nothing don't use it up, and deleting
-    /// the entry frees it. See [`check_key`](crate::labels::check_key) for the
-    /// rules.
+    /// exists, a create with it on the same code returns that entry as it is,
+    /// instead of adding another; on other code it is a `bad_request`. Such a
+    /// replay ignores the request's other fields, `labels` and `verify`
+    /// included, so it can be `verified: false` with no error after
+    /// `verify: true`. Creates that keep nothing don't use the key up, and
+    /// deleting the entry frees it. See [`check_key`](crate::labels::check_key)
+    /// for the rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotResponse {
-    /// The new entry, which the other snapshot endpoints take. It keeps the
-    /// module until it is deleted. Absent when nothing new was kept: the code
-    /// was not kept, or `verify: true` found it kept but failing the re-check,
-    /// in which case `snapshot` and `header` are set and `result` has the
-    /// error.
+    /// The entry, which the other snapshot endpoints take: the one this create
+    /// added, or on a [`key`](SnapshotRequest::key) replay the one the key is
+    /// on. It keeps the module until it is deleted. Absent when nothing new
+    /// was kept: the code was not kept, or `verify: true` found it kept but
+    /// failing the re-check, in which case `snapshot` and `header` are set and
+    /// `result` has the error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
     /// The module to import, e.g. `PisaSnap.s1a2b…`, shared by every entry on
@@ -405,14 +410,16 @@ pub struct SnapshotSummary {
 }
 
 /// `GET /snapshots`: the version's entries, newest first, that have every
-/// label the query names as `label=key:value` (split on the first `:`), at
-/// most `limit` of them (1 to 1000, default 100). A full page has `next`;
-/// passing it as `after` gives the page after it.
+/// label the query names as `label=key:value` (split on the first `:`; up to
+/// 64 filters), at most `limit` of them (1 to 1000, default 100). Keep
+/// requesting with `next` as `after` while a page has it: one request reads
+/// at most about 10,000 index entries, so a page may be short, even empty,
+/// and still have `next`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotList {
     pub entries: Vec<SnapshotSummary>,
-    /// The cursor after the last entry, when the page is full. The page after
-    /// it may be empty.
+    /// Where the next page starts, unless the listing reached the end. The
+    /// page after it may be empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
 }

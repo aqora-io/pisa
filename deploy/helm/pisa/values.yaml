@@ -67,9 +67,13 @@ store:
   # Delete stored states and sessions older than this (0 keeps them).
   stateTtlSecs: 86400
 
-# TiKV holds the session and proof-state records, which all workers of a
-# release share. The chart doesn't deploy TiKV; run it with the TiDB Operator
-# (https://docs.pingcap.com/tidb-in-kubernetes/stable) or any other means.
+# TiKV holds the metadata that all workers of a release share: the session
+# and proof-state records, and the snapshot entries and module records. It has
+# the only copy of the snapshot records, which never expire, so it must be
+# durable and backed up. The workers move its GC safepoint themselves, as
+# there is no TiDB to. The chart doesn't deploy TiKV; run it with the TiDB
+# Operator (https://docs.pingcap.com/tidb-in-kubernetes/stable) or any other
+# means.
 metadata:
   tikv:
     # Required: the cluster's PD endpoints, e.g. ["pd.tikv:2379"].

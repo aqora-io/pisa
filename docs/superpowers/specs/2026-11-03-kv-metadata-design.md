@@ -111,10 +111,12 @@ A crash partway up the chain leaves unreferenced modules behind. That's harmless
 **Set labels** (`set_labels(e, set, remove)`): one transaction applies the removes, then the sets. It updates the `label` keys (deleting the old value's key on change) and writes `entry/e`. Returns the entry's summary.
 
 **List** (`list(labels, limit, after)`):
+- At most 64 label pairs (`MAX_LABELS`); more is a 400 at the router, and the worker checks again.
 - No labels: scan `new` from the cursor.
-- With labels: scan the `label` keys of the first pair from the cursor. For each `(R, e)`, check the other pairs with point gets of their exact keys (`label/k2/v2/R/e`). Continue in pages until there are `limit` matches or the range is exhausted.
+- With labels: scan the `label` keys of the first pair from the cursor. For each `(R, e)`, check the other pairs with point gets of their exact keys (`label/k2/v2/R/e`).
+- Scan in pages of `max(limit, 256)` keys until there are `limit` matches, the range is exhausted, or the request has read `MAX_SCAN` (10,000) index keys, counting each scanned key and each point get. An entry whose gets pass the budget is still checked to the end.
 - Then fetch each entry and its module.
-- The cursor is the opaque `R`+`e` of the last item returned. Callers should put their most selective label first; document this.
+- The cursor is the opaque `R`+`e` of the last item returned on a full page, or of the last key examined when the budget ran out; it is absent only when the range is exhausted. So a page can be short, or empty, and still have `next`: callers keep requesting while `next` is present. (This replaces "continue until `limit` matches or the range is exhausted", which let one request do unbounded work.) Callers should put their most selective label first; document this.
 
 **Label and key rules (my call; in `pisa-protocol` so router and worker agree):**
 - Label key: 1–128 bytes of `[A-Za-z0-9._/-]`, so `key:value` splits on the first `:`.

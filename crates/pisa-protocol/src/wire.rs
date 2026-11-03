@@ -55,6 +55,44 @@ pub enum RouterMessage {
     },
 }
 
+/// A frame from the router, as a worker reads it.
+#[derive(Debug)]
+pub enum Inbound {
+    Message(RouterMessage),
+    /// A job whose `job` doesn't decode, e.g. one in another release's format.
+    /// The worker answers it with [`JobResult::Failed`]: dropping the
+    /// connection instead would make the router retry it, and every other job
+    /// on the connection, elsewhere.
+    BadJob {
+        request_id: u64,
+        error: String,
+    },
+}
+
+/// A frame is an error only if it is neither a job with a `request_id` nor a
+/// [`RouterMessage`].
+impl<'de> Deserialize<'de> for Inbound {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        use serde_json::Value;
+        let mut frame = Value::deserialize(d)?;
+        let is_job = frame.get("type").and_then(Value::as_str) == Some("job");
+        if is_job && let Some(request_id) = frame.get("request_id").and_then(Value::as_u64) {
+            let job = frame.get_mut("job").map(Value::take);
+            return Ok(match serde_json::from_value(job.unwrap_or_default()) {
+                Ok(job) => Inbound::Message(RouterMessage::Job { request_id, job }),
+                Err(e) => Inbound::BadJob {
+                    request_id,
+                    error: e.to_string(),
+                },
+            });
+        }
+        serde_json::from_value(frame)
+            .map(Inbound::Message)
+            .map_err(D::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Job {
@@ -118,7 +156,9 @@ pub struct SnapshotCreateJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotJob {
-    /// The entry id.
+    /// The entry id. Routers of the release before entries called it
+    /// `snapshot` and sent a module name, which is then a `bad_request`.
+    #[serde(alias = "snapshot")]
     pub entry: String,
 }
 
@@ -294,5 +334,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_job_that_does_not_decode_keeps_its_request_id() {
+        let decode = serde_json::from_value::<Inbound>;
+        let bad = decode(serde_json::json!({
+            "type": "job", "request_id": 4, "job": {"kind": "check", "code": 5}
+        }));
+        assert!(
+            matches!(bad, Ok(Inbound::BadJob { request_id: 4, .. })),
+            "{bad:?}"
+        );
+
+        // A job from a router of the release before entries.
+        let old = decode(serde_json::json!({
+            "type": "job", "request_id": 5,
+            "job": {"kind": "snapshot_get", "snapshot": "PisaSnap.s0"}
+        }));
+        let Ok(Inbound::Message(RouterMessage::Job {
+            request_id: 5,
+            job: Job::SnapshotGet(job),
+        })) = old
+        else {
+            panic!("{old:?}")
+        };
+        assert_eq!(job.entry, "PisaSnap.s0");
+
+        let prewarm = decode(serde_json::json!({"type": "prewarm", "headers": ["import A"]}));
+        assert!(matches!(
+            prewarm,
+            Ok(Inbound::Message(RouterMessage::Prewarm { .. }))
+        ));
+        for unusable in [
+            serde_json::json!({"type": "job", "job": {"kind": "check"}}),
+            serde_json::json!({"type": "job", "request_id": "x", "job": {}}),
+            serde_json::json!({"type": "from_the_future"}),
+        ] {
+            assert!(decode(unusable.clone()).is_err(), "{unusable}");
+        }
     }
 }

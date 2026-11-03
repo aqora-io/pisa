@@ -156,14 +156,16 @@ class Client:
         already kept gets a new entry on its module without being built again.
 
         `key` makes the call safe to retry: while an entry made with the same
-        key exists, creating the same code again returns that entry, with its
-        own labels, and other code is a `bad_request` in `result["error"]`. A
-        create that keeps nothing doesn't use the key up, and deleting the entry
-        frees it. A key is 1 to 256 bytes of letters, digits and `._:/-`.
+        key exists, creating the same code again returns that entry as it is,
+        ignoring the call's other arguments, `labels` and `verify` included,
+        and other code is a `bad_request` in `result["error"]`. A create that
+        keeps nothing doesn't use the key up, and deleting the entry frees it.
+        A key is 1 to 256 bytes of letters, digits and `._:/-`.
 
         The kernel re-check runs by default only if the code uses macros, its
         own or an import's. `verify=True` always runs it and also re-checks the
-        imports, so the snapshot ends `verified` or the result has an error.
+        imports, so the snapshot ends `verified` or the result has an error,
+        except on a `key` replay, which can be `verified: False` with no error.
         `verify=False` skips it, and the snapshot stays not `verified`."""
     def verify_snapshot(self, entry: str) -> SnapshotVerified:
         """Re-check an entry's module and everything it imports through the
@@ -184,11 +186,12 @@ class Client:
         after: str | None = None,
     ) -> SnapshotList:
         """Entries newest first, as summaries without code or check results:
-        those with every label in `labels` (exact matches), or all of them. A
-        page has up to `limit` entries (1 to 1000, default 100); a full one has
-        `next`, which as `after` gives the page after it. The first label in
-        `labels` is the one the server scans, so put the most selective
-        first."""
+        those with every label in `labels` (exact matches, up to 64), or all of
+        them. A page has up to `limit` entries (1 to 1000, default 100). Keep
+        passing its `next` as `after` while it has one: a request reads a
+        bounded number of index entries, so a page may be short, even empty,
+        and still have `next`. The first label in `labels` is the one the
+        server scans, so put the most selective first."""
     def set_snapshot_labels(
         self,
         entry: str,

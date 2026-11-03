@@ -9,15 +9,31 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tikv_client::{CheckLevel, TransactionClient, TransactionOptions};
+use tikv_client::{CheckLevel, Config, Timestamp, TransactionClient, TransactionOptions};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// The first component of every key the worker stores.
 pub const ROOT: &str = "pisa";
 
-/// The most times [`retry`] runs an attempt.
-const MAX_ATTEMPTS: usize = 8;
+/// The most times [`retry`] runs an attempt: enough that its sleeps come to
+/// about [`RETRY_BUDGET`] even when the jitter keeps them all short.
+const MAX_ATTEMPTS: usize = 16;
+
+/// [`retry`]'s first sleep; each next one is twice as long, up to
+/// [`MAX_BACKOFF`].
+const FIRST_BACKOFF: Duration = Duration::from_millis(10);
+
+const MAX_BACKOFF: Duration = Duration::from_secs(1);
+
+/// The most [`retry`] sleeps in all: longer than TiKV's 3 s lock TTL, so that
+/// a lock left by a client that died expires while it waits.
+const RETRY_BUDGET: Duration = Duration::from_secs(5);
+
+/// The largest gRPC message the TiKV client accepts, so that it can read back
+/// the largest record the catalog writes.
+const TIKV_MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
 /// Encodes a tuple of strings: each component's bytes with `0x00` written as
 /// `0x00 0xFF`, then a `0x00` terminator.
@@ -79,6 +95,18 @@ impl IsConflict for KvError {
     }
 }
 
+/// What a request whose store access failed tells the client: the store
+/// couldn't be reached, or stayed contended through every [`retry`], so the
+/// request may succeed later.
+impl From<KvError> for pisa_protocol::api::Error {
+    fn from(e: KvError) -> Self {
+        pisa_protocol::api::Error::new(
+            pisa_protocol::api::ErrorKind::Unavailable,
+            format!("the metadata store is unavailable, retry later: {e}"),
+        )
+    }
+}
+
 impl From<tikv_client::Error> for KvError {
     fn from(e: tikv_client::Error) -> Self {
         if is_tikv_conflict(&e) {
@@ -101,18 +129,36 @@ fn is_tikv_conflict(e: &tikv_client::Error) -> bool {
     }
 }
 
-/// Runs `attempt` (which begins and commits its own transaction) up to 8
-/// times while it fails with a conflict.
+/// Runs `attempt` (which begins and commits its own transaction) again while
+/// it fails with a conflict, sleeping in between: from 10 ms, doubling up to
+/// 1 s, each sleep jittered down by up to half so that racing workers spread
+/// out. It gives up after 16 attempts or about 5 s of sleeping, whichever
+/// comes first, with the last conflict.
 pub async fn retry<T, E: IsConflict, F: Future<Output = Result<T, E>>>(
     mut attempt: impl FnMut() -> F,
 ) -> Result<T, E> {
     let mut attempts = 1;
+    let mut backoff = FIRST_BACKOFF;
+    let mut slept = Duration::ZERO;
     loop {
         match attempt().await {
-            Err(e) if e.is_conflict() && attempts < MAX_ATTEMPTS => attempts += 1,
+            Err(e) if e.is_conflict() && attempts < MAX_ATTEMPTS && slept < RETRY_BUDGET => {
+                let pause = jittered(backoff).min(RETRY_BUDGET - slept);
+                tokio::time::sleep(pause).await;
+                slept += pause;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                attempts += 1;
+            }
             result => return result,
         }
     }
+}
+
+/// A random duration from half of `d` to `d`.
+fn jittered(d: Duration) -> Duration {
+    let half = d / 2;
+    let random = uuid::Uuid::new_v4().as_u128() as u64;
+    half + Duration::from_nanos(random % (half.as_nanos() as u64 + 1))
 }
 
 #[derive(Clone)]
@@ -129,8 +175,22 @@ impl Kv {
 
     /// Connects to the TiKV cluster behind the given PD endpoints.
     pub async fn tikv(pd_endpoints: &[String]) -> Result<Kv, KvError> {
-        let client = TransactionClient::new(pd_endpoints.to_vec()).await?;
+        let config = Config::default().with_grpc_max_decoding_message_size(TIKV_MAX_MESSAGE);
+        let client = TransactionClient::new_with_config(pd_endpoints.to_vec(), config).await?;
         Ok(Kv::Tikv(TikvKv(client)))
+    }
+
+    /// Lets TiKV collect the old versions that writes and deletes leave, up
+    /// to `older_than` ago, by moving the cluster's GC safepoint there.
+    /// Without TiDB nothing else moves it, and old versions pile up. A
+    /// transaction that started before the safepoint may fail, but the
+    /// worker's take milliseconds. The in-memory store keeps no old versions,
+    /// so there it does nothing.
+    pub async fn gc(&self, older_than: Duration) -> Result<(), KvError> {
+        match self {
+            Kv::Memory(_) => Ok(()),
+            Kv::Tikv(kv) => kv.gc(older_than).await,
+        }
     }
 
     /// Starts a transaction.
@@ -284,6 +344,17 @@ impl TikvKv {
     async fn begin(&self) -> Result<TikvTxn, KvError> {
         let options = TransactionOptions::new_optimistic().drop_check(CheckLevel::None);
         Ok(TikvTxn(Box::new(self.0.begin_with_options(options).await?)))
+    }
+
+    /// See [`Kv::gc`]. A timestamp's `physical` part is in milliseconds.
+    async fn gc(&self, older_than: Duration) -> Result<(), KvError> {
+        let now = self.0.current_timestamp().await?;
+        let safepoint = Timestamp {
+            physical: now.physical.saturating_sub(older_than.as_millis() as i64),
+            ..Default::default()
+        };
+        self.0.gc(safepoint).await?;
+        Ok(())
     }
 }
 
@@ -465,6 +536,7 @@ mod tests {
     /// docker run -d --rm --name pisa-tikv --network host --ulimit nofile=1048576 pingcap/tikv:v8.5.1 \
     ///   --addr=127.0.0.1:20160 --status-addr=127.0.0.1:20180 --data-dir=/tmp/tikv --pd=127.0.0.1:2379
     /// PISA_TEST_TIKV_PD=127.0.0.1:2379 cargo test -p pisa-worker tikv_ -- --nocapture
+    /// PISA_TEST_TIKV_PD=127.0.0.1:2379 cargo test -p pisa-tests --test stage4 --test listing
     /// docker stop pisa-tikv pisa-pd
     /// ```
     #[tokio::test]
@@ -543,8 +615,9 @@ mod tests {
         ))));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn retry_reruns_on_conflict() {
+        let start = tokio::time::Instant::now();
         let mut calls = 0;
         let result = retry(|| {
             calls += 1;
@@ -560,7 +633,15 @@ mod tests {
         .await;
         assert!(matches!(result, Ok(7)));
         assert_eq!(calls, 3);
+        // Two sleeps: 5–10 ms, then 10–20 ms. The timer rounds each up to the
+        // next millisecond.
+        let slept = start.elapsed();
+        assert!(
+            (Duration::from_millis(15)..=Duration::from_millis(32)).contains(&slept),
+            "{slept:?}"
+        );
 
+        let start = tokio::time::Instant::now();
         let mut calls = 0;
         let result: Result<(), KvError> = retry(|| {
             calls += 1;
@@ -568,7 +649,15 @@ mod tests {
         })
         .await;
         assert!(matches!(result, Err(KvError::Conflict)));
-        assert_eq!(calls, 8);
+        // Unjittered, the budget runs out during the 11th sleep.
+        assert!((12..=MAX_ATTEMPTS).contains(&calls), "{calls}");
+        // At least the halves of 10 ms, …, 640 ms, then eight of 1 s.
+        let slept = start.elapsed();
+        let rounding = Duration::from_millis(MAX_ATTEMPTS as u64);
+        assert!(
+            (Duration::from_millis(4635)..=RETRY_BUDGET + rounding).contains(&slept),
+            "{slept:?}"
+        );
 
         let mut calls = 0;
         let result: Result<(), KvError> = retry(|| {
@@ -578,5 +667,32 @@ mod tests {
         .await;
         assert!(matches!(result, Err(KvError::Other(_))));
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn jitter_stays_within_half_of_the_backoff() {
+        for _ in 0..1000 {
+            let d = jittered(Duration::from_millis(10));
+            assert!((Duration::from_millis(5)..=Duration::from_millis(10)).contains(&d));
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_gc_does_nothing() {
+        let kv = Kv::memory();
+        let k = key(&["t", "a"]);
+        let mut txn = kv.begin().await.unwrap();
+        txn.put(k.clone(), b"one".to_vec()).await.unwrap();
+        txn.commit().await.unwrap();
+        kv.gc(Duration::ZERO).await.unwrap();
+        let mut txn = kv.begin().await.unwrap();
+        assert_eq!(txn.get(&k).await.unwrap(), Some(b"one".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn tikv_gc() {
+        let Some(pd) = test_pd() else { return };
+        let kv = Kv::tikv(&pd).await.unwrap();
+        kv.gc(Duration::from_secs(600)).await.unwrap();
     }
 }

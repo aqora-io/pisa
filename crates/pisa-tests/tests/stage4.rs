@@ -58,11 +58,12 @@ fn entry(snapshot: &Value) -> &str {
 /// its record names.
 async fn blob(c: &Cluster, snapshot: &Value, ext: &str) -> String {
     let id = &module(snapshot)["PisaSnap.s".len()..];
-    let record = key(&[KV_ROOT, "v", "mod", id]);
+    let v = c.version("v");
+    let record = key(&[KV_ROOT, &v, "mod", id]);
     let bytes = c.kv.begin().await.unwrap().get(&record).await.unwrap();
     let meta: Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
     let build = meta["modules"].as_array().unwrap().last().unwrap()["build"].clone();
-    format!("snapshots/v/{id}.{}.{ext}.zst", build.as_str().unwrap())
+    format!("snapshots/{v}/{id}.{}.{ext}.zst", build.as_str().unwrap())
 }
 
 async fn request(c: &Cluster, method: reqwest::Method, path: &str) -> (u16, Value) {
@@ -79,7 +80,7 @@ async fn code_on_a_snapshot_sees_it_and_reports_only_itself() {
     let module = root["snapshot"].as_str().unwrap();
     assert!(module.starts_with("PisaSnap.s"), "{root}");
     assert_eq!(root["header"], format!("import Foo\nimport {module}"));
-    assert_eq!(root["version"], "v");
+    assert_eq!(root["version"], c.version("v"));
     assert_eq!(root["dirty"], false);
     assert_eq!(root["result"]["ok"], true, "{root}");
     assert_eq!(names(&root["result"]), ["base"]);
@@ -234,7 +235,9 @@ async fn create_keyed(c: &Cluster, code: &str, key: &str, labels: Value) -> Valu
 
 /// Whether the KV store has the idempotency key `k`.
 async fn has_key(c: &Cluster, k: &str) -> bool {
-    let want = [KV_ROOT, "v", "key", k].map(String::from).to_vec();
+    let want = [KV_ROOT, &c.version("v"), "key", k]
+        .map(String::from)
+        .to_vec();
     c.stored_keys("v").await.contains(&want)
 }
 
@@ -936,7 +939,7 @@ async fn verify_takes_the_axioms_from_the_kernel_re_check() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let snapshot = kept(&c, "import Foo\n\ntheorem d : 1 = 1 := by sorry").await;
     let id = &module(&snapshot)["PisaSnap.s".len()..];
-    let record = key(&[KV_ROOT, "v", "mod", id]);
+    let record = key(&[KV_ROOT, &c.version("v"), "mod", id]);
     let mut txn = c.kv.begin().await.unwrap();
     let bytes = txn.get(&record).await.unwrap().unwrap();
     let mut meta: Value = serde_json::from_slice(&bytes).unwrap();

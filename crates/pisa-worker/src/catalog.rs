@@ -98,9 +98,21 @@ pub struct NewEntry {
     pub key: Option<String>,
 }
 
+/// The most bytes of JSON a record can have. The TiKV client reads up to
+/// 16 MiB in one message.
+const MAX_RECORD_BYTES: usize = 6 * 1024 * 1024;
+
+/// The most index keys one listing reads; see [`Catalog::list`].
+const MAX_SCAN: usize = 10_000;
+
+/// The fewest keys a listing scans at once.
+const SCAN_CHUNK: usize = 256;
+
 pub struct Catalog {
     kv: Kv,
     version: String,
+    /// [`MAX_SCAN`], except in tests.
+    max_scan: usize,
 }
 
 /// Why a transaction attempt failed: the store, which [`kv::retry`] runs
@@ -131,7 +143,7 @@ impl IsConflict for Fail {
 impl From<Fail> for Error {
     fn from(f: Fail) -> Self {
         match f {
-            Fail::Kv(e) => internal(e),
+            Fail::Kv(e) => e.into(),
             Fail::Api(e) => e,
         }
     }
@@ -139,6 +151,22 @@ impl From<Fail> for Error {
 
 fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Internal, e.to_string())
+}
+
+/// A record's JSON, refused as a `bad_request` if it is over
+/// [`MAX_RECORD_BYTES`]: it could be written but never read back.
+fn to_record(value: &impl Serialize) -> Result<Vec<u8>, Fail> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(Fail::Api(Error::new(
+            ErrorKind::BadRequest,
+            format!(
+                "snapshot record too large: {} bytes, limit 6 MiB",
+                bytes.len()
+            ),
+        )));
+    }
+    Ok(bytes)
 }
 
 /// The error for a module that isn't kept.
@@ -161,7 +189,17 @@ fn now_micros() -> u64 {
 
 impl Catalog {
     pub fn new(kv: Kv, version: String) -> Catalog {
-        Catalog { kv, version }
+        Catalog {
+            kv,
+            version,
+            max_scan: MAX_SCAN,
+        }
+    }
+
+    /// This catalog with listings that read at most `max_scan` index keys.
+    #[cfg(test)]
+    pub fn with_max_scan(self, max_scan: usize) -> Catalog {
+        Catalog { max_scan, ..self }
     }
 
     fn mod_key(&self, m: &str) -> Vec<u8> {
@@ -194,9 +232,7 @@ impl Catalog {
 
     /// Reads one JSON record.
     async fn read<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, Error> {
-        let value = kv::retry(|| async { self.kv.begin().await?.get(key).await })
-            .await
-            .map_err(internal)?;
+        let value = kv::retry(|| async { self.kv.begin().await?.get(key).await }).await?;
         value
             .map(|v| serde_json::from_slice(&v).map_err(internal))
             .transpose()
@@ -208,12 +244,15 @@ impl Catalog {
             .ok_or_else(|| unknown_module(m))
     }
 
-    /// Rewrites module `m`'s record with `f`.
+    /// Rewrites module `m`'s record with `f` if the module's own build is
+    /// still `build`. `None` if it isn't, because the module was deleted and
+    /// built again: the record is then left alone.
     pub async fn update_module(
         &self,
         m: &str,
+        build: &str,
         f: impl Fn(&mut ModuleMeta),
-    ) -> Result<ModuleMeta, Error> {
+    ) -> Result<Option<ModuleMeta>, Error> {
         let mod_key = self.mod_key(m);
         let updated = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
@@ -221,10 +260,13 @@ impl Catalog {
                 return Err(Fail::Api(unknown_module(m)));
             };
             let mut meta: ModuleMeta = serde_json::from_slice(&bytes)?;
+            if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
+                return Ok(None);
+            }
             f(&mut meta);
-            txn.put(mod_key.clone(), serde_json::to_vec(&meta)?).await?;
+            txn.put(mod_key.clone(), to_record(&meta)?).await?;
             txn.commit().await?;
-            Ok(meta)
+            Ok(Some(meta))
         })
         .await?;
         Ok(updated)
@@ -263,14 +305,15 @@ impl Catalog {
     /// If `entry`'s key is already on an entry, nothing is written and that
     /// entry comes back, unchanged. On the same module, with its stored
     /// record; on another, with `meta` in place of a record, which callers
-    /// tell by the entry's `module`.
+    /// tell by the entry's `module`. A `meta` too large to store is a
+    /// `bad_request`, and nothing is written either.
     pub async fn commit(
         &self,
         m: &str,
         meta: &ModuleMeta,
         entry: NewEntry,
     ) -> Result<(String, EntryMeta, ModuleMeta), Error> {
-        let record = serde_json::to_vec(meta).map_err(internal)?;
+        let record = to_record(meta)?;
         let mod_key = self.mod_key(m);
         let added = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
@@ -367,8 +410,7 @@ impl Catalog {
             key: entry.key.clone(),
             created_micros: now_micros(),
         };
-        txn.put(self.entry_key(&e), serde_json::to_vec(&meta)?)
-            .await?;
+        txn.put(self.entry_key(&e), to_record(&meta)?).await?;
         txn.put(self.ref_key(m, &e), Vec::new()).await?;
         if let Some(k) = &entry.key {
             txn.put(self.idem_key(k), e.clone().into_bytes()).await?;
@@ -425,10 +467,14 @@ impl Catalog {
     /// The entries, newest first, that have every `(key, value)` in `labels`
     /// (every entry if there are none), at most `limit` of them, starting
     /// after the cursor `after` (see [`is_cursor`]). Also returns the cursor
-    /// after the last one if there are `limit`.
+    /// to go on from unless the range ran out: the last entry's if there are
+    /// `limit`, else the last key's it read before reaching [`MAX_SCAN`]. So
+    /// a page can be short, even empty, and still have one.
     ///
-    /// It scans the first label's keys and looks up the others' for each
-    /// entry found, all in one read transaction, page by page.
+    /// It scans the first label's keys, at least 256 at a time, and looks up
+    /// the others' for each entry found, all in one read transaction. Every
+    /// key scanned or looked up counts towards [`MAX_SCAN`], and an entry
+    /// that reaches it is still looked up to the end.
     ///
     /// [`is_cursor`]: pisa_protocol::labels::is_cursor
     pub async fn list(
@@ -448,20 +494,33 @@ impl Catalog {
             let cursor = key(&[scanned.as_slice(), &[r, e]].concat());
             start.start = [cursor, vec![0]].concat();
         }
+        let chunk = limit.max(SCAN_CHUNK);
         let listed = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
             let mut range = start.clone();
             let mut entries = Vec::new();
+            let mut budget = self.max_scan;
+            let mut last = None;
             loop {
-                let page = txn.scan(range.clone(), limit as u32).await?;
-                let exhausted = page.len() < limit;
+                if budget == 0 {
+                    return Ok((entries, last));
+                }
+                let wanted = chunk.min(budget);
+                let page = txn.scan(range.clone(), wanted as u32).await?;
+                let exhausted = page.len() < wanted;
                 'scanned: for (found, _) in page {
+                    if budget == 0 {
+                        return Ok((entries, last));
+                    }
+                    budget -= 1;
                     range.start = [found.as_slice(), &[0]].concat();
                     let parts = decode(&found);
                     let [.., r, e] = parts.as_slice() else {
                         continue;
                     };
+                    last = Some(format!("{r}{e}"));
                     for (k, value) in others {
+                        budget = budget.saturating_sub(1);
                         if txn.get(&self.label_key(k, value, r, e)).await?.is_none() {
                             continue 'scanned;
                         }
@@ -473,7 +532,7 @@ impl Catalog {
                     };
                     entries.push((e.clone(), serde_json::from_slice(&bytes)?));
                     if entries.len() == limit {
-                        return Ok((entries, Some(format!("{r}{e}"))));
+                        return Ok((entries, last));
                     }
                 }
                 if exhausted {
@@ -520,8 +579,7 @@ impl Catalog {
                 }
             }
             // Rewriting the record also makes a concurrent delete conflict.
-            txn.put(entry_key.clone(), serde_json::to_vec(&meta)?)
-                .await?;
+            txn.put(entry_key.clone(), to_record(&meta)?).await?;
             txn.commit().await?;
             Ok(meta)
         })

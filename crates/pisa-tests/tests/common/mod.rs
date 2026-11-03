@@ -1,4 +1,5 @@
-//! A router plus workers running fake-repl, all in-process.
+//! A router plus workers running fake-repl, all in-process. Their metadata
+//! is in memory, or in the TiKV at `PISA_TEST_TIKV_PD` when that is set.
 
 #![allow(dead_code)]
 
@@ -24,8 +25,11 @@ pub struct Cluster {
     pub client: reqwest::Client,
     /// Shared by all workers, standing in for S3.
     pub store: Arc<dyn ObjectStore>,
-    /// Shared by all workers, standing in for TiKV.
+    /// Shared by all workers: in memory, or the TiKV at `PISA_TEST_TIKV_PD`.
     pub kv: Kv,
+    /// What workers' versions get on TiKV, so that clusters there don't share
+    /// keys; see [`Cluster::version`].
+    suffix: String,
     /// Workers' scratch space, private to this cluster so that tests running
     /// in parallel with the same worker names don't share files.
     pub dir: tempfile::TempDir,
@@ -77,23 +81,50 @@ fn split(list: &str) -> Vec<String> {
     list.split(',').map(String::from).collect()
 }
 
+/// A new cluster's KV store, and the suffix for its versions: a random one
+/// on TiKV, which every cluster shares.
+async fn kv_store() -> (Kv, String) {
+    match std::env::var("PISA_TEST_TIKV_PD") {
+        Ok(pd) => {
+            let kv = Kv::tikv(&split(&pd)).await.unwrap();
+            let id = uuid::Uuid::new_v4().simple().to_string();
+            (kv, format!("-{}", &id[..12]))
+        }
+        Err(_) => (Kv::memory(), String::new()),
+    }
+}
+
 impl Cluster {
     pub async fn start(workers: &[(&str, &str, usize)]) -> Cluster {
         Self::start_with(router_config(), workers, |c| c).await
     }
 
+    /// Starts the router and `(name, version, slots)` workers. Requests can
+    /// name a version as given here; see [`Cluster::version`].
     pub async fn start_with(
-        router: RouterConfig,
+        mut router: RouterConfig,
         workers: &[(&str, &str, usize)],
         tweak: impl Fn(WorkerConfig) -> WorkerConfig,
     ) -> Cluster {
+        let (kv, suffix) = kv_store().await;
+        if !suffix.is_empty() {
+            for (_, version) in &mut router.alias {
+                version.push_str(&suffix);
+            }
+            for (_, version, _) in workers {
+                router
+                    .alias
+                    .push((version.to_string(), format!("{version}{suffix}")));
+            }
+        }
         let router = pisa_router::start(router).await.unwrap();
         let mut cluster = Cluster {
             router,
             workers: Vec::new(),
             client: reqwest::Client::new(),
             store: Arc::new(InMemory::new()),
-            kv: Kv::memory(),
+            kv,
+            suffix,
             dir: tempfile::tempdir().unwrap(),
         };
         for (name, version, slots) in workers {
@@ -106,6 +137,13 @@ impl Cluster {
         }
         cluster.wait_for_workers(workers.len()).await;
         cluster
+    }
+
+    /// The version that workers configured with `version` run as, which
+    /// responses, keys and paths have: `version` with this cluster's suffix.
+    /// The router maps the versions that the cluster started with.
+    pub fn version(&self, version: &str) -> String {
+        format!("{version}{}", self.suffix)
     }
 
     pub fn add_worker(&mut self, cfg: WorkerConfig) {
@@ -129,6 +167,7 @@ impl Cluster {
         let name = cfg.worker_id.clone().unwrap_or_default();
         cfg.work_dir
             .get_or_insert_with(|| self.dir.path().join(name));
+        cfg.version = cfg.version.map(|v| self.version(&v));
         let store = self.store.clone();
         let kv = self.kv.clone();
         self.workers.push(tokio::spawn(async move {
@@ -175,10 +214,11 @@ impl Cluster {
         out
     }
 
-    /// Every KV key of `version`, decoded.
+    /// Every KV key of `version` (as [`Cluster::version`] maps it), decoded.
     pub async fn stored_keys(&self, version: &str) -> Vec<Vec<String>> {
         let mut txn = self.kv.begin().await.unwrap();
-        let pairs = txn.scan(prefix(&[ROOT, version]), u32::MAX).await.unwrap();
+        let range = prefix(&[ROOT, &self.version(version)]);
+        let pairs = txn.scan(range, u32::MAX).await.unwrap();
         pairs.iter().map(|(key, _)| decode(key)).collect()
     }
 

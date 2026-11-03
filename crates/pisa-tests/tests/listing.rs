@@ -228,6 +228,18 @@ async fn limits_are_bounded() {
         );
     }
     assert!(listed(&c, &[("limit", "1000")]).await.is_empty());
+
+    let filters: Vec<String> = (0..65).map(|i| format!("k{i}:v")).collect();
+    let query = |n: usize| -> Vec<(&str, &str)> {
+        filters[..n].iter().map(|f| ("label", f.as_str())).collect()
+    };
+    assert!(listed(&c, &query(64)).await.is_empty());
+    let (status, r) = list(&c, &query(65)).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
 }
 
 /// Review Focus 1: a value with the characters a query string and a filter

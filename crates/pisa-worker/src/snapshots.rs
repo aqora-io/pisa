@@ -1,9 +1,10 @@
 //! Environment snapshots: code compiled to a Lean module that later code
-//! imports, kept in object storage with its check result so that any worker
-//! of the version can import it. Entries keep modules alive: the same code
-//! is one module, however many entries point at it, and a module goes once
-//! no entry or kept module needs it. The records are in the [`Catalog`], and
-//! so are the idempotency keys that make a create safe to retry.
+//! imports, its files kept in object storage so that any worker of the
+//! version can import it. Entries keep modules alive: the same code is one
+//! module, however many entries point at it, and a module goes once no entry
+//! or kept module needs it. The records, with each module's check result, are
+//! in the [`Catalog`], and so are the idempotency keys that make a create safe
+//! to retry.
 //!
 //! Object storage, per pool version:
 //! - `snapshots/<version>/<id>.<build>.<ext>.zst`: the module's files,
@@ -37,10 +38,11 @@ use pisa_protocol::api::{
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
-    MAX_LIMIT, check_key, check_labels, entry_id_error, is_cursor, is_entry_id,
+    MAX_LABELS, MAX_LIMIT, check_key, check_labels, entry_id_error, is_cursor, is_entry_id,
 };
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
+use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
 use sha2::{Digest, Sha256};
 
@@ -147,9 +149,13 @@ fn now() -> u64 {
 }
 
 /// What re-checking one module of a chain came to.
+#[derive(Debug, PartialEq)]
 enum Recheck {
     Passed,
     AlreadyVerified,
+    /// The module was deleted and built again since the chain was read, so
+    /// this run doesn't verify it.
+    Changed,
     Failed(String),
 }
 
@@ -344,12 +350,16 @@ impl Snapshots {
     }
 
     /// Forgets a module that a delete removed, unless the same code has been
-    /// stored again since, maybe by a build on this worker.
+    /// stored again since, maybe by a build on this worker. Then the local
+    /// copy may be the removed build, so the next import looks the module up
+    /// again.
     async fn forget(&self, id: &str) {
         let lock = self.lock(id);
         let _held = lock.lock().await;
         if self.catalog.module(id).await.is_err() {
             self.discard(id);
+        } else {
+            self.confirmed.lock().unwrap().remove(id);
         }
     }
 
@@ -509,7 +519,8 @@ impl Snapshots {
     /// first if the request asks for that and the module isn't verified, then
     /// adds the entry. Its result is what is stored. If the re-check fails,
     /// it has the error and no entry is added, as for new code that fails it.
-    /// `None` if the module is gone by the time it is needed.
+    /// `None` if the module is gone by the time it is needed, or was built
+    /// again during the re-check.
     async fn add_to_kept(
         &self,
         pool: &Arc<Pool>,
@@ -524,6 +535,8 @@ impl Snapshots {
                 Ok::<_, Error>((self.catalog.module(id).await?, failure))
             };
             match verified.await {
+                // Nothing failed, so the chain stopped at a module built again.
+                Ok((meta, None)) if !meta.verified => return None,
                 Ok((meta, None)) => meta,
                 Ok((meta, Some(failure))) => {
                     let mut response = self.response(id, meta, None);
@@ -801,8 +814,9 @@ impl Snapshots {
 
     /// Walks `meta.modules`, which lists imports before what imports them, so
     /// a module is only marked verified once its imports are. Stops at the
-    /// first module that fails. Returns the modules that passed, in order,
-    /// and the one that failed.
+    /// first module that fails, or that was deleted and built again since:
+    /// that one isn't verified this run, which isn't an error. Returns the
+    /// modules that passed, in order, and the one that failed.
     async fn verify_chain(
         &self,
         pool: &Arc<Pool>,
@@ -813,9 +827,11 @@ impl Snapshots {
         let mut checked = Vec::new();
         let mut failure = None;
         for module in &modules {
-            match self.verify_module(pool, &module.id).await? {
+            match self.verify_module(pool, module).await? {
                 Recheck::Passed => checked.push(snapshot::module(&module.id)),
                 Recheck::AlreadyVerified => {}
+                // Whatever imports it was built again too, or is gone.
+                Recheck::Changed => break,
                 Recheck::Failed(reason) => {
                     failure = Some(SnapshotFailure {
                         snapshot: snapshot::module(&module.id),
@@ -828,28 +844,53 @@ impl Snapshots {
         Ok((checked, failure))
     }
 
-    /// Re-checks one module, whose imports must be verified and in the local
-    /// cache, unless it is already verified. Its axioms then come from the
-    /// re-check, replacing what the build's report said.
+    /// Re-checks one module build, whose imports must be verified and in the
+    /// local cache, unless it is already verified. Its axioms then come from
+    /// the re-check, replacing what the build's report said.
     ///
     /// This doesn't take the snapshot's lock, which every check on it needs:
     /// they shouldn't wait for the kernel, and two re-checks of a module agree.
-    async fn verify_module(&self, pool: &Arc<Pool>, id: &str) -> Result<Recheck, Error> {
-        if self.catalog.module(id).await?.verified {
-            return Ok(Recheck::AlreadyVerified);
+    async fn verify_module(&self, pool: &Arc<Pool>, module: &Module) -> Result<Recheck, Error> {
+        if let Some(done) = self.before_recheck(module).await? {
+            return Ok(done);
         }
         // No header to prefer: this takes a slot with nothing warm if it can.
         let mut slot = pool.acquire("", None).await;
         // The verifier imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
-        let verification = match recheck_module(&slot, id).await {
+        let verification = match recheck_module(&slot, &module.id).await {
             Ok(decls) => slot.policy().judge_decls(false, Some(decls)),
             Err(reason) => return Ok(Recheck::Failed(reason)),
         };
         drop(slot);
-        // A module removed during the re-check stays removed.
-        self.catalog
-            .update_module(id, |meta| {
+        self.record_recheck(module, &verification).await
+    }
+
+    /// Gets a re-check of a module build ready: `Changed` if the module's
+    /// record names another build now, `AlreadyVerified` if this build is,
+    /// else `None` once the local files, which the verifier reads, are this
+    /// build's. They are fetched for a verified build too, as the next
+    /// modules of the chain import it.
+    async fn before_recheck(&self, module: &Module) -> Result<Option<Recheck>, Error> {
+        let meta = self.catalog.module(&module.id).await?;
+        if meta.modules.last().map(|own| &own.build) != Some(&module.build) {
+            return Ok(Some(Recheck::Changed));
+        }
+        self.fetch(module).await?;
+        Ok(meta.verified.then_some(Recheck::AlreadyVerified))
+    }
+
+    /// Records that a module build passed the re-check, with what it found.
+    /// A module removed meanwhile stays removed, and one built again keeps
+    /// its record and is `Changed`.
+    async fn record_recheck(
+        &self,
+        module: &Module,
+        verification: &Verification,
+    ) -> Result<Recheck, Error> {
+        let updated = self
+            .catalog
+            .update_module(&module.id, &module.build, |meta| {
                 meta.verified = true;
                 meta.dirty = !verification.ok;
                 meta.result.ok = verification.ok;
@@ -857,7 +898,10 @@ impl Snapshots {
                 meta.result.declarations = verification.declarations.clone();
             })
             .await?;
-        Ok(Recheck::Passed)
+        Ok(match updated {
+            Some(_) => Recheck::Passed,
+            None => Recheck::Changed,
+        })
     }
 
     /// Uploads a freshly built module's files (`own`, whose files have
@@ -865,7 +909,9 @@ impl Snapshots {
     /// stored record and the entry. If another worker stored the module
     /// first, its record and build are kept, and this build's files go. So do
     /// they if the entry's key is on an entry of other code, which is
-    /// `bad_request`, with nothing stored.
+    /// `bad_request`, with nothing stored, and if the catalog refuses the
+    /// record. Only after an `unavailable` store, which may have stored it,
+    /// do they stay.
     async fn commit(
         &self,
         own: &Module,
@@ -880,7 +926,15 @@ impl Snapshots {
                 .await
                 .map_err(internal)?;
         }
-        let (entry, entry_meta, stored) = self.catalog.commit(&own.id, meta, entry).await?;
+        let (entry, entry_meta, stored) = match self.catalog.commit(&own.id, meta, entry).await {
+            Ok(committed) => committed,
+            Err(e) => {
+                if e.kind != ErrorKind::Unavailable {
+                    self.delete_blobs(own).await;
+                }
+                return Err(e);
+            }
+        };
         if entry_meta.module != own.id {
             self.delete_blobs(own).await;
             return Err(key_in_use());
@@ -933,6 +987,15 @@ impl Snapshots {
             return Err(Error::new(
                 ErrorKind::BadRequest,
                 format!("a listing takes a limit from 1 to {MAX_LIMIT} and a cursor from `next`"),
+            ));
+        }
+        if labels.len() > MAX_LABELS {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!(
+                    "{} label filters; a listing takes at most {MAX_LABELS}",
+                    labels.len()
+                ),
             ));
         }
         let (listed, next) = self.catalog.list(labels, limit, after).await?;
@@ -1096,6 +1159,11 @@ mod tests {
             .lock()
             .unwrap()
             .insert(id.clone(), new.modules[0].clone());
+        // A lookup vouched for the old build before.
+        s.confirmed
+            .lock()
+            .unwrap()
+            .insert(id.clone(), Instant::now());
 
         // The build holds the module's lock until it has stored its record,
         // so the delete removes the old record and files, then waits there.
@@ -1121,6 +1189,159 @@ mod tests {
         assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"new");
         assert_eq!(s.cached.lock().unwrap().get(&id), Some(&new.modules[0]));
         assert_eq!(s.catalog.module(&id).await.unwrap().modules, new.modules);
+        // The local copy might have been the old build: the next import
+        // looks the module up again.
+        assert!(!s.confirmed.lock().unwrap().contains_key(&id));
+    }
+
+    /// A re-check that passes on a module's old build. Meanwhile the module
+    /// was deleted and built again: the new build stays unverified, and so
+    /// does the old one's record, which no longer exists.
+    #[tokio::test]
+    async fn a_verify_of_an_old_build_leaves_the_new_one_unverified() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let catalog = Catalog::new(kv, "v".into());
+        let id = snapshot::id("code");
+        let old = built(&id, b"old");
+        let (entry, _, _) = catalog.commit(&id, &old, no_labels()).await.unwrap();
+        catalog.remove_entry(&entry).await.unwrap();
+        let new = built(&id, b"new");
+        catalog.commit(&id, &new, no_labels()).await.unwrap();
+
+        let passed = Verification {
+            ok: true,
+            reasons: Vec::new(),
+            declarations: Vec::new(),
+        };
+        let old = &old.modules[0];
+        assert_eq!(s.before_recheck(old).await.unwrap(), Some(Recheck::Changed));
+        let recorded = s.record_recheck(old, &passed).await.unwrap();
+        assert_eq!(recorded, Recheck::Changed);
+        assert!(!catalog.module(&id).await.unwrap().verified);
+
+        let new = &new.modules[0];
+        let recorded = s.record_recheck(new, &passed).await.unwrap();
+        assert_eq!(recorded, Recheck::Passed);
+        assert!(catalog.module(&id).await.unwrap().verified);
+    }
+
+    /// The local copy is an old build that a lookup still vouches for, as on
+    /// a worker that didn't see the module deleted and built again. The
+    /// re-check of the stored build fetches that build first, since the
+    /// verifier reads the local files.
+    #[tokio::test]
+    async fn a_verify_fetches_the_build_it_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let id = snapshot::id("code");
+        let old = built(&id, b"old");
+        std::fs::write(s.file(&id, "olean"), b"old").unwrap();
+        s.cached
+            .lock()
+            .unwrap()
+            .insert(id.clone(), old.modules[0].clone());
+        s.confirmed
+            .lock()
+            .unwrap()
+            .insert(id.clone(), Instant::now());
+        let new = built(&id, b"new");
+        upload(&s, &new, b"new").await;
+        let catalog = Catalog::new(kv, "v".into());
+        catalog.commit(&id, &new, no_labels()).await.unwrap();
+
+        assert_eq!(s.before_recheck(&new.modules[0]).await.unwrap(), None);
+        assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"new");
+        assert_eq!(s.cached.lock().unwrap().get(&id), Some(&new.modules[0]));
+    }
+
+    /// A record the store couldn't read back is refused before anything is
+    /// written, and the files uploaded for it go.
+    #[tokio::test]
+    async fn a_record_too_large_is_refused_and_its_files_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let id = snapshot::id("code");
+        let mut ours = built(&id, b"ours");
+        ours.code = "x".repeat(7 * 1024 * 1024);
+        let own = ours.modules[0].clone();
+        let contents = [b"ours".to_vec()];
+        let error = s
+            .commit(&own, &contents, &ours, keyed("k"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadRequest);
+        assert!(
+            error.message.contains("snapshot record too large"),
+            "{error:?}"
+        );
+        assert!(kv_keys(&kv).await.is_empty());
+        assert!(!has_files(&s, &ours).await, "this build's files go");
+    }
+
+    /// A listing reads a bounded number of index keys. One cut short has
+    /// `next`, even when it found nothing, and following it reaches the rest.
+    #[tokio::test]
+    async fn a_listing_cut_short_by_its_budget_goes_on_from_next() {
+        let catalog = Catalog::new(Kv::memory(), "v".into()).with_max_scan(4);
+        let id = snapshot::id("code");
+        let with = |labels: &[(&str, &str)]| NewEntry {
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            key: None,
+        };
+        let only_match = with(&[("k", "a"), ("p", "x")]);
+        let (oldest, _, _) = catalog
+            .commit(&id, &built(&id, b"x"), only_match)
+            .await
+            .unwrap();
+        let mut newest_first = vec![oldest.clone()];
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let added = catalog.add_entry(&id, with(&[("k", "a")])).await.unwrap();
+            newest_first.insert(0, added.unwrap().0);
+        }
+        let ids = |page: Vec<(String, EntryMeta)>| -> Vec<String> {
+            page.into_iter().map(|(e, _)| e).collect()
+        };
+
+        // Each entry costs its one key.
+        let (page, next) = catalog.list(&[], 10, None).await.unwrap();
+        assert_eq!(ids(page), newest_first[..4]);
+        let (page, next) = catalog.list(&[], 10, next.as_deref()).await.unwrap();
+        assert_eq!(ids(page), newest_first[4..]);
+        assert_eq!(next, None);
+
+        // Each costs its key and a lookup of `p:x`, so a page covers two.
+        let filters = [("k", "a"), ("p", "x")].map(|(k, v)| (k.to_string(), v.to_string()));
+        let mut pages = Vec::new();
+        let mut after = None;
+        loop {
+            let (page, next) = catalog.list(&filters, 10, after.as_deref()).await.unwrap();
+            pages.push(ids(page));
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(pages, [vec![], vec![], vec![oldest]]);
+    }
+
+    #[tokio::test]
+    async fn a_listing_takes_at_most_64_filters() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = snapshots(Kv::memory(), dir.path());
+        let filters = |n: usize| -> Vec<(String, String)> {
+            (0..n).map(|i| (i.to_string(), String::new())).collect()
+        };
+        assert!(s.list(&filters(64), 10, None).await.is_ok());
+        let error = s.list(&filters(65), 10, None).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadRequest, "{error:?}");
     }
 
     /// Two workers build the same code at once and the other one stores it

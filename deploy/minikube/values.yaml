@@ -1,6 +1,6 @@
 # Values for trying the chart on minikube with locally built images, the
-# Garage from garage.yaml for proof states, and the TiKV from tikv.yaml for
-# session and state records:
+# Garage from garage.yaml for proof states and snapshot modules, and the TiKV
+# from tikv.yaml for the session, state and snapshot records:
 #   minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
 #   kubectl apply -f deploy/minikube/garage.yaml
 #   kubectl apply -f deploy/minikube/tikv.yaml

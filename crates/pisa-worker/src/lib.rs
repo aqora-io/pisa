@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use object_store::ObjectStore;
 use pisa_protocol::header::split_header;
-use pisa_protocol::wire::{self, Job, JobResult, RouterMessage, WorkerMessage};
+use pisa_protocol::wire::{self, Inbound, Job, JobResult, RouterMessage, WorkerMessage};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
@@ -25,11 +25,22 @@ pub mod snapshots;
 pub mod store;
 
 pub use config::WorkerConfig;
+use config::{MetadataKind, StoreKind};
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;
 
+/// How often a worker on TiKV moves its GC safepoint, and how far behind the
+/// present it puts it; see [`kv::Kv::gc`].
+const TIKV_GC_EVERY: Duration = Duration::from_secs(600);
+
 /// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
+    if cfg.metadata == MetadataKind::Memory && cfg.store == StoreKind::S3 {
+        tracing::warn!(
+            "PISA_METADATA=memory with PISA_STORE=s3: the metadata is in this worker's \
+             memory, not shared with other workers or kept across restarts"
+        );
+    }
     let store = cfg.object_store()?;
     let kv = cfg.kv().await?;
     run_with_stores(cfg, store, kv, shutdown_signal()).await
@@ -79,6 +90,21 @@ pub async fn run_with_stores(
     );
     tracing::info!(%worker_id, %version, slots = pool.slots(), "worker starting");
     prewarm(&pool, &cfg.prewarm);
+    // Every worker does it: one moving the safepoint is enough, and more do
+    // no harm.
+    if cfg.metadata == MetadataKind::Tikv {
+        let kv = kv.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(TIKV_GC_EVERY);
+            loop {
+                tick.tick().await;
+                match kv.gc(TIKV_GC_EVERY).await {
+                    Ok(()) => tracing::debug!("moved TiKV's GC safepoint"),
+                    Err(e) => tracing::warn!("moving TiKV's GC safepoint failed: {e}"),
+                }
+            }
+        });
+    }
     let sessions = Arc::new(Sessions {
         store: store::Store::new(store, kv, version.clone()),
         version: version.clone(),
@@ -178,9 +204,18 @@ impl Connection<'_> {
                 return Ok(());
             }
             tokio::select! {
-                msg = wire::recv::<_, RouterMessage>(&mut source) => match msg? {
+                msg = wire::recv::<_, Inbound>(&mut source) => match msg? {
                     None => return Ok(()),
-                    Some(RouterMessage::Job { request_id, job }) => {
+                    Some(Inbound::BadJob { request_id, error }) => {
+                        tracing::warn!(request_id, "a job did not decode: {error}");
+                        let error = format!(
+                            "the worker could not read the job, which may come from \
+                             a router of another release: {error}"
+                        );
+                        let result = JobResult::Failed { error };
+                        wire::send(&mut sink, &WorkerMessage::Result { request_id, result }).await?;
+                    }
+                    Some(Inbound::Message(RouterMessage::Job { request_id, job })) => {
                         outstanding += 1;
                         let pool = self.pool.clone();
                         let sessions = self.sessions.clone();
@@ -190,10 +225,10 @@ impl Connection<'_> {
                             let _ = tx.send(WorkerMessage::Result { request_id, result });
                         });
                     }
-                    Some(RouterMessage::Prewarm { headers }) if !draining => {
+                    Some(Inbound::Message(RouterMessage::Prewarm { headers })) if !draining => {
                         prewarm(self.pool, &headers)
                     }
-                    Some(RouterMessage::Prewarm { .. }) => {}
+                    Some(Inbound::Message(RouterMessage::Prewarm { .. })) => {}
                 },
                 Some(out) = rx.recv() => {
                     if matches!(out, WorkerMessage::Result { .. }) {

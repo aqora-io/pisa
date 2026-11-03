@@ -12,7 +12,7 @@ use pisa_protocol::api::{
     SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
-use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LIMIT, is_cursor, parse_filter};
+use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LABELS, MAX_LIMIT, is_cursor, parse_filter};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
     Job, JobResult, SnapshotCreateJob, SnapshotJob, SnapshotLabelsJob, SnapshotListJob,
@@ -77,7 +77,8 @@ pub async fn list(
 }
 
 /// Splits the query of `GET /snapshots` into the version and the job, and
-/// checks the job's filters, limit and cursor. Other parameters are ignored.
+/// checks the job's filters, at most [`MAX_LABELS`] of them, limit and
+/// cursor. Other parameters are ignored.
 fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
     let mut q = VersionQuery::default();
     let mut job = SnapshotListJob {
@@ -104,6 +105,12 @@ fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
             }
             _ => {}
         }
+    }
+    if job.labels.len() > MAX_LABELS {
+        return Err(format!(
+            "{} label filters; a listing takes at most {MAX_LABELS}",
+            job.labels.len()
+        ));
     }
     Ok((q, job))
 }

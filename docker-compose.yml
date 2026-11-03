@@ -1,5 +1,6 @@
 # Local development stack: one router, two workers, Garage (S3) for pickled
-# proof states, and a single-node TiKV for the session and state records.
+# proof states and snapshot modules, and a single-node TiKV for the session,
+# state and snapshot records.
 #   docker compose up --build
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'

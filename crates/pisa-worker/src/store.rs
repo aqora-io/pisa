@@ -17,7 +17,6 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::Context;
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
@@ -120,8 +119,10 @@ impl Store {
         Ok(hash)
     }
 
-    pub async fn state_meta(&self, hash: &str) -> anyhow::Result<StateMeta> {
-        self.get_record(self.state_key(hash), "state", hash).await
+    /// The state's record, `None` if there is none. An error is the KV
+    /// store's ([`KvError`]) or an unreadable record.
+    pub async fn state_meta(&self, hash: &str) -> anyhow::Result<Option<StateMeta>> {
+        self.get_record(self.state_key(hash)).await
     }
 
     /// The state's decompressed pickle, or `None` if it has been deleted.
@@ -148,29 +149,28 @@ impl Store {
         Ok(())
     }
 
-    pub async fn session(&self, id: &str) -> anyhow::Result<SessionMeta> {
-        self.get_record(self.session_key(id), "session", id).await
+    /// The session's record, `None` if there is none; errors as for
+    /// [`state_meta`](Self::state_meta).
+    pub async fn session(&self, id: &str) -> anyhow::Result<Option<SessionMeta>> {
+        self.get_record(self.session_key(id)).await
     }
 
     async fn get_record<T: serde::de::DeserializeOwned>(
         &self,
         key: Vec<u8>,
-        kind: &str,
-        id: &str,
-    ) -> anyhow::Result<T> {
+    ) -> anyhow::Result<Option<T>> {
         let value = kv::retry(|| async { self.kv.begin().await?.get(&key).await }).await?;
-        let value = value.with_context(|| format!("no {kind} {id}"))?;
-        Ok(serde_json::from_slice(&value)?)
+        Ok(value.map(|v| serde_json::from_slice(&v)).transpose()?)
     }
 
     /// Deletes states and sessions of this version older than `ttl`.
     pub async fn sweep(&self, ttl: Duration) -> anyhow::Result<usize> {
         let cutoff = now_secs().saturating_sub(ttl.as_secs());
-        let start = key(&[ROOT, &self.version, "age"]);
+        let mut start = key(&[ROOT, &self.version, "age"]);
         let end = key(&[ROOT, &self.version, "age", &format!("{cutoff:016x}")]);
         let mut deleted = 0;
         loop {
-            let batch = kv::retry(|| async {
+            let (batch, last) = kv::retry(|| async {
                 let mut txn = self.kv.begin().await?;
                 let aged = txn.scan(start.clone()..end.clone(), SWEEP_BATCH).await?;
                 for (age_key, _) in &aged {
@@ -185,12 +185,18 @@ impl Store {
                     txn.delete(age_key.clone()).await?;
                 }
                 txn.commit().await?;
-                Ok::<_, KvError>(aged.len())
+                let last = aged.last().map(|(age_key, _)| age_key.clone());
+                Ok::<_, KvError>((aged.len(), last))
             })
             .await?;
             deleted += batch;
             if batch < SWEEP_BATCH as usize {
                 break;
+            }
+            // TiKV keeps what a batch deleted as tombstones until GC: scanning
+            // from the start again would skip over every one of them.
+            if let Some(last) = last {
+                start = [last, vec![0]].concat();
             }
         }
 
@@ -248,10 +254,11 @@ mod tests {
         let hash = store.put_state(&pickle, &meta).await.unwrap();
         assert_eq!(store.put_state(&pickle, &meta).await.unwrap(), hash);
         assert_eq!(store.state_pickle(&hash).await.unwrap(), Some(pickle));
-        assert_eq!(store.state_meta(&hash).await.unwrap().goals, meta.goals);
+        let stored = store.state_meta(&hash).await.unwrap().unwrap();
+        assert_eq!(stored.goals, meta.goals);
 
         store.put_session("s", &session(now_secs())).await.unwrap();
-        assert_eq!(store.session("s").await.unwrap().code, "x");
+        assert_eq!(store.session("s").await.unwrap().unwrap().code, "x");
         assert_eq!(
             object_paths(&s3).await,
             [format!("states/v1/{hash}.olean.zst")]
@@ -260,8 +267,8 @@ mod tests {
         assert_eq!(store.sweep(Duration::from_secs(3600)).await.unwrap(), 0);
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert_eq!(store.sweep(Duration::ZERO).await.unwrap(), 3);
-        assert!(store.state_meta(&hash).await.is_err());
-        assert!(store.session("s").await.is_err());
+        assert!(store.state_meta(&hash).await.unwrap().is_none());
+        assert!(store.session("s").await.unwrap().is_none());
         assert_eq!(store.state_pickle(&hash).await.unwrap(), None);
         assert!(object_paths(&s3).await.is_empty());
     }
@@ -297,7 +304,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.sweep(Duration::from_secs(3600)).await.unwrap(), 300);
-        assert!(store.session("old299").await.is_err());
-        assert_eq!(store.session("fresh").await.unwrap().code, "x");
+        assert!(store.session("old299").await.unwrap().is_none());
+        assert_eq!(store.session("fresh").await.unwrap().unwrap().code, "x");
+    }
+
+    /// A missing record is `None`, not an error: errors are the store's.
+    #[tokio::test]
+    async fn missing_records_are_none() {
+        let store = Store::new(Arc::new(InMemory::new()), Kv::memory(), "v1".into());
+        assert!(store.state_meta("0f").await.unwrap().is_none());
+        assert!(store.session("s").await.unwrap().is_none());
     }
 }
