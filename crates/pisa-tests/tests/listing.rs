@@ -1,0 +1,281 @@
+//! Listing snapshot entries by label, page by page, and editing their labels.
+
+mod common;
+
+use common::Cluster;
+use serde_json::{Value, json};
+
+const ROOT: &str = "import Foo\n\ntheorem base : 1 = 1 := rfl";
+
+/// Creates an entry on `ROOT` with `labels` and returns the response.
+async fn create(c: &Cluster, labels: Value) -> Value {
+    let (status, r) = c
+        .post("/snapshots", json!({"code": ROOT, "labels": labels}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert!(r["entry"].is_string(), "{r}");
+    r
+}
+
+/// `GET /snapshots` with `query`, encoded by reqwest's `Url`.
+async fn list(c: &Cluster, query: &[(&str, &str)]) -> (u16, Value) {
+    let mut url = reqwest::Url::parse(&c.url("/snapshots")).unwrap();
+    url.query_pairs_mut().extend_pairs(query);
+    let r = c.client.get(url).send().await.unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+/// The ids of the entries a successful listing returns.
+async fn listed(c: &Cluster, query: &[(&str, &str)]) -> Vec<String> {
+    let (status, r) = list(c, query).await;
+    assert_eq!(status, 200, "{query:?}: {r}");
+    ids(&r)
+}
+
+fn ids(list: &Value) -> Vec<String> {
+    let entries = list["entries"].as_array().unwrap();
+    entries
+        .iter()
+        .map(|e| e["entry"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn entry(snapshot: &Value) -> &str {
+    snapshot["entry"].as_str().unwrap()
+}
+
+/// `GET /snapshots/{entry}`.
+async fn info(c: &Cluster, entry: &str) -> Value {
+    let r = c
+        .client
+        .get(c.url(&format!("/snapshots/{entry}")))
+        .send()
+        .await;
+    r.unwrap().json().await.unwrap()
+}
+
+async fn patch(c: &Cluster, entry: &str, body: Value) -> (u16, Value) {
+    let path = format!("/snapshots/{entry}");
+    let r = c
+        .client
+        .patch(c.url(&path))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+async fn delete(c: &Cluster, snapshot: &Value) {
+    let path = format!("/snapshots/{}", entry(snapshot));
+    let r = c.client.delete(c.url(&path)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lists_entries_newest_first_with_pages() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    for i in 0..5 {
+        create(&c, json!({"n": i.to_string()})).await;
+    }
+    let n = |list: &Value| -> Vec<String> {
+        let entries = list["entries"].as_array().unwrap();
+        entries
+            .iter()
+            .map(|e| e["labels"]["n"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let (status, page) = list(&c, &[("limit", "2")]).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(n(&page), ["4", "3"]);
+    let (_, page) = list(
+        &c,
+        &[("limit", "2"), ("after", page["next"].as_str().unwrap())],
+    )
+    .await;
+    assert_eq!(n(&page), ["2", "1"]);
+    let (_, page) = list(
+        &c,
+        &[("limit", "2"), ("after", page["next"].as_str().unwrap())],
+    )
+    .await;
+    assert_eq!(n(&page), ["0"]);
+    assert!(page.get("next").is_none(), "{page}");
+
+    let (_, all) = list(&c, &[]).await;
+    assert_eq!(n(&all), ["4", "3", "2", "1", "0"]);
+    assert!(all.get("next").is_none(), "{all}");
+
+    // A summary: the entry and its module, without the code or the result.
+    let summary = &all["entries"][0];
+    let info = info(&c, &ids(&all)[0]).await;
+    for field in [
+        "entry", "snapshot", "imports", "header", "labels", "dirty", "verified", "created",
+    ] {
+        assert_eq!(summary[field], info[field], "{field}: {summary}");
+    }
+    assert!(
+        summary.get("code").is_none() && summary.get("result").is_none(),
+        "{summary}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn filters_are_anded() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let first = create(&c, json!({"p": "x", "k": "a"})).await;
+    let second = create(&c, json!({"p": "x", "k": "b"})).await;
+    create(&c, json!({"p": "y", "k": "a"})).await;
+
+    let both = listed(&c, &[("label", "p:x"), ("label", "k:a")]).await;
+    assert_eq!(both, [entry(&first)]);
+    let p = listed(&c, &[("label", "p:x")]).await;
+    assert_eq!(p, [entry(&second), entry(&first)]);
+
+    // The first label's newest entry fails the second filter: the scan goes on
+    // to the next page of its range for a match.
+    let query = [("label", "k:a"), ("label", "p:x"), ("limit", "1")];
+    let (_, page) = list(&c, &query).await;
+    assert_eq!(ids(&page), [entry(&first)]);
+    let next = page["next"].as_str().unwrap();
+    let (_, page) = list(&c, &[query[0], query[1], query[2], ("after", next)]).await;
+    assert_eq!(ids(&page), Vec::<String>::new());
+    assert!(page.get("next").is_none(), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn patch_sets_and_removes_labels() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let created = create(&c, json!({"p": "x", "k": "a"})).await;
+    let e = entry(&created);
+
+    let (status, r) = patch(&c, e, json!({"set": {"k": "b"}, "remove": ["p"]})).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["entry"], e);
+    assert_eq!(r["snapshot"], created["snapshot"]);
+    assert_eq!(r["labels"], json!({"k": "b"}));
+    assert!(listed(&c, &[("label", "k:a")]).await.is_empty());
+    assert!(listed(&c, &[("label", "p:x")]).await.is_empty());
+    assert_eq!(listed(&c, &[("label", "k:b")]).await, [e]);
+    assert_eq!(info(&c, e).await["labels"], json!({"k": "b"}));
+
+    let (status, r) = patch(&c, e, json!({"set": {"bad key": "x"}})).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
+    assert_eq!(listed(&c, &[("label", "k:b")]).await, [e], "unchanged");
+    let (status, r) = patch(&c, &"0".repeat(32), json!({"set": {"k": "c"}})).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (404, &json!("not_found")),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn listings_are_per_version() {
+    let c = Cluster::start(&[("w0", "a", 1), ("w1", "b", 1)]).await;
+    let mut created = Vec::new();
+    for version in ["a", "b"] {
+        let body = json!({"code": ROOT, "version": version});
+        let (status, r) = c.post("/snapshots", body).await;
+        assert_eq!(status, 200, "{r}");
+        created.push(r);
+    }
+    assert_eq!(listed(&c, &[("version", "a")]).await, [entry(&created[0])]);
+    assert_eq!(listed(&c, &[("version", "b")]).await, [entry(&created[1])]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deleted_entries_leave_listings() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let kept = create(&c, json!({"k": "a"})).await;
+    let gone = create(&c, json!({"k": "a", "p": "x"})).await;
+    delete(&c, &gone).await;
+
+    assert_eq!(listed(&c, &[]).await, [entry(&kept)]);
+    assert_eq!(listed(&c, &[("label", "k:a")]).await, [entry(&kept)]);
+    assert!(listed(&c, &[("label", "p:x")]).await.is_empty());
+
+    delete(&c, &kept).await;
+    assert!(listed(&c, &[]).await.is_empty());
+    let keys = c.stored_keys("v").await;
+    assert!(
+        keys.iter().all(|k| k[2] != "new" && k[2] != "label"),
+        "{keys:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_are_bounded() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    for query in [
+        ("limit", "0"),
+        ("limit", "1001"),
+        ("limit", "ten"),
+        ("label", "nocolon"),
+        ("label", "bad key:x"),
+        ("after", "xyz"),
+    ] {
+        let (status, r) = list(&c, &[query]).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{query:?}: {r}"
+        );
+    }
+    assert!(listed(&c, &[("limit", "1000")]).await.is_empty());
+}
+
+/// Review Focus 1: a value with the characters a query string and a filter
+/// treat specially matches exactly.
+#[tokio::test(flavor = "multi_thread")]
+async fn labels_with_special_characters_round_trip() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let created = create(&c, json!({})).await;
+    let (status, r) = patch(&c, entry(&created), json!({"set": {"k": "a:b c&d=é"}})).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["labels"], json!({"k": "a:b c&d=é"}));
+
+    assert_eq!(
+        listed(&c, &[("label", "k:a:b c&d=é")]).await,
+        [entry(&created)]
+    );
+    assert!(listed(&c, &[("label", "k:a:b")]).await.is_empty());
+}
+
+/// Review Focus 2: a cursor is a position, not an entry that must still exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cursor_survives_deleting_its_entry() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let mut created = Vec::new();
+    for i in 0..3 {
+        created.push(create(&c, json!({"n": i.to_string()})).await);
+    }
+    let (_, page) = list(&c, &[("limit", "1")]).await;
+    assert_eq!(ids(&page), [entry(&created[2])]);
+    delete(&c, &created[2]).await;
+
+    let next = page["next"].as_str().unwrap();
+    let (_, page) = list(&c, &[("limit", "1"), ("after", next)]).await;
+    assert_eq!(ids(&page), [entry(&created[1])]);
+}
+
+/// Review Focus 3: an entry has one value per key, so two values of the same
+/// key match nothing, and the same filter twice is the filter once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_key_twice_matches_nothing() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let a = create(&c, json!({"k": "a"})).await;
+    create(&c, json!({"k": "b"})).await;
+
+    let (status, r) = list(&c, &[("label", "k:a"), ("label", "k:b")]).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["entries"], json!([]));
+    let twice = listed(&c, &[("label", "k:a"), ("label", "k:a")]).await;
+    assert_eq!(twice, listed(&c, &[("label", "k:a")]).await);
+    assert_eq!(twice, [entry(&a)]);
+}

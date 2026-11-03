@@ -14,7 +14,9 @@
 //! | `POST /states/{state}/tactic` | [`TacticRequest`] → [`TacticResponse`] |
 //! | `POST /sessions/{session}/check` | [`SessionCheckRequest`] → [`CheckResult`] |
 //! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
+//! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`SnapshotList`] |
 //! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
+//! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
 //! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
 //! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
 //!
@@ -381,6 +383,49 @@ pub struct SnapshotInfo {
     pub result: CheckResult,
     /// When the entry was created, in seconds since the Unix epoch.
     pub created: u64,
+}
+
+/// An entry in a listing: as [`SnapshotInfo`], without the code and the check
+/// result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotSummary {
+    pub entry: String,
+    /// The entry's module.
+    pub snapshot: String,
+    /// The modules it imports.
+    pub imports: Vec<String>,
+    /// As in [`SnapshotResponse::header`].
+    pub header: String,
+    pub labels: BTreeMap<String, String>,
+    pub dirty: bool,
+    /// As in [`SnapshotResponse::verified`].
+    pub verified: bool,
+    /// When the entry was created, in seconds since the Unix epoch.
+    pub created: u64,
+}
+
+/// `GET /snapshots`: the version's entries, newest first, that have every
+/// label the query names as `label=key:value` (split on the first `:`), at
+/// most `limit` of them (1 to 1000, default 100). A full page has `next`;
+/// passing it as `after` gives the page after it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotList {
+    pub entries: Vec<SnapshotSummary>,
+    /// The cursor after the last entry, when the page is full. The page after
+    /// it may be empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
+/// `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets
+/// those in `set`. The labels that result must follow the rules of
+/// [`check_labels`](crate::labels::check_labels).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelsRequest {
+    #[serde(default)]
+    pub set: BTreeMap<String, String>,
+    #[serde(default)]
+    pub remove: Vec<String>,
 }
 
 /// `POST /snapshots/{entry}/verify`: re-checks the entry's module and

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 BASE = os.environ.get("PISA_URL", "http://localhost:8000")
@@ -248,6 +249,34 @@ def snapshots():
     step("snapshot: errors aren't kept; read, and modules go with their last entry")
 
 
+def labels():
+    def create(run):
+        return post("/snapshots", {"code": SNAPSHOT_ROOT, "labels": {"e2e": "1", "run": run}, "timeout": 600})
+
+    def listed(*filters):
+        query = urllib.parse.urlencode([("label", f) for f in filters])
+        status, out = call("GET", f"/snapshots?{query}")
+        assert status == 200, (filters, status, out)
+        return [x["entry"] for x in out["entries"]], out
+
+    first, second = create("a"), create("b")
+    entries, out = listed("e2e:1")
+    assert entries == [second["entry"], first["entry"]], out
+    assert {x["snapshot"] for x in out["entries"]} == {first["snapshot"]}, out
+    status, patched = call("PATCH", f"/snapshots/{first['entry']}", {"set": {"run": "c"}})
+    assert status == 200 and patched["labels"] == {"e2e": "1", "run": "c"}, patched
+    assert listed("run:c")[0] == [first["entry"]]
+    step("labels: list, filter, edit")
+
+    status, gone = call("DELETE", f"/snapshots/{first['entry']}")
+    assert status == 200 and gone["removed"] == [], gone
+    r = check(f"{second['header']}\n\nexample : Snap.double 3 = 6 := by simp")
+    assert r["ok"], r
+    status, gone = call("DELETE", f"/snapshots/{second['entry']}")
+    assert status == 200 and gone["removed"] == [second["snapshot"]], gone
+    step("labels: modules go with their last entry")
+
+
 MODULE_ROOT = """module
 
 @[expose] public section
@@ -340,6 +369,7 @@ if __name__ == "__main__":
         wait_for_workers(2)
     core(failover=not args.no_failover)
     snapshots()
+    labels()
     module_snapshots()
     if args.mathlib:
         mathlib()

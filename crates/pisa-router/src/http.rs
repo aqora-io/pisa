@@ -54,10 +54,12 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/sessions", post(sessions::start))
         .route("/sessions/{id}/check", post(sessions::check))
         .route("/states/{id}/tactic", post(sessions::tactic))
-        .route("/snapshots", post(snapshots::create))
+        .route("/snapshots", post(snapshots::create).get(snapshots::list))
         .route(
             "/snapshots/{entry}",
-            get(snapshots::get).delete(snapshots::delete),
+            get(snapshots::get)
+                .patch(snapshots::labels)
+                .delete(snapshots::delete),
         )
         .route("/snapshots/{entry}/verify", post(snapshots::verify))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })

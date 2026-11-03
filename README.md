@@ -160,7 +160,9 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
 | `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, result}`; see [Snapshots](#snapshots) |
+| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, dirty, verified, result, created}` |
+| `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /health`, `GET /metrics` | Liveness, Prometheus metrics |
@@ -219,18 +221,36 @@ POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double
 - **The entry** (`entry`, 32 hex digits) is what this create added: a
   reference to the module with its own `labels` and `created` time. Creating
   the same code again adds another entry on the same module without building
-  it again. `GET`, `DELETE` and `verify` take the entry; a module name there
-  is a `bad_request`.
+  it again. `GET`, `PATCH`, `DELETE` and `verify` take the entry; a module
+  name there is a `bad_request`.
 
 A create that keeps nothing has no `entry`. Neither does `verify: true` on code
 that is already kept but fails the re-check: the response then has its
 `snapshot` and `header` with the error, as new code that fails the re-check
 isn't kept.
 
-Labels are string key/value pairs, at most 64 per entry. A key is 1–128 bytes
-of letters, digits, `.`, `_`, `/` and `-`; a value is up to 512 bytes. Labels
-that break these rules are a `bad_request` in `result.error`, and nothing is
-kept.
+<a id="labels"></a>
+**Labels.** An entry's labels are string key/value pairs, at most 64 of them. A
+key is 1–128 bytes of letters, digits, `.`, `_`, `/` and `-`; a value is up to
+512 bytes of UTF-8. Labels that break these rules are a `bad_request`: in
+`result.error` on a create, which then keeps nothing, and a 400 on a `PATCH`,
+which then changes nothing.
+- **Editing.** `PATCH /snapshots/{entry}` with `{"set": {"stage": "done"},
+  "remove": ["draft"]}` removes the `remove` keys, then sets the `set` pairs,
+  and returns the entry as a listing shows it.
+- **Filtering.** `GET /snapshots?label=project:foo&label=kind:lemma` lists the
+  entries that have every label given, each an exact match of `key:value`
+  split on the first `:`, so a value can contain `:`. Without `label` it lists
+  every entry of the version. There is no OR or prefix matching. Two values for
+  the same key match nothing, as an entry has one value per key.
+- **Order and pages.** Entries come newest first, as summaries: what
+  `GET /snapshots/{entry}` returns without `code` and `result`. `limit` is 1–1000
+  (default 100). A full page has `next`, an opaque cursor: pass it as `after`
+  for the page after it, which may be empty. A cursor is a position, so it
+  keeps working when its entry is deleted.
+- **Speed.** The first `label` is scanned and the others are looked up for
+  each entry it finds, so put the most selective label first. A filter that
+  matches few of the first label's entries can take a while to fill a page.
 
 **Retrying a create.** A create can carry an idempotency `key`, 1–256 bytes of
 letters, digits, `.`, `_`, `:`, `/` and `-` (anything else is a `bad_request`
@@ -347,6 +367,10 @@ let verdict = client.check_session(&session.session, "theorem t (n : Nat) : n + 
 let base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n").await?;
 let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header.unwrap())).await?;
 let entry = base.entry.unwrap();
+let page = client.list_snapshots(&[("run", "7")], Some(50), None).await?; // newest first
+let more = client.list_snapshots(&[("run", "7")], Some(50), page.next.as_deref()).await?;
+let done = std::collections::BTreeMap::from([("stage".to_string(), "done".to_string())]);
+let summary = client.set_snapshot_labels(&entry, &done, &[]).await?;
 let verified = client.verify_snapshot(&entry).await?;
 let removed = client.delete_snapshot(&entry).await?; // the modules that went with it
 ```
@@ -363,6 +387,8 @@ step = client.tactic(session["states"][0]["state"], "simp")   # raises LeanError
 client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]
 base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n", labels={"run": "7"})
 client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
+page = client.list_snapshots({"run": "7"}, limit=50)   # newest first; pass page["next"] as after=
+client.set_snapshot_labels(base["entry"], set={"stage": "done"}, remove=["run"])
 client.verify_snapshot(base["entry"])["verified"]
 client.delete_snapshot(base["entry"])   # the modules that went with it
 ```

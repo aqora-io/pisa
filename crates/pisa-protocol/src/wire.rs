@@ -66,6 +66,8 @@ pub enum Job {
     SnapshotGet(SnapshotJob),
     SnapshotDelete(SnapshotJob),
     SnapshotVerify(SnapshotJob),
+    SnapshotList(SnapshotListJob),
+    SnapshotLabels(SnapshotLabelsJob),
     /// A job kind this worker doesn't know, sent by a newer router. It is
     /// answered with [`JobResult::Failed`] rather than dropping the connection.
     #[serde(other)]
@@ -120,6 +122,28 @@ pub struct SnapshotJob {
     pub entry: String,
 }
 
+/// `GET /snapshots`, its query parsed and checked by the router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotListJob {
+    /// `(key, value)` pairs that an entry must all have, in request order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<(String, String)>,
+    pub limit: usize,
+    /// The cursor to start after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotLabelsJob {
+    /// The entry id.
+    pub entry: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobResult {
@@ -132,6 +156,8 @@ pub enum JobResult {
     Snapshot(Result<Box<api::SnapshotInfo>, api::Error>),
     SnapshotDeleted(Result<api::Deleted, api::Error>),
     SnapshotVerified(Result<api::SnapshotVerified, api::Error>),
+    SnapshotList(Result<api::SnapshotList, api::Error>),
+    SnapshotLabels(Result<api::SnapshotSummary, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,

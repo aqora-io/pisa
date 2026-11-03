@@ -1,18 +1,22 @@
 //! Snapshot endpoints. Creating a snapshot is a check whose code later code
 //! imports, so it is routed like a check of that later code: its worker then
-//! has the snapshot warm. Reads, deletes and verifies go to any worker of the
-//! version.
+//! has the snapshot warm. Reads, listings, label edits, deletes and verifies
+//! go to any worker of the version.
 
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, RawQuery, State};
 use pisa_protocol::api::{
-    Deleted, SnapshotInfo, SnapshotRequest, SnapshotResponse, SnapshotVerified, VersionQuery,
+    Deleted, ErrorKind, LabelsRequest, SnapshotInfo, SnapshotList, SnapshotRequest,
+    SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
+use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LIMIT, is_cursor, parse_filter};
 use pisa_protocol::snapshot;
-use pisa_protocol::wire::{Job, JobResult, SnapshotCreateJob, SnapshotJob};
+use pisa_protocol::wire::{
+    Job, JobResult, SnapshotCreateJob, SnapshotJob, SnapshotLabelsJob, SnapshotListJob,
+};
 
 use crate::dispatch::{Priority, Route};
 use crate::http::{ApiError, App, Body, record_result};
@@ -54,6 +58,70 @@ pub async fn get(
     let job = Job::SnapshotGet(SnapshotJob { entry });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::Snapshot(r) => Ok(Json(*r.map_err(ApiError)?)),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// `GET /snapshots`. The query is parsed here rather than by
+/// [`Query`], which can't collect the repeated `label`.
+pub async fn list(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<SnapshotList>, ApiError> {
+    let (q, job) = list_query(query.as_deref().unwrap_or_default())
+        .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    match submit(&app, Job::SnapshotList(job), q, Priority::Interactive).await? {
+        JobResult::SnapshotList(r) => Ok(Json(r.map_err(ApiError)?)),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// Splits the query of `GET /snapshots` into the version and the job, and
+/// checks the job's filters, limit and cursor. Other parameters are ignored.
+fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
+    let mut q = VersionQuery::default();
+    let mut job = SnapshotListJob {
+        labels: Vec::new(),
+        limit: DEFAULT_LIMIT,
+        after: None,
+    };
+    for (name, value) in form_urlencoded::parse(query.as_bytes()) {
+        match &*name {
+            "version" => q.version = Some(value.into_owned()),
+            "label" => job.labels.push(parse_filter(&value)?),
+            "limit" => {
+                job.limit = value
+                    .parse()
+                    .ok()
+                    .filter(|n| (1..=MAX_LIMIT).contains(n))
+                    .ok_or_else(|| format!("limit {value:?} must be from 1 to {MAX_LIMIT}"))?
+            }
+            "after" if is_cursor(&value) => job.after = Some(value.into_owned()),
+            "after" => {
+                return Err(format!(
+                    "after {value:?} is not a cursor: pass the `next` of the page before"
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok((q, job))
+}
+
+/// `PATCH /snapshots/{entry}`.
+pub async fn labels(
+    State(app): State<Arc<App>>,
+    Path(entry): Path<String>,
+    Query(q): Query<VersionQuery>,
+    Body(req): Body<LabelsRequest>,
+) -> Result<Json<SnapshotSummary>, ApiError> {
+    let job = Job::SnapshotLabels(SnapshotLabelsJob {
+        entry,
+        set: req.set,
+        remove: req.remove,
+    });
+    match submit(&app, job, q, Priority::Interactive).await? {
+        JobResult::SnapshotLabels(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
     }
 }

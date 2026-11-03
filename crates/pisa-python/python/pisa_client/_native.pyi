@@ -88,6 +88,20 @@ class SnapshotInfo(TypedDict):
     result: CheckResult
     created: int
 
+class SnapshotSummary(TypedDict):
+    entry: str
+    snapshot: str
+    imports: list[str]
+    header: str
+    labels: dict[str, str]
+    dirty: bool
+    verified: bool
+    created: int
+
+class SnapshotList(TypedDict):
+    entries: list[SnapshotSummary]
+    next: NotRequired[str]
+
 class SnapshotFailure(TypedDict):
     snapshot: str
     reason: str
@@ -162,6 +176,29 @@ class Client:
     def delete_snapshot(self, entry: str) -> list[str]:
         """Delete an entry; returns the modules that went with it: its module,
         if no other entry or kept module needs it, and so on up its imports."""
+    def list_snapshots(
+        self,
+        labels: dict[str, str] | None = None,
+        *,
+        limit: int | None = None,
+        after: str | None = None,
+    ) -> SnapshotList:
+        """Entries newest first, as summaries without code or check results:
+        those with every label in `labels` (exact matches), or all of them. A
+        page has up to `limit` entries (1 to 1000, default 100); a full one has
+        `next`, which as `after` gives the page after it. The first label in
+        `labels` is the one the server scans, so put the most selective
+        first."""
+    def set_snapshot_labels(
+        self,
+        entry: str,
+        *,
+        set: dict[str, str] | None = None,
+        remove: list[str] | None = None,
+    ) -> SnapshotSummary:
+        """Remove the labels `remove` names from an entry, then set those in
+        `set`; returns the entry's summary. Labels that break the rules raise a
+        `bad_request` PisaError, and NotFoundError means an unknown entry."""
 
 class Query(TypedDict, total=False):
     """One search; fill as many fields as you can, each feeds different lanes."""

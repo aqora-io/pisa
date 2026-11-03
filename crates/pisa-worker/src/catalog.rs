@@ -10,6 +10,11 @@
 //! - `(pisa, <version>, "entry", <e>)`: entry `e` ([`EntryMeta`])
 //! - `(pisa, <version>, "key", <k>)`: the id of the entry made with
 //!   idempotency key `k`
+//! - `(pisa, <version>, "new", <R>, <e>)`: empty; every entry, newest first.
+//!   `R` is its creation time in microseconds counted down from `u64::MAX`,
+//!   as 16 hex digits, and `R` followed by `e` is a listing cursor
+//! - `(pisa, <version>, "label", <key>, <value>, <R>, <e>)`: empty; one per
+//!   label of entry `e`, newest first
 //!
 //! A module is kept while an entry points at it or a kept module imports it.
 //! Each transaction that relies on a `mod` record it only reads locks it, so
@@ -21,11 +26,12 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use pisa_protocol::api::{CheckResult, Error, ErrorKind};
+use pisa_protocol::labels::check_labels;
 use pisa_protocol::snapshot;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::kv::{self, IsConflict, Kv, KvError, ROOT, Txn, key, prefix};
+use crate::kv::{self, IsConflict, Kv, KvError, ROOT, Txn, decode, key, prefix};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleMeta {
@@ -77,6 +83,13 @@ pub struct EntryMeta {
     pub key: Option<String>,
     /// Microseconds since the Unix epoch.
     pub created_micros: u64,
+}
+
+impl EntryMeta {
+    /// The `R` component of the entry's `new` and `label` keys.
+    fn rank(&self) -> String {
+        format!("{:016x}", u64::MAX - self.created_micros)
+    }
 }
 
 /// What a new entry is given.
@@ -169,6 +182,14 @@ impl Catalog {
 
     fn idem_key(&self, k: &str) -> Vec<u8> {
         key(&[ROOT, &self.version, "key", k])
+    }
+
+    fn new_key(&self, r: &str, e: &str) -> Vec<u8> {
+        key(&[ROOT, &self.version, "new", r, e])
+    }
+
+    fn label_key(&self, k: &str, value: &str, r: &str, e: &str) -> Vec<u8> {
+        key(&[ROOT, &self.version, "label", k, value, r, e])
     }
 
     /// Reads one JSON record.
@@ -352,6 +373,12 @@ impl Catalog {
         if let Some(k) = &entry.key {
             txn.put(self.idem_key(k), e.clone().into_bytes()).await?;
         }
+        let r = meta.rank();
+        txn.put(self.new_key(&r, &e), Vec::new()).await?;
+        for (k, value) in &meta.labels {
+            txn.put(self.label_key(k, value, &r, &e), Vec::new())
+                .await?;
+        }
         Ok((e, meta))
     }
 
@@ -387,7 +414,119 @@ impl Catalog {
         if let Some(k) = &meta.key {
             txn.delete(self.idem_key(k)).await?;
         }
+        let r = meta.rank();
+        txn.delete(self.new_key(&r, e)).await?;
+        for (k, value) in &meta.labels {
+            txn.delete(self.label_key(k, value, &r, e)).await?;
+        }
         Ok(())
+    }
+
+    /// The entries, newest first, that have every `(key, value)` in `labels`
+    /// (every entry if there are none), at most `limit` of them, starting
+    /// after the cursor `after` (see [`is_cursor`]). Also returns the cursor
+    /// after the last one if there are `limit`.
+    ///
+    /// It scans the first label's keys and looks up the others' for each
+    /// entry found, all in one read transaction, page by page.
+    ///
+    /// [`is_cursor`]: pisa_protocol::labels::is_cursor
+    pub async fn list(
+        &self,
+        labels: &[(String, String)],
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<(Vec<(String, EntryMeta)>, Option<String>), Error> {
+        let v = self.version.as_str();
+        let (scanned, others) = match labels.split_first() {
+            Some(((k, value), others)) => (vec![ROOT, v, "label", k, value], others),
+            None => (vec![ROOT, v, "new"], labels),
+        };
+        let mut start = prefix(&scanned);
+        if let Some(after) = after {
+            let (r, e) = after.split_at(16);
+            let cursor = key(&[scanned.as_slice(), &[r, e]].concat());
+            start.start = [cursor, vec![0]].concat();
+        }
+        let listed = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            let mut range = start.clone();
+            let mut entries = Vec::new();
+            loop {
+                let page = txn.scan(range.clone(), limit as u32).await?;
+                let exhausted = page.len() < limit;
+                'scanned: for (found, _) in page {
+                    range.start = [found.as_slice(), &[0]].concat();
+                    let parts = decode(&found);
+                    let [.., r, e] = parts.as_slice() else {
+                        continue;
+                    };
+                    for (k, value) in others {
+                        if txn.get(&self.label_key(k, value, r, e)).await?.is_none() {
+                            continue 'scanned;
+                        }
+                    }
+                    let Some(bytes) = txn.get(&self.entry_key(e)).await? else {
+                        return Err(Fail::Api(internal(format!(
+                            "the listing index names the missing entry {e}"
+                        ))));
+                    };
+                    entries.push((e.clone(), serde_json::from_slice(&bytes)?));
+                    if entries.len() == limit {
+                        return Ok((entries, Some(format!("{r}{e}"))));
+                    }
+                }
+                if exhausted {
+                    return Ok((entries, None));
+                }
+            }
+        })
+        .await?;
+        Ok(listed)
+    }
+
+    /// Removes the labels `remove` names from entry `e`, then sets those in
+    /// `set`, and returns the entry. The labels that result must follow the
+    /// rules, or nothing changes and it is a `bad_request`.
+    pub async fn set_labels(
+        &self,
+        e: &str,
+        set: &BTreeMap<String, String>,
+        remove: &[String],
+    ) -> Result<EntryMeta, Error> {
+        let entry_key = self.entry_key(e);
+        let updated = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            let Some(bytes) = txn.get(&entry_key).await? else {
+                return Err(Fail::Api(unknown_entry(e)));
+            };
+            let mut meta: EntryMeta = serde_json::from_slice(&bytes)?;
+            let old = meta.labels.clone();
+            for k in remove {
+                meta.labels.remove(k);
+            }
+            meta.labels.extend(set.clone());
+            check_labels(&meta.labels)
+                .map_err(|m| Fail::Api(Error::new(ErrorKind::BadRequest, m)))?;
+            let r = meta.rank();
+            for (k, value) in &old {
+                if meta.labels.get(k) != Some(value) {
+                    txn.delete(self.label_key(k, value, &r, e)).await?;
+                }
+            }
+            for (k, value) in &meta.labels {
+                if old.get(k) != Some(value) {
+                    txn.put(self.label_key(k, value, &r, e), Vec::new()).await?;
+                }
+            }
+            // Rewriting the record also makes a concurrent delete conflict.
+            txn.put(entry_key.clone(), serde_json::to_vec(&meta)?)
+                .await?;
+            txn.commit().await?;
+            Ok(meta)
+        })
+        .await?;
+        Ok(updated)
     }
 
     /// Removes module `m` if no entry references it and no module imports it.

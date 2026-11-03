@@ -1,10 +1,16 @@
-//! Labels and idempotency keys on snapshot entries, and entry ids: the rules
-//! the router and the workers share.
+//! Labels and idempotency keys on snapshot entries, entry ids, and listing
+//! filters and cursors: the rules the router and the workers share.
 
 use std::collections::BTreeMap;
 
 /// The most labels an entry can have.
 pub const MAX_LABELS: usize = 64;
+
+/// How many entries a listing returns when the request doesn't say.
+pub const DEFAULT_LIMIT: usize = 100;
+
+/// The most entries a listing returns.
+pub const MAX_LIMIT: usize = 1000;
 
 /// The longest label key, in bytes.
 const MAX_KEY: usize = 128;
@@ -26,12 +32,7 @@ pub fn check_labels(labels: &BTreeMap<String, String>) -> Result<(), String> {
         ));
     }
     for (key, value) in labels {
-        let allowed = |b: u8| b.is_ascii_alphanumeric() || b"._/-".contains(&b);
-        if key.is_empty() || key.len() > MAX_KEY || !key.bytes().all(allowed) {
-            return Err(format!(
-                "label key {key:?} must be 1 to {MAX_KEY} bytes of letters, digits, '.', '_', '/' and '-'"
-            ));
-        }
+        check_label_key(key)?;
         if value.len() > MAX_VALUE {
             return Err(format!(
                 "the value of label {key} is longer than {MAX_VALUE} bytes"
@@ -39,6 +40,32 @@ pub fn check_labels(labels: &BTreeMap<String, String>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Checks a label key: 1–128 bytes of `[A-Za-z0-9._/-]`.
+fn check_label_key(key: &str) -> Result<(), String> {
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || b"._/-".contains(&b);
+    if key.is_empty() || key.len() > MAX_KEY || !key.bytes().all(allowed) {
+        return Err(format!(
+            "label key {key:?} must be 1 to {MAX_KEY} bytes of letters, digits, '.', '_', '/' and '-'"
+        ));
+    }
+    Ok(())
+}
+
+/// Splits a listing filter, `key:value`, on its first `:` and checks the key.
+pub fn parse_filter(s: &str) -> Result<(String, String), String> {
+    let Some((key, value)) = s.split_once(':') else {
+        return Err(format!("label filter {s:?} must be key:value"));
+    };
+    check_label_key(key)?;
+    Ok((key.to_string(), value.to_string()))
+}
+
+/// Whether `s` is a listing cursor: 48 lowercase hex digits, 16 for the
+/// position in time and 32 for the entry id.
+pub fn is_cursor(s: &str) -> bool {
+    s.len() == 48 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Checks an idempotency key: 1–256 bytes of `[A-Za-z0-9._:/-]`. The error says
@@ -100,6 +127,20 @@ mod tests {
         for bad in ["", &"k".repeat(257), "has space", "a=b", "é"] {
             assert!(check_key(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn filters_and_cursors_parse() {
+        let pair = |k: &str, v: &str| Ok((k.to_string(), v.to_string()));
+        assert_eq!(parse_filter("k:a:b"), pair("k", "a:b"));
+        assert_eq!(parse_filter("k:"), pair("k", ""));
+        assert!(parse_filter("k").is_err());
+        assert!(parse_filter("bad key:x").is_err());
+
+        let cursor = "0123456789abcdef".repeat(3);
+        assert!(is_cursor(&cursor));
+        assert!(!is_cursor(&cursor[1..]));
+        assert!(!is_cursor(&cursor.replace('a', "A")));
     }
 
     #[test]

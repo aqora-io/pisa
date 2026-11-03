@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 
 use pisa_protocol::api::{
-    BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse,
+    BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse, LabelsRequest,
     SessionCheckRequest, SnapshotRequest, StartRequest, TacticRequest,
 };
 use pisa_protocol::search::{
@@ -46,8 +46,8 @@ use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
     CheckResult, Declaration, Detail, ErrorKind, Message, Pos, Severity, SnapshotFailure,
-    SnapshotInfo, SnapshotResponse as Snapshot, SnapshotVerified, Sorry, StartResponse as Session,
-    StateInfo, TacticInfo, TacticResponse as Step,
+    SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary, SnapshotVerified,
+    Sorry, StartResponse as Session, StateInfo, TacticInfo, TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, Suggestion,
@@ -147,6 +147,15 @@ impl Endpoint {
 
     async fn post_url<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
         let r = self.http.post(url).send().await?;
+        Ok(server_error(r).await?.json().await?)
+    }
+
+    async fn patch<B: Serialize, T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &B,
+    ) -> Result<T, Error> {
+        let r = self.http.patch(url).json(body).send().await?;
         Ok(server_error(r).await?.json().await?)
     }
 }
@@ -335,6 +344,51 @@ impl Client {
     /// result.
     pub async fn snapshot(&self, entry: &str) -> Result<SnapshotInfo, Error> {
         self.endpoint.get(self.snapshot_url(entry)?).await
+    }
+
+    /// Entries newest first, as summaries without code or check results: those
+    /// with every `(key, value)` label in `labels`, or all of them. A page has
+    /// up to `limit` (1 to 1000, default 100); a full one has `next`, which as
+    /// `after` gives the page after it. The first label is the one scanned, so
+    /// put the most selective first.
+    pub async fn list_snapshots(
+        &self,
+        labels: &[(&str, &str)],
+        limit: Option<usize>,
+        after: Option<&str>,
+    ) -> Result<SnapshotList, Error> {
+        let mut url = self.endpoint.url("snapshots")?;
+        {
+            let mut query = url.query_pairs_mut();
+            for (key, value) in labels {
+                query.append_pair("label", &format!("{key}:{value}"));
+            }
+            if let Some(limit) = limit {
+                query.append_pair("limit", &limit.to_string());
+            }
+            if let Some(after) = after {
+                query.append_pair("after", after);
+            }
+            if let Some(v) = &self.version {
+                query.append_pair("version", v);
+            }
+        }
+        self.endpoint.get(url).await
+    }
+
+    /// Removes the labels `remove` names from an entry, then sets those in
+    /// `set`, and returns the entry's summary.
+    pub async fn set_snapshot_labels(
+        &self,
+        entry: &str,
+        set: &BTreeMap<String, String>,
+        remove: &[String],
+    ) -> Result<SnapshotSummary, Error> {
+        let req = LabelsRequest {
+            set: set.clone(),
+            remove: remove.to_vec(),
+        };
+        self.endpoint.patch(self.snapshot_url(entry)?, &req).await
     }
 
     /// Deletes an entry and returns the names of the modules that went with

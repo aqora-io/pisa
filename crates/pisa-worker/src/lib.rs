@@ -248,6 +248,16 @@ async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
         Job::SnapshotVerify(j) => {
             JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.entry).await)
         }
+        Job::SnapshotList(j) => JobResult::SnapshotList(
+            pool.snapshots()
+                .list(&j.labels, j.limit, j.after.as_deref())
+                .await,
+        ),
+        Job::SnapshotLabels(j) => JobResult::SnapshotLabels(
+            pool.snapshots()
+                .set_labels(&j.entry, &j.set, &j.remove)
+                .await,
+        ),
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the router".into(),
         },

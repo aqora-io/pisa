@@ -185,3 +185,36 @@ def test_snapshots(url):
     assert client.delete_snapshot(entry) == [name]
     with pytest.raises(NotFoundError):
         client.snapshot(entry)
+
+
+def test_snapshot_labels(url):
+    client = Client(url, timeout=5)
+    code = "import Foo\ntheorem listed : 1 = 1 := rfl"
+    first = client.create_snapshot(code, labels={"suite": "labels", "k": "v"})["entry"]
+    second = client.create_snapshot(code, labels={"suite": "labels", "k": "w"})["entry"]
+
+    def entries(listing):
+        return [s["entry"] for s in listing["entries"]]
+
+    found = client.list_snapshots({"suite": "labels", "k": "v"})
+    assert entries(found) == [first] and "next" not in found
+    assert found["entries"][0]["labels"] == {"suite": "labels", "k": "v"}
+    page = client.list_snapshots({"suite": "labels"}, limit=1)
+    assert entries(page) == [second]
+    assert entries(client.list_snapshots({"suite": "labels"}, limit=1, after=page["next"])) == [first]
+
+    summary = client.set_snapshot_labels(first, set={"k": "u"})
+    assert summary["entry"] == first and summary["labels"] == {"suite": "labels", "k": "u"}
+    assert client.list_snapshots({"suite": "labels", "k": "v"})["entries"] == []
+    assert entries(client.list_snapshots({"suite": "labels", "k": "u"})) == [first]
+    assert client.set_snapshot_labels(first, remove=["k"])["labels"] == {"suite": "labels"}
+    with pytest.raises(PisaError) as e:
+        client.set_snapshot_labels(first, set={"bad key": "x"})
+    assert (e.value.kind, e.value.status) == ("bad_request", 400)
+    with pytest.raises(PisaError) as e:
+        client.list_snapshots(limit=0)
+    assert (e.value.kind, e.value.status) == ("bad_request", 400)
+
+    for entry in [first, second]:
+        client.delete_snapshot(entry)
+    assert client.list_snapshots({"suite": "labels"})["entries"] == []

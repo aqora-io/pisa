@@ -238,6 +238,45 @@ impl Client {
     fn delete_snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
         call(py, async move { self.inner.delete_snapshot(&entry).await })
     }
+
+    #[pyo3(signature = (labels = None, *, limit = None, after = None))]
+    fn list_snapshots<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Option<Bound<'py, PyDict>>,
+        limit: Option<usize>,
+        after: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        // In the dict's order: the first label is the one the server scans.
+        let labels = labels.map_or(Ok(Vec::new()), |d| {
+            d.iter()
+                .map(|(k, v)| Ok((k.extract::<String>()?, v.extract::<String>()?)))
+                .collect::<PyResult<Vec<_>>>()
+        })?;
+        call(py, async move {
+            let labels: Vec<(&str, &str)> = labels
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            self.inner
+                .list_snapshots(&labels, limit, after.as_deref())
+                .await
+        })
+    }
+
+    #[pyo3(signature = (entry, *, set = None, remove = None))]
+    fn set_snapshot_labels<'py>(
+        &self,
+        py: Python<'py>,
+        entry: String,
+        set: Option<BTreeMap<String, String>>,
+        remove: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let (set, remove) = (set.unwrap_or_default(), remove.unwrap_or_default());
+        call(py, async move {
+            self.inner.set_snapshot_labels(&entry, &set, &remove).await
+        })
+    }
 }
 
 /// A client for one declaration search server. Safe to share between threads.

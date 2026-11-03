@@ -24,7 +24,7 @@
 //! that uses macros or asks for it, and later on request. A module's record
 //! is rewritten once it passes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -33,10 +33,12 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
     CheckResult, Declaration, Deleted, Error, ErrorKind, SnapshotFailure, SnapshotInfo,
-    SnapshotResponse, SnapshotVerified,
+    SnapshotList, SnapshotResponse, SnapshotSummary, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
-use pisa_protocol::labels::{check_key, check_labels, entry_id_error, is_entry_id};
+use pisa_protocol::labels::{
+    MAX_LIMIT, check_key, check_labels, entry_id_error, is_cursor, is_entry_id,
+};
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
@@ -86,6 +88,20 @@ fn parse_entry(entry: &str) -> Result<&str, Error> {
         Ok(entry)
     } else {
         Err(Error::new(ErrorKind::BadRequest, entry_id_error(entry)))
+    }
+}
+
+/// An entry with its module's state.
+fn summary(entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> SnapshotSummary {
+    SnapshotSummary {
+        entry,
+        snapshot: snapshot::module(&entry_meta.module),
+        imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
+        header: meta.header.clone(),
+        labels: entry_meta.labels,
+        dirty: meta.dirty,
+        verified: meta.verified,
+        created: entry_meta.created_micros / 1_000_000,
     }
 }
 
@@ -903,6 +919,54 @@ impl Snapshots {
             result: meta.result,
             created: entry_meta.created_micros / 1_000_000,
         })
+    }
+
+    /// The entries, newest first, that have every label in `labels`, at most
+    /// `limit`, after the cursor `after`; see [`Catalog::list`].
+    pub async fn list(
+        &self,
+        labels: &[(String, String)],
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<SnapshotList, Error> {
+        if !(1..=MAX_LIMIT).contains(&limit) || after.is_some_and(|a| !is_cursor(a)) {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!("a listing takes a limit from 1 to {MAX_LIMIT} and a cursor from `next`"),
+            ));
+        }
+        let (listed, next) = self.catalog.list(labels, limit, after).await?;
+        let mut modules: HashMap<String, Option<ModuleMeta>> = HashMap::new();
+        let mut entries = Vec::new();
+        for (entry, entry_meta) in listed {
+            let id = entry_meta.module.clone();
+            if !modules.contains_key(&id) {
+                let meta = match self.catalog.module(&id).await {
+                    Ok(meta) => Some(meta),
+                    // Its entries were deleted since they were listed.
+                    Err(e) if e.kind == ErrorKind::NotFound => None,
+                    Err(e) => return Err(e),
+                };
+                modules.insert(id.clone(), meta);
+            }
+            if let Some(meta) = &modules[&id] {
+                entries.push(summary(entry, entry_meta, meta));
+            }
+        }
+        Ok(SnapshotList { entries, next })
+    }
+
+    /// Edits an entry's labels; see [`Catalog::set_labels`].
+    pub async fn set_labels(
+        &self,
+        entry: &str,
+        set: &BTreeMap<String, String>,
+        remove: &[String],
+    ) -> Result<SnapshotSummary, Error> {
+        let entry = parse_entry(entry)?;
+        let entry_meta = self.catalog.set_labels(entry, set, remove).await?;
+        let meta = self.catalog.module(&entry_meta.module).await?;
+        Ok(summary(entry.to_string(), entry_meta, &meta))
     }
 
     /// Deletes an entry, then each module that nothing needs any more: the

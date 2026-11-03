@@ -5,7 +5,7 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::Cluster;
-use pisa_client::{Client, Error, ErrorKind, SnapshotOptions};
+use pisa_client::{Client, Error, ErrorKind, SnapshotList, SnapshotOptions};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_covers_checks_and_sessions() {
@@ -119,6 +119,64 @@ async fn client_passes_labels() {
 
     let again = client.create_snapshot_with(code, &opts).await.unwrap();
     assert_eq!(again.entry, Some(entry));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_lists_and_labels_snapshots() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let code = "import Foo\ntheorem base : 1 = 1 := rfl";
+    let labels = |value: &str| BTreeMap::from([("k".to_string(), value.to_string())]);
+    let mut created = Vec::new();
+    for value in ["v", "w"] {
+        let opts = SnapshotOptions {
+            labels: labels(value),
+            ..Default::default()
+        };
+        let snapshot = client.create_snapshot_with(code, &opts).await.unwrap();
+        created.push(snapshot.entry.unwrap());
+    }
+    let entries = |list: &SnapshotList| -> Vec<String> {
+        list.entries.iter().map(|s| s.entry.clone()).collect()
+    };
+
+    let found = client
+        .list_snapshots(&[("k", "v")], None, None)
+        .await
+        .unwrap();
+    assert_eq!(entries(&found), [created[0].clone()]);
+    assert!(found.next.is_none());
+    let page = client.list_snapshots(&[], Some(1), None).await.unwrap();
+    assert_eq!(entries(&page), [created[1].clone()]);
+    let rest = client
+        .list_snapshots(&[], Some(1), page.next.as_deref())
+        .await
+        .unwrap();
+    assert_eq!(entries(&rest), [created[0].clone()]);
+
+    let summary = client
+        .set_snapshot_labels(&created[0], &labels("u"), &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        (&summary.entry, &summary.labels),
+        (&created[0], &labels("u"))
+    );
+    let gone = client
+        .list_snapshots(&[("k", "v")], None, None)
+        .await
+        .unwrap();
+    assert!(gone.entries.is_empty());
+    let moved = client
+        .list_snapshots(&[("k", "u")], None, None)
+        .await
+        .unwrap();
+    assert_eq!(entries(&moved), [created[0].clone()]);
+    let removed = client
+        .set_snapshot_labels(&created[0], &BTreeMap::new(), &["k".to_string()])
+        .await
+        .unwrap();
+    assert!(removed.labels.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
