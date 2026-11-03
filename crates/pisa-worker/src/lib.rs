@@ -33,6 +33,11 @@ use sessions::Sessions;
 /// present it puts it; see [`kv::Kv::gc`].
 const TIKV_GC_EVERY: Duration = Duration::from_secs(600);
 
+/// How long dialling the router may take. A Service without ready endpoints
+/// can drop the connection attempt instead of refusing it, which would
+/// otherwise leave the worker waiting minutes for the OS to give up.
+const ROUTER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
     if cfg.metadata == MetadataKind::Memory && cfg.store == StoreKind::S3 {
@@ -142,8 +147,9 @@ pub async fn run_with_stores(
         if *drain_rx.borrow() {
             return Ok(());
         }
-        match TcpStream::connect(&cfg.router).await {
-            Ok(stream) => {
+        let connect = TcpStream::connect(&cfg.router);
+        match tokio::time::timeout(ROUTER_CONNECT_TIMEOUT, connect).await {
+            Ok(Ok(stream)) => {
                 backoff = Duration::from_millis(100);
                 tracing::info!(router = %cfg.router, "connected");
                 let conn = Connection {
@@ -161,7 +167,8 @@ pub async fn run_with_stores(
                 }
                 tracing::warn!(?result, "router connection closed");
             }
-            Err(e) => tracing::warn!(router = %cfg.router, "connect failed: {e}"),
+            Ok(Err(e)) => tracing::warn!(router = %cfg.router, "connect failed: {e}"),
+            Err(_) => tracing::warn!(router = %cfg.router, "connect timed out"),
         }
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
