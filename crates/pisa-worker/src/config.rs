@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+use crate::kv::Kv;
+
 #[derive(Debug, Clone, clap::Parser)]
 #[command(about = "Pisa worker: runs Lean REPLs for the router")]
 pub struct WorkerConfig {
@@ -78,6 +80,16 @@ pub struct WorkerConfig {
     /// AWS_ALLOW_HTTP). All workers of a version must share one store.
     #[arg(long, env = "PISA_STORE", value_enum, default_value_t = StoreKind::Memory)]
     pub store: StoreKind,
+    /// Where session and proof-state records live. `tikv` stores them in the
+    /// TiKV cluster at `--tikv-pd`, shared by all workers of a version. `memory`
+    /// keeps them in this process, so they are neither shared between workers
+    /// nor kept across restarts. Pickled states always go to `--store`.
+    #[arg(long, env = "PISA_METADATA", value_enum, default_value_t = MetadataKind::Memory)]
+    pub metadata: MetadataKind,
+    /// PD endpoints of the TiKV cluster, e.g. "pd-0:2379,pd-1:2379". Required
+    /// with `--metadata tikv`.
+    #[arg(long, env = "PISA_TIKV_PD", value_delimiter = ',')]
+    pub tikv_pd: Vec<String>,
     /// Delete stored proof states and sessions older than this (0 keeps them).
     #[arg(long, env = "PISA_STATE_TTL_SECS", default_value_t = 0)]
     pub state_ttl_secs: u64,
@@ -95,6 +107,13 @@ pub enum StoreKind {
     /// In this process only; sessions can't move between workers.
     Memory,
     S3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum MetadataKind {
+    /// In this process only; sessions can't move between workers.
+    Memory,
+    Tikv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -141,12 +160,49 @@ impl WorkerConfig {
         })
     }
 
+    pub async fn kv(&self) -> anyhow::Result<Kv> {
+        match self.metadata {
+            MetadataKind::Memory => Ok(Kv::memory()),
+            MetadataKind::Tikv => {
+                let pd: Vec<String> = self
+                    .tikv_pd
+                    .iter()
+                    .map(|endpoint| endpoint.trim().to_owned())
+                    .filter(|endpoint| !endpoint.is_empty())
+                    .collect();
+                anyhow::ensure!(
+                    !pd.is_empty(),
+                    "PISA_TIKV_PD is required with PISA_METADATA=tikv"
+                );
+                Kv::tikv(&pd).await.context("connecting to TiKV")
+            }
+        }
+    }
+
     pub fn version(&self) -> anyhow::Result<String> {
         match (&self.version, &self.project) {
             (Some(v), _) => Ok(v.clone()),
             (None, Some(project)) => pisa_protocol::version::project_version(project)
                 .with_context(|| format!("reading the project at {}", project.display())),
             (None, None) => Ok("dev".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn tikv_needs_pd_endpoints() {
+        let mut cfg = WorkerConfig::parse_from(["pisa-worker"]);
+        cfg.metadata = MetadataKind::Tikv;
+        for endpoints in [vec![], vec![" ".to_string(), String::new()]] {
+            cfg.tikv_pd = endpoints;
+            let err = cfg.kv().await.err().expect("no endpoints to connect to");
+            assert!(err.to_string().contains("PISA_TIKV_PD"), "{err}");
         }
     }
 }

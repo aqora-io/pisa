@@ -18,7 +18,8 @@ Lean 4 Server in Rust*:
    - Worker pools are labelled by version.
 3. **Tactic sessions.**
    - Proof states are pickled into object storage (S3, or Garage in Compose),
-     so any worker can continue a session.
+     and their records and the sessions are kept in TiKV, so any worker can
+     continue a session.
    - A final check re-runs the whole proof from scratch and confirms it proves
      the original statements, with the original imports.
 
@@ -48,6 +49,17 @@ python3 scripts/e2e.py [--mathlib]     # end-to-end checks against the running s
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 ```
 
+Compose also starts a single-node TiKV (a PD and a TiKV) and Garage. Workers keep
+session data in two places, chosen by environment variables that Compose and the
+chart set:
+- **Metadata**, the sessions and the records that make proof states loadable,
+  is in TiKV. `PISA_METADATA` is `tikv` or `memory` (the default). `memory` keeps
+  it in the worker process, so it isn't shared between workers or kept across
+  restarts. `PISA_TIKV_PD` lists the PD endpoints, comma-separated (e.g.
+  `pd:2379`), and `tikv` requires it.
+- **Blobs**, the pickled proof states, are in S3. `PISA_STORE` is `s3`, which
+  reads the `AWS_*` variables, or `memory`.
+
 The pinned versions live in `docker/lean-project`: `lean-toolchain`,
 `lakefile.toml` and `lake-manifest.json`. Keep `REPL_REV` in `docker/Dockerfile`
 on the same Lean version.
@@ -70,9 +82,15 @@ own KEDA and Prometheus:
 - Keep the scrape interval short, e.g. 5–15s: it bounds how fast workers react
   to load.
 
-**Storage.** Proof states go to an S3-compatible bucket. Give its credentials as an existing Secret, or leave
-`store.s3.credentialsSecret.name` empty to use the pod's ambient credentials
-(e.g. EKS IRSA):
+**Storage.** Metadata (sessions and proof-state records) lives in TiKV, and blobs
+(pickled proof states) in an S3-compatible bucket.
+- The chart doesn't deploy TiKV. Set `metadata.tikv.pdEndpoints` to the PD
+  endpoints of a cluster you run, for example with the
+  [TiDB Operator](https://docs.pingcap.com/tidb-in-kubernetes/stable). It is
+  required.
+- Give the bucket's credentials as an existing Secret, or leave
+  `store.s3.credentialsSecret.name` empty to use the pod's ambient credentials
+  (e.g. EKS IRSA).
 
 ```sh
 helm repo add kedacore https://kedacore.github.io/charts
@@ -82,6 +100,7 @@ kubectl create secret generic pisa-s3 \
 helm install pisa deploy/helm/pisa \
   --set worker.image.repository=<registry>/pisa-worker \
   --set keda.prometheus.serverAddress=http://prometheus-server.monitoring.svc.cluster.local \
+  --set metadata.tikv.pdEndpoints={pd.tikv:2379} \
   --set store.s3.bucket=<bucket> --set store.s3.region=<region> \
   --set store.s3.credentialsSecret.name=pisa-s3
 ```
@@ -114,6 +133,7 @@ helm install prometheus prometheus-community/prometheus --version 29.37.0 \
   -n monitoring --create-namespace -f deploy/minikube/prometheus-values.yaml
 minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
 kubectl apply -f deploy/minikube/garage.yaml   # a throwaway S3 store and its Secret
+kubectl apply -f deploy/minikube/tikv.yaml     # a throwaway single-node TiKV
 helm install pisa deploy/helm/pisa -f deploy/minikube/values.yaml
 kubectl port-forward svc/pisa-router 8000:8000 &
 python3 scripts/e2e.py --no-failover   # checks, policy, sessions against real Lean

@@ -67,6 +67,14 @@ store:
   # Delete stored states and sessions older than this (0 keeps them).
   stateTtlSecs: 86400
 
+# TiKV holds the session and proof-state records, which all workers of a
+# release share. The chart doesn't deploy TiKV; run it with the TiDB Operator
+# (https://docs.pingcap.com/tidb-in-kubernetes/stable) or any other means.
+metadata:
+  tikv:
+    # Required: the cluster's PD endpoints, e.g. ["pd.tikv:2379"].
+    pdEndpoints: []
+
 # How the cluster's Prometheus finds the router's /metrics.
 metrics:
   # prometheus.io/scrape annotations on the router Service, for Prometheus

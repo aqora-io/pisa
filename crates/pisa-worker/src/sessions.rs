@@ -15,7 +15,7 @@ use pisa_protocol::wire::{
 use crate::check::{axiom_report, header_error, policy_error, run, run_check, unexpected};
 use crate::policy::parse_report;
 use crate::pool::{Lease, Pool, Resident};
-use crate::store::{SessionMeta, StateMeta, Store};
+use crate::store::{SessionMeta, StateMeta, Store, now_secs};
 
 /// Pickling and unpickling only touch the state's own constants.
 const PICKLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -104,6 +104,7 @@ impl Sessions {
                 parent: None,
                 tactic: None,
                 goals: vec![sorry.goal.clone()],
+                created: now_secs(),
             };
             let hash = self.save(slot, proof_state, &meta).await?;
             states.push(StateInfo {
@@ -116,6 +117,7 @@ impl Sessions {
         let meta = SessionMeta {
             code: job.code,
             declarations,
+            created: now_secs(),
         };
         self.store
             .put_session(&session_id, &meta)
@@ -170,6 +172,7 @@ impl Sessions {
             parent: Some(job.state),
             tactic: Some(job.tactic),
             goals: step.goals.clone(),
+            created: now_secs(),
         };
         let hash = self.save(slot, step.proof_state, &meta).await?;
         Ok(TacticResponse {
@@ -281,7 +284,12 @@ impl Sessions {
             .warm_up(&meta.header, &key.header_key)
             .await
             .map_err(|f| header_error(f, slot.import_timeout()))?;
-        let pickle = self.store.state_pickle(&key.id).await.map_err(internal)?;
+        let pickle = self
+            .store
+            .state_pickle(&key.id)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| Error::new(ErrorKind::NotFound, format!("unknown state: {}", key.id)))?;
         let path = slot
             .scratch_dir()
             .join(format!("{}.olean", uuid::Uuid::new_v4().simple()));

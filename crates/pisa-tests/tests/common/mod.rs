@@ -11,7 +11,8 @@ use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use pisa_router::{RouterConfig, Running};
 use pisa_worker::WorkerConfig;
-use pisa_worker::config::{Sandbox, StoreKind};
+use pisa_worker::config::{MetadataKind, Sandbox, StoreKind};
+use pisa_worker::kv::Kv;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -21,6 +22,8 @@ pub struct Cluster {
     pub client: reqwest::Client,
     /// Shared by all workers, standing in for S3.
     pub store: Arc<dyn ObjectStore>,
+    /// Shared by all workers, standing in for TiKV.
+    pub kv: Kv,
     /// Workers' scratch space, private to this cluster so that tests running
     /// in parallel with the same worker names don't share files.
     pub dir: tempfile::TempDir,
@@ -60,6 +63,8 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         allowed_options: split(pisa_worker::policy::DEFAULT_OPTIONS),
         allow_metaprogramming: false,
         store: StoreKind::Memory,
+        metadata: MetadataKind::Memory,
+        tikv_pd: vec![],
         state_ttl_secs: 0,
         snapshot_confirm_secs: 60,
         drain_timeout_secs: 30,
@@ -86,6 +91,7 @@ impl Cluster {
             workers: Vec::new(),
             client: reqwest::Client::new(),
             store: Arc::new(InMemory::new()),
+            kv: Kv::memory(),
             dir: tempfile::tempdir().unwrap(),
         };
         for (name, version, slots) in workers {
@@ -122,8 +128,9 @@ impl Cluster {
         cfg.work_dir
             .get_or_insert_with(|| self.dir.path().join(name));
         let store = self.store.clone();
+        let kv = self.kv.clone();
         self.workers.push(tokio::spawn(async move {
-            pisa_worker::run_with_store(cfg, store, shutdown)
+            pisa_worker::run_with_stores(cfg, store, kv, shutdown)
                 .await
                 .unwrap();
         }));

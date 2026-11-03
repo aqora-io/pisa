@@ -45,6 +45,8 @@ spec:
             - { name: PISA_PREWARM, value: {{ $w.prewarm | quote }} }
             - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ $w.drainTimeoutSecs | quote }} }
             - { name: PISA_STORE, value: s3 }
+            - { name: PISA_METADATA, value: tikv }
+            - { name: PISA_TIKV_PD, value: {{ required "metadata.tikv.pdEndpoints is required" (join "," .Values.metadata.tikv.pdEndpoints) | quote }} }
             - { name: PISA_STATE_TTL_SECS, value: {{ .Values.store.stateTtlSecs | quote }} }
             {{- with .Values.store.s3 }}
             - { name: AWS_BUCKET, value: {{ required "store.s3.bucket is required" .bucket | quote }} }

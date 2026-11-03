@@ -1,7 +1,9 @@
-# Values for trying the chart on minikube with locally built images, and the
-# Garage from garage.yaml for proof states:
+# Values for trying the chart on minikube with locally built images, the
+# Garage from garage.yaml for proof states, and the TiKV from tikv.yaml for
+# session and state records:
 #   minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
 #   kubectl apply -f deploy/minikube/garage.yaml
+#   kubectl apply -f deploy/minikube/tikv.yaml
 #   helm install prometheus prometheus-community/prometheus -n monitoring \
 #     --create-namespace -f deploy/minikube/prometheus-values.yaml
 router:
@@ -28,6 +30,10 @@ store:
     endpoint: http://garage:3900
     allowHttp: true
     credentialsSecret: { name: pisa-s3 }
+
+metadata:
+  tikv:
+    pdEndpoints: ["pd:2379"]
 
 keda:
   minReplicas: 1

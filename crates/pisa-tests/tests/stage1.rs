@@ -101,9 +101,10 @@ async fn worker_reports_a_new_warm_header_before_the_result() {
     let cfg = common::worker_config(listener.local_addr().unwrap(), "w0", "v", 1);
     let store: std::sync::Arc<dyn object_store::ObjectStore> =
         std::sync::Arc::new(object_store::memory::InMemory::new());
-    tokio::spawn(pisa_worker::run_with_store(
+    tokio::spawn(pisa_worker::run_with_stores(
         cfg,
         store,
+        pisa_worker::kv::Kv::memory(),
         std::future::pending(),
     ));
     let (stream, _) = listener.accept().await.unwrap();

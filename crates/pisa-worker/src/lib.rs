@@ -30,7 +30,8 @@ use sessions::Sessions;
 /// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
     let store = cfg.object_store()?;
-    run_with_store(cfg, store, shutdown_signal()).await
+    let kv = cfg.kv().await?;
+    run_with_stores(cfg, store, kv, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {
@@ -42,13 +43,15 @@ async fn shutdown_signal() {
     }
 }
 
-/// Runs the worker with proof states kept in `store`, which every worker of
-/// the same version must share. When `shutdown` completes, the worker drains:
-/// it tells the router to send no more jobs, finishes the ones it has (for at
+/// Runs the worker with pickled proof states kept in `store`, and the records
+/// that describe them and the sessions in `kv`. Every worker of the same
+/// version must share both. When `shutdown` completes, the worker drains: it
+/// tells the router to send no more jobs, finishes the ones it has (for at
 /// most `drain_timeout_secs`), and returns.
-pub async fn run_with_store(
+pub async fn run_with_stores(
     cfg: WorkerConfig,
     store: Arc<dyn ObjectStore>,
+    kv: kv::Kv,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let version = cfg.version()?;
@@ -74,7 +77,7 @@ pub async fn run_with_store(
     tracing::info!(%worker_id, %version, slots = pool.slots(), "worker starting");
     prewarm(&pool, &cfg.prewarm);
     let sessions = Arc::new(Sessions {
-        store: store::Store::new(store, version.clone()),
+        store: store::Store::new(store, kv, version.clone()),
         version: version.clone(),
     });
     if cfg.state_ttl_secs > 0 {
