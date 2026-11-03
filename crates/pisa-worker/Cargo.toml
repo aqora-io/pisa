@@ -17,6 +17,7 @@ pisa-repl.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tikv-client.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
