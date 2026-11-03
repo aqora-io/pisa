@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::corpus::Decl;
-use crate::index::StoredDecl;
 
 /// Matryoshka truncation of the model's output.
 pub const DIMS: usize = 512;
@@ -273,7 +272,6 @@ pub struct Dense {
     pub model: String,
     ids: Vec<u32>,
     vectors: Vec<i8>,
-    embedder: Option<Embedder>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -297,7 +295,6 @@ impl Dense {
             model,
             ids,
             vectors,
-            embedder: None,
         }
     }
 
@@ -317,11 +314,6 @@ impl Dense {
     pub fn get(&self, id: u32) -> Option<&[i8]> {
         let i = self.ids.binary_search(&id).ok()?;
         Some(&self.vectors[i * DIMS..(i + 1) * DIMS])
-    }
-
-    pub fn with_embedder(mut self, embedder: Embedder) -> Dense {
-        self.embedder = Some(embedder);
-        self
     }
 
     /// `vectors.bin`: a JSON header line, then u32 ids, then int8 vectors.
@@ -371,7 +363,6 @@ impl Dense {
             model: header.model,
             ids,
             vectors,
-            embedder: None,
         })
     }
 
@@ -381,12 +372,6 @@ impl Dense {
             .into_iter()
             .map(|(_, id)| id)
             .collect()
-    }
-
-    /// [`nearest`](Self::nearest) with each one's [`dot`] with `query`
-    /// quantized, best first.
-    pub fn nearest_scored(&self, query: &[i8], n: usize) -> Vec<(i32, u32)> {
-        self.nearest_quantized(query, n)
     }
 
     /// The `n` declarations nearest to declaration `id`, or `None` if it has no vector.
@@ -412,30 +397,10 @@ impl Dense {
             .collect();
         best(scored, n)
     }
-
-    /// Each text embedded as a query, in one request; `None` without an
-    /// embedder, an error when the embedder failed.
-    pub fn embed_queries(&self, texts: &[&str]) -> Option<anyhow::Result<Vec<Vec<f32>>>> {
-        let embedder = self.embedder.as_ref()?;
-        let queries: Vec<String> = texts
-            .iter()
-            .map(|t| format!("{QUERY_INSTRUCTION}{t}"))
-            .collect();
-        Some(embedder.embed_queries(&queries))
-    }
-
-    /// For each text, the declaration ids nearest to it, from one embedding
-    /// request; `None` without an embedder, an error when the embedder failed.
-    pub fn search_many(&self, texts: &[&str], n: usize) -> Option<anyhow::Result<Vec<Vec<u32>>>> {
-        Some(
-            self.embed_queries(texts)?
-                .map(|vs| vs.iter().map(|v| self.nearest(v, n)).collect()),
-        )
-    }
 }
 
 /// The dot product of two quantized vectors.
-pub fn dot(a: &[i8], b: &[i8]) -> i32 {
+fn dot(a: &[i8], b: &[i8]) -> i32 {
     a.iter()
         .zip(b)
         .map(|(&x, &y)| i32::from(x) * i32::from(y))
@@ -443,7 +408,7 @@ pub fn dot(a: &[i8], b: &[i8]) -> i32 {
 }
 
 /// The `n` best of `(score, id)`s, best first, ties by id.
-pub fn best(mut scored: Vec<(i32, u32)>, n: usize) -> Vec<(i32, u32)> {
+fn best(mut scored: Vec<(i32, u32)>, n: usize) -> Vec<(i32, u32)> {
     let n = n.min(scored.len());
     if n == 0 {
         return Vec::new();
@@ -582,15 +547,6 @@ pub async fn embed_missing(
         tracing::info!(done, total, rate = format!("{rate:.1}/s"), "saved vectors");
     }
     Ok(done)
-}
-
-/// Which stored declarations a dense index covers, for labelling results.
-pub fn coverage(decls: &[StoredDecl], dense: &Dense) -> HashMap<String, usize> {
-    let mut out = HashMap::new();
-    for &id in &dense.ids {
-        *out.entry(decls[id as usize].library.clone()).or_insert(0) += 1;
-    }
-    out
 }
 
 #[cfg(test)]

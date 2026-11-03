@@ -160,7 +160,13 @@ pub fn lexical_doc(d: &StoredDecl, stats: &BTreeMap<String, f32>) -> Sparse {
     let mut map = BTreeMap::new();
     for (field, terms) in field_terms(d) {
         let len = terms.len() as f32;
-        let avg = stats.get(field).copied().unwrap_or(1.0).max(f32::EPSILON);
+        // A field no bundle declaration has, e.g. descriptions in a bundle
+        // without them, counts as of average length.
+        let avg = stats
+            .get(field)
+            .copied()
+            .filter(|&a| a > 0.0)
+            .unwrap_or(len.max(1.0));
         let mut tf: HashMap<&str, f32> = HashMap::new();
         for t in &terms {
             *tf.entry(t).or_default() += 1.0;
@@ -250,6 +256,19 @@ mod tests {
         // The same term in another field is another token.
         assert!(v.indices.contains(&token("name", "trace")));
         assert!(v.indices.is_sorted());
+    }
+
+    #[test]
+    fn fields_the_bundle_lacks_count_as_average() {
+        let d = decl("x", "x", Some("trace"));
+        let stats = BTreeMap::from([("doc".to_string(), 0.0)]);
+        let v = lexical_doc(&d, &stats);
+        let i = v
+            .indices
+            .iter()
+            .position(|&i| i == token("doc", "trace"))
+            .unwrap();
+        assert!((v.values[i] - 1.0).abs() < 1e-6, "{}", v.values[i]);
     }
 
     #[test]

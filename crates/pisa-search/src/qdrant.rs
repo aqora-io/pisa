@@ -140,6 +140,13 @@ impl Qdrant {
         Ok(())
     }
 
+    /// Deletes a collection and its points.
+    pub async fn drop(&self, collection: &str) -> anyhow::Result<()> {
+        let path = format!("/collections/{collection}");
+        let _: Value = self.call(reqwest::Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
     /// Indexes payload field `field` with `schema`, e.g. `"keyword"`.
     pub async fn index(&self, collection: &str, field: &str, schema: &str) -> anyhow::Result<()> {
         let path = format!("/collections/{collection}/index?wait=true");

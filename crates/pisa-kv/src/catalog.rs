@@ -19,6 +19,8 @@
 //!   search service ([`SnapshotDecls`]), written with the module
 //! - `(pisa, <version>, "described", <m>, <name>)`: the search service's
 //!   description and vector of a declaration of `m`, which only it reads
+//! - `(pisa, <version>, "lease", <name>)`: a [`Lease`] held by one process,
+//!   e.g. the search replica that indexes snapshots
 //! - `(pisa, <version>, "log", <T>, <id>)`: a [`Change`]; one per transaction
 //!   that changes an entry or a module, for the search service to follow.
 //!   `T` is the time in microseconds as 16 hex digits, `id` random. Kept for
@@ -166,6 +168,14 @@ pub struct Change {
     pub entry: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+}
+
+/// Who holds a lease, and until when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lease {
+    pub owner: String,
+    /// Microseconds since the Unix epoch.
+    pub until_micros: u64,
 }
 
 /// How long [`Change`]s are kept; see [`Catalog::prune_log`].
@@ -858,6 +868,48 @@ impl Catalog {
             .collect()
     }
 
+    /// Takes or renews lease `name` for `owner` for `ttl`, unless another
+    /// owner holds it; returns when it ends if `owner` holds it now.
+    pub async fn take_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl: Duration,
+    ) -> Result<Option<u64>, Error> {
+        let lease_key = key(&[ROOT, &self.version, "lease", name]);
+        let taken = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            let now = now_micros();
+            if let Some(bytes) = txn.get(&lease_key).await? {
+                let held: Lease = serde_json::from_slice(&bytes)?;
+                if held.owner != owner && held.until_micros > now {
+                    return Ok(None);
+                }
+            }
+            let lease = Lease {
+                owner: owner.to_string(),
+                until_micros: now + ttl.as_micros() as u64,
+            };
+            txn.put(lease_key.clone(), serde_json::to_vec(&lease)?)
+                .await?;
+            txn.commit().await?;
+            Ok::<_, Fail>(Some(lease.until_micros))
+        })
+        .await?;
+        Ok(taken)
+    }
+
+    /// Whether any entry is on module `m`.
+    pub async fn has_entries(&self, m: &str) -> Result<bool, Error> {
+        let refs = prefix(&[ROOT, &self.version, "ref", m]);
+        let found = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            Ok::<_, KvError>(!txn.scan(refs.clone(), 1).await?.is_empty())
+        })
+        .await?;
+        Ok(found)
+    }
+
     /// Entry `e`, if it exists.
     pub async fn find_entry(&self, e: &str) -> Result<Option<EntryMeta>, Error> {
         self.read(&self.entry_key(e)).await
@@ -1031,6 +1083,33 @@ mod tests {
         );
         assert_eq!(catalog.prune_log(Duration::ZERO).await.unwrap(), 3);
         assert!(catalog.changes(0, None, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lease_is_held_by_one_owner_until_it_ends() {
+        let catalog = Catalog::new(Kv::memory(), "v".into());
+        let ttl = Duration::from_secs(30);
+        assert!(catalog.take_lease("l", "a", ttl).await.unwrap().is_some());
+        assert!(catalog.take_lease("l", "b", ttl).await.unwrap().is_none());
+        // Renewing is taking it again.
+        assert!(catalog.take_lease("l", "a", ttl).await.unwrap().is_some());
+        // An ended lease goes to whoever asks.
+        catalog.take_lease("l", "a", Duration::ZERO).await.unwrap();
+        assert!(catalog.take_lease("l", "b", ttl).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn whether_a_module_has_entries() {
+        let catalog = Catalog::new(Kv::memory(), "v".into());
+        let (e, _, _) = catalog
+            .commit("x", &meta("x"), None, no_labels())
+            .await
+            .unwrap();
+        assert!(catalog.has_entries("x").await.unwrap());
+        assert!(!catalog.has_entries("y").await.unwrap());
+        catalog.add_entry("x", no_labels()).await.unwrap();
+        catalog.remove_entry(&e).await.unwrap();
+        assert!(catalog.has_entries("x").await.unwrap());
     }
 
     #[tokio::test]

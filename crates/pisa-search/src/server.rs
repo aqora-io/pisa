@@ -14,7 +14,8 @@ use pisa_protocol::search::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
-use crate::engine::Engine;
+use crate::engine::Lanes;
+use crate::engine::{Engine, SearchError};
 
 /// Most queries or names one request may carry.
 const MAX_BATCH: usize = 64;
@@ -83,7 +84,20 @@ fn check_batch(n: usize) -> Result<(), ApiError> {
 }
 
 async fn health(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok", "env_id": engine.env_id() }))
+    let qdrant = engine.q.healthy().await;
+    Json(json!({
+        "status": if qdrant { "ok" } else { "degraded" },
+        "env_id": engine.env_id(),
+        "qdrant": qdrant,
+    }))
+}
+
+fn unavailable(e: impl std::fmt::Display) -> ApiError {
+    tracing::warn!("search backend failed: {e}");
+    ApiError::new(
+        ErrorKind::Unavailable,
+        format!("search backend unavailable: {e}"),
+    )
 }
 
 async fn search(
@@ -97,10 +111,12 @@ async fn search(
             .check_filters(q)
             .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
     }
+    let results = match engine.search_batch(&req.queries, Lanes::ALL).await {
+        Ok(results) => results,
+        Err(SearchError::BadRequest(m)) => return Err(ApiError::new(ErrorKind::BadRequest, m)),
+        Err(SearchError::Unavailable(e)) => return Err(unavailable(e)),
+    };
     let env_id = engine.env_id().to_string();
-    let results = tokio::task::spawn_blocking(move || engine.search_batch(&req.queries))
-        .await
-        .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
     Ok(Json(SearchResponse { env_id, results }))
 }
 
@@ -110,11 +126,8 @@ async fn resolve(
 ) -> Result<Json<ResolveResponse>, ApiError> {
     check_env(&engine, req.env_id.as_deref())?;
     check_batch(req.names.len())?;
+    let results = engine.resolve(&req.names).await.map_err(unavailable)?;
     let env_id = engine.env_id().to_string();
-    let results =
-        tokio::task::spawn_blocking(move || req.names.iter().map(|n| engine.resolve(n)).collect())
-            .await
-            .map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))?;
     Ok(Json(ResolveResponse { env_id, results }))
 }
 
@@ -122,16 +135,19 @@ async fn decl(
     State(engine): State<Arc<Engine>>,
     Path(name): Path<String>,
 ) -> Result<Json<DeclResponse>, ApiError> {
-    match engine.detail(&name) {
+    match engine.detail(&name).await.map_err(unavailable)? {
         Some(decl) => Ok(Json(DeclResponse {
             env_id: engine.env_id().to_string(),
             decl,
         })),
         None => {
-            let r = engine.resolve(&name);
+            let r = engine
+                .resolve(std::slice::from_ref(&name))
+                .await
+                .map_err(unavailable)?;
             let hint = r
-                .suggestions
                 .first()
+                .and_then(|r| r.suggestions.first())
                 .map(|s| format!("; did you mean {}?", s.name));
             Err(ApiError::new(
                 ErrorKind::NotFound,

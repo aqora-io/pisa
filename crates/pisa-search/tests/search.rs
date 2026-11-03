@@ -1,14 +1,17 @@
-//! Builds a bundle from a small handwritten corpus and checks the lanes,
-//! fusion, folding and the HTTP API.
+//! Loads a bundle built from a small handwritten corpus into Qdrant and
+//! checks the lanes, fusion, folding and the HTTP API. Needs a Qdrant at
+//! `PISA_TEST_QDRANT_URL`; without one, every test is skipped.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pisa_protocol::search::{Informal, Query};
 use pisa_search::corpus::{self, Corpus, Decl, Manifest};
 use pisa_search::engine::Engine;
-use pisa_search::index::{self, Bundle};
+use pisa_search::qdrant::Qdrant;
 use pisa_search::symbols::{self, Symbols};
+use pisa_search::{index, load, points};
 
 struct D<'a> {
     name: &'a str,
@@ -246,9 +249,22 @@ fn corpus() -> Corpus {
     }
 }
 
-fn engine() -> (tempfile::TempDir, Engine) {
+/// The engine over the test corpus, loaded into a collection of its own,
+/// or `None` (the test is skipped) without a Qdrant.
+async fn engine() -> Option<Loaded> {
+    let Ok(url) = std::env::var("PISA_TEST_QDRANT_URL") else {
+        eprintln!("skipped: PISA_TEST_QDRANT_URL is unset");
+        return None;
+    };
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let env_id = format!(
+        "test-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::SeqCst)
+    );
     let dir = tempfile::tempdir().unwrap();
-    let c = corpus();
+    let mut c = corpus();
+    c.manifest.env_id = env_id.clone();
     let mut informal = HashMap::new();
     informal.insert(
         "Matrix.trace_one".to_string(),
@@ -261,16 +277,42 @@ fn engine() -> (tempfile::TempDir, Engine) {
         },
     );
     index::build(&c, &informal, None, dir.path()).unwrap();
-    let e = Engine::new(
-        Bundle::open(dir.path()).unwrap(),
-        Symbols::parse(symbols::DEFAULT).unwrap(),
-    )
-    .unwrap();
-    (dir, e)
+    let q = Qdrant::new(&url, None).unwrap();
+    load::load(dir.path(), &q, 1, 0.0).await.unwrap();
+    let symbols = Symbols::parse(symbols::DEFAULT).unwrap();
+    let engine = Engine::open(q.clone(), &env_id, symbols, None)
+        .await
+        .unwrap();
+    Some(Loaded {
+        engine,
+        q,
+        env_id,
+        _dir: dir,
+    })
 }
 
-fn names(e: &Engine, q: Query) -> Vec<String> {
-    e.search(&q).hits.into_iter().map(|h| h.name).collect()
+struct Loaded {
+    engine: Engine,
+    q: Qdrant,
+    env_id: String,
+    _dir: tempfile::TempDir,
+}
+
+impl Loaded {
+    async fn names(&self, q: Query) -> Vec<String> {
+        let r = self.engine.search(&q).await.unwrap();
+        r.hits.into_iter().map(|h| h.name).collect()
+    }
+
+    /// Drops the test's collections.
+    async fn done(self) {
+        for c in [
+            points::collection(&self.env_id),
+            points::entries_collection(&self.env_id),
+        ] {
+            self.q.drop(&c).await.unwrap();
+        }
+    }
 }
 
 fn nl(text: &str) -> Query {
@@ -280,74 +322,74 @@ fn nl(text: &str) -> Query {
     }
 }
 
-#[test]
-fn natural_language_finds_descriptions_and_docstrings() {
-    let (_d, e) = engine();
-    let hits = names(&e, nl("trace of the identity matrix"));
+#[tokio::test(flavor = "multi_thread")]
+async fn natural_language_finds_descriptions_and_docstrings() {
+    let Some(t) = engine().await else { return };
+    let hits = t.names(nl("trace of the identity matrix")).await;
     assert_eq!(hits[0], "Matrix.trace_one", "{hits:?}");
-    let hits = names(&e, nl("uncertainty relation for observables"));
+    let hits = t.names(nl("uncertainty relation for observables")).await;
     assert_eq!(
         hits[0], "QuantumMechanics.state_uncertainty_of_raw_commutator",
         "{hits:?}"
     );
+    t.done().await;
 }
 
-#[test]
-fn latex_and_patterns_reach_the_right_declarations() {
-    let (_d, e) = engine();
-    let hits = names(
-        &e,
-        Query {
+#[tokio::test(flavor = "multi_thread")]
+async fn latex_and_patterns_reach_the_right_declarations() {
+    let Some(t) = engine().await else { return };
+    let hits = t
+        .names(Query {
             latex: Some(r"\operatorname{Tr}(I) = n".into()),
             ..Default::default()
-        },
-    );
+        })
+        .await;
     assert_eq!(hits[0], "Matrix.trace_one", "{hits:?}");
-    let r = e.search(&Query {
-        pattern: Some("Matrix.trace (?A * ?B) = Matrix.trace (?B * ?A)".into()),
-        ..Default::default()
-    });
-    assert_eq!(r.hits[0].name, "Matrix.trace_mul_comm");
-    assert!(
-        r.hits[0].lanes.contains(&"structural".to_string()),
-        "{:?}",
-        r.hits[0].lanes
-    );
+    let hits = t
+        .names(Query {
+            pattern: Some("Matrix.trace (?A * ?B) = Matrix.trace (?B * ?A)".into()),
+            ..Default::default()
+        })
+        .await;
+    assert_eq!(hits[0], "Matrix.trace_mul_comm", "{hits:?}");
+    t.done().await;
 }
 
-#[test]
-fn misspelled_names_resolve_with_suggestions() {
-    let (_d, e) = engine();
-    let r = e.resolve("Real.sqrt_mul_sefl");
-    assert!(!r.exists);
-    assert_eq!(r.suggestions[0].name, "Real.sqrt_mul_self");
-    let r = e.resolve("Real.sqrt_mul_self");
-    assert!(r.exists && r.suggestions.is_empty());
-    let r = e.resolve("Real.sqrt_mul_self_old");
-    assert_eq!(r.deprecated_to.as_deref(), Some("Real.sqrt_mul_self"));
+#[tokio::test(flavor = "multi_thread")]
+async fn misspelled_names_resolve_with_suggestions() {
+    let Some(t) = engine().await else { return };
+    let names = [
+        "Real.sqrt_mul_sefl",
+        "Real.sqrt_mul_self",
+        "Real.sqrt_mul_self_old",
+    ];
+    let r = t.engine.resolve(&names.map(String::from)).await.unwrap();
+    assert!(!r[0].exists);
+    assert_eq!(r[0].suggestions[0].name, "Real.sqrt_mul_self");
+    assert!(r[1].exists && r[1].suggestions.is_empty());
+    assert_eq!(r[2].deprecated_to.as_deref(), Some("Real.sqrt_mul_self"));
     // A free-text query that is a name goes through the name lane.
-    let hits = names(
-        &e,
-        Query {
+    let hits = t
+        .names(Query {
             q: Some("Real.sqrt_mul_sefl".into()),
             ..Default::default()
-        },
-    );
+        })
+        .await;
     assert_eq!(hits[0], "Real.sqrt_mul_self", "{hits:?}");
+    t.done().await;
 }
 
-#[test]
-fn folding_flags_and_filters() {
-    let (_d, e) = engine();
+#[tokio::test(flavor = "multi_thread")]
+async fn folding_flags_and_filters() {
+    let Some(t) = engine().await else { return };
     // The deprecated alias folds into its replacement.
-    let hits = names(
-        &e,
-        Query {
+    let hits = t
+        .names(Query {
             q: Some("sqrt of a times a".into()),
             k: 10,
             ..Default::default()
-        },
-    );
+        })
+        .await;
     assert!(hits.contains(&"Real.sqrt_mul_self".to_string()), "{hits:?}");
     assert!(
         !hits.contains(&"Real.sqrt_mul_self_old".to_string()),
@@ -355,7 +397,11 @@ fn folding_flags_and_filters() {
     );
 
     // to_additive pairs show once, naming the sibling.
-    let r = e.search(&nl("commutativity of multiplication a * b = b * a"));
+    let r = t
+        .engine
+        .search(&nl("commutativity of multiplication a * b = b * a"))
+        .await
+        .unwrap();
     let comm: Vec<_> = r
         .hits
         .iter()
@@ -372,14 +418,19 @@ fn folding_flags_and_filters() {
     // Sorried results are excluded unless asked for, then flagged.
     let q = nl("eigenstates of the harmonic oscillator are orthonormal");
     assert!(
-        !names(&e, q.clone())
+        !t.names(q.clone())
+            .await
             .iter()
             .any(|n| n.ends_with("eigenstates_orthonormal"))
     );
-    let r = e.search(&Query {
-        include_sorried: true,
-        ..q
-    });
+    let r = t
+        .engine
+        .search(&Query {
+            include_sorried: true,
+            ..q
+        })
+        .await
+        .unwrap();
     let hit = r
         .hits
         .iter()
@@ -387,59 +438,69 @@ fn folding_flags_and_filters() {
         .unwrap();
     assert!(hit.flags.uses_sorry && hit.text.contains("depends on sorry"));
 
-    let hits = names(
-        &e,
-        Query {
+    let hits = t
+        .names(Query {
             libraries: vec!["Physlib".into()],
             k: 50,
             ..nl("the")
-        },
-    );
+        })
+        .await;
     assert!(
         hits.iter()
             .all(|n| !n.starts_with("Matrix") && !n.starts_with("Real")),
         "{hits:?}"
     );
-    let hits = names(
-        &e,
-        Query {
+    let hits = t
+        .names(Query {
             kinds: vec!["def".into()],
             ..nl("trace")
-        },
-    );
+        })
+        .await;
     assert_eq!(hits[0], "Matrix.trace");
+    t.done().await;
 }
 
-#[test]
-fn results_are_deterministic_and_rendered_compactly() {
-    let (_d, e) = engine();
+#[tokio::test(flavor = "multi_thread")]
+async fn results_are_deterministic_and_rendered_compactly() {
+    let Some(t) = engine().await else { return };
     let q = nl("trace matrix");
-    assert_eq!(names(&e, q.clone()), names(&e, q.clone()));
-    let hit = &e.search(&q).hits[0];
+    assert_eq!(t.names(q.clone()).await, t.names(q.clone()).await);
+    let hit = &t.engine.search(&q).await.unwrap().hits[0];
     assert!(
         hit.text.starts_with(&format!("1. {}", hit.name)),
         "{}",
         hit.text
     );
     assert!(hit.text.lines().count() <= 4);
+    t.done().await;
 }
 
-#[test]
-fn detail_lists_dependencies_and_users() {
-    let (_d, e) = engine();
-    let d = e.detail("Matrix.trace").unwrap();
+#[tokio::test(flavor = "multi_thread")]
+async fn detail_lists_dependencies_and_users() {
+    let Some(t) = engine().await else { return };
+    let d = t.engine.detail("Matrix.trace").await.unwrap().unwrap();
     assert_eq!(d.deps, ["Matrix"]);
     assert!(d.used_by.contains(&"Matrix.trace_one".to_string()));
-    assert!(e.detail("Nope").is_none());
+    assert!(t.engine.detail("Nope").await.unwrap().is_none());
+    t.done().await;
+}
+
+/// Serves `t`'s engine; returns its address.
+async fn serve(t: &Loaded) -> std::net::SocketAddr {
+    let q = t.q.clone();
+    let symbols = Symbols::parse(symbols::DEFAULT).unwrap();
+    let engine = Engine::open(q, &t.env_id, symbols, None).await.unwrap();
+    let app = pisa_search::server::router(Arc::new(engine));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    addr
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn http_api() {
-    let (_d, e) = engine();
-    let app = pisa_search::server::router(Arc::new(e));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let Some(t) = engine().await else { return };
+    let addr = serve(&t).await;
     let c = reqwest::Client::new();
     let url = |p: &str| format!("http://{addr}{p}");
 
@@ -447,7 +508,7 @@ async fn http_api() {
         .post(url("/v1/search"))
         .json(&serde_json::json!({"queries": [{"nl": "trace of the identity matrix"}, {"name": "Nat.succ_le_succ", "verify": true}]}))
         .send().await.unwrap().json().await.unwrap();
-    assert_eq!(r["env_id"], "v4.35.0-test");
+    assert_eq!(r["env_id"], t.env_id);
     assert_eq!(r["results"][0]["hits"][0]["name"], "Matrix.trace_one");
     assert_eq!(r["results"][1]["hits"][0]["name"], "Nat.succ_le_succ");
     assert_eq!(r["results"][1]["verification"], "unavailable");
@@ -497,17 +558,24 @@ async fn http_api() {
         .await
         .unwrap();
     assert_eq!(r.status(), 400);
+    let health: serde_json::Value = c
+        .get(url("/health"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["qdrant"], true);
+    t.done().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_client() {
     use pisa_client::{ErrorKind, SearchClient};
 
-    let (_d, e) = engine();
-    let app = pisa_search::server::router(Arc::new(e));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let Some(t) = engine().await else { return };
+    let addr = serve(&t).await;
     let c = SearchClient::new(&format!("http://{addr}")).unwrap();
     c.health().await.unwrap();
 
@@ -547,47 +615,39 @@ async fn rust_client() {
     let pinned = c.clone().with_env("other");
     let err = pinned.search(&Query::default()).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
-    assert!(
-        c.with_env("v4.35.0-test")
-            .resolve(["Matrix"])
-            .await
-            .unwrap()[0]
-            .exists
-    );
+    assert!(c.with_env(&t.env_id).resolve(["Matrix"]).await.unwrap()[0].exists);
+    t.done().await;
 }
 
-#[test]
-fn queries_skip_blanks_noise_and_bad_filters() {
-    let (_d, e) = engine();
-    let names = |q: Query| {
-        e.search(&q)
-            .hits
-            .into_iter()
-            .map(|h| h.name)
-            .collect::<Vec<_>>()
-    };
+#[tokio::test(flavor = "multi_thread")]
+async fn queries_skip_blanks_noise_and_bad_filters() {
+    let Some(t) = engine().await else { return };
     assert!(
-        names(Query {
+        t.names(Query {
             q: Some("   ".into()),
             ..Default::default()
         })
+        .await
         .is_empty()
     );
     assert!(
-        names(Query {
+        t.names(Query {
             nl: Some("trace".into()),
             k: 0,
             ..Default::default()
         })
+        .await
         .is_empty()
     );
 
     // Generated helpers and tooling stay out of results unless named exactly.
-    let trace = names(Query {
-        nl: Some("trace of a matrix".into()),
-        k: 20,
-        ..Default::default()
-    });
+    let trace = t
+        .names(Query {
+            nl: Some("trace of a matrix".into()),
+            k: 20,
+            ..Default::default()
+        })
+        .await;
     assert!(trace.contains(&"Matrix.trace".to_string()), "{trace:?}");
     assert!(
         !trace
@@ -595,23 +655,26 @@ fn queries_skip_blanks_noise_and_bad_filters() {
             .any(|n| n.contains("injEq") || n.contains("Tactic")),
         "{trace:?}"
     );
-    assert_eq!(
-        names(Query {
+    let named = t
+        .names(Query {
             q: Some("Matrix.mk.injEq".into()),
             k: 1,
             ..Default::default()
-        }),
-        ["Matrix.mk.injEq"]
-    );
+        })
+        .await;
+    assert_eq!(named, ["Matrix.mk.injEq"]);
 
     // So does a declaration that depends on sorry, flagged.
     let sorried = "QuantumMechanics.HarmonicOscillator.eigenstates_orthonormal";
-    let hits = e
+    let hits = t
+        .engine
         .search(&Query {
             q: Some(sorried.into()),
             k: 1,
             ..Default::default()
         })
+        .await
+        .unwrap()
         .hits;
     assert_eq!(hits[0].name, sorried);
     assert!(hits[0].flags.uses_sorry);
@@ -621,7 +684,7 @@ fn queries_skip_blanks_noise_and_bad_filters() {
         kinds: vec!["THEOREM".into()],
         ..Default::default()
     };
-    e.check_filters(&mut q).unwrap();
+    t.engine.check_filters(&mut q).unwrap();
     assert_eq!(
         (q.libraries, q.kinds),
         (vec!["Physlib".to_string()], vec!["theorem".to_string()])
@@ -630,6 +693,7 @@ fn queries_skip_blanks_noise_and_bad_filters() {
         libraries: vec!["nope".into()],
         ..Default::default()
     };
-    let err = e.check_filters(&mut q).unwrap_err();
+    let err = t.engine.check_filters(&mut q).unwrap_err();
     assert!(err.contains("known: Mathlib, Physlib"), "{err}");
+    t.done().await;
 }

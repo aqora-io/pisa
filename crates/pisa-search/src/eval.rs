@@ -11,7 +11,7 @@ use pisa_protocol::search::Query;
 use serde::Deserialize;
 
 use crate::engine::Lanes;
-use crate::qengine::{Engine, Weights};
+use crate::engine::{Engine, Weights};
 
 pub const MATHLIB_QR_URL: &str = "https://raw.githubusercontent.com/frenzymath/LeanSearch-v2/94f4888cbaf9f4322535755f86cbac690ec18080/benchmark/MathlibQR.json";
 

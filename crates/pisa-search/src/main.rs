@@ -6,14 +6,13 @@ use clap::{Parser, Subcommand};
 use pisa_protocol::search::Informal;
 use pisa_search::corpus::{self, Corpus};
 use pisa_search::dense::{self, Embedder};
-use pisa_search::engine::Engine;
+use pisa_search::engine::{self, Weights};
 use pisa_search::index::{self, Bundle};
+use pisa_search::indexer;
 use pisa_search::informal_store::Store;
 use pisa_search::informalize;
 use pisa_search::llm::Llm;
 use pisa_search::qdrant::Qdrant;
-use pisa_search::qengine::{self, Weights};
-use pisa_search::snapshots;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
 
@@ -193,10 +192,14 @@ enum Command {
         #[arg(long, default_value_t = 0.99)]
         min_coverage: f64,
     },
-    /// Serve the HTTP API for a bundle.
+    /// Serve the HTTP API for the bundle loaded for an environment. Any
+    /// number of replicas can serve one environment.
     Serve {
-        #[arg(long, env = "PISA_SEARCH_BUNDLE")]
-        bundle: PathBuf,
+        #[command(flatten)]
+        qdrant: QdrantArgs,
+        /// The environment whose loaded bundle to serve.
+        #[arg(long, env = "PISA_SEARCH_ENV_ID")]
+        env_id: String,
         #[arg(long, env = "PISA_SEARCH_HTTP", default_value = "0.0.0.0:8100")]
         http: std::net::SocketAddr,
         /// Symbol dictionary; defaults to the shipped search/symbols.toml.
@@ -208,10 +211,11 @@ enum Command {
         #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
         embedder: Option<String>,
         /// PD endpoints of the TiKV holding the workers' snapshot catalog,
-        /// comma-separated; with them, queries can search snapshots.
+        /// comma-separated; with them, queries can search snapshots, and the
+        /// replica that holds the lease indexes them.
         #[arg(long, env = "PISA_TIKV_PD", value_delimiter = ',')]
         tikv_pd: Vec<String>,
-        /// The worker version whose snapshots to search (default: the bundle's env_id).
+        /// The worker version whose snapshots to search (default: the env_id).
         #[arg(long, env = "PISA_SEARCH_SNAPSHOT_VERSION")]
         snapshot_version: Option<String>,
         /// Claude or OpenAI model that describes every snapshot declaration
@@ -297,35 +301,19 @@ async fn open_engine(
     qdrant: &QdrantArgs,
     env_id: &str,
     embedder: Option<String>,
-) -> anyhow::Result<qengine::Engine> {
+) -> anyhow::Result<engine::Engine> {
     // The embedder's blocking HTTP client is made off the async threads.
     let embedder = match embedder {
         Some(spec) => Some(tokio::task::spawn_blocking(move || Embedder::parse(&spec)).await??),
         None => None,
     };
     let symbols = Symbols::parse(symbols::DEFAULT)?;
-    qengine::Engine::open(qdrant.client()?, env_id, symbols, embedder).await
+    engine::Engine::open(qdrant.client()?, env_id, symbols, embedder).await
 }
 
 /// Drops `value`, which may hold a blocking HTTP client, off the async threads.
 async fn drop_blocking<T: Send + 'static>(value: T) {
     let _ = tokio::task::spawn_blocking(move || drop(value)).await;
-}
-
-fn load_engine(
-    bundle: &Path,
-    symbols_path: Option<&Path>,
-    embedder: Option<&str>,
-) -> anyhow::Result<Engine> {
-    let symbols = match symbols_path {
-        Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
-        None => Symbols::parse(symbols::DEFAULT)?,
-    };
-    let mut engine = Engine::new(Bundle::open(bundle)?, symbols)?;
-    if let (Some(d), Some(spec)) = (engine.dense.take(), embedder) {
-        engine.dense = Some(d.with_embedder(Embedder::parse(spec)?));
-    }
-    Ok(engine)
 }
 
 /// Stored descriptions for a corpus, by declaration name.
@@ -660,7 +648,8 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Command::Serve {
-            bundle,
+            qdrant,
+            env_id,
             http,
             symbols,
             embedder,
@@ -669,26 +658,34 @@ async fn main() -> anyhow::Result<()> {
             describe_model,
             describe_concurrency,
         } => {
-            let mut engine = load_engine(&bundle, symbols.as_deref(), embedder.as_deref())?;
             // Compose passes unset variables as empty ones.
             let tikv_pd: Vec<String> = tikv_pd.into_iter().filter(|p| !p.is_empty()).collect();
             let describe_model = describe_model.filter(|m| !m.is_empty());
-            let mut queue = None;
+            let symbols = match symbols {
+                Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
+                None => Symbols::parse(symbols::DEFAULT)?,
+            };
+            let embedder = match embedder.clone() {
+                Some(spec) => {
+                    Some(tokio::task::spawn_blocking(move || Embedder::parse(&spec)).await??)
+                }
+                None => None,
+            };
+            let mut engine = pisa_search::engine::Engine::open(
+                qdrant.client()?,
+                &env_id,
+                symbols,
+                embedder.clone(),
+            )
+            .await?;
+            engine.snapshots = !tikv_pd.is_empty();
+            let engine = Arc::new(engine);
             if !tikv_pd.is_empty() {
                 let kv = pisa_kv::kv::Kv::tikv(&tikv_pd)
                     .await
                     .map_err(|e| anyhow::anyhow!("connecting to TiKV: {e}"))?;
-                let version = snapshot_version.unwrap_or_else(|| engine.env_id().to_string());
-                let model = engine.dense.as_ref().map(|d| d.model.clone());
-                let base = engine.bundle.decls.len() as u32;
+                let version = snapshot_version.unwrap_or_else(|| env_id.clone());
                 tracing::info!(%version, "searching snapshots");
-                let (s, q) = snapshots::Snapshots::new(kv, version, base, model)?;
-                engine.snapshots = Some(s);
-                queue = Some(q);
-            }
-            let engine = Arc::new(engine);
-            if let (Some(s), Some(queue)) = (engine.snapshots.clone(), queue) {
-                tokio::spawn(s.follow());
                 let llm = match describe_model {
                     Some(model) => Some((
                         Llm::for_model(&model)?,
@@ -702,23 +699,22 @@ async fn main() -> anyhow::Result<()> {
                     None => None,
                 };
                 // Snapshot vectors join the bundle's, so without those there are none.
-                let embedder = match (&engine.dense, &embedder) {
-                    (Some(_), Some(spec)) => Some(Embedder::parse(spec)?),
-                    _ => None,
-                };
-                let how = snapshots::Describe { llm, embedder };
-                tokio::spawn(snapshots::describe(
+                let embedder = embedder.filter(|_| engine.manifest.embedding_model.is_some());
+                let how = indexer::Describe { llm, embedder };
+                let indexer = indexer::Indexer::new(
                     engine.clone(),
-                    queue,
+                    kv,
+                    version,
                     how,
                     describe_concurrency,
-                ));
+                    indexer::LEASE_TTL,
+                );
+                tokio::spawn(indexer.run());
             }
             tracing::info!(
                 env_id = engine.env_id(),
-                decls = engine.bundle.decls.len(),
-                vectors = engine.dense.as_ref().map_or(0, |d| d.len()),
-                snapshots = engine.snapshots.is_some(),
+                decls = engine.manifest.decls,
+                snapshots = engine.snapshots,
                 %http,
                 "serving"
             );
@@ -745,10 +741,10 @@ async fn main() -> anyhow::Result<()> {
                     .collect::<Result<_, _>>()?
             };
             let items = pisa_search::eval::load(&data).await?;
-            let labels = qengine::weight_labels(weights.len());
+            let labels = engine::weight_labels(weights.len());
             let mut configs = Vec::new();
             for (w, suffix) in weights.iter().zip(&labels) {
-                for (label, lanes) in qengine::lane_configs(fused_only) {
+                for (label, lanes) in engine::lane_configs(fused_only) {
                     configs.push((format!("{label}{suffix}"), lanes, w.clone()));
                 }
             }
