@@ -11,6 +11,7 @@ use pisa_search::index::{self, Bundle};
 use pisa_search::informal_store::Store;
 use pisa_search::informalize;
 use pisa_search::llm::Llm;
+use pisa_search::qdrant::Qdrant;
 use pisa_search::snapshots;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
@@ -20,6 +21,26 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(clap::Args)]
+struct QdrantArgs {
+    /// Qdrant's REST URL.
+    #[arg(long = "qdrant", env = "PISA_SEARCH_QDRANT")]
+    url: String,
+    /// The environment variable holding Qdrant's API key, if it needs one.
+    #[arg(long = "qdrant-key-env")]
+    key_env: Option<String>,
+}
+
+impl QdrantArgs {
+    fn client(&self) -> anyhow::Result<Qdrant> {
+        let key = match &self.key_env {
+            Some(var) => Some(std::env::var(var).map_err(|_| anyhow::anyhow!("{var} is not set"))?),
+            None => None,
+        };
+        Qdrant::new(&self.url, key)
+    }
 }
 
 #[derive(Subcommand)]
@@ -157,6 +178,19 @@ enum Command {
         vector_names: Option<PathBuf>,
         #[arg(long)]
         out: PathBuf,
+    },
+    /// Load a bundle into Qdrant, as the declarations of its `env_id`.
+    Load {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[command(flatten)]
+        qdrant: QdrantArgs,
+        /// Copies of each collection's shard.
+        #[arg(long, default_value_t = 1)]
+        replication: u32,
+        /// Refuse a bundle whose vectors cover less than this share of its declarations.
+        #[arg(long, default_value_t = 0.99)]
+        min_coverage: f64,
     },
     /// Serve the HTTP API for a bundle.
     Serve {
@@ -580,6 +614,23 @@ async fn main() -> anyhow::Result<()> {
             .await??;
             println!("{}", serde_json::to_string_pretty(&m)?);
             eprintln!("built in {:.1}s", started.elapsed().as_secs_f64());
+        }
+        Command::Load {
+            bundle,
+            qdrant,
+            replication,
+            min_coverage,
+        } => {
+            let started = std::time::Instant::now();
+            let q = qdrant.client()?;
+            let loaded = pisa_search::load::load(&bundle, &q, replication, min_coverage).await?;
+            tracing::info!(
+                env_id = loaded.env_id,
+                points = loaded.points,
+                removed = loaded.removed,
+                elapsed = format!("{:.0}s", started.elapsed().as_secs_f64()),
+                "loaded the bundle"
+            );
         }
         Command::Serve {
             bundle,

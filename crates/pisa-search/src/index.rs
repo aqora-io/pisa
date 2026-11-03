@@ -26,16 +26,12 @@ use tantivy::schema::{
     FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, SchemaBuilder,
     TextFieldIndexing, TextOptions,
 };
-use tantivy::tokenizer::{
-    Language, LowerCaser, NgramTokenizer, RemoveLongFilter, Stemmer, TextAnalyzer,
-    WhitespaceTokenizer,
-};
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
 use crate::corpus::{self, Corpus, Decl, LineRange};
 use crate::text::{latex_to_unicode, split_name, tokens};
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 /// What a hit or `/v1/decl` shows for one declaration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -46,6 +42,9 @@ pub struct StoredDecl {
     pub library: String,
     pub signature: String,
     pub type_full: String,
+    /// The constants its type mentions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub type_refs: Vec<String>,
     #[serde(default)]
     pub docstring: Option<String>,
     #[serde(default)]
@@ -83,6 +82,12 @@ pub struct BundleManifest {
     /// The embedding model, when the bundle has a dense lane.
     #[serde(default)]
     pub embedding_model: Option<String>,
+    /// The average number of terms in each lexical field (see `encode`).
+    #[serde(default)]
+    pub field_stats: BTreeMap<String, f32>,
+    /// The kinds of declaration there are, e.g. `theorem`.
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -135,27 +140,9 @@ fn schema_builder() -> (SchemaBuilder, Fields) {
 
 pub fn register_tokenizers(index: &Index) {
     let t = index.tokenizers();
-    t.register(
-        "pisa_words",
-        TextAnalyzer::builder(WhitespaceTokenizer::default())
-            .filter(RemoveLongFilter::limit(80))
-            .filter(LowerCaser)
-            .build(),
-    );
-    t.register(
-        "pisa_prose",
-        TextAnalyzer::builder(WhitespaceTokenizer::default())
-            .filter(RemoveLongFilter::limit(80))
-            .filter(LowerCaser)
-            .filter(Stemmer::new(Language::English))
-            .build(),
-    );
-    t.register(
-        "pisa_ngram",
-        TextAnalyzer::builder(NgramTokenizer::new(3, 3, false).expect("valid ngram sizes"))
-            .filter(LowerCaser)
-            .build(),
-    );
+    t.register("pisa_words", crate::encode::words());
+    t.register("pisa_prose", crate::encode::prose());
+    t.register("pisa_ngram", crate::encode::ngram());
 }
 
 /// The text indexed for a name: its parts, the whole name, and the last component.
@@ -254,6 +241,13 @@ pub fn build(
         libraries: corpus.manifest.libraries.clone(),
         informal: stored.iter().filter(|s| s.informal.is_some()).count(),
         embedding_model,
+        field_stats: crate::encode::field_stats(&stored),
+        kinds: stored
+            .iter()
+            .map(|s| s.kind.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
     };
     std::fs::write(
         out.join("manifest.json"),
@@ -285,6 +279,7 @@ fn stored_decl(
         library: d.library.clone(),
         signature: d.signature.clone(),
         type_full: d.type_pp_full.clone(),
+        type_refs: d.type_refs.clone(),
         docstring: d.docstring.clone(),
         range: d.range,
         deprecated_to: d.deprecated_to.clone(),

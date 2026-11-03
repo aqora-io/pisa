@@ -313,6 +313,12 @@ impl Dense {
         self.ids.binary_search(&id).is_ok()
     }
 
+    /// Declaration `id`'s quantized vector, if it has one.
+    pub fn get(&self, id: u32) -> Option<&[i8]> {
+        let i = self.ids.binary_search(&id).ok()?;
+        Some(&self.vectors[i * DIMS..(i + 1) * DIMS])
+    }
+
     pub fn with_embedder(mut self, embedder: Embedder) -> Dense {
         self.embedder = Some(embedder);
         self
