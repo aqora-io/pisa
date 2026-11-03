@@ -159,7 +159,7 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, result}`; see [Snapshots](#snapshots) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, result}`; see [Snapshots](#snapshots) |
 | `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, dirty, verified, result, created}` |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -231,6 +231,18 @@ Labels are string key/value pairs, at most 64 per entry. A key is 1–128 bytes
 of letters, digits, `.`, `_`, `/` and `-`; a value is up to 512 bytes. Labels
 that break these rules are a `bad_request` in `result.error`, and nothing is
 kept.
+
+**Retrying a create.** A create can carry an idempotency `key`, 1–256 bytes of
+letters, digits, `.`, `_`, `:`, `/` and `-` (anything else is a `bad_request`
+in `result.error`), so that a retry is safe:
+- While an entry made with the key exists, creating the same code with it
+  returns that entry, with its own labels, without building anything. A
+  different `labels` on the retry is ignored.
+- Different code under a used key is a `bad_request` in `result.error`, and
+  nothing is kept.
+- A create that keeps nothing, e.g. when Lean reports errors or a `verify: true`
+  re-check fails, doesn't use the key up, so a later create can.
+- Deleting an entry frees its key.
 
 **How it works.**
 - **Building.** A module is its code compiled with `lean -o` to the module

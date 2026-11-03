@@ -1,5 +1,5 @@
-//! Labels on snapshot entries, and entry ids: the rules the router and the
-//! workers share.
+//! Labels and idempotency keys on snapshot entries, and entry ids: the rules
+//! the router and the workers share.
 
 use std::collections::BTreeMap;
 
@@ -11,6 +11,9 @@ const MAX_KEY: usize = 128;
 
 /// The longest label value, in bytes.
 const MAX_VALUE: usize = 512;
+
+/// The longest idempotency key, in bytes.
+const MAX_IDEMPOTENCY_KEY: usize = 256;
 
 /// Checks an entry's labels: at most [`MAX_LABELS`] of them, each key 1–128
 /// bytes of `[A-Za-z0-9._/-]` (so `key:value` splits on the first `:`), and
@@ -34,6 +37,18 @@ pub fn check_labels(labels: &BTreeMap<String, String>) -> Result<(), String> {
                 "the value of label {key} is longer than {MAX_VALUE} bytes"
             ));
         }
+    }
+    Ok(())
+}
+
+/// Checks an idempotency key: 1–256 bytes of `[A-Za-z0-9._:/-]`. The error says
+/// which rule it breaks.
+pub fn check_key(key: &str) -> Result<(), String> {
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || b"._:/-".contains(&b);
+    if key.is_empty() || key.len() > MAX_IDEMPOTENCY_KEY || !key.bytes().all(allowed) {
+        return Err(format!(
+            "idempotency key {key:?} must be 1 to {MAX_IDEMPOTENCY_KEY} bytes of letters, digits, '.', '_', ':', '/' and '-'"
+        ));
     }
     Ok(())
 }
@@ -76,6 +91,15 @@ mod tests {
         let many = |n: usize| (0..n).map(|i| (i.to_string(), String::new())).collect();
         assert_eq!(check_labels(&many(MAX_LABELS)), Ok(()));
         assert!(check_labels(&many(65)).is_err());
+    }
+
+    #[test]
+    fn keys_follow_the_rules() {
+        assert_eq!(check_key("run-1:step/2.a_b"), Ok(()));
+        assert_eq!(check_key(&"k".repeat(256)), Ok(()));
+        for bad in ["", &"k".repeat(257), "has space", "a=b", "é"] {
+            assert!(check_key(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

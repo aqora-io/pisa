@@ -63,6 +63,9 @@ pub struct SnapshotOptions {
     pub verify: Option<bool>,
     /// Labels for the new entry.
     pub labels: BTreeMap<String, String>,
+    /// An idempotency key: a retried create with the same key returns the
+    /// entry the first one made.
+    pub key: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -312,6 +315,7 @@ impl Client {
             timeout: self.timeout,
             verify: opts.verify,
             labels: opts.labels.clone(),
+            key: opts.key.clone(),
         };
         self.post("snapshots", &req).await
     }

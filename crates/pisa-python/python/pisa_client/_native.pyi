@@ -127,7 +127,12 @@ class Client:
         """Re-check a completed proof from scratch; `ok` also requires that it
         proves the session's original statements, with its imports."""
     def create_snapshot(
-        self, code: str, *, verify: bool | None = None, labels: dict[str, str] | None = None
+        self,
+        code: str,
+        *,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
     ) -> Snapshot:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module (`snapshot`) that later code can import, with a new `entry`
@@ -135,6 +140,12 @@ class Client:
         Start that code with the returned `header` to reuse the Lean process
         that has it loaded. Code with `sorry` is kept but `dirty`. Code that is
         already kept gets a new entry on its module without being built again.
+
+        `key` makes the call safe to retry: while an entry made with the same
+        key exists, creating the same code again returns that entry, with its
+        own labels, and other code is a `bad_request` in `result["error"]`. A
+        create that keeps nothing doesn't use the key up, and deleting the entry
+        frees it. A key is 1 to 256 bytes of letters, digits and `._:/-`.
 
         The kernel re-check runs by default only if the code uses macros, its
         own or an import's. `verify=True` always runs it and also re-checks the

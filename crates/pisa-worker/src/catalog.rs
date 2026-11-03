@@ -8,10 +8,14 @@
 //! - `(pisa, <version>, "child", <parent>, <m>)`: empty; `m` imports `parent`
 //! - `(pisa, <version>, "ref", <m>, <e>)`: empty; entry `e` points at `m`
 //! - `(pisa, <version>, "entry", <e>)`: entry `e` ([`EntryMeta`])
+//! - `(pisa, <version>, "key", <k>)`: the id of the entry made with
+//!   idempotency key `k`
 //!
 //! A module is kept while an entry points at it or a kept module imports it.
 //! Each transaction that relies on a `mod` record it only reads locks it, so
-//! that it conflicts with one that removes the module.
+//! that it conflicts with one that removes the module. A transaction that adds
+//! an entry with a key reads the key first and writes it with the entry, so
+//! that two creates with the same key conflict instead of both succeeding.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -68,6 +72,9 @@ pub struct EntryMeta {
     /// The id of the module it points at.
     pub module: String,
     pub labels: BTreeMap<String, String>,
+    /// The idempotency key it was made with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     /// Microseconds since the Unix epoch.
     pub created_micros: u64,
 }
@@ -75,6 +82,7 @@ pub struct EntryMeta {
 /// What a new entry is given.
 pub struct NewEntry {
     pub labels: BTreeMap<String, String>,
+    pub key: Option<String>,
 }
 
 pub struct Catalog {
@@ -159,6 +167,10 @@ impl Catalog {
         key(&[ROOT, &self.version, "entry", e])
     }
 
+    fn idem_key(&self, k: &str) -> Vec<u8> {
+        key(&[ROOT, &self.version, "key", k])
+    }
+
     /// Reads one JSON record.
     async fn read<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, Error> {
         let value = kv::retry(|| async { self.kv.begin().await?.get(key).await })
@@ -197,11 +209,40 @@ impl Catalog {
         Ok(updated)
     }
 
+    /// The entry made with idempotency key `k`, if there is one.
+    pub async fn keyed(&self, k: &str) -> Result<Option<(String, EntryMeta)>, Error> {
+        let found = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            self.keyed_in(&mut txn, k).await
+        })
+        .await?;
+        Ok(found)
+    }
+
+    /// [`keyed`](Self::keyed) in `txn`.
+    async fn keyed_in(&self, txn: &mut Txn, k: &str) -> Result<Option<(String, EntryMeta)>, Fail> {
+        let Some(id) = txn.get(&self.idem_key(k)).await? else {
+            return Ok(None);
+        };
+        let e = String::from_utf8(id).map_err(|e| Fail::Api(internal(e)))?;
+        let Some(bytes) = txn.get(&self.entry_key(&e)).await? else {
+            return Err(Fail::Api(internal(format!(
+                "idempotency key {k} names the missing entry {e}"
+            ))));
+        };
+        Ok(Some((e, serde_json::from_slice(&bytes)?)))
+    }
+
     /// Stores a freshly built module (unless it exists) with its child links,
     /// plus a new entry on it. Returns the entry and the module's stored
     /// record, which is another worker's if it stored the module first. A
     /// missing parent is `not_found`, and so is one deleted and built again
     /// since `meta` was made from it, whose files `meta` would name.
+    ///
+    /// If `entry`'s key is already on an entry, nothing is written and that
+    /// entry comes back, unchanged. On the same module, with its stored
+    /// record; on another, with `meta` in place of a record, which callers
+    /// tell by the entry's `module`.
     pub async fn commit(
         &self,
         m: &str,
@@ -212,6 +253,19 @@ impl Catalog {
         let mod_key = self.mod_key(m);
         let added = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
+            if let Some(k) = &entry.key
+                && let Some((e, taken)) = self.keyed_in(&mut txn, k).await?
+            {
+                let stored = if taken.module == m {
+                    let Some(bytes) = txn.get(&mod_key).await? else {
+                        return Err(Fail::Api(unknown_module(m)));
+                    };
+                    serde_json::from_slice(&bytes)?
+                } else {
+                    meta.clone()
+                };
+                return Ok((e, taken, stored));
+            }
             for parent in &meta.imports {
                 let parent_key = self.mod_key(parent);
                 txn.lock(parent_key.clone()).await?;
@@ -249,7 +303,9 @@ impl Catalog {
         Ok(added)
     }
 
-    /// A new entry on an existing module; `None` if the module is gone.
+    /// A new entry on an existing module; `None` if the module is gone. If
+    /// `entry`'s key is already on an entry, that one comes back instead,
+    /// unchanged, and it may be on another module.
     pub async fn add_entry(
         &self,
         m: &str,
@@ -258,6 +314,11 @@ impl Catalog {
         let mod_key = self.mod_key(m);
         let added = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
+            if let Some(k) = &entry.key
+                && let Some(taken) = self.keyed_in(&mut txn, k).await?
+            {
+                return Ok(Some(taken));
+            }
             txn.lock(mod_key.clone()).await?;
             if txn.get(&mod_key).await?.is_none() {
                 return Ok(None);
@@ -270,7 +331,8 @@ impl Catalog {
         Ok(added)
     }
 
-    /// Writes a new entry on module `m`, which `txn` has locked and found.
+    /// Writes a new entry on module `m`, which `txn` has locked and found, and
+    /// its key, which `txn` has found unused.
     async fn add(
         &self,
         txn: &mut Txn,
@@ -281,11 +343,15 @@ impl Catalog {
         let meta = EntryMeta {
             module: m.to_string(),
             labels: entry.labels.clone(),
+            key: entry.key.clone(),
             created_micros: now_micros(),
         };
         txn.put(self.entry_key(&e), serde_json::to_vec(&meta)?)
             .await?;
         txn.put(self.ref_key(m, &e), Vec::new()).await?;
+        if let Some(k) = &entry.key {
+            txn.put(self.idem_key(k), e.clone().into_bytes()).await?;
+        }
         Ok((e, meta))
     }
 
@@ -318,6 +384,9 @@ impl Catalog {
     async fn remove(&self, txn: &mut Txn, e: &str, meta: &EntryMeta) -> Result<(), Fail> {
         txn.delete(self.entry_key(e)).await?;
         txn.delete(self.ref_key(&meta.module, e)).await?;
+        if let Some(k) = &meta.key {
+            txn.delete(self.idem_key(k)).await?;
+        }
         Ok(())
     }
 

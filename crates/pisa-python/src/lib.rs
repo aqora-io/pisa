@@ -208,17 +208,19 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None))]
     fn create_snapshot<'py>(
         &self,
         py: Python<'py>,
         code: String,
         verify: Option<bool>,
         labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = pisa_client::SnapshotOptions {
             verify,
             labels: labels.unwrap_or_default(),
+            key,
         };
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await

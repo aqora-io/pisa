@@ -81,7 +81,7 @@ impl Txn {
 
 ### 3. Snapshots (`crates/pisa-worker/src/snapshots.rs`)
 
-`Snapshots` holds the `Kv` as well as the `ObjectStore`. Module blobs keep their S3 paths (`snapshots/<v>/<m>.<ext>.zst`). `SnapshotMeta` is renamed `ModuleMeta`, with the same fields. Internals that work on modules (`ensure`, `ensure_one`, `fetch`, `build`, `verify_chain`, `verify_module`, the confirmation cache) keep working on module ids, with lookups moved from S3 to `mod/m`.
+`Snapshots` holds the `Kv` as well as the `ObjectStore`. Module blobs are at per-build S3 paths, `snapshots/<v>/<m>.<build>.<ext>.zst`, where `build` is a nonce stored in the module record; a delete removes only the blobs of the build whose record it removed. `SnapshotMeta` is renamed `ModuleMeta`, with the same fields. Internals that work on modules (`ensure`, `ensure_one`, `fetch`, `build`, `verify_chain`, `verify_module`, the confirmation cache) keep working on module ids, with lookups moved from S3 to `mod/m`.
 
 **Create** (`create(pool, job)`; the job now carries `labels` and an optional `key`):
 1. Validate labels and key, and check the imports parse, as now.
@@ -94,7 +94,7 @@ impl Txn {
    - Add the entry.
 5. Creates that keep nothing (Lean errors, policy, timeouts) write no entry and no key, so a retry with the same key can still succeed.
 
-*Adding an entry* writes `entry/e`, `ref/m/e`, `new/R/e`, a `label/k/v/R/e` per label, and `key/k` if a key was given. With a key, the transaction reads `key/k` first and handles it as in step 2 if it's there. Two creates racing on the same key then both write `key/k`, so one conflicts, retries and finds the other's entry.
+*Adding an entry* writes `entry/e`, `ref/m/e`, `new/R/e`, a `label/k/v/R/e` per label, and `key/k` if a key was given. With a key, the transaction reads `key/k` first and handles it as in step 2 if it's there, without writing anything. So a `commit` that finds the key on an entry of another module stores nothing, deletes the blobs it uploaded, and the create answers `bad_request`. Two creates racing on the same key then both write `key/k`, so one conflicts, retries and finds the other's entry.
 
 **Delete** (`delete(e)`):
 1. In one transaction: read `entry/e` (missing is `not_found`), delete it and every key listed under "Adding an entry", then try to clean up its module.

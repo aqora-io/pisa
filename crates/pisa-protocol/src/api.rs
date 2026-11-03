@@ -315,6 +315,14 @@ pub struct SnapshotRequest {
     /// for the rules.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// Makes the create safe to retry: while an entry made with this key
+    /// exists, a create with it on the same code returns that entry, with its
+    /// own labels, instead of adding another; on other code it is a
+    /// `bad_request`. Creates that keep nothing don't use it up, and deleting
+    /// the entry frees it. See [`check_key`](crate::labels::check_key) for the
+    /// rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

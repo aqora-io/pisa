@@ -175,6 +175,9 @@ def test_snapshots(url):
     labelled = client.create_snapshot("import Foo\ntheorem labelled : 1 = 1 := rfl", labels={"k": "v"})
     assert labelled["labels"] == {"k": "v"}
     assert client.snapshot(labelled["entry"])["labels"] == {"k": "v"}
+    code = "import Foo\ntheorem keyed : 1 = 1 := rfl"
+    keyed = client.create_snapshot(code, key="run-1")
+    assert client.create_snapshot(code, key="run-1")["entry"] == keyed["entry"]
     with pytest.raises(PisaError) as e:
         client.snapshot(name)
     assert (e.value.kind, e.value.status) == ("bad_request", 400)

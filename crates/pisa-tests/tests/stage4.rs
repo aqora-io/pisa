@@ -225,6 +225,151 @@ async fn bad_labels_are_rejected() {
     assert_eq!(stored(&c).await, (vec![], vec![]));
 }
 
+async fn create_keyed(c: &Cluster, code: &str, key: &str, labels: Value) -> Value {
+    let body = json!({"code": code, "key": key, "labels": labels});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    r
+}
+
+/// Whether the KV store has the idempotency key `k`.
+async fn has_key(c: &Cluster, k: &str) -> bool {
+    let want = [KV_ROOT, "v", "key", k].map(String::from).to_vec();
+    c.stored_keys("v").await.contains(&want)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_key_returns_the_same_entry() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let code = "import Foo\n\ntheorem s : 1 = 1 := rfl\n-- SLEEP 500";
+    let first = create_keyed(&c, code, "k1", json!({"a": "1"})).await;
+    assert!(first["snapshot"].is_string(), "{first}");
+    assert_eq!(first["labels"], json!({"a": "1"}), "{first}");
+
+    let start = Instant::now();
+    let again = create_keyed(&c, code, "k1", json!({"a": "2"})).await;
+    assert!(start.elapsed() < Duration::from_millis(400), "{again}");
+    assert_eq!(again["entry"], first["entry"], "{again}");
+    assert_eq!(again["snapshot"], first["snapshot"], "{again}");
+    assert_eq!(again["labels"], json!({"a": "1"}), "{again}");
+    assert_eq!(info(&c, &first).await["labels"], json!({"a": "1"}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_with_different_code_is_refused() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    create_keyed(&c, ROOT, "k1", json!({})).await;
+    let before = stored(&c).await;
+
+    let other = "import Foo\n\ntheorem other : 2 = 2 := rfl";
+    let r = create_keyed(&c, other, "k1", json!({})).await;
+    assert_eq!(r["result"]["error"]["kind"], "bad_request", "{r}");
+    assert_eq!(r["result"]["ok"], false, "{r}");
+    assert!(r.get("entry").is_none(), "{r}");
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(stored(&c).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_create_leaves_its_key_unused() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let r = create_keyed(
+        &c,
+        "import Foo\n\ntheorem t : 1 = 1 := error_here",
+        "k2",
+        json!({}),
+    )
+    .await;
+    assert_eq!(r["result"]["ok"], false, "{r}");
+    assert!(r.get("entry").is_none(), "{r}");
+    assert!(!has_key(&c, "k2").await);
+
+    let r = create_keyed(&c, ROOT, "k2", json!({})).await;
+    assert!(r["entry"].is_string(), "{r}");
+    assert!(has_key(&c, "k2").await);
+}
+
+/// A kept module that fails the re-check the request asked for gets no entry,
+/// so the request's key stays unused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_re_check_leaves_its_key_unused() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    kept(&c, FORGED).await;
+    let body = json!({"code": FORGED, "verify": true, "key": "k5"});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    assert_rejected_by_kernel(&r);
+    assert!(r.get("entry").is_none(), "{r}");
+    assert!(!has_key(&c, "k5").await);
+
+    let r = create_keyed(&c, FORGED, "k5", json!({})).await;
+    assert!(r["entry"].is_string(), "{r}");
+    assert!(has_key(&c, "k5").await);
+}
+
+fn creating(c: &Cluster, code: &str, key: &str) -> tokio::task::JoinHandle<Value> {
+    let body = json!({"code": code, "key": key});
+    let (client, url) = (c.client.clone(), c.url("/snapshots"));
+    tokio::spawn(async move {
+        let r = client.post(url).json(&body).send().await.unwrap();
+        r.json::<Value>().await.unwrap()
+    })
+}
+
+/// Creates that overlap on one key make one entry. On the same code the later
+/// one gets the first's entry. On other code it is refused after building, and
+/// leaves no files behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn creates_racing_on_a_key_make_one_entry() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let code = "import Foo\n\ntheorem s : 1 = 1 := rfl\n-- SLEEP 500";
+    let (a, b) = tokio::join!(creating(&c, code, "k6"), creating(&c, code, "k6"));
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert!(a["entry"].is_string(), "{a}");
+    assert_eq!(a["entry"], b["entry"], "{a} {b}");
+    delete_all(&c, &[&a]).await;
+
+    let other = "import Foo\n\ntheorem t : 2 = 2 := rfl\n-- SLEEP 500";
+    let (a, b) = tokio::join!(creating(&c, code, "k7"), creating(&c, other, "k7"));
+    let (a, b) = (a.unwrap(), b.unwrap());
+    let (won, lost) = if a.get("entry").is_some() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert!(won["entry"].is_string(), "{won}");
+    assert_eq!(lost["result"]["error"]["kind"], "bad_request", "{lost}");
+    assert!(lost.get("entry").is_none() && lost.get("snapshot").is_none());
+    delete_all(&c, &[&won]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_is_freed_when_its_entry_is_deleted() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let first = create_keyed(&c, ROOT, "k3", json!({})).await;
+    assert!(has_key(&c, "k3").await);
+    delete(&c, &first).await;
+    assert!(!has_key(&c, "k3").await);
+
+    let second = create_keyed(&c, ROOT, "k3", json!({})).await;
+    assert!(second["snapshot"].is_string(), "{second}");
+    assert_ne!(entry(&second), entry(&first));
+    assert_eq!(info(&c, &second).await["entry"], second["entry"]);
+    delete_all(&c, &[&second]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bad_keys_are_rejected() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    for key in ["has space", "", &"k".repeat(257)] {
+        let r = create_keyed(&c, ROOT, key, json!({})).await;
+        assert_eq!(r["result"]["error"]["kind"], "bad_request", "{key:?}: {r}");
+        assert!(r.get("entry").is_none(), "{r}");
+        assert!(r.get("snapshot").is_none(), "{r}");
+    }
+    assert_eq!(stored(&c).await, (vec![], vec![]));
+}
+
 /// Checks on a snapshot go to the worker that built it, which owns its
 /// header and keeps it warm. The stored module is corrupted, so any other
 /// worker would refuse to load it.

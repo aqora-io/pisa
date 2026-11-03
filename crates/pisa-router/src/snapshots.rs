@@ -36,6 +36,7 @@ pub async fn create(
         timeout_secs: req.timeout,
         verify: req.verify,
         labels: req.labels,
+        key: req.key,
     });
     let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
     let JobResult::SnapshotCreated(r) = done.result else {

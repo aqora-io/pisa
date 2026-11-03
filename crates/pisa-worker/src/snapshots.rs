@@ -2,7 +2,8 @@
 //! imports, kept in object storage with its check result so that any worker
 //! of the version can import it. Entries keep modules alive: the same code
 //! is one module, however many entries point at it, and a module goes once
-//! no entry or kept module needs it. The records are in the [`Catalog`].
+//! no entry or kept module needs it. The records are in the [`Catalog`], and
+//! so are the idempotency keys that make a create safe to retry.
 //!
 //! Object storage, per pool version:
 //! - `snapshots/<version>/<id>.<build>.<ext>.zst`: the module's files,
@@ -35,7 +36,7 @@ use pisa_protocol::api::{
     SnapshotResponse, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
-use pisa_protocol::labels::{check_labels, entry_id_error, is_entry_id};
+use pisa_protocol::labels::{check_key, check_labels, entry_id_error, is_entry_id};
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
@@ -69,6 +70,14 @@ pub struct Snapshots {
 
 fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Internal, e.to_string())
+}
+
+/// The error for a create whose idempotency key is on an entry of other code.
+fn key_in_use() -> Error {
+    Error::new(
+        ErrorKind::BadRequest,
+        "idempotency key already used for different code",
+    )
 }
 
 /// Checks that a path segment is an entry id.
@@ -375,7 +384,9 @@ impl Snapshots {
             labels: Default::default(),
             result: CheckResult::default(),
         };
-        if let Err(e) = check_labels(&job.labels) {
+        let valid =
+            check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
+        if let Err(e) = valid {
             response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
             return response;
         }
@@ -392,6 +403,16 @@ impl Snapshots {
             response.result.reasons = rejected;
             return response;
         }
+        if let Some(key) = &job.key {
+            match self.replay(key, &snapshot::id(&job.code)).await {
+                Ok(Some(done)) => return done,
+                Ok(None) => {}
+                Err(e) => {
+                    response.result.error = Some(e);
+                    return response;
+                }
+            }
+        }
         // A kept module removed before its new entry was added is built
         // again, once.
         for _ in 0..2 {
@@ -403,6 +424,20 @@ impl Snapshots {
             "the snapshot was deleted twice while it was being created",
         ));
         response
+    }
+
+    /// The response to a create whose idempotency key an entry already has:
+    /// that entry, unchanged, if it is on module `id`, else an error. `None` if
+    /// no entry has the key.
+    async fn replay(&self, key: &str, id: &str) -> Result<Option<SnapshotResponse>, Error> {
+        let Some((entry, entry_meta)) = self.catalog.keyed(key).await? else {
+            return Ok(None);
+        };
+        if entry_meta.module != id {
+            return Err(key_in_use());
+        }
+        let meta = self.catalog.module(id).await?;
+        Ok(Some(self.response(id, meta, Some((entry, entry_meta)))))
     }
 
     /// [`create`](Self::create) after validation. `None` if the module was
@@ -495,6 +530,7 @@ impl Snapshots {
         };
         let entry = NewEntry {
             labels: job.labels.clone(),
+            key: job.key.clone(),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -504,6 +540,11 @@ impl Snapshots {
                 return Some(response);
             }
         };
+        // Another create took the key for other code since `create` looked.
+        if added.1.module != id {
+            response.result.error = Some(key_in_use());
+            return Some(response);
+        }
         Some(self.response(id, meta, Some(added)))
     }
 
@@ -661,6 +702,7 @@ impl Snapshots {
         };
         let entry = NewEntry {
             labels: job.labels.clone(),
+            key: job.key.clone(),
         };
         match self.commit(&own, &contents, &meta, entry).await {
             Ok(stored) => Ok(Some(stored)),
@@ -805,7 +847,9 @@ impl Snapshots {
     /// Uploads a freshly built module's files (`own`, whose files have
     /// `contents`), then stores its record with the new entry. Returns the
     /// stored record and the entry. If another worker stored the module
-    /// first, its record and build are kept, and this build's files go.
+    /// first, its record and build are kept, and this build's files go. So do
+    /// they if the entry's key is on an entry of other code, which is
+    /// `bad_request`, with nothing stored.
     async fn commit(
         &self,
         own: &Module,
@@ -821,6 +865,10 @@ impl Snapshots {
                 .map_err(internal)?;
         }
         let (entry, entry_meta, stored) = self.catalog.commit(&own.id, meta, entry).await?;
+        if entry_meta.module != own.id {
+            self.delete_blobs(own).await;
+            return Err(key_in_use());
+        }
         if stored.modules.last() != Some(own) {
             self.delete_blobs(own).await;
             if let Some(kept) = stored.modules.last()
@@ -893,6 +941,7 @@ impl Snapshots {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv::{ROOT, prefix};
     use object_store::memory::InMemory;
 
     /// A worker's snapshots over `kv`, with its local cache in `dir`.
@@ -929,7 +978,22 @@ mod tests {
     fn no_labels() -> NewEntry {
         NewEntry {
             labels: Default::default(),
+            key: None,
         }
+    }
+
+    fn keyed(key: &str) -> NewEntry {
+        NewEntry {
+            key: Some(key.into()),
+            ..no_labels()
+        }
+    }
+
+    /// Every KV key of version `v`.
+    async fn kv_keys(kv: &Kv) -> Vec<Vec<u8>> {
+        let mut txn = kv.begin().await.unwrap();
+        let pairs = txn.scan(prefix(&[ROOT, "v"]), u32::MAX).await.unwrap();
+        pairs.into_iter().map(|(key, _)| key).collect()
     }
 
     async fn upload(s: &Snapshots, meta: &ModuleMeta, content: &[u8]) {
@@ -1023,5 +1087,88 @@ mod tests {
         assert!(has_files(&s, &theirs).await);
         assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"theirs");
         assert_eq!(s.cached.lock().unwrap().get(&id), Some(&theirs.modules[0]));
+    }
+
+    /// Another create took the key for other code while this one was
+    /// building: its transaction writes nothing, not even the module and its
+    /// child link, and the blobs uploaded for it go. An entry added to a kept
+    /// module under that key gets the other code's entry back too.
+    #[tokio::test]
+    async fn a_commit_whose_key_is_used_by_other_code_keeps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let catalog = Catalog::new(kv.clone(), "v".into());
+        let (parent_id, other_id, id) = (
+            snapshot::id("parent"),
+            snapshot::id("other"),
+            snapshot::id("code"),
+        );
+        let parent = built(&parent_id, b"parent");
+        let other = built(&other_id, b"other");
+        catalog
+            .commit(&parent_id, &parent, no_labels())
+            .await
+            .unwrap();
+        let (taken, _, _) = catalog.commit(&other_id, &other, keyed("k")).await.unwrap();
+        upload(&s, &other, b"other").await;
+        let before = kv_keys(&kv).await;
+
+        let ours = built(&id, b"ours");
+        let own = ours.modules[0].clone();
+        upload(&s, &ours, b"ours").await;
+        let mut on_parent = ours.clone();
+        on_parent.imports = vec![parent_id.clone()];
+        on_parent.modules.insert(0, parent.modules[0].clone());
+        let (entry, entry_meta, _) = catalog.commit(&id, &on_parent, keyed("k")).await.unwrap();
+        assert_eq!((entry, entry_meta.module), (taken.clone(), other_id));
+        assert_eq!(kv_keys(&kv).await, before);
+
+        let contents = [b"ours".to_vec()];
+        let error = s
+            .commit(&own, &contents, &on_parent, keyed("k"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadRequest);
+        assert!(error.message.contains("different code"), "{error:?}");
+        assert_eq!(kv_keys(&kv).await, before);
+        assert!(catalog.module(&id).await.is_err());
+        assert!(!has_files(&s, &ours).await, "this build's files go");
+        assert!(has_files(&s, &other).await);
+
+        let added = catalog.add_entry(&parent_id, keyed("k")).await.unwrap();
+        assert_eq!(added.map(|(e, _)| e), Some(taken));
+        assert_eq!(kv_keys(&kv).await, before);
+    }
+
+    /// The key is already on an entry of this very module: that entry is
+    /// returned unchanged with the stored record, and this build's files go.
+    #[tokio::test]
+    async fn a_commit_whose_key_is_on_the_same_module_returns_that_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let kv = Kv::memory();
+        let s = snapshots(kv.clone(), dir.path());
+        let catalog = Catalog::new(kv.clone(), "v".into());
+        let id = snapshot::id("code");
+        let theirs = built(&id, b"theirs");
+        upload(&s, &theirs, b"theirs").await;
+        let mut labelled = keyed("k");
+        labelled.labels.insert("a".into(), "1".into());
+        let (taken, _, _) = catalog.commit(&id, &theirs, labelled).await.unwrap();
+        let before = kv_keys(&kv).await;
+
+        let ours = built(&id, b"ours");
+        let own = ours.modules[0].clone();
+        upload(&s, &ours, b"ours").await;
+        std::fs::write(s.file(&id, "olean"), b"ours").unwrap();
+        let contents = [b"ours".to_vec()];
+        let (stored, (entry, entry_meta)) =
+            s.commit(&own, &contents, &ours, keyed("k")).await.unwrap();
+        assert_eq!(entry, taken);
+        assert_eq!(entry_meta.labels["a"], "1");
+        assert_eq!(stored.modules, theirs.modules);
+        assert_eq!(kv_keys(&kv).await, before);
+        assert!(!has_files(&s, &ours).await, "this build's files go");
+        assert!(has_files(&s, &theirs).await);
     }
 }

@@ -107,13 +107,18 @@ async fn client_passes_labels() {
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
     let opts = SnapshotOptions {
         labels: BTreeMap::from([("k".to_string(), "v".to_string())]),
+        key: Some("run-1".to_string()),
         ..Default::default()
     };
     let code = "import Foo\ntheorem base : 1 = 1 := rfl";
     let created = client.create_snapshot_with(code, &opts).await.unwrap();
     assert_eq!(created.labels, opts.labels);
-    let info = client.snapshot(&created.entry.unwrap()).await.unwrap();
+    let entry = created.entry.unwrap();
+    let info = client.snapshot(&entry).await.unwrap();
     assert_eq!(info.labels, opts.labels);
+
+    let again = client.create_snapshot_with(code, &opts).await.unwrap();
+    assert_eq!(again.entry, Some(entry));
 }
 
 #[tokio::test(flavor = "multi_thread")]
