@@ -197,7 +197,7 @@ impl Catalog {
     }
 
     /// This catalog with listings that read at most `max_scan` index keys.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub fn with_max_scan(self, max_scan: usize) -> Catalog {
         Catalog { max_scan, ..self }
     }

@@ -12,12 +12,12 @@ hex.workspace = true
 libc.workspace = true
 object_store.workspace = true
 serde.workspace = true
+pisa-kv.workspace = true
 pisa-protocol.workspace = true
 pisa-repl.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tikv-client.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -25,5 +25,6 @@ uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+pisa-kv = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

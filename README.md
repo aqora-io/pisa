@@ -34,6 +34,7 @@ imports it instead of re-checking it.
 | `pisa-protocol` | The HTTP API types, REPL protocol types, header splitting, router↔worker frames |
 | `pisa-repl` | Async driver for one REPL process: blank-line framing, timeouts, crash reporting |
 | `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store |
+| `pisa-kv` | The transactional KV layer (in-memory or TiKV) and the snapshot catalog stored in it, shared by the workers and the search service |
 | `pisa-router` | HTTP API, worker registry, global queue, routing, metrics |
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |

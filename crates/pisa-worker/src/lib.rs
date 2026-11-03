@@ -12,11 +12,9 @@ use pisa_protocol::wire::{self, Inbound, Job, JobResult, RouterMessage, WorkerMe
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 
-pub mod catalog;
 pub mod cgroup;
 pub mod check;
 pub mod config;
-pub mod kv;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
@@ -25,6 +23,7 @@ pub mod snapshots;
 pub mod store;
 
 pub use config::WorkerConfig;
+pub use pisa_kv::{catalog, kv};
 use config::{MetadataKind, StoreKind};
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;

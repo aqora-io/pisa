@@ -1943,6 +1943,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pisa-kv"
+version = "0.1.0"
+dependencies = [
+ "pisa-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tikv-client",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "pisa-protocol"
 version = "0.1.0"
 dependencies = [
@@ -2060,6 +2073,7 @@ dependencies = [
  "hex",
  "libc",
  "object_store",
+ "pisa-kv",
  "pisa-protocol",
  "pisa-repl",
  "serde",
@@ -2067,7 +2081,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
- "tikv-client",
  "tokio",
  "tracing",
  "tracing-subscriber",
