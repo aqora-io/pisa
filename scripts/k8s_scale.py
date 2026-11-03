@@ -78,7 +78,8 @@ def wait_for(what, cond, timeout, interval=2):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--kubectl", default="minikube -p pisa kubectl --")
+    # Name the context: `minikube kubectl` otherwise uses the current one.
+    p.add_argument("--kubectl", default="minikube -p pisa kubectl -- --context pisa")
     p.add_argument("--deployment", default="pisa-worker")
     p.add_argument("--min", type=int, default=1, help="the ScaledObject's minReplicaCount")
     p.add_argument("--jobs", type=int, default=24)
