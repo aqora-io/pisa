@@ -11,6 +11,7 @@ use pisa_search::index::{self, Bundle};
 use pisa_search::informal_store::Store;
 use pisa_search::informalize;
 use pisa_search::llm::Llm;
+use pisa_search::snapshots;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
 
@@ -167,8 +168,25 @@ enum Command {
         #[arg(long, env = "PISA_SEARCH_SYMBOLS")]
         symbols: Option<PathBuf>,
         /// Embedding server for queries (enables the dense lane); see `embed`.
+        /// It also embeds snapshot declarations, so it must serve the model
+        /// that embedded the bundle.
         #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
         embedder: Option<String>,
+        /// PD endpoints of the TiKV holding the workers' snapshot catalog,
+        /// comma-separated; with them, queries can search snapshots.
+        #[arg(long, env = "PISA_TIKV_PD", value_delimiter = ',')]
+        tikv_pd: Vec<String>,
+        /// The worker version whose snapshots to search (default: the bundle's env_id).
+        #[arg(long, env = "PISA_SEARCH_SNAPSHOT_VERSION")]
+        snapshot_version: Option<String>,
+        /// Claude or OpenAI model that describes every snapshot declaration
+        /// (needs ANTHROPIC_API_KEY or OPENAI_API_KEY); without one they are
+        /// searched by name, signature and docstring.
+        #[arg(long, env = "PISA_SEARCH_DESCRIBE_MODEL")]
+        describe_model: Option<String>,
+        /// LLM and embedding requests in flight for snapshots.
+        #[arg(long, env = "PISA_SEARCH_DESCRIBE_CONCURRENCY", default_value_t = 8)]
+        describe_concurrency: usize,
     },
     /// Measure retrieval quality on MathlibQR.
     Eval {
@@ -568,16 +586,61 @@ async fn main() -> anyhow::Result<()> {
             http,
             symbols,
             embedder,
+            tikv_pd,
+            snapshot_version,
+            describe_model,
+            describe_concurrency,
         } => {
-            let engine = Arc::new(load_engine(
-                &bundle,
-                symbols.as_deref(),
-                embedder.as_deref(),
-            )?);
+            let mut engine = load_engine(&bundle, symbols.as_deref(), embedder.as_deref())?;
+            // Compose passes unset variables as empty ones.
+            let tikv_pd: Vec<String> = tikv_pd.into_iter().filter(|p| !p.is_empty()).collect();
+            let describe_model = describe_model.filter(|m| !m.is_empty());
+            let mut queue = None;
+            if !tikv_pd.is_empty() {
+                let kv = pisa_kv::kv::Kv::tikv(&tikv_pd)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("connecting to TiKV: {e}"))?;
+                let version = snapshot_version.unwrap_or_else(|| engine.env_id().to_string());
+                let model = engine.dense.as_ref().map(|d| d.model.clone());
+                let base = engine.bundle.decls.len() as u32;
+                tracing::info!(%version, "searching snapshots");
+                let (s, q) = snapshots::Snapshots::new(kv, version, base, model)?;
+                engine.snapshots = Some(s);
+                queue = Some(q);
+            }
+            let engine = Arc::new(engine);
+            if let (Some(s), Some(queue)) = (engine.snapshots.clone(), queue) {
+                tokio::spawn(s.follow());
+                let llm = match describe_model {
+                    Some(model) => Some((
+                        Llm::for_model(&model)?,
+                        informalize::Config {
+                            model,
+                            effort: "low".into(),
+                            max_tokens: 4096,
+                            concurrency: describe_concurrency,
+                        },
+                    )),
+                    None => None,
+                };
+                // Snapshot vectors join the bundle's, so without those there are none.
+                let embedder = match (&engine.dense, &embedder) {
+                    (Some(_), Some(spec)) => Some(Embedder::parse(spec)?),
+                    _ => None,
+                };
+                let how = snapshots::Describe { llm, embedder };
+                tokio::spawn(snapshots::describe(
+                    engine.clone(),
+                    queue,
+                    how,
+                    describe_concurrency,
+                ));
+            }
             tracing::info!(
                 env_id = engine.env_id(),
                 decls = engine.bundle.decls.len(),
                 vectors = engine.dense.as_ref().map_or(0, |d| d.len()),
+                snapshots = engine.snapshots.is_some(),
                 %http,
                 "serving"
             );

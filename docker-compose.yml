@@ -113,6 +113,9 @@ services:
       target: search
     image: pisa-search
     ports: ["8100:8100"]
+    # It reads the workers' snapshot catalog, and exits if PD isn't serving yet.
+    depends_on: [tikv]
+    restart: on-failure
     # Writable: tantivy takes a lock file when it opens the index.
     volumes:
       - ${PISA_SEARCH_BUNDLE:-./search/bundle}:/bundle
@@ -124,6 +127,13 @@ services:
       PISA_SEARCH_BUNDLE: /bundle
       PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
+      # Snapshot search. Set a describe model (e.g. claude-haiku-5-5, with
+      # ANTHROPIC_API_KEY) to describe every snapshot declaration with it;
+      # without one they are searched by name, signature and docstring.
+      PISA_TIKV_PD: pd:2379
+      PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RUST_LOG: info
 
   # Qwen3-Embedding-0.6B on the CPU, for bundles embedded with it.

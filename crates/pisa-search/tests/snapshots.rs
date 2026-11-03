@@ -1,0 +1,579 @@
+//! Searches snapshot declarations next to a small bundle: the catalog is an
+//! in-memory KV store written as workers write it, and the LLM and the
+//! embedder are mock servers.
+//!
+//! The embedder's blocking HTTP client can't be made or dropped on the
+//! runtime's threads, so every test shares one, [`Setup::embedder`], and
+//! ends with [`teardown`].
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use axum::Json;
+use axum::extract::State;
+use pisa_kv::catalog::{
+    Catalog, Change, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls,
+};
+use pisa_kv::kv::Kv;
+use pisa_protocol::api::CheckResult;
+use pisa_protocol::search::{Hit, Query, SnapshotScope};
+use pisa_search::anthropic::Client;
+use pisa_search::corpus::{Corpus, Decl, Manifest};
+use pisa_search::dense::{self, Embedder};
+use pisa_search::engine::Engine;
+use pisa_search::index::{self, Bundle};
+use pisa_search::informalize::Config;
+use pisa_search::llm::Llm;
+use pisa_search::snapshots::{self, Describe, Described, Snapshots};
+use pisa_search::symbols::{self, Symbols};
+use serde_json::{Value, json};
+
+const MODEL: &str = "words@test";
+const VERSION: &str = "v";
+
+/// A bag-of-words vector: texts that share words are near.
+fn embed(text: &str) -> Vec<f32> {
+    let mut v = vec![0.0f32; dense::DIMS];
+    for word in text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+    {
+        let h = word
+            .to_lowercase()
+            .bytes()
+            .fold(7u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)));
+        v[(h % dense::DIMS as u64) as usize] += 1.0;
+    }
+    v[0] += 0.01;
+    dense::truncate_normalize(v)
+}
+
+#[derive(Default)]
+struct Mocks {
+    llm_calls: AtomicUsize,
+    embed_calls: AtomicUsize,
+}
+
+async fn messages(State(mocks): State<Arc<Mocks>>, Json(body): Json<Value>) -> Json<Value> {
+    mocks.llm_calls.fetch_add(1, Ordering::SeqCst);
+    let prompt = body["messages"][0]["content"].as_str().unwrap_or_default();
+    let name = prompt
+        .lines()
+        .find_map(|l| l.strip_prefix("name: "))
+        .unwrap_or_default();
+    let out = json!({
+        "informal_name": format!("Twice {name}"),
+        "statement_nl": "Multiplying a natural number by two gives the number added to itself.",
+        "statement_latex": "2n = n + n",
+        "aliases": [],
+        "synthetic_queries": [],
+    });
+    Json(json!({
+        "model": body["model"],
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": out.to_string()}],
+        "usage": {"input_tokens": 10, "output_tokens": 10},
+    }))
+}
+
+async fn tei(State(mocks): State<Arc<Mocks>>, Json(body): Json<Value>) -> Json<Value> {
+    mocks.embed_calls.fetch_add(1, Ordering::SeqCst);
+    let inputs = body["inputs"].as_array().unwrap();
+    let vectors: Vec<Vec<f32>> = inputs.iter().map(|t| embed(t.as_str().unwrap())).collect();
+    Json(json!(vectors))
+}
+
+/// Mock Anthropic and TEI servers, and their URL.
+async fn mocks() -> (Arc<Mocks>, String) {
+    let mocks = Arc::new(Mocks::default());
+    let app = axum::Router::new()
+        .route("/v1/messages", axum::routing::post(messages))
+        .route("/embed", axum::routing::post(tei))
+        .with_state(mocks.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (mocks, url)
+}
+
+fn base_decl(name: &str, signature: &str, doc: &str) -> Decl {
+    Decl {
+        name: name.into(),
+        kind: "theorem".into(),
+        module: "Mathlib.Fixture".into(),
+        library: "Mathlib".into(),
+        signature: signature.into(),
+        type_pp_full: signature.into(),
+        type_refs: vec!["Nat".into()],
+        docstring: Some(doc.into()),
+        ..Default::default()
+    }
+}
+
+/// A bundle of two Mathlib theorems with vectors from [`embed`].
+fn bundle(dir: &std::path::Path) -> Bundle {
+    let mut decls = vec![
+        base_decl(
+            "Nat.add_comm",
+            "Nat.add_comm (n m : ℕ) : n + m = m + n",
+            "Addition of natural numbers is commutative.",
+        ),
+        base_decl(
+            "Nat.mul_one",
+            "Nat.mul_one (n : ℕ) : n * 1 = n",
+            "Multiplying by one leaves a number unchanged.",
+        ),
+    ];
+    decls.sort_by(|a, b| a.name.cmp(&b.name));
+    let corpus = Corpus {
+        manifest: Manifest {
+            env_id: "v4.35.0-test".into(),
+            decls: decls.len(),
+            libraries: BTreeMap::from([("Mathlib".into(), decls.len())]),
+            sources: Default::default(),
+        },
+        decls,
+        modules: Vec::new(),
+    };
+    let vectors: HashMap<String, Vec<f32>> = corpus
+        .decls
+        .iter()
+        .map(|d| (d.name.clone(), embed(&dense::document_view(d, None))))
+        .collect();
+    index::build(&corpus, &HashMap::new(), Some((MODEL, &vectors)), dir).unwrap();
+    Bundle::open(dir).unwrap()
+}
+
+fn engine(dir: &std::path::Path, embedder: &Embedder) -> Engine {
+    let mut e = Engine::new(bundle(dir), Symbols::parse(symbols::DEFAULT).unwrap()).unwrap();
+    let d = e.dense.take().unwrap();
+    e.dense = Some(d.with_embedder(embedder.clone()));
+    e
+}
+
+/// Drops `t` where blocking is allowed, after the tasks `tasks`, which may
+/// hold clones of what it holds.
+async fn teardown<T: Send + 'static>(tasks: Vec<tokio::task::JoinHandle<()>>, t: T) {
+    for task in tasks {
+        task.abort();
+        let _ = task.await;
+    }
+    tokio::task::spawn_blocking(move || drop(t)).await.unwrap();
+}
+
+fn meta(id: &str) -> ModuleMeta {
+    ModuleMeta {
+        imports: Vec::new(),
+        modules: vec![Module {
+            id: id.into(),
+            build: "b".into(),
+            files: Vec::new(),
+        }],
+        header: format!("import Mathlib\nimport PisaSnap.s{id}"),
+        code: String::new(),
+        dirty: false,
+        verified: false,
+        macros: false,
+        result: CheckResult::default(),
+        created: 0,
+    }
+}
+
+fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
+    SnapshotDecl {
+        name: name.into(),
+        kind: "theorem".into(),
+        signature: signature.into(),
+        type_pp_full: signature.into(),
+        type_refs: vec!["Nat".into(), "double".into()],
+        value_refs: Vec::new(),
+        docstring: Some(doc.into()),
+        deprecated_to: None,
+        uses_sorry: false,
+    }
+}
+
+/// Stores module `id` with `decls` and an entry with `labels`, as a worker
+/// does; returns the entry.
+async fn create(
+    catalog: &Catalog,
+    id: &str,
+    decls: Vec<SnapshotDecl>,
+    labels: &[(&str, &str)],
+) -> String {
+    let m = meta(id);
+    let decls = SnapshotDecls::new(&m, decls);
+    let entry = NewEntry {
+        labels: labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        key: None,
+    };
+    let (e, _, _) = catalog.commit(id, &m, Some(&decls), entry).await.unwrap();
+    e
+}
+
+fn doubling() -> Vec<SnapshotDecl> {
+    vec![snapshot_decl(
+        "double_eq",
+        "double_eq (n : ℕ) : double n = n + n",
+        "Doubling a number adds it to itself.",
+    )]
+}
+
+fn labels(pairs: &[(&str, &str)]) -> SnapshotScope {
+    SnapshotScope::Labels(
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    )
+}
+
+async fn search(e: &Arc<Engine>, q: Query) -> Vec<Hit> {
+    let e = Arc::clone(e);
+    tokio::task::spawn_blocking(move || e.search(&q).hits)
+        .await
+        .unwrap()
+}
+
+fn about_doubling(snapshots: SnapshotScope) -> Query {
+    Query {
+        nl: Some("doubling a number adds it to itself".into()),
+        snapshots,
+        ..Default::default()
+    }
+}
+
+fn names(hits: &[Hit]) -> Vec<&str> {
+    hits.iter().map(|h| h.name.as_str()).collect()
+}
+
+struct Setup {
+    dir: tempfile::TempDir,
+    kv: Kv,
+    catalog: Catalog,
+    mocks: Arc<Mocks>,
+    url: String,
+    embedder: Embedder,
+}
+
+async fn setup() -> Setup {
+    let (mocks, url) = mocks().await;
+    let kv = Kv::memory();
+    let tei = url.clone();
+    let embedder = tokio::task::spawn_blocking(move || Embedder::parse(&tei).unwrap());
+    Setup {
+        dir: tempfile::tempdir().unwrap(),
+        catalog: Catalog::new(kv.clone(), VERSION.into()),
+        kv,
+        mocks,
+        embedder: embedder.await.unwrap(),
+        url,
+    }
+}
+
+/// An engine that searches the snapshots of `s`, loaded once.
+async fn snapshot_engine(s: &Setup) -> (Arc<Engine>, Arc<Snapshots>, snapshots::Queue) {
+    let mut e = engine(s.dir.path(), &s.embedder);
+    let base = e.bundle.decls.len() as u32;
+    let (snapshots, queue) =
+        Snapshots::new(s.kv.clone(), VERSION.into(), base, Some(MODEL.into())).unwrap();
+    snapshots.load().await.unwrap();
+    e.snapshots = Some(snapshots.clone());
+    (Arc::new(e), snapshots, queue)
+}
+
+fn how(s: &Setup, llm: bool) -> Describe {
+    Describe {
+        llm: llm.then(|| {
+            (
+                Llm::Anthropic(Client::new(&s.url, "key".into())),
+                Config {
+                    model: "claude-haiku-5-5".into(),
+                    effort: "low".into(),
+                    max_tokens: 1000,
+                    concurrency: 2,
+                },
+            )
+        }),
+        embedder: Some(s.embedder.clone()),
+    }
+}
+
+/// Whether the hits have `name` from the dense lane.
+fn embedded(hits: &[Hit], name: &str) -> bool {
+    hits.iter()
+        .any(|h| h.name == name && h.lanes.iter().any(|l| l == "dense"))
+}
+
+/// Waits until `f` holds of the hits for `q`.
+async fn until(e: &Arc<Engine>, q: Query, f: impl Fn(&[Hit]) -> bool) -> Vec<Hit> {
+    for _ in 0..200 {
+        let hits = search(e, q.clone()).await;
+        if f(&hits) {
+            return hits;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("never matched; last: {:?}", names(&search(e, q).await));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshots_are_searched_by_scope() {
+    let s = setup().await;
+    let entry = create(&s.catalog, "a1", doubling(), &[("run", "1")]).await;
+    let (e, _, queue) = snapshot_engine(&s).await;
+    let task = tokio::spawn(snapshots::describe(e.clone(), queue, how(&s, false), 2));
+
+    let hits = until(&e, about_doubling(SnapshotScope::All), |hits| {
+        embedded(hits, "double_eq")
+    })
+    .await;
+    assert_eq!(hits[0].name, "double_eq", "{:?}", names(&hits));
+    let hit = &hits[0];
+    assert_eq!(hit.library, "PisaSnap");
+    assert_eq!(hit.module, "PisaSnap.sa1");
+    assert_eq!(
+        hit.flags.imports.as_deref(),
+        Some("import Mathlib\nimport PisaSnap.sa1")
+    );
+    assert!(hit.text.contains("import PisaSnap.sa1"), "{}", hit.text);
+    let snap = hit.snapshot.as_ref().unwrap();
+    assert_eq!(snap.entries, [entry]);
+    assert!(!snap.dirty && !snap.verified);
+
+    let hits = search(&e, about_doubling(labels(&[("run", "1")]))).await;
+    assert_eq!(hits[0].name, "double_eq");
+    for scope in [
+        SnapshotScope::None,
+        labels(&[("run", "2")]),
+        labels(&[("run", "1"), ("x", "y")]),
+    ] {
+        let hits = search(&e, about_doubling(scope.clone())).await;
+        assert!(
+            !names(&hits).contains(&"double_eq"),
+            "{scope:?}: {:?}",
+            names(&hits)
+        );
+        assert!(hits.iter().all(|h| h.snapshot.is_none()));
+    }
+
+    // By name, exactly or misspelled, within the scope only.
+    let by_name = |name: &str, scope| Query {
+        name: Some(name.into()),
+        snapshots: scope,
+        ..Default::default()
+    };
+    assert_eq!(
+        search(&e, by_name("double_eq", SnapshotScope::All)).await[0].name,
+        "double_eq"
+    );
+    assert_eq!(
+        search(&e, by_name("doubel_eq", SnapshotScope::All)).await[0].name,
+        "double_eq"
+    );
+    assert!(
+        !names(&search(&e, by_name("double_eq", SnapshotScope::None)).await).contains(&"double_eq")
+    );
+    teardown(vec![task], (e, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_snapshots_results_are_unchanged() {
+    let s = setup().await;
+    create(&s.catalog, "a1", doubling(), &[]).await;
+    let (with, _, _) = snapshot_engine(&s).await;
+    let dir = tempfile::tempdir().unwrap();
+    let without = Arc::new(engine(dir.path(), &s.embedder));
+    for q in [
+        about_doubling(SnapshotScope::None),
+        Query {
+            name: Some("Nat.add_com".into()),
+            ..Default::default()
+        },
+    ] {
+        let (a, b) = (search(&with, q.clone()).await, search(&without, q).await);
+        let scored = |hits: &[Hit]| -> Vec<(String, f64)> {
+            hits.iter().map(|h| (h.name.clone(), h.score)).collect()
+        };
+        assert_eq!(scored(&a), scored(&b));
+    }
+    teardown(vec![], (with, without, dir, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scopes_are_checked() {
+    let s = setup().await;
+    let (e, _, _) = snapshot_engine(&s).await;
+    let dir = tempfile::tempdir().unwrap();
+    let plain = engine(dir.path(), &s.embedder);
+    let mut q = about_doubling(SnapshotScope::All);
+    assert!(plain.check_filters(&mut q).is_err());
+    assert!(e.check_filters(&mut q).is_ok());
+    let mut q = about_doubling(SnapshotScope::Labels(BTreeMap::new()));
+    assert!(e.check_filters(&mut q).unwrap_err().contains("\"all\""));
+    let mut q = about_doubling(labels(&[("bad key", "v")]));
+    assert!(e.check_filters(&mut q).is_err());
+
+    // `PisaSnap` names the snapshots, which a scope must ask for.
+    let mut q = Query {
+        libraries: vec!["pisasnap".into()],
+        ..about_doubling(SnapshotScope::None)
+    };
+    assert!(e.check_filters(&mut q).is_err());
+    q.snapshots = SnapshotScope::All;
+    e.check_filters(&mut q).unwrap();
+    assert_eq!(q.libraries, ["PisaSnap"]);
+    assert!(plain.check_filters(&mut q).is_err());
+    teardown(vec![], (e, plain, dir, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshots_only() {
+    let s = setup().await;
+    create(&s.catalog, "a1", doubling(), &[]).await;
+    let (e, _, _) = snapshot_engine(&s).await;
+    let q = Query {
+        nl: Some("addition of natural numbers".into()),
+        libraries: vec!["PisaSnap".into()],
+        ..about_doubling(SnapshotScope::All)
+    };
+    let hits = search(&e, q).await;
+    assert!(!hits.is_empty());
+    assert!(
+        hits.iter().all(|h| h.library == "PisaSnap"),
+        "{:?}",
+        names(&hits)
+    );
+    teardown(vec![], (e, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn descriptions_and_vectors_are_made_once_and_kept() {
+    let s = setup().await;
+    create(&s.catalog, "a1", doubling(), &[]).await;
+    let (e, _, queue) = snapshot_engine(&s).await;
+    let first = tokio::spawn(snapshots::describe(e.clone(), queue, how(&s, true), 2));
+
+    // Found by the description's words, which the docstring doesn't have.
+    let q = Query {
+        nl: Some("multiplying by two".into()),
+        ..about_doubling(SnapshotScope::All)
+    };
+    let hits = until(&e, q.clone(), |hits| {
+        hits.first().is_some_and(|h| h.informal_name.is_some())
+    })
+    .await;
+    assert_eq!(hits[0].name, "double_eq");
+    assert_eq!(hits[0].informal_name.as_deref(), Some("Twice double_eq"));
+    assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), 1);
+    let stored = s.catalog.described("a1").await.unwrap();
+    let rec: Described = serde_json::from_slice(&stored[0].1).unwrap();
+    assert!(rec.informal.is_some() && rec.vector.is_some(), "{rec:?}");
+
+    // A restart reads them back and asks for nothing.
+    let (llm, embeds) = (
+        s.mocks.llm_calls.load(Ordering::SeqCst),
+        s.mocks.embed_calls.load(Ordering::SeqCst),
+    );
+    let (again, _, queue) = snapshot_engine(&s).await;
+    let second = tokio::spawn(snapshots::describe(again.clone(), queue, how(&s, true), 2));
+    let hits = search(&again, q).await;
+    assert_eq!(hits[0].informal_name.as_deref(), Some("Twice double_eq"));
+    assert!(
+        hits[0].lanes.contains(&"dense".to_string()),
+        "{:?}",
+        hits[0].lanes
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), llm);
+    // The queries above were embedded, but no declaration was.
+    let queries = 1;
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), embeds + queries);
+    teardown(vec![first, second], (e, again, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_model_declarations_are_embedded_from_docstrings() {
+    let s = setup().await;
+    create(&s.catalog, "a1", doubling(), &[]).await;
+    let (e, snapshots, queue) = snapshot_engine(&s).await;
+    let task = tokio::spawn(snapshots::describe(e.clone(), queue, how(&s, false), 2));
+    let hits = until(&e, about_doubling(SnapshotScope::All), |hits| {
+        embedded(hits, "double_eq")
+    })
+    .await;
+    assert_eq!(hits[0].name, "double_eq", "{:?}", names(&hits));
+    assert!(hits[0].informal_name.is_none());
+    assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshots.index.read().unwrap().decls(), 1);
+    teardown(vec![task], (e, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relabels_and_deletes_are_followed() {
+    let s = setup().await;
+    let entry = create(&s.catalog, "a1", doubling(), &[("run", "1")]).await;
+    let (e, snapshots, _) = snapshot_engine(&s).await;
+    let has_it =
+        async |scope| names(&search(&e, about_doubling(scope)).await).contains(&"double_eq");
+    assert!(has_it(labels(&[("run", "1")])).await);
+
+    let set = BTreeMap::from([("run".to_string(), "2".to_string())]);
+    s.catalog.set_labels(&entry, &set, &[]).await.unwrap();
+    let change = Change {
+        entry: Some(entry.clone()),
+        module: Some("a1".into()),
+    };
+    snapshots.apply(&change).await.unwrap();
+    snapshots.index.write().unwrap().commit().unwrap();
+    assert!(!has_it(labels(&[("run", "1")])).await);
+    assert!(has_it(labels(&[("run", "2")])).await);
+
+    s.catalog.remove_entry(&entry).await.unwrap();
+    snapshots.apply(&change).await.unwrap();
+    snapshots.index.write().unwrap().commit().unwrap();
+    assert!(!has_it(SnapshotScope::All).await);
+    assert_eq!(snapshots.index.read().unwrap().modules(), 0);
+
+    // Another module takes the freed slot, and only its declaration is found.
+    let other = vec![snapshot_decl(
+        "halve_eq",
+        "halve_eq (n : ℕ) : halve (2 * n) = n",
+        "Halving undoes doubling.",
+    )];
+    let entry = create(&s.catalog, "b2", other, &[]).await;
+    let change = Change {
+        entry: Some(entry),
+        module: Some("b2".into()),
+    };
+    snapshots.apply(&change).await.unwrap();
+    snapshots.index.write().unwrap().commit().unwrap();
+    let hits = search(&e, about_doubling(SnapshotScope::All)).await;
+    let ours: Vec<&Hit> = hits.iter().filter(|h| h.library == "PisaSnap").collect();
+    assert_eq!(ours.len(), 1, "{:?}", names(&hits));
+    assert_eq!(
+        (ours[0].name.as_str(), ours[0].module.as_str()),
+        ("halve_eq", "PisaSnap.sb2")
+    );
+    teardown(vec![], (e, s)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_change_log_is_followed() {
+    let s = setup().await;
+    let (e, snapshots, _) = snapshot_engine(&s).await;
+    let task = tokio::spawn(snapshots.clone().follow());
+    create(&s.catalog, "b2", doubling(), &[("run", "3")]).await;
+    let hits = until(&e, about_doubling(labels(&[("run", "3")])), |hits| {
+        names(hits).contains(&"double_eq")
+    })
+    .await;
+    let hit = hits.iter().find(|h| h.name == "double_eq").unwrap();
+    assert_eq!(hit.module, "PisaSnap.sb2");
+    teardown(vec![task], (e, s)).await;
+}

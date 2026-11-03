@@ -10,5 +10,6 @@ pub mod llm;
 pub mod lsv2;
 pub mod openai;
 pub mod server;
+pub mod snapshots;
 pub mod symbols;
 pub mod text;

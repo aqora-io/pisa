@@ -2028,6 +2028,7 @@ dependencies = [
  "hex",
  "object_store",
  "pisa-client",
+ "pisa-kv",
  "pisa-protocol",
  "rayon",
  "reqwest",

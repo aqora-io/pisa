@@ -23,7 +23,8 @@ use pisa_protocol::search::Informal;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tantivy::schema::{
-    Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions,
+    FAST, Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, SchemaBuilder,
+    TextFieldIndexing, TextOptions,
 };
 use tantivy::tokenizer::{
     Language, LowerCaser, NgramTokenizer, RemoveLongFilter, Stemmer, TextAnalyzer,
@@ -97,6 +98,19 @@ pub struct Fields {
 }
 
 pub fn schema() -> (Schema, Fields) {
+    let (b, fields) = schema_builder();
+    (b.build(), fields)
+}
+
+/// The schema of the snapshot index: the bundle's, whose fields keep their
+/// ids, plus `module`, a fast field with the slot of each declaration's module.
+pub fn snapshot_schema() -> (Schema, Fields, Field) {
+    let (mut b, fields) = schema_builder();
+    let module = b.add_u64_field("module", INDEXED | FAST);
+    (b.build(), fields, module)
+}
+
+fn schema_builder() -> (SchemaBuilder, Fields) {
     let mut b = Schema::builder();
     let text = |tokenizer: &str| {
         TextOptions::default().set_indexing_options(
@@ -116,7 +130,7 @@ pub fn schema() -> (Schema, Fields) {
         doc: b.add_text_field("doc", text("pisa_prose")),
         consts: b.add_text_field("consts", STRING),
     };
-    (b.build(), fields)
+    (b, fields)
 }
 
 pub fn register_tokenizers(index: &Index) {
@@ -201,7 +215,7 @@ pub fn build(
     register_tokenizers(&index);
     let mut writer: IndexWriter = index.writer(1_000_000_000)?;
     for (i, (d, s)) in decls.iter().zip(&stored).enumerate() {
-        writer.add_document(document(&fields, i as u64, d, s))?;
+        writer.add_document(document(&fields, i as u64, s, &d.type_refs))?;
     }
     writer.commit()?;
     writer.wait_merging_threads()?;
@@ -285,12 +299,13 @@ fn stored_decl(
     }
 }
 
-fn document(f: &Fields, id: u64, d: &Decl, s: &StoredDecl) -> TantivyDocument {
+/// The document of declaration `s`, whose type mentions `type_refs`.
+pub fn document(f: &Fields, id: u64, s: &StoredDecl, type_refs: &[String]) -> TantivyDocument {
     let mut doc = TantivyDocument::default();
     doc.add_u64(f.id, id);
-    doc.add_text(f.name, name_text(&d.name));
-    doc.add_text(f.name_ngram, d.name.to_lowercase());
-    doc.add_text(f.signature, tokens(&d.signature).join(" "));
+    doc.add_text(f.name, name_text(&s.name));
+    doc.add_text(f.name_ngram, s.name.to_lowercase());
+    doc.add_text(f.signature, tokens(&s.signature).join(" "));
     let mut statement = String::new();
     if let Some(i) = &s.informal {
         doc.add_text(f.informal, tokens(&i.informal_name).join(" "));
@@ -305,10 +320,10 @@ fn document(f: &Fields, id: u64, d: &Decl, s: &StoredDecl) -> TantivyDocument {
         }
     }
     doc.add_text(f.statement, statement);
-    if let Some(docstring) = &d.docstring {
+    if let Some(docstring) = &s.docstring {
         doc.add_text(f.doc, tokens(docstring).join(" "));
     }
-    for c in &d.type_refs {
+    for c in type_refs {
         doc.add_text(f.consts, c);
     }
     doc

@@ -46,7 +46,7 @@ imports it instead of re-checking it.
 ```sh
 docker compose up --build              # Lean v4.35.0 + Mathlib + Physlib (first build compiles Physlib)
 PROJECT=lean-core docker compose up --build   # no Mathlib, for quick checks
-python3 scripts/e2e.py [--mathlib]     # end-to-end checks against the running stack
+python3 scripts/e2e.py [--mathlib] [--search http://localhost:8100]   # end-to-end checks against the running stack
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 ```
 
@@ -163,6 +163,12 @@ To the release that moved metadata into TiKV and snapshots onto entries:
   S3 is ignored, so snapshots, sessions and states start over.
 - The snapshot HTTP API takes entry ids where it took module names; see
   [Snapshots](#snapshots).
+
+To the release that searches snapshots:
+- Upgrade the workers first: only they record what the search service reads,
+  each module's declarations and a log of changes.
+- Modules built before the upgrade aren't searchable, and creating the same
+  code again doesn't make them so, as it doesn't build them again.
 
 ## API
 
@@ -375,6 +381,9 @@ cache: whoever can write the store can still install an unchecked module, and
 the recorded SHA-256 catches only corruption, not a malicious write. The base
 Mathlib/Physlib oleans and the kernel are the trusted base.
 
+**Searching them.** The search service can search snapshot declarations, by
+label, next to Mathlib's; see [Snapshots in search](#snapshot-search).
+
 ## Clients
 
 Rust (`pisa-client`):
@@ -535,7 +544,7 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /v1/search` | `{queries: [{q?, nl?, latex?, pattern?, goal?, name?, libraries?, kinds?, k?, include_sorried?}], env_id?}` → `{env_id, results: [{hits}]}`, at most 64 queries |
+| `POST /v1/search` | `{queries: [{q?, nl?, latex?, pattern?, goal?, name?, libraries?, kinds?, k?, include_sorried?, snapshots?}], env_id?}` → `{env_id, results: [{hits}]}`, at most 64 queries |
 | `POST /v1/resolve` | `{names, env_id?}` → `{env_id, results: [{name, exists, deprecated_to?, suggestions}]}` |
 | `GET /v1/decl/{name}` | → `{env_id, decl}`: signature, description, flags, dependencies and users |
 
@@ -544,7 +553,8 @@ Each hit carries:
 - a description, when one exists;
 - flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
 - the lanes that found it, and a source link;
-- `text`, about 150 tokens ready for a model's context.
+- `text`, about 150 tokens ready for a model's context;
+- for a snapshot declaration, `snapshot` (see [below](#snapshot-search)).
 
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists
@@ -563,6 +573,48 @@ search.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqr
 
 The Rust `pisa_client::SearchClient` has the same methods. To run the Python
 search tests, first run `cargo build -p pisa-search`.
+
+<a id="snapshot-search"></a>
+**Snapshots in search.** With `PISA_TIKV_PD` pointing at the workers' TiKV, the
+service also searches the declarations of [snapshots](#snapshots), ranked with
+the bundle's in every lane:
+- **Scope.** A query's `snapshots` says which: `"none"` (the default), `"all"`,
+  or `{"labels": {"run": "7"}}`, the modules of the entries that have every
+  label, as `GET /snapshots?label=` matches them. The snapshots those import
+  aren't included. Snapshot declarations are in the library `PisaSnap`, so
+  adding `"libraries": ["PisaSnap"]` searches snapshots only.
+- **Hits.** A hit's `module` is the snapshot, e.g. `PisaSnap.s1f…`, and
+  `flags.imports` the header that loads it. `snapshot` lists the scope's
+  entries on that module, newest first, at most 10, with the module's
+  `dirty` and `verified`. Names can repeat across snapshots, and each is a hit
+  of its own. `/v1/resolve` and `/v1/decl` cover the bundle only.
+- **Freshness.** Workers export a module's declarations when they build it,
+  and log every create, relabel, delete and re-check in TiKV. The service
+  reads that log every 2 s. A snapshot is searchable by name, signature and
+  docstring seconds after it is created; its description and vector follow
+  when the LLM and the embedder answer. Module-system snapshots have no
+  docstrings in the export.
+- **Descriptions.** With `PISA_SEARCH_DESCRIBE_MODEL` set to a Claude model
+  (with `ANTHROPIC_API_KEY`) or an OpenAI one (with `OPENAI_API_KEY`), every
+  snapshot declaration is described as `informalize` describes the libraries.
+  So all snapshot code goes to that provider, at about $0.0003 a declaration
+  with Claude Haiku 5.5. Without one, declarations are embedded from their
+  docstrings. A failed description is tried 3 times in all; an
+  authentication error pauses describing for 5 minutes.
+  `PISA_SEARCH_DESCRIBE_CONCURRENCY` (8) bounds the requests in flight.
+- **Vectors.** The embedder that embeds queries (`PISA_SEARCH_TEI`, Scaleway or
+  TEI) also embeds each snapshot declaration's signature, docstring and
+  description, so it must serve the model that embedded the bundle.
+- **Storage.** Descriptions and vectors are kept in TiKV with the module, so a
+  restart rebuilds the in-memory index without calling either API. They are
+  deleted with the module.
+- **Version.** It searches the snapshots of the workers whose version is the
+  bundle's `env_id`; `PISA_SEARCH_SNAPSHOT_VERSION` names another.
+
+```python
+hits = search.search(nl="doubling adds a number to itself", snapshots={"labels": {"run": "7"}})["hits"]
+hits[0]["module"], hits[0]["snapshot"]["entries"]  # "PisaSnap.s1f…", ["9c0e…"]
+```
 
 **Quality.** Two reports track it:
 - `search/eval/<env_id>.md`: recall, MRR and nDCG on LeanSearch v2's MathlibQR

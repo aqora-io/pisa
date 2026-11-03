@@ -538,7 +538,8 @@ impl<'a> Context<'a> {
         checks
     }
 
-    fn outcome(&self, cfg: &Config, d: &Decl, r: Completion) -> Outcome {
+    /// What the model's answer `r` for `d` comes to.
+    pub fn outcome(&self, cfg: &Config, d: &Decl, r: Completion) -> Outcome {
         let mut o = Outcome {
             name: d.name.clone(),
             cost: r.cost,
@@ -619,6 +620,50 @@ pub fn docstring_entry(d: &Decl) -> Option<Entry> {
     })
 }
 
+/// The system prompts, by library, and the schema of what the model returns.
+pub struct Prompts {
+    physlib: Vec<String>,
+    mathlib: Vec<String>,
+    schema: Value,
+}
+
+impl Prompts {
+    pub fn new() -> anyhow::Result<Prompts> {
+        Ok(Prompts {
+            physlib: system(&[GLOSSARY_MATHLIB, GLOSSARY_PHYSLIB])?,
+            mathlib: system(&[GLOSSARY_MATHLIB])?,
+            schema: output_schema(),
+        })
+    }
+
+    fn system(&self, d: &Decl) -> &[String] {
+        if d.library == "Physlib" {
+            &self.physlib
+        } else {
+            &self.mathlib
+        }
+    }
+}
+
+/// Sends each `(i, declaration, prompt)` to the model, at most
+/// `cfg.concurrency` at once and at most as many as `limit` lets through,
+/// and yields `i` with the answer as each lands.
+pub fn complete<'a>(
+    client: &'a Llm,
+    cfg: &'a Config,
+    prompts: &'a Prompts,
+    jobs: Vec<(usize, &'a Decl, String)>,
+    limit: &'a tokio::sync::Semaphore,
+) -> impl futures::Stream<Item = (usize, Result<Completion, llm::Error>)> + 'a {
+    futures::stream::iter(jobs)
+        .map(move |(i, d, prompt)| async move {
+            let _permit = limit.acquire().await;
+            let req = cfg.request(prompts.system(d), &prompt, &prompts.schema);
+            (i, client.complete(&req).await)
+        })
+        .buffer_unordered(cfg.concurrency.max(1))
+}
+
 /// Describes `targets` level by level, saving descriptions to `store` as
 /// batches named `<batch>-<seq>`. Stops at the first authentication error.
 pub async fn run(
@@ -630,9 +675,8 @@ pub async fn run(
     described: HashMap<String, Informal>,
     batch: &str,
 ) -> anyhow::Result<Vec<Outcome>> {
-    let physlib_system = system(&[GLOSSARY_MATHLIB, GLOSSARY_PHYSLIB])?;
-    let mathlib_system = system(&[GLOSSARY_MATHLIB])?;
-    let schema = output_schema();
+    let prompts = Prompts::new()?;
+    let limit = tokio::sync::Semaphore::new(cfg.concurrency.max(1));
     let mut ctx = Context::new(corpus, described);
     let mut outcomes = Vec::new();
     let mut pending: Vec<Entry> = Vec::new();
@@ -662,23 +706,11 @@ pub async fn run(
     let levels = levels(&llm);
     let started = std::time::Instant::now();
     for (n, level) in levels.iter().enumerate() {
-        let prompts: Vec<(usize, String)> =
-            level.iter().map(|&i| (i, ctx.prompt(llm[i]))).collect();
-        let (schema, llm) = (&schema, &llm);
-        let (physlib_system, mathlib_system) = (&physlib_system, &mathlib_system);
-        let mut responses = futures::stream::iter(prompts)
-            .map(|(i, prompt)| async move {
-                let system = if llm[i].library == "Physlib" {
-                    physlib_system
-                } else {
-                    mathlib_system
-                };
-                (
-                    i,
-                    client.complete(&cfg.request(system, &prompt, schema)).await,
-                )
-            })
-            .buffer_unordered(cfg.concurrency.max(1));
+        let jobs = level
+            .iter()
+            .map(|&i| (i, llm[i], ctx.prompt(llm[i])))
+            .collect();
+        let mut responses = std::pin::pin!(complete(client, cfg, &prompts, jobs, &limit));
         while let Some((i, result)) = responses.next().await {
             let d = llm[i];
             let outcome = match result {

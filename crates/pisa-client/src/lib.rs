@@ -50,7 +50,8 @@ pub use pisa_protocol::api::{
     Sorry, StartResponse as Session, StateInfo, TacticInfo, TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
-    DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, Suggestion,
+    DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope,
+    Suggestion,
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;

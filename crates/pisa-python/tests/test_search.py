@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from pisa_client import NotFoundError, SearchClient
+from pisa_client import NotFoundError, PisaError, SearchClient
 
 ROOT = Path(__file__).parents[3]
 BIN = Path(os.environ.get("PISA_BIN_DIR", ROOT / "target" / "debug"))
@@ -113,3 +113,15 @@ def test_resolve_and_decl(url):
 def test_env_pin(url):
     with pytest.raises(NotFoundError, match="no index for env other"):
         SearchClient(url, env_id="other").search("trace")
+
+
+def test_snapshot_scopes(url):
+    client = SearchClient(url)
+    assert client.search(nl="trace of the identity matrix", snapshots="none")["hits"]
+    # This server follows no snapshot catalog, so asking for snapshots is refused.
+    for scope in ["all", {"labels": {"run": "1"}}]:
+        with pytest.raises(PisaError, match="doesn't search snapshots") as e:
+            client.search(nl="trace", snapshots=scope)
+        assert e.value.status == 400
+    with pytest.raises(ValueError, match="invalid snapshots"):
+        client.search(nl="trace", snapshots="some")

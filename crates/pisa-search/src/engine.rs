@@ -1,15 +1,23 @@
 //! Answering queries over a bundle: routing, lanes, fusion, priors, rendering.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use pisa_protocol::search::{DeclDetail, Flags, Hit, Query, QueryResult, Resolution, Suggestion};
+use pisa_protocol::labels::check_labels;
+use pisa_protocol::search::{
+    DeclDetail, Flags, Hit, Query, QueryResult, Resolution, SnapshotScope, Suggestion,
+};
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query as TQuery, TermQuery};
+use tantivy::query::{
+    Bm25StatisticsProvider, BooleanQuery, BoostQuery, Occur, Query as TQuery, TermQuery,
+};
 use tantivy::schema::{Field, IndexRecordOption, Value};
-use tantivy::{IndexReader, TantivyDocument, Term};
+use tantivy::{IndexReader, Searcher, TantivyDocument, Term};
 
 use crate::corpus::{is_generated, is_tooling};
+use crate::dense::quantize;
 use crate::index::{Bundle, StoredDecl};
+use crate::snapshots::{self, Combined, Scope, SnapshotIndex, Snapshots};
 use crate::symbols::Symbols;
 use crate::text::{latex_to_unicode, lean_identifiers, levenshtein, tokens};
 
@@ -95,6 +103,50 @@ pub struct Engine {
     symbols: Symbols,
     kinds: std::collections::BTreeSet<String>,
     pub dense: Option<crate::dense::Dense>,
+    /// Snapshot declarations, when this server searches them.
+    pub snapshots: Option<Arc<Snapshots>>,
+}
+
+/// The snapshot index and the modules a query covers.
+type Snap<'a> = Option<(&'a SnapshotIndex, &'a Scope)>;
+
+/// The declarations one query can see: the bundle's, and those of the
+/// snapshot modules it covers.
+struct View<'a> {
+    engine: &'a Engine,
+    snap: Snap<'a>,
+}
+
+impl View<'_> {
+    fn decl(&self, id: u32) -> &StoredDecl {
+        match self.engine.bundle.decls.get(id as usize) {
+            Some(d) => d,
+            // The query holds the snapshot index, so its ids stay live.
+            None => self
+                .snap
+                .and_then(|(index, _)| index.decl(id))
+                .expect("a live snapshot declaration"),
+        }
+    }
+
+    /// The declarations named exactly `name`.
+    fn exact(&self, name: &str) -> Vec<u32> {
+        let mut ids: Vec<u32> = self.engine.id_of(name).into_iter().collect();
+        if let Some((index, scope)) = self.snap {
+            ids.extend(index.exact(name, scope));
+        }
+        ids
+    }
+
+    fn has_vector(&self, id: u32) -> bool {
+        match (&self.engine.dense, self.snap) {
+            _ if (id as usize) >= self.engine.bundle.decls.len() => {
+                self.snap.is_some_and(|(index, _)| index.has_vector(id))
+            }
+            (Some(dense), _) => dense.contains(id),
+            (None, _) => false,
+        }
+    }
 }
 
 /// A query split by what it contains.
@@ -220,13 +272,29 @@ impl Engine {
             symbols,
             kinds: bundle_kinds,
             dense,
+            snapshots: None,
         })
     }
 
     /// Spells a query's library and kind filters as the index does, matching
     /// case-insensitively; an unknown one is an error listing the known ones.
     pub fn check_filters(&self, q: &mut Query) -> Result<(), String> {
-        let libraries: Vec<&String> = self.bundle.manifest.libraries.keys().collect();
+        match &q.snapshots {
+            SnapshotScope::None => {}
+            _ if self.snapshots.is_none() => {
+                return Err("this server doesn't search snapshots".into());
+            }
+            SnapshotScope::All => {}
+            SnapshotScope::Labels(labels) if labels.is_empty() => {
+                return Err("snapshots: no labels given; use \"all\" for every snapshot".into());
+            }
+            SnapshotScope::Labels(labels) => check_labels(labels)?,
+        }
+        let snapshot_library = snapshots::LIBRARY.to_string();
+        let mut libraries: Vec<&String> = self.bundle.manifest.libraries.keys().collect();
+        if self.snapshots.is_some() {
+            libraries.push(&snapshot_library);
+        }
         let kinds: Vec<&String> = self.kinds.iter().collect();
         for (wanted, known, what) in [
             (&mut q.libraries, &libraries, "library"),
@@ -241,6 +309,11 @@ impl Engine {
                     }
                 }
             }
+        }
+        if q.snapshots.is_none() && q.libraries.contains(&snapshot_library) {
+            return Err(format!(
+                "library {snapshot_library} needs snapshots: \"all\" or labels"
+            ));
         }
         Ok(())
     }
@@ -257,19 +330,41 @@ impl Engine {
         self.by_name.get(name).copied()
     }
 
+    /// The bundle's declaration named `name`.
+    pub fn base_decl(&self, name: &str) -> Option<&StoredDecl> {
+        self.id_of(name).map(|id| self.decl(id))
+    }
+
     pub fn search(&self, q: &Query) -> QueryResult {
         self.search_with(q, Lanes::ALL)
+    }
+
+    /// The snapshot index, read-locked, if any of `queries` asks for
+    /// snapshots. It is locked once, outside the rayon tasks that search with
+    /// it: a task waiting on its own nested `par_iter` may run another
+    /// query's, which would otherwise lock it again and wait behind a writer.
+    fn snapshot_index<'a>(
+        &'a self,
+        queries: &[&Query],
+    ) -> Option<std::sync::RwLockReadGuard<'a, SnapshotIndex>> {
+        let s = self.snapshots.as_ref()?;
+        queries
+            .iter()
+            .any(|q| !q.snapshots.is_none())
+            .then(|| s.index.read().unwrap())
     }
 
     /// Several queries, embedded for the dense lane in one request and
     /// otherwise searched in parallel; results in order.
     pub fn search_batch(&self, queries: &[Query]) -> Vec<QueryResult> {
         use rayon::prelude::*;
+        let guard = self.snapshot_index(&queries.iter().collect::<Vec<_>>());
+        let index = guard.as_deref();
         let parsed: Vec<Parsed> = queries.iter().map(parse).collect();
         let wanted: Vec<usize> = (0..queries.len())
             .filter(|&i| queries[i].k > 0 && !parsed[i].dense_text.is_empty())
             .collect();
-        let mut dense: Vec<Option<Result<Vec<u32>, String>>> = vec![None; queries.len()];
+        let mut dense: Vec<Option<Result<Vec<f32>, String>>> = vec![None; queries.len()];
         if let Some(d) = &self.dense
             && !wanted.is_empty()
         {
@@ -277,10 +372,10 @@ impl Engine {
                 .iter()
                 .map(|&i| parsed[i].dense_text.as_str())
                 .collect();
-            match d.search_many(&texts, LANE_DEPTH) {
+            match d.embed_queries(&texts) {
                 Some(Ok(found)) => {
-                    for (&i, ids) in wanted.iter().zip(found) {
-                        dense[i] = Some(Ok(ids));
+                    for (&i, v) in wanted.iter().zip(found) {
+                        dense[i] = Some(Ok(v));
                     }
                 }
                 Some(Err(e)) => {
@@ -295,55 +390,70 @@ impl Engine {
             .par_iter()
             .zip(parsed)
             .zip(dense)
-            .map(|((q, p), d)| self.search_parsed(q, p, Lanes::ALL, d))
+            .map(|((q, p), d)| self.search_parsed(q, p, Lanes::ALL, d, index))
             .collect()
     }
 
     pub fn search_with(&self, q: &Query, use_lanes: Lanes) -> QueryResult {
         let parsed = parse(q);
         let dense = match &self.dense {
-            Some(d) if use_lanes.dense && q.k > 0 && !parsed.dense_text.is_empty() => d
-                .search_many(&[parsed.dense_text.as_str()], LANE_DEPTH)
-                .map(|r| {
+            Some(d) if use_lanes.dense && q.k > 0 && !parsed.dense_text.is_empty() => {
+                d.embed_queries(&[parsed.dense_text.as_str()]).map(|r| {
                     r.map(|mut v| v.pop().unwrap_or_default())
                         .map_err(|e| e.to_string())
-                }),
+                })
+            }
             _ => None,
         };
-        self.search_parsed(q, parsed, use_lanes, dense)
+        let guard = self.snapshot_index(&[q]);
+        self.search_parsed(q, parsed, use_lanes, dense, guard.as_deref())
     }
 
-    /// `dense`: the dense lane's ids for this query, or why there are none.
+    /// `dense`: the query's vector for the dense lane, or why there is none.
+    /// `index`: the snapshot index, locked by the caller.
     fn search_parsed(
         &self,
         q: &Query,
         parsed: Parsed,
         use_lanes: Lanes,
-        dense: Option<Result<Vec<u32>, String>>,
+        dense: Option<Result<Vec<f32>, String>>,
+        index: Option<&SnapshotIndex>,
     ) -> QueryResult {
         if q.k == 0 {
             return QueryResult::default();
         }
         let w = &self.weights;
         let mut warnings = Vec::new();
+        if let Some(s) = &self.snapshots
+            && !q.snapshots.is_none()
+            && !s.loaded()
+        {
+            warnings.push("snapshots are still loading: results may lack them".into());
+        }
+        let scope = index.and_then(|index| Some((index, index.scope(&q.snapshots)?)));
+        let view = View {
+            engine: self,
+            snap: scope.as_ref().map(|(index, scope)| (*index, scope)),
+        };
         let mut lanes: Vec<(&'static str, f64, Vec<u32>)> = Vec::new();
 
-        if use_lanes.lexical && (!parsed.prose.is_empty() || !parsed.lean.is_empty()) {
-            lanes.push((
-                "lexical",
-                w.lexical,
-                self.bm25(&parsed.prose, &parsed.lean, LANE_DEPTH),
-            ));
+        if use_lanes.lexical
+            && let Some(query) = self.bm25_query(&parsed.prose, &parsed.lean)
+        {
+            lanes.push(("lexical", w.lexical, self.top_in(&query, view.snap)));
         }
         if use_lanes.name
             && let Some(name) = &parsed.name
         {
-            lanes.push(("name", w.name, self.name_lane(name)));
+            lanes.push(("name", w.name, self.name_lane(name, &view)));
         }
         let mut consts: Vec<(String, f32)> = parsed
             .identifiers
             .iter()
-            .filter(|i| self.by_name.contains_key(*i))
+            .filter(|i| {
+                self.by_name.contains_key(*i)
+                    || view.snap.is_some_and(|(index, _)| index.has_name(i))
+            })
             .map(|i| (i.clone(), 1.0))
             .collect();
         let all_tokens: Vec<String> = parsed.prose.iter().chain(&parsed.lean).cloned().collect();
@@ -355,26 +465,38 @@ impl Engine {
             } else {
                 1.0
             };
-            lanes.push(("structural", weight, self.structural(&consts, LANE_DEPTH)));
+            let query = self.structural_query(&consts);
+            lanes.push(("structural", weight, self.top_in(&query, view.snap)));
         }
         if use_lanes.dense
             && let Some(found) = dense
             && let Some(dense) = &self.dense
         {
-            let ids = found.unwrap_or_else(|e| {
-                tracing::warn!("query embedding failed: {e}");
-                warnings.push(format!(
-                    "dense lane unavailable, results from the other lanes only: {e}"
-                ));
-                Vec::new()
-            });
+            let ids = match found {
+                Ok(v) => {
+                    let v = quantize(&v);
+                    let mut near = dense.nearest_scored(&v, LANE_DEPTH);
+                    if let Some((index, scope)) = view.snap {
+                        near.extend(index.nearest(&v, LANE_DEPTH, scope));
+                        near = crate::dense::best(near, LANE_DEPTH);
+                    }
+                    near.into_iter().map(|(_, id)| id).collect()
+                }
+                Err(e) => {
+                    tracing::warn!("query embedding failed: {e}");
+                    warnings.push(format!(
+                        "dense lane unavailable, results from the other lanes only: {e}"
+                    ));
+                    Vec::new()
+                }
+            };
             // Only some declarations have vectors. Trust the lane as far as it
             // covers the lexical lane's top hits, so a query about uncovered
             // declarations isn't flooded with the nearest covered ones.
             let coverage = match lanes.iter().find(|(lane, ..)| *lane == "lexical") {
                 Some((_, _, lexical)) if !lexical.is_empty() => {
                     let top = &lexical[..lexical.len().min(COVERAGE_PROBE)];
-                    let covered = top.iter().filter(|&&id| dense.contains(id)).count();
+                    let covered = top.iter().filter(|&&id| view.has_vector(id)).count();
                     covered as f64 / top.len() as f64
                 }
                 _ => 1.0,
@@ -396,10 +518,11 @@ impl Engine {
         }
 
         // A name that exists exactly is what was asked for.
-        if use_lanes.name
-            && let Some(id) = parsed.name.as_deref().and_then(|n| self.id_of(n))
-        {
-            fused.entry(id).or_default().0 += 1.0;
+        let exact_ids = parsed.name.as_deref().map_or(Vec::new(), |n| view.exact(n));
+        if use_lanes.name {
+            for &id in &exact_ids {
+                fused.entry(id).or_default().0 += 1.0;
+            }
         }
 
         let prose: HashSet<&str> = parsed.prose.iter().map(String::as_str).collect();
@@ -418,10 +541,9 @@ impl Engine {
         .any(|w| prose.contains(w));
 
         // Priors, filters, and folding duplicates into one hit.
-        let exact_id = parsed.name.as_deref().and_then(|n| self.id_of(n));
         let mut scored: HashMap<u32, (f64, Vec<&'static str>, Option<String>)> = HashMap::new();
         for (id, (mut score, lanes)) in fused {
-            let d = self.decl(id);
+            let d = view.decl(id);
             if !q.libraries.is_empty() && !q.libraries.contains(&d.library) {
                 continue;
             }
@@ -429,7 +551,7 @@ impl Engine {
                 continue;
             }
             // An exact name match is shown whatever it is, flagged.
-            let exact = exact_id == Some(id);
+            let exact = exact_ids.contains(&id);
             if !exact
                 && (d.uses_sorry && !q.include_sorried
                     || is_generated(&d.name)
@@ -449,7 +571,7 @@ impl Engine {
             let target = d
                 .deprecated_to
                 .as_ref()
-                .and_then(|t| self.id_of(t))
+                .and_then(|t| view.exact(t).first().copied())
                 .unwrap_or(id);
             let e = scored.entry(target).or_insert((0.0, Vec::new(), None));
             e.0 = e.0.max(score);
@@ -462,7 +584,7 @@ impl Engine {
         // Fold to_additive pairs: keep the better-scored one, name the other.
         let ids: Vec<u32> = scored.keys().copied().collect();
         for id in ids {
-            let Some(sib) = self
+            let Some(sib) = view
                 .decl(id)
                 .additive_sibling
                 .as_ref()
@@ -476,7 +598,7 @@ impl Engine {
                 let (keep, drop) = if a >= b { (id, sib) } else { (sib, id) };
                 scored.remove(&drop);
                 if let Some(e) = scored.get_mut(&keep) {
-                    e.2 = Some(self.decl(drop).name.clone());
+                    e.2 = Some(view.decl(drop).name.clone());
                 }
             }
         }
@@ -486,14 +608,17 @@ impl Engine {
             .collect();
         ranked.sort_by(|a, b| {
             b.1.total_cmp(&a.1)
-                .then_with(|| self.decl(a.0).name.cmp(&self.decl(b.0).name))
+                .then_with(|| view.decl(a.0).name.cmp(&view.decl(b.0).name))
+                .then(a.0.cmp(&b.0))
         });
         let k = q.k.min(MAX_K);
         let hits = ranked
             .into_iter()
             .take(k)
             .enumerate()
-            .map(|(i, (id, score, lanes, sibling))| self.hit(i + 1, id, score, lanes, sibling))
+            .map(|(i, (id, score, lanes, sibling))| {
+                self.hit(&view, i + 1, id, score, lanes, sibling)
+            })
             .collect();
         QueryResult {
             hits,
@@ -519,23 +644,62 @@ impl Engine {
 
     fn top(&self, query: &dyn TQuery, n: usize) -> Vec<u32> {
         let searcher = self.reader.searcher();
-        let Ok(top) = searcher.search(query, &TopDocs::with_limit(n).order_by_score()) else {
+        self.top_scored(&searcher, query, &searcher, n)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    fn top_scored(
+        &self,
+        searcher: &Searcher,
+        query: &dyn TQuery,
+        stats: &dyn Bm25StatisticsProvider,
+        n: usize,
+    ) -> Vec<(f32, u32)> {
+        let collector = TopDocs::with_limit(n).order_by_score();
+        let Ok(top) = searcher.search_with_statistics_provider(query, &collector, stats) else {
             return Vec::new();
         };
         top.into_iter()
-            .filter_map(|(_, addr)| {
+            .filter_map(|(score, addr)| {
                 let doc: TantivyDocument = searcher.doc(addr).ok()?;
-                doc.get_first(self.bundle.fields.id)?
-                    .as_u64()
-                    .map(|v| v as u32)
+                let id = doc.get_first(self.bundle.fields.id)?.as_u64()?;
+                Some((score, id as u32))
             })
             .collect()
+    }
+
+    /// The best [`LANE_DEPTH`] for `query` in the bundle and, if the query
+    /// covers any, the snapshot modules, scored alike.
+    fn top_in(&self, query: &dyn TQuery, snap: Snap<'_>) -> Vec<u32> {
+        self.top_merged(query, LANE_DEPTH, snap)
+    }
+
+    fn top_merged(&self, query: &dyn TQuery, n: usize, snap: Snap<'_>) -> Vec<u32> {
+        let Some((index, scope)) = snap else {
+            return self.top(query, n);
+        };
+        let base = self.reader.searcher();
+        let other = index.searcher();
+        let stats = Combined(&base, &other);
+        let mut scored = self.top_scored(&base, query, &stats, n);
+        scored.extend(index.top(&other, query, &stats, n, scope));
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().take(n).map(|(_, id)| id).collect()
     }
 
     /// BM25: prose against names, descriptions, signatures and docstrings;
     /// Lean text against signatures and names only, so a pattern matches
     /// statements rather than prose that mentions the same words.
     pub fn bm25(&self, prose: &[String], lean: &[String], n: usize) -> Vec<u32> {
+        match self.bm25_query(prose, lean) {
+            Some(query) => self.top(&query, n),
+            None => Vec::new(),
+        }
+    }
+
+    fn bm25_query(&self, prose: &[String], lean: &[String]) -> Option<BooleanQuery> {
         let f = self.bundle.fields;
         let w = &self.weights;
         let mut clauses: Vec<(Occur, Box<dyn TQuery>)> = Vec::new();
@@ -558,13 +722,13 @@ impl Engine {
             }
         }
         if clauses.is_empty() {
-            return Vec::new();
+            return None;
         }
-        self.top(&BooleanQuery::new(clauses), n)
+        Some(BooleanQuery::new(clauses))
     }
 
     /// Declarations whose types mention the given constants, idf-weighted.
-    fn structural(&self, consts: &[(String, f32)], n: usize) -> Vec<u32> {
+    fn structural_query(&self, consts: &[(String, f32)]) -> BooleanQuery {
         let field = self.bundle.fields.consts;
         let clauses: Vec<(Occur, Box<dyn TQuery>)> = consts
             .iter()
@@ -576,30 +740,40 @@ impl Engine {
                 )
             })
             .collect();
-        self.top(&BooleanQuery::new(clauses), n)
+        BooleanQuery::new(clauses)
     }
 
-    /// Exact name first, then its closest matches.
-    fn name_lane(&self, name: &str) -> Vec<u32> {
-        let exact = self.id_of(name);
-        exact
-            .into_iter()
-            .chain(
-                self.suggest(name, 20)
-                    .into_iter()
-                    .filter(|id| Some(*id) != exact),
-            )
-            .collect()
+    /// Exact names first, then the closest matches.
+    fn name_lane(&self, name: &str, view: &View) -> Vec<u32> {
+        let exact = view.exact(name);
+        let suggested = self.suggest_in(name, 20, view);
+        let mut ids = exact.clone();
+        ids.extend(suggested.into_iter().filter(|id| !exact.contains(id)));
+        ids
     }
 
     /// Existing names closest to `name`: same name in other case, same last
     /// component, or shared trigrams; ranked by edit distance, then prominence.
     pub fn suggest(&self, name: &str, n: usize) -> Vec<u32> {
+        self.suggest_in(
+            name,
+            n,
+            &View {
+                engine: self,
+                snap: None,
+            },
+        )
+    }
+
+    fn suggest_in(&self, name: &str, n: usize, view: &View) -> Vec<u32> {
         let lower = name.to_lowercase();
         let last = lower.rsplit('.').next().unwrap_or(&lower).to_string();
         let mut candidates: HashSet<u32> = HashSet::new();
         candidates.extend(self.by_lower.get(&lower).into_iter().flatten());
         candidates.extend(self.by_last.get(&last).into_iter().flatten().take(200));
+        if let Some((index, scope)) = view.snap {
+            candidates.extend(index.name_candidates(&lower, &last, scope));
+        }
         let field = self.bundle.fields.name_ngram;
         let grams = self.analyzed_terms(field, std::slice::from_ref(&lower));
         if !grams.is_empty() {
@@ -612,13 +786,19 @@ impl Engine {
                     )
                 })
                 .collect();
-            candidates.extend(self.top(&BooleanQuery::new(clauses), 100));
+            let query = BooleanQuery::new(clauses);
+            candidates.extend(self.top(&query, 100));
+            if let Some((index, scope)) = view.snap {
+                let searcher = index.searcher();
+                let found = index.top(&searcher, &query, &searcher, 100, scope);
+                candidates.extend(found.into_iter().map(|(_, id)| id));
+            }
         }
         let mut ranked: Vec<(usize, f32, u32)> = candidates
             .into_iter()
-            .filter(|&id| self.decl(id).name != name)
+            .filter(|&id| view.decl(id).name != name)
             .map(|id| {
-                let d = self.decl(id);
+                let d = view.decl(id);
                 let full = levenshtein(&lower, &d.name.to_lowercase());
                 let d_last = d.name.rsplit('.').next().unwrap_or(&d.name).to_lowercase();
                 let tail = levenshtein(&last, &d_last);
@@ -690,13 +870,14 @@ impl Engine {
 
     fn hit(
         &self,
+        view: &View,
         n: usize,
         id: u32,
         score: f64,
         lanes: Vec<&'static str>,
         sibling: Option<String>,
     ) -> Hit {
-        let d = self.decl(id);
+        let d = view.decl(id);
         let flags = flags(d, sibling);
         let summary = summary(d);
         Hit {
@@ -712,7 +893,7 @@ impl Engine {
             score,
             lanes: lanes.into_iter().map(String::from).collect(),
             source_url: d.source_url.clone(),
-            snapshot: None,
+            snapshot: view.snap.and_then(|(index, scope)| index.hit(id, scope)),
         }
     }
 }

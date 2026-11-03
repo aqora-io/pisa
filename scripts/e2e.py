@@ -4,6 +4,8 @@
     PROJECT=lean-core docker compose up -d --build
     python3 scripts/e2e.py            # core checks
     python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
+    python3 scripts/e2e.py --search http://localhost:8100  # also snapshot search
+                                      # (compose --profile search)
 
 It stops and restarts workers to check that tactic sessions resume on another
 worker (gate 3), so run it against a dev stack only. Pass --no-failover to skip
@@ -24,10 +26,10 @@ BASE = os.environ.get("PISA_URL", "http://localhost:8000")
 COMPOSE = ["docker", "compose"]
 
 
-def call(method, path, body=None, timeout=900):
+def call(method, path, body=None, timeout=900, base=BASE):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(
-        BASE + path, data=data, method=method, headers={"content-type": "application/json"}
+        base + path, data=data, method=method, headers={"content-type": "application/json"}
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -342,6 +344,46 @@ def module_snapshots():
     step("module snapshot: plain code imports it, a module can't import plain code")
 
 
+def snapshot_search(url):
+    run = str(int(time.time()))
+    # The comment makes it a new module, which this release has exported.
+    code = (f"-- e2e {run}\n/-- Tripling a number adds it to itself twice. -/\n"
+            "theorem e2e_triple (n : Nat) : 3 * n = n + n + n := by omega\n")
+    created = post("/snapshots", {"code": code, "labels": {"e2e-search": run}, "timeout": 600})
+
+    def hits(scope):
+        query = {"nl": "tripling a number", "name": "e2e_triple", "snapshots": scope}
+        status, out = call("POST", "/v1/search", {"queries": [query]}, base=url)
+        assert status == 200, out
+        return [h for h in out["results"][0]["hits"] if h["module"] == created["snapshot"]]
+
+    def until(f, what):
+        for _ in range(60):
+            if f():
+                return
+            time.sleep(1)
+        sys.exit(f"snapshot search: timed out waiting for {what}")
+
+    labelled = {"labels": {"e2e-search": run}}
+    until(lambda: hits(labelled), "a new snapshot")
+    hit = hits(labelled)[0]
+    assert hit["library"] == "PisaSnap" and hit["snapshot"]["entries"] == [created["entry"]], hit
+    assert hit["flags"]["imports"] == created["header"], hit
+    r = check(f"{hit['flags']['imports']}\n\nexample : 3 * 2 = 2 + 2 + 2 := e2e_triple 2")
+    assert r["ok"], r
+    assert not hits({"labels": {"e2e-search": "other"}}) and not hits("none")
+    step("snapshot search: a new snapshot is found by label, and its header loads it")
+
+    moved = {"labels": {"e2e-search": run + "-moved"}}
+    status, _ = call("PATCH", f"/snapshots/{created['entry']}", {"set": moved["labels"]})
+    assert status == 200
+    until(lambda: hits(moved) and not hits(labelled), "a relabel")
+    status, _ = call("DELETE", f"/snapshots/{created['entry']}")
+    assert status == 200
+    until(lambda: not hits("all"), "a delete")
+    step("snapshot search: follows relabels and deletes")
+
+
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
     assert r["ok"], r
@@ -364,6 +406,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--mathlib", action="store_true")
     p.add_argument("--no-failover", action="store_true", help="don't stop workers (not using compose)")
+    p.add_argument("--search", metavar="URL", help="also check snapshot search on this pisa-search")
     args = p.parse_args()
     if not args.no_failover:
         wait_for_workers(2)
@@ -373,4 +416,6 @@ if __name__ == "__main__":
     module_snapshots()
     if args.mathlib:
         mathlib()
+    if args.search:
+        snapshot_search(args.search)
     print("all end-to-end checks passed")

@@ -372,57 +372,80 @@ impl Dense {
     /// Ids of the `n` vectors nearest to `query` (a normalized vector).
     pub fn nearest(&self, query: &[f32], n: usize) -> Vec<u32> {
         self.nearest_quantized(&quantize(query), n)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    /// [`nearest`](Self::nearest) with each one's [`dot`] with `query`
+    /// quantized, best first.
+    pub fn nearest_scored(&self, query: &[i8], n: usize) -> Vec<(i32, u32)> {
+        self.nearest_quantized(query, n)
     }
 
     /// The `n` declarations nearest to declaration `id`, or `None` if it has no vector.
     pub fn neighbours(&self, id: u32, n: usize) -> Option<Vec<u32>> {
         let i = self.ids.iter().position(|&x| x == id)?;
         let q = self.vectors[i * DIMS..(i + 1) * DIMS].to_vec();
-        let mut near = self.nearest_quantized(&q, n + 1);
+        let mut near: Vec<u32> = self
+            .nearest_quantized(&q, n + 1)
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
         near.retain(|&x| x != id);
         near.truncate(n);
         Some(near)
     }
 
-    fn nearest_quantized(&self, q: &[i8], n: usize) -> Vec<u32> {
-        let mut scored: Vec<(i32, u32)> = self
+    fn nearest_quantized(&self, q: &[i8], n: usize) -> Vec<(i32, u32)> {
+        let scored: Vec<(i32, u32)> = self
             .vectors
             .par_chunks_exact(DIMS)
             .zip(self.ids.par_iter())
-            .map(|(v, &id)| {
-                (
-                    v.iter()
-                        .zip(q)
-                        .map(|(&a, &b)| i32::from(a) * i32::from(b))
-                        .sum(),
-                    id,
-                )
-            })
+            .map(|(v, &id)| (dot(v, q), id))
             .collect();
-        let n = n.min(scored.len());
-        if n == 0 {
-            return Vec::new();
-        }
-        scored.select_nth_unstable_by(n - 1, |a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored.truncate(n);
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored.into_iter().map(|(_, id)| id).collect()
+        best(scored, n)
     }
 
-    /// For each text, the declaration ids nearest to it, from one embedding
-    /// request; `None` without an embedder, an error when the embedder failed.
-    pub fn search_many(&self, texts: &[&str], n: usize) -> Option<anyhow::Result<Vec<Vec<u32>>>> {
+    /// Each text embedded as a query, in one request; `None` without an
+    /// embedder, an error when the embedder failed.
+    pub fn embed_queries(&self, texts: &[&str]) -> Option<anyhow::Result<Vec<Vec<f32>>>> {
         let embedder = self.embedder.as_ref()?;
         let queries: Vec<String> = texts
             .iter()
             .map(|t| format!("{QUERY_INSTRUCTION}{t}"))
             .collect();
+        Some(embedder.embed_queries(&queries))
+    }
+
+    /// For each text, the declaration ids nearest to it, from one embedding
+    /// request; `None` without an embedder, an error when the embedder failed.
+    pub fn search_many(&self, texts: &[&str], n: usize) -> Option<anyhow::Result<Vec<Vec<u32>>>> {
         Some(
-            embedder
-                .embed_queries(&queries)
+            self.embed_queries(texts)?
                 .map(|vs| vs.iter().map(|v| self.nearest(v, n)).collect()),
         )
     }
+}
+
+/// The dot product of two quantized vectors.
+pub fn dot(a: &[i8], b: &[i8]) -> i32 {
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| i32::from(x) * i32::from(y))
+        .sum()
+}
+
+/// The `n` best of `(score, id)`s, best first, ties by id.
+pub fn best(mut scored: Vec<(i32, u32)>, n: usize) -> Vec<(i32, u32)> {
+    let n = n.min(scored.len());
+    if n == 0 {
+        return Vec::new();
+    }
+    scored.select_nth_unstable_by(n - 1, |a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.truncate(n);
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored
 }
 
 /// Where a model's cached vectors live in the store.
