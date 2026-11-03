@@ -16,12 +16,14 @@
 //! the snapshots they import.
 //! The worker's axiom report (`run_cmd` … `PISA_DECLS`) lists each `theorem`,
 //! `def` and `axiom` seen since the imports, or, for a module report, those
-//! of that module (see `pisa_tests::declarations`).
+//! of that module (see `pisa_tests::declarations`). Its declaration export
+//! (`run_cmd` … `PISA_EXPORT`) is the same declarations, with their
+//! statements and docstrings (see `pisa_tests::exports`).
 //! Tactic `rfl` closes the goal, `fail` errors, anything else leaves a goal open.
 
 use std::io::{BufRead, Write};
 
-use pisa_tests::{declarations, declares, find_module, imported_code, needs};
+use pisa_tests::{declarations, declares, exports, find_module, imported_code, needs};
 use serde_json::{Value, json};
 
 struct State {
@@ -155,7 +157,13 @@ fn import(s: &mut State, header: &str) -> Value {
 }
 
 fn run(s: &mut State, prev: &Env, cmd: &str, infotree: bool) -> Value {
-    if cmd.starts_with("run_cmd") && cmd.contains("PISA_DECLS") {
+    for (marker, report) in [
+        ("PISA_DECLS", declarations as fn(&str) -> String),
+        ("PISA_EXPORT", exports),
+    ] {
+        if !(cmd.starts_with("run_cmd") && cmd.contains(marker)) {
+            continue;
+        }
         let code = match cmd.split_once("getModuleIdx? `") {
             None => prev.local.clone(),
             Some((_, rest)) => {
@@ -164,7 +172,7 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: bool) -> Value {
             }
         };
         s.envs.push(prev.clone());
-        let report = format!("PISA_DECLS {}", declarations(&code));
+        let report = format!("{marker} {}", report(&code));
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
     }
     if prev.local.contains("import Clash") && cmd.starts_with("#check") {

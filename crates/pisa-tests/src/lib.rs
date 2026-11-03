@@ -125,6 +125,38 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, and on any
 /// axiom it declares. A "type hash" is the statement text between the name
 /// and `:=`.
+/// The worker's declaration export for `code`: each `theorem`, `def` and
+/// `axiom`, with its statement as the signature and a `/-- … -/` on the line
+/// before as its docstring.
+pub fn exports(code: &str) -> String {
+    let mut decls = Vec::new();
+    let mut doc = None;
+    for line in code.lines() {
+        let line = line.strip_prefix("public ").unwrap_or(line);
+        if let Some(text) = line.strip_prefix("/--") {
+            doc = Some(text.trim_end_matches("-/").trim().to_string());
+            continue;
+        }
+        let mut words = line.split_whitespace();
+        let (Some(kind @ ("theorem" | "def" | "axiom")), Some(name)) = (words.next(), words.next())
+        else {
+            doc = None;
+            continue;
+        };
+        let statement = line
+            .split_once(name)
+            .map_or("", |(_, rest)| rest.split(":=").next().unwrap_or("").trim());
+        decls.push(json!({
+            "name": name,
+            "kind": kind,
+            "signature": format!("{name} {statement}"),
+            "type_pp_full": statement,
+            "docstring": doc.take(),
+        }));
+    }
+    Value::Array(decls).to_string()
+}
+
 pub fn declarations(code: &str) -> String {
     let mut used = vec!["propext".to_string()];
     if code.contains("sorry") {

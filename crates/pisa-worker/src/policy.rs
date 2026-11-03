@@ -9,6 +9,8 @@ use pisa_protocol::header::import_parts;
 use pisa_protocol::repl::{CommandResponse, Severity};
 use pisa_protocol::verify::{Declaration, Verification};
 
+use crate::catalog::SnapshotDecl;
+
 /// Commands and attributes that run or install metaprograms.
 const FORBIDDEN: &[&str] = &[
     "#eval",
@@ -120,6 +122,88 @@ pub fn module_report(module: &str) -> String {
          let some ci := env.find? n | continue\n"
     );
     AXIOM_REPORT.replacen(REPORT_LOOP, &report_loop, 1)
+}
+
+const EXPORT_MARKER: &str = "PISA_EXPORT ";
+
+/// What the search service indexes of each declaration of a snapshot module:
+/// [`SnapshotDecl`]s as JSON, without `uses_sorry`. Skips what
+/// `search/exporter/PisaExport.lean` skips: internal, private and
+/// auto-generated names. Docstrings of a module-system snapshot aren't
+/// loaded in a module-system header, so they are missing there.
+const MODULE_EXPORT: &str = r#"run_cmd do
+  let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
+  let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError "{module} is not imported"
+  let out ← _root_.Lean.Elab.Command.liftTermElabM do
+    let mut out : Array _root_.Lean.Json := #[]
+    for n in env.header.moduleData[idx.toNat]!.constNames do
+      let some ci := env.find? n | continue
+      if n.isInternalDetail || _root_.Lean.isPrivateName n then continue
+      if n matches .str _ "inj" || n matches .str _ "injEq" || n matches .str _ "noConfusionType" then continue
+      if _root_.Lean.isAuxRecursor env n || _root_.Lean.isNoConfusion env n then continue
+      if ← _root_.Lean.isRec n <||> _root_.Lean.Meta.isMatcher n then continue
+      -- Each declaration gets its own heartbeat budget.
+      let record? : Option _root_.Lean.Json ← _root_.Lean.Core.withCurrHeartbeats do try
+          let signature ← _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.deepTerms true
+              |>.set `pp.deepTerms.threshold (10000 : Nat) |>.set `pp.maxSteps (100000 : Nat)) do
+            return (← _root_.Lean.PrettyPrinter.ppSignature n).fmt.pretty 120
+          let typeFull ← _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.notation false
+              |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
+            return (← _root_.Lean.Meta.ppExpr ci.type).pretty 120
+          let kind : String := match ci with
+            | .axiomInfo _ => "axiom"
+            | .defnInfo d =>
+              if _root_.Lean.Meta.isInstanceCore env d.name then "instance"
+              else if _root_.Lean.getReducibilityStatusCore env d.name == _root_.Lean.ReducibilityStatus.reducible then "abbrev"
+              else "def"
+            | .thmInfo _ => "theorem"
+            | .opaqueInfo _ => "opaque"
+            | .quotInfo _ => "quot"
+            | .inductInfo i =>
+              if _root_.Lean.isClass env i.name then "class"
+              else if _root_.Lean.isStructure env i.name then "structure"
+              else "inductive"
+            | .ctorInfo _ => "constructor"
+            | .recInfo _ => "recursor"
+          let typeRefs := ci.type.getUsedConstants.filter (· != n)
+          let valueRefs := match ci.value? (allowOpaque := true) with
+            | some v => v.getUsedConstantsAsSet.toArray.filter (fun r => r != n && !r.isInternalDetail)
+            | none => #[]
+          let doc : Option String := match ← _root_.Lean.findInternalDocString? env n with
+            | some (.inl s) => some s
+            | _ => none
+          let deprecated := _root_.Lean.Linter.deprecatedAttr.getParam? env n
+          pure (some (_root_.Lean.Json.mkObj [
+            ("name", _root_.Lean.ToJson.toJson n),
+            ("kind", _root_.Lean.ToJson.toJson kind),
+            ("signature", _root_.Lean.ToJson.toJson signature),
+            ("type_pp_full", _root_.Lean.ToJson.toJson typeFull),
+            ("type_refs", _root_.Lean.ToJson.toJson typeRefs),
+            ("value_refs", _root_.Lean.ToJson.toJson valueRefs),
+            ("docstring", _root_.Lean.ToJson.toJson doc),
+            ("deprecated_to", _root_.Lean.ToJson.toJson (deprecated.bind (·.newName?)))]))
+        catch _ => pure none
+      if let some r := record? then out := out.push r
+    return out
+  _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
+    (_root_.Std.Format.text ("PISA_EXPORT " ++ (_root_.Lean.Json.arr out).compress)))"#;
+
+/// The export of the declarations of `module`, which the process imports.
+pub fn module_export(module: &str) -> String {
+    MODULE_EXPORT.replace("{module}", module)
+}
+
+pub fn parse_export(report: &CommandResponse) -> Option<Vec<SnapshotDecl>> {
+    report
+        .messages
+        .iter()
+        .filter(|m| m.severity == Severity::Info)
+        .find_map(|m| m.data.strip_prefix(EXPORT_MARKER))
+        .and_then(|json| serde_json::from_str::<Vec<SnapshotDecl>>(json).ok())
+        .map(|mut decls| {
+            decls.sort_by(|a, b| a.name.cmp(&b.name));
+            decls
+        })
 }
 
 /// Whether `body` uses macros, or other code that runs at elaboration time
@@ -402,6 +486,26 @@ mod tests {
             "{report}"
         );
         assert!(report.contains("    let some ci := env.find? n | continue\n    if n.isInternal"));
+    }
+
+    #[test]
+    fn module_export_names_the_module_and_parses() {
+        let export = module_export("PisaSnap.s0f");
+        assert!(!export.contains("{module}"), "{export}");
+        assert!(
+            export.contains("env.getModuleIdx? `PisaSnap.s0f |"),
+            "{export}"
+        );
+        let report: CommandResponse = serde_json::from_value(json!({
+            "env": 1,
+            "messages": [{"severity": "info", "pos": {"line": 1, "column": 0},
+                "data": "PISA_EXPORT [{\"name\":\"b\",\"kind\":\"def\",\"signature\":\"b : Nat\",\"type_pp_full\":\"Nat\",\"type_refs\":[\"Nat\"],\"value_refs\":[],\"docstring\":\"B.\",\"deprecated_to\":null},{\"name\":\"a\",\"kind\":\"theorem\",\"signature\":\"a : True\",\"type_pp_full\":\"True\",\"type_refs\":[],\"value_refs\":[],\"docstring\":null,\"deprecated_to\":null}]"}]
+        }))
+        .unwrap();
+        let decls = parse_export(&report).unwrap();
+        let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(decls[1].docstring.as_deref(), Some("B."));
     }
 
     #[test]

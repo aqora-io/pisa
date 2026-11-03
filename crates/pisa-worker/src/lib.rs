@@ -23,14 +23,17 @@ pub mod snapshots;
 pub mod store;
 
 pub use config::WorkerConfig;
-pub use pisa_kv::{catalog, kv};
 use config::{MetadataKind, StoreKind};
+pub use pisa_kv::{catalog, kv};
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;
 
 /// How often a worker on TiKV moves its GC safepoint, and how far behind the
 /// present it puts it; see [`kv::Kv::gc`].
 const TIKV_GC_EVERY: Duration = Duration::from_secs(600);
+
+/// How often a worker deletes the snapshot change log's expired keys.
+const LOG_PRUNE_EVERY: Duration = Duration::from_secs(600);
 
 /// How long dialling the router may take. A Service without ready endpoints
 /// can drop the connection attempt instead of refusing it, which would
@@ -109,6 +112,17 @@ pub async fn run_with_stores(
             }
         });
     }
+    let catalog = catalog::Catalog::new(kv.clone(), version.clone());
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(LOG_PRUNE_EVERY);
+        loop {
+            tick.tick().await;
+            match catalog.prune_log(catalog::LOG_RETENTION).await {
+                Ok(n) => tracing::debug!(deleted = n, "pruned the snapshot change log"),
+                Err(e) => tracing::warn!("pruning the snapshot change log failed: {e}"),
+            }
+        }
+    });
     let sessions = Arc::new(Sessions {
         store: store::Store::new(store, kv, version.clone()),
         version: version.clone(),

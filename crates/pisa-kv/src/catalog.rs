@@ -15,6 +15,14 @@
 //!   as 16 hex digits, and `R` followed by `e` is a listing cursor
 //! - `(pisa, <version>, "label", <key>, <value>, <R>, <e>)`: empty; one per
 //!   label of entry `e`, newest first
+//! - `(pisa, <version>, "decls", <m>)`: module `m`'s declarations for the
+//!   search service ([`SnapshotDecls`]), written with the module
+//! - `(pisa, <version>, "described", <m>, <name>)`: the search service's
+//!   description and vector of a declaration of `m`, which only it reads
+//! - `(pisa, <version>, "log", <T>, <id>)`: a [`Change`]; one per transaction
+//!   that changes an entry or a module, for the search service to follow.
+//!   `T` is the time in microseconds as 16 hex digits, `id` random. Kept for
+//!   [`LOG_RETENTION`]
 //!
 //! A module is kept while an entry points at it or a kept module imports it.
 //! Each transaction that relies on a `mod` record it only reads locks it, so
@@ -23,7 +31,7 @@
 //! that two creates with the same key conflict instead of both succeeding.
 
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use pisa_protocol::api::{CheckResult, Error, ErrorKind};
 use pisa_protocol::labels::check_labels;
@@ -92,6 +100,80 @@ impl EntryMeta {
     }
 }
 
+/// One declaration of a module, as the search service indexes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotDecl {
+    pub name: String,
+    pub kind: String,
+    /// The declaration's signature, with notation.
+    pub signature: String,
+    /// The type with full names and no notation.
+    pub type_pp_full: String,
+    #[serde(default)]
+    pub type_refs: Vec<String>,
+    #[serde(default)]
+    pub value_refs: Vec<String>,
+    #[serde(default)]
+    pub docstring: Option<String>,
+    #[serde(default)]
+    pub deprecated_to: Option<String>,
+    /// Depends on `sorry`, by the module's check result.
+    #[serde(default)]
+    pub uses_sorry: bool,
+}
+
+/// A module's declarations for the search service, with the module's state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotDecls {
+    /// See [`ModuleMeta::header`].
+    pub header: String,
+    pub dirty: bool,
+    pub verified: bool,
+    pub decls: Vec<SnapshotDecl>,
+}
+
+impl SnapshotDecls {
+    /// `decls` for the module `meta`, flagged from its check result.
+    pub fn new(meta: &ModuleMeta, decls: Vec<SnapshotDecl>) -> SnapshotDecls {
+        let mut out = SnapshotDecls {
+            header: meta.header.clone(),
+            dirty: false,
+            verified: false,
+            decls,
+        };
+        out.refresh(meta);
+        out
+    }
+
+    /// Takes `dirty`, `verified` and each declaration's `uses_sorry` from `meta`.
+    fn refresh(&mut self, meta: &ModuleMeta) {
+        self.dirty = meta.dirty;
+        self.verified = meta.verified;
+        for d in &mut self.decls {
+            d.uses_sorry = meta
+                .result
+                .declarations
+                .iter()
+                .any(|r| r.name == d.name && r.axioms.iter().any(|a| a == "sorryAx"));
+        }
+    }
+}
+
+/// What a transaction changed, by id: readers look up the current state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Change {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+}
+
+/// How long [`Change`]s are kept; see [`Catalog::prune_log`].
+pub const LOG_RETENTION: Duration = Duration::from_secs(24 * 3600);
+
+/// The most `log` keys one [`Catalog::prune_log`] transaction deletes.
+const PRUNE_BATCH: u32 = 1000;
+
 /// What a new entry is given.
 pub struct NewEntry {
     pub labels: BTreeMap<String, String>,
@@ -151,6 +233,11 @@ impl From<Fail> for Error {
 
 fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Internal, e.to_string())
+}
+
+/// Whether `value`'s JSON fits in a record.
+pub fn record_fits(value: &impl Serialize) -> bool {
+    serde_json::to_vec(value).is_ok_and(|b| b.len() <= MAX_RECORD_BYTES)
 }
 
 /// A record's JSON, refused as a `bad_request` if it is over
@@ -230,6 +317,38 @@ impl Catalog {
         key(&[ROOT, &self.version, "label", k, value, r, e])
     }
 
+    fn decls_key(&self, m: &str) -> Vec<u8> {
+        key(&[ROOT, &self.version, "decls", m])
+    }
+
+    fn described_key(&self, m: &str, name: &str) -> Vec<u8> {
+        key(&[ROOT, &self.version, "described", m, name])
+    }
+
+    fn log_key(&self, micros: u64, id: &str) -> Vec<u8> {
+        key(&[ROOT, &self.version, "log", &format!("{micros:016x}"), id])
+    }
+
+    /// Records in `txn` that it changes entry `entry` and/or module `module`.
+    async fn log(
+        &self,
+        txn: &mut Txn,
+        entry: Option<&str>,
+        module: Option<&str>,
+    ) -> Result<(), Fail> {
+        let change = Change {
+            entry: entry.map(str::to_string),
+            module: module.map(str::to_string),
+        };
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        txn.put(
+            self.log_key(now_micros(), &id),
+            serde_json::to_vec(&change)?,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Reads one JSON record.
     async fn read<T: DeserializeOwned>(&self, key: &[u8]) -> Result<Option<T>, Error> {
         let value = kv::retry(|| async { self.kv.begin().await?.get(key).await }).await?;
@@ -265,6 +384,13 @@ impl Catalog {
             }
             f(&mut meta);
             txn.put(mod_key.clone(), to_record(&meta)?).await?;
+            let decls_key = self.decls_key(m);
+            if let Some(bytes) = txn.get(&decls_key).await? {
+                let mut decls: SnapshotDecls = serde_json::from_slice(&bytes)?;
+                decls.refresh(&meta);
+                txn.put(decls_key, to_record(&decls)?).await?;
+            }
+            self.log(&mut txn, None, Some(m)).await?;
             txn.commit().await?;
             Ok(Some(meta))
         })
@@ -305,15 +431,18 @@ impl Catalog {
     /// If `entry`'s key is already on an entry, nothing is written and that
     /// entry comes back, unchanged. On the same module, with its stored
     /// record; on another, with `meta` in place of a record, which callers
-    /// tell by the entry's `module`. A `meta` too large to store is a
-    /// `bad_request`, and nothing is written either.
+    /// tell by the entry's `module`. A `meta` or `decls` too large to store
+    /// is a `bad_request`, and nothing is written either. `decls` is stored
+    /// with the module, if this stores it.
     pub async fn commit(
         &self,
         m: &str,
         meta: &ModuleMeta,
+        decls: Option<&SnapshotDecls>,
         entry: NewEntry,
     ) -> Result<(String, EntryMeta, ModuleMeta), Error> {
         let record = to_record(meta)?;
+        let decls = decls.map(to_record).transpose()?;
         let mod_key = self.mod_key(m);
         let added = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
@@ -356,10 +485,14 @@ impl Catalog {
                     for parent in &meta.imports {
                         txn.put(self.child_key(parent, m), Vec::new()).await?;
                     }
+                    if let Some(decls) = &decls {
+                        txn.put(self.decls_key(m), decls.clone()).await?;
+                    }
                     meta.clone()
                 }
             };
             let (e, entry_meta) = self.add(&mut txn, m, &entry).await?;
+            self.log(&mut txn, Some(&e), Some(m)).await?;
             txn.commit().await?;
             Ok((e, entry_meta, stored))
         })
@@ -388,6 +521,7 @@ impl Catalog {
                 return Ok(None);
             }
             let added = self.add(&mut txn, m, &entry).await?;
+            self.log(&mut txn, Some(&added.0), Some(m)).await?;
             txn.commit().await?;
             Ok::<_, Fail>(Some(added))
         })
@@ -442,6 +576,7 @@ impl Catalog {
             let meta: EntryMeta = serde_json::from_slice(&bytes)?;
             self.remove(&mut txn, e, &meta).await?;
             let module = self.clean(&mut txn, &meta.module).await?;
+            self.log(&mut txn, Some(e), Some(&meta.module)).await?;
             txn.commit().await?;
             Ok((meta, module))
         })
@@ -580,6 +715,7 @@ impl Catalog {
             }
             // Rewriting the record also makes a concurrent delete conflict.
             txn.put(entry_key.clone(), to_record(&meta)?).await?;
+            self.log(&mut txn, Some(e), Some(&meta.module)).await?;
             txn.commit().await?;
             Ok(meta)
         })
@@ -592,6 +728,9 @@ impl Catalog {
         let removed = kv::retry(|| async {
             let mut txn = self.kv.begin().await?;
             let removed = self.clean(&mut txn, m).await?;
+            if removed.is_some() {
+                self.log(&mut txn, None, Some(m)).await?;
+            }
             txn.commit().await?;
             Ok::<_, Fail>(removed)
         })
@@ -622,6 +761,297 @@ impl Catalog {
         for parent in &meta.imports {
             txn.delete(self.child_key(parent, m)).await?;
         }
+        txn.delete(self.decls_key(m)).await?;
+        let mut described = prefix(&[ROOT, v, "described", m]);
+        loop {
+            let page = txn.scan(described.clone(), PRUNE_BATCH).await?;
+            for (k, _) in &page {
+                txn.delete(k.clone()).await?;
+            }
+            match page.last() {
+                Some((last, _)) if page.len() == PRUNE_BATCH as usize => {
+                    described.start = [last.as_slice(), &[0]].concat();
+                }
+                _ => break,
+            }
+        }
         Ok(Some(meta))
+    }
+
+    /// Deletes the [`Change`]s older than `older_than`, a batch per
+    /// transaction; returns how many.
+    pub async fn prune_log(&self, older_than: Duration) -> Result<usize, Error> {
+        let cutoff = now_micros().saturating_sub(older_than.as_micros() as u64);
+        let mut start = key(&[ROOT, &self.version, "log"]);
+        let end = key(&[ROOT, &self.version, "log", &format!("{cutoff:016x}")]);
+        let mut deleted = 0;
+        loop {
+            let (batch, last) = kv::retry(|| async {
+                let mut txn = self.kv.begin().await?;
+                let old = txn.scan(start.clone()..end.clone(), PRUNE_BATCH).await?;
+                for (k, _) in &old {
+                    txn.delete(k.clone()).await?;
+                }
+                txn.commit().await?;
+                Ok::<_, KvError>((old.len(), old.last().map(|(k, _)| k.clone())))
+            })
+            .await?;
+            deleted += batch;
+            if batch < PRUNE_BATCH as usize {
+                return Ok(deleted);
+            }
+            // Scanning from the start again would step over every tombstone.
+            if let Some(last) = last {
+                start = [last, vec![0]].concat();
+            }
+        }
+    }
+
+    /// Up to `limit` keys of kind `kind` (e.g. `"entry"`) with their values,
+    /// in key order, after `after` (a key a previous page returned). Each
+    /// key comes decoded, without the root, version and kind.
+    pub async fn scan(
+        &self,
+        kind: &str,
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Vec<String>, Vec<u8>)>, Error> {
+        let mut range = prefix(&[ROOT, &self.version, kind]);
+        if let Some(after) = after {
+            range.start = [after, &[0]].concat();
+        }
+        let page = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            txn.scan(range.clone(), limit).await
+        })
+        .await?;
+        Ok(page
+            .into_iter()
+            .map(|(k, v)| {
+                let parts = decode(&k).split_off(3);
+                (k, parts, v)
+            })
+            .collect())
+    }
+
+    /// The [`Change`]s logged at `since_micros` or later, oldest first, at most
+    /// `limit` of them, after the key `after` from a previous page.
+    pub async fn changes(
+        &self,
+        since_micros: u64,
+        after: Option<&[u8]>,
+        limit: u32,
+    ) -> Result<Vec<(Vec<u8>, Change)>, Error> {
+        let v = self.version.as_str();
+        let mut range = prefix(&[ROOT, v, "log"]);
+        range.start = match after {
+            Some(after) => [after, &[0]].concat(),
+            None => key(&[ROOT, v, "log", &format!("{since_micros:016x}")]),
+        };
+        let page = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            txn.scan(range.clone(), limit).await
+        })
+        .await?;
+        page.into_iter()
+            .map(|(k, v)| Ok((k, serde_json::from_slice(&v).map_err(internal)?)))
+            .collect()
+    }
+
+    /// Entry `e`, if it exists.
+    pub async fn find_entry(&self, e: &str) -> Result<Option<EntryMeta>, Error> {
+        self.read(&self.entry_key(e)).await
+    }
+
+    /// Module `m`'s declarations for search, if it is kept and has them.
+    pub async fn decls(&self, m: &str) -> Result<Option<SnapshotDecls>, Error> {
+        self.read(&self.decls_key(m)).await
+    }
+
+    /// The search service's records for module `m`'s declarations, by name.
+    pub async fn described(&self, m: &str) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        let range = prefix(&[ROOT, &self.version, "described", m]);
+        let found = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            let mut range = range.clone();
+            let mut found = Vec::new();
+            loop {
+                let page = txn.scan(range.clone(), PRUNE_BATCH).await?;
+                let full = page.len() == PRUNE_BATCH as usize;
+                if let Some((last, _)) = page.last() {
+                    range.start = [last.as_slice(), &[0]].concat();
+                }
+                found.extend(page);
+                if !full {
+                    return Ok::<_, KvError>(found);
+                }
+            }
+        })
+        .await?;
+        Ok(found
+            .into_iter()
+            .filter_map(|(k, v)| Some((decode(&k).pop()?, v)))
+            .collect())
+    }
+
+    /// Stores the search service's records for declarations of module `m`,
+    /// by name, unless the module is gone; returns whether it stored them.
+    pub async fn put_described(
+        &self,
+        m: &str,
+        records: &[(String, Vec<u8>)],
+    ) -> Result<bool, Error> {
+        let mod_key = self.mod_key(m);
+        let stored = kv::retry(|| async {
+            let mut txn = self.kv.begin().await?;
+            txn.lock(mod_key.clone()).await?;
+            if txn.get(&mod_key).await?.is_none() {
+                return Ok(false);
+            }
+            for (name, record) in records {
+                txn.put(self.described_key(m, name), record.clone()).await?;
+            }
+            txn.commit().await?;
+            Ok::<_, KvError>(true)
+        })
+        .await?;
+        Ok(stored)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pisa_protocol::verify::Declaration;
+
+    fn meta(id: &str) -> ModuleMeta {
+        ModuleMeta {
+            imports: Vec::new(),
+            modules: vec![Module {
+                id: id.into(),
+                build: "b".into(),
+                files: Vec::new(),
+            }],
+            header: "import PisaSnap.sx".into(),
+            code: String::new(),
+            dirty: false,
+            verified: false,
+            macros: false,
+            result: CheckResult::default(),
+            created: 0,
+        }
+    }
+
+    fn decl(name: &str) -> SnapshotDecl {
+        SnapshotDecl {
+            name: name.into(),
+            kind: "theorem".into(),
+            signature: format!("{name} : True"),
+            type_pp_full: "True".into(),
+            type_refs: Vec::new(),
+            value_refs: Vec::new(),
+            docstring: None,
+            deprecated_to: None,
+            uses_sorry: false,
+        }
+    }
+
+    fn no_labels() -> NewEntry {
+        NewEntry {
+            labels: BTreeMap::new(),
+            key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recheck_refreshes_the_declarations_and_is_logged() {
+        let catalog = Catalog::new(Kv::memory(), "v".into());
+        let m = meta("x");
+        let decls = SnapshotDecls::new(&m, vec![decl("a"), decl("b")]);
+        catalog
+            .commit("x", &m, Some(&decls), no_labels())
+            .await
+            .unwrap();
+        let before = catalog.changes(0, None, 100).await.unwrap().len();
+
+        catalog
+            .update_module("x", "b", |meta| {
+                meta.verified = true;
+                meta.dirty = true;
+                meta.result.declarations = vec![Declaration {
+                    name: "b".into(),
+                    kind: "theorem".into(),
+                    axioms: vec!["sorryAx".into()],
+                    type_hash: String::new(),
+                    value_hash: None,
+                }];
+            })
+            .await
+            .unwrap();
+        let decls = catalog.decls("x").await.unwrap().unwrap();
+        assert!(decls.verified && decls.dirty);
+        assert!(!decls.decls[0].uses_sorry && decls.decls[1].uses_sorry);
+        let changes = catalog.changes(0, None, 100).await.unwrap();
+        assert_eq!(changes.len(), before + 1);
+        let last = &changes.last().unwrap().1;
+        assert_eq!(
+            (last.entry.as_deref(), last.module.as_deref()),
+            (None, Some("x"))
+        );
+    }
+
+    #[tokio::test]
+    async fn changes_page_in_order_and_prune() {
+        let catalog = Catalog::new(Kv::memory(), "v".into());
+        for id in ["x", "y", "z"] {
+            catalog
+                .commit(id, &meta(id), None, no_labels())
+                .await
+                .unwrap();
+        }
+        let modules = |page: &[(Vec<u8>, Change)]| -> Vec<String> {
+            page.iter().filter_map(|(_, c)| c.module.clone()).collect()
+        };
+        let first = catalog.changes(0, None, 2).await.unwrap();
+        assert_eq!(modules(&first), ["x", "y"]);
+        let rest = catalog.changes(0, Some(&first[1].0), 2).await.unwrap();
+        assert_eq!(modules(&rest), ["z"]);
+        // Nothing is logged in the future.
+        assert!(
+            catalog
+                .changes(now_micros() + 1_000_000, None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        assert_eq!(
+            catalog.prune_log(Duration::from_secs(3600)).await.unwrap(),
+            0
+        );
+        assert_eq!(catalog.prune_log(Duration::ZERO).await.unwrap(), 3);
+        assert!(catalog.changes(0, None, 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn scans_page_through_a_kind() {
+        let catalog = Catalog::new(Kv::memory(), "v".into());
+        for id in ["x", "y", "z"] {
+            let m = meta(id);
+            let decls = SnapshotDecls::new(&m, vec![decl("a")]);
+            catalog
+                .commit(id, &m, Some(&decls), no_labels())
+                .await
+                .unwrap();
+        }
+        let first = catalog.scan("decls", None, 2).await.unwrap();
+        let ids: Vec<&str> = first
+            .iter()
+            .map(|(_, parts, _)| parts[0].as_str())
+            .collect();
+        assert_eq!(ids, ["x", "y"]);
+        let rest = catalog.scan("decls", Some(&first[1].0), 2).await.unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].1, ["z"]);
     }
 }

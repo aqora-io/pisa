@@ -214,12 +214,17 @@ impl Cluster {
         out
     }
 
-    /// Every KV key of `version` (as [`Cluster::version`] maps it), decoded.
+    /// Every KV key of `version` (as [`Cluster::version`] maps it), decoded,
+    /// except the change log's, which outlive what they describe.
     pub async fn stored_keys(&self, version: &str) -> Vec<Vec<String>> {
         let mut txn = self.kv.begin().await.unwrap();
         let range = prefix(&[ROOT, &self.version(version)]);
         let pairs = txn.scan(range, u32::MAX).await.unwrap();
-        pairs.iter().map(|(key, _)| decode(key)).collect()
+        pairs
+            .iter()
+            .map(|(key, _)| decode(key))
+            .filter(|parts| parts[2] != "log")
+            .collect()
     }
 
     pub async fn metrics(&self) -> String {

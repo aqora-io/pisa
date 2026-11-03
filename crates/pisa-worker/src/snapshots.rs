@@ -47,11 +47,12 @@ use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{
-    Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, unknown_module,
+    Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls,
+    record_fits, unknown_module,
 };
 use crate::check::{header_error, policy_error, run, unexpected};
 use crate::kv::Kv;
-use crate::policy::{module_report, parse_report, uses_macros};
+use crate::policy::{module_export, module_report, parse_export, parse_report, uses_macros};
 use crate::pool::{Lease, Pool};
 
 /// Time allowed for the report on a snapshot's declarations.
@@ -194,23 +195,43 @@ async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<Declaration>, Stri
         .map_err(|_| "unreadable verifier declarations".to_string())
 }
 
-/// The declarations of a module in a process that has it imported, with their
-/// axioms as that process reports them.
-async fn report_module(slot: &mut Lease, id: &str, env: u64) -> Result<Vec<Declaration>, Error> {
-    let cmd = ReplCommand::cmd(module_report(&snapshot::module(id)), Some(env));
+/// Runs one of the worker's own reports in environment `env` and parses it;
+/// `what` names it in the error.
+async fn run_report<T>(
+    slot: &mut Lease,
+    text: String,
+    env: u64,
+    what: &str,
+    parse: impl Fn(&CommandResponse) -> Option<T>,
+) -> Result<T, Error> {
+    let cmd = ReplCommand::cmd(text, Some(env));
     let report = match run(slot, &cmd, REPORT_TIMEOUT).await? {
         ReplResponse::Command(r) => r,
         ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
         other => return Err(unexpected(other)),
     };
-    parse_report(&report).ok_or_else(|| {
+    parse(&report).ok_or_else(|| {
         let why = report
             .messages
             .iter()
             .find(|m| m.severity == Severity::Error)
             .map_or("no output".to_string(), |m| m.data.clone());
-        internal(format!("the axiom report failed: {why}"))
+        internal(format!("the {what} failed: {why}"))
     })
+}
+
+/// The declarations of a module in a process that has it imported, with their
+/// axioms as that process reports them.
+async fn report_module(slot: &mut Lease, id: &str, env: u64) -> Result<Vec<Declaration>, Error> {
+    let text = module_report(&snapshot::module(id));
+    run_report(slot, text, env, "axiom report", parse_report).await
+}
+
+/// What the search service indexes of a module's declarations, from a
+/// process that has it imported.
+async fn export_module(slot: &mut Lease, id: &str, env: u64) -> Result<Vec<SnapshotDecl>, Error> {
+    let text = module_export(&snapshot::module(id));
+    run_report(slot, text, env, "declaration export", parse_export).await
 }
 
 impl Snapshots {
@@ -714,6 +735,11 @@ impl Snapshots {
                 }
             },
         };
+        // For search only, so a failure just leaves the module out of it.
+        let exported = export_module(slot, id, env)
+            .await
+            .inspect_err(|e| tracing::warn!(module = %id, "exporting declarations failed: {e}"))
+            .ok();
         let verification = slot.policy().judge_decls(false, Some(decls));
         let dirty = !verification.ok;
         outcome.verification = Some(verification);
@@ -729,11 +755,22 @@ impl Snapshots {
             result: outcome.clone().into(),
             created: now(),
         };
+        let search = exported
+            .map(|decls| SnapshotDecls::new(&meta, decls))
+            .filter(|d| {
+                record_fits(d) || {
+                    tracing::warn!(module = %id, "too many declarations to index for search");
+                    false
+                }
+            });
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
         };
-        match self.commit(&own, &contents, &meta, entry).await {
+        match self
+            .commit(&own, &contents, &meta, search.as_ref(), entry)
+            .await
+        {
             Ok(stored) => Ok(Some(stored)),
             Err(e) => {
                 self.unbuild(slot, id);
@@ -905,7 +942,8 @@ impl Snapshots {
     }
 
     /// Uploads a freshly built module's files (`own`, whose files have
-    /// `contents`), then stores its record with the new entry. Returns the
+    /// `contents`), then stores its record, and `search` with it, with the new
+    /// entry. Returns the
     /// stored record and the entry. If another worker stored the module
     /// first, its record and build are kept, and this build's files go. So do
     /// they if the entry's key is on an entry of other code, which is
@@ -917,6 +955,7 @@ impl Snapshots {
         own: &Module,
         contents: &[Vec<u8>],
         meta: &ModuleMeta,
+        search: Option<&SnapshotDecls>,
         entry: NewEntry,
     ) -> Result<(ModuleMeta, (String, EntryMeta)), Error> {
         for (file, bytes) in own.files.iter().zip(contents) {
@@ -926,15 +965,16 @@ impl Snapshots {
                 .await
                 .map_err(internal)?;
         }
-        let (entry, entry_meta, stored) = match self.catalog.commit(&own.id, meta, entry).await {
-            Ok(committed) => committed,
-            Err(e) => {
-                if e.kind != ErrorKind::Unavailable {
-                    self.delete_blobs(own).await;
+        let (entry, entry_meta, stored) =
+            match self.catalog.commit(&own.id, meta, search, entry).await {
+                Ok(committed) => committed,
+                Err(e) => {
+                    if e.kind != ErrorKind::Unavailable {
+                        self.delete_blobs(own).await;
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
+            };
         if entry_meta.module != own.id {
             self.delete_blobs(own).await;
             return Err(key_in_use());
@@ -1116,11 +1156,17 @@ mod tests {
         }
     }
 
-    /// Every KV key of version `v`.
+    /// Every KV key of version `v`, except the change log's, which outlive
+    /// what they describe.
     async fn kv_keys(kv: &Kv) -> Vec<Vec<u8>> {
         let mut txn = kv.begin().await.unwrap();
         let pairs = txn.scan(prefix(&[ROOT, "v"]), u32::MAX).await.unwrap();
-        pairs.into_iter().map(|(key, _)| key).collect()
+        let log = prefix(&[ROOT, "v", "log"]);
+        pairs
+            .into_iter()
+            .map(|(key, _)| key)
+            .filter(|key| !log.contains(key))
+            .collect()
     }
 
     async fn upload(s: &Snapshots, meta: &ModuleMeta, content: &[u8]) {
@@ -1149,7 +1195,7 @@ mod tests {
         let id = snapshot::id("code");
         let old = built(&id, b"old");
         upload(&s, &old, b"old").await;
-        let (entry, _, _) = catalog.commit(&id, &old, no_labels()).await.unwrap();
+        let (entry, _, _) = catalog.commit(&id, &old, None, no_labels()).await.unwrap();
 
         // The new build is uploaded and installed here, but not stored yet.
         let new = built(&id, b"new");
@@ -1180,7 +1226,7 @@ mod tests {
         })
         .await
         .unwrap();
-        catalog.commit(&id, &new, no_labels()).await.unwrap();
+        catalog.commit(&id, &new, None, no_labels()).await.unwrap();
         drop(building);
 
         let deleted = deleting.await.unwrap().unwrap();
@@ -1205,10 +1251,10 @@ mod tests {
         let catalog = Catalog::new(kv, "v".into());
         let id = snapshot::id("code");
         let old = built(&id, b"old");
-        let (entry, _, _) = catalog.commit(&id, &old, no_labels()).await.unwrap();
+        let (entry, _, _) = catalog.commit(&id, &old, None, no_labels()).await.unwrap();
         catalog.remove_entry(&entry).await.unwrap();
         let new = built(&id, b"new");
-        catalog.commit(&id, &new, no_labels()).await.unwrap();
+        catalog.commit(&id, &new, None, no_labels()).await.unwrap();
 
         let passed = Verification {
             ok: true,
@@ -1250,7 +1296,7 @@ mod tests {
         let new = built(&id, b"new");
         upload(&s, &new, b"new").await;
         let catalog = Catalog::new(kv, "v".into());
-        catalog.commit(&id, &new, no_labels()).await.unwrap();
+        catalog.commit(&id, &new, None, no_labels()).await.unwrap();
 
         assert_eq!(s.before_recheck(&new.modules[0]).await.unwrap(), None);
         assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"new");
@@ -1270,7 +1316,7 @@ mod tests {
         let own = ours.modules[0].clone();
         let contents = [b"ours".to_vec()];
         let error = s
-            .commit(&own, &contents, &ours, keyed("k"))
+            .commit(&own, &contents, &ours, None, keyed("k"))
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadRequest);
@@ -1297,7 +1343,7 @@ mod tests {
         };
         let only_match = with(&[("k", "a"), ("p", "x")]);
         let (oldest, _, _) = catalog
-            .commit(&id, &built(&id, b"x"), only_match)
+            .commit(&id, &built(&id, b"x"), None, only_match)
             .await
             .unwrap();
         let mut newest_first = vec![oldest.clone()];
@@ -1356,7 +1402,10 @@ mod tests {
         let theirs = built(&id, b"theirs");
         upload(&s, &theirs, b"theirs").await;
         let catalog = Catalog::new(kv, "v".into());
-        catalog.commit(&id, &theirs, no_labels()).await.unwrap();
+        catalog
+            .commit(&id, &theirs, None, no_labels())
+            .await
+            .unwrap();
 
         // As `install` leaves this worker's build.
         let ours = built(&id, b"ours");
@@ -1365,7 +1414,10 @@ mod tests {
         s.cached.lock().unwrap().insert(id.clone(), own.clone());
 
         let contents = [b"ours".to_vec()];
-        let (stored, (entry, _)) = s.commit(&own, &contents, &ours, no_labels()).await.unwrap();
+        let (stored, (entry, _)) = s
+            .commit(&own, &contents, &ours, None, no_labels())
+            .await
+            .unwrap();
         assert_eq!(stored.modules, theirs.modules);
         assert_eq!(catalog.entry(&entry).await.unwrap().module, id);
         assert!(!has_files(&s, &ours).await, "this build's files go");
@@ -1392,10 +1444,13 @@ mod tests {
         let parent = built(&parent_id, b"parent");
         let other = built(&other_id, b"other");
         catalog
-            .commit(&parent_id, &parent, no_labels())
+            .commit(&parent_id, &parent, None, no_labels())
             .await
             .unwrap();
-        let (taken, _, _) = catalog.commit(&other_id, &other, keyed("k")).await.unwrap();
+        let (taken, _, _) = catalog
+            .commit(&other_id, &other, None, keyed("k"))
+            .await
+            .unwrap();
         upload(&s, &other, b"other").await;
         let before = kv_keys(&kv).await;
 
@@ -1405,13 +1460,16 @@ mod tests {
         let mut on_parent = ours.clone();
         on_parent.imports = vec![parent_id.clone()];
         on_parent.modules.insert(0, parent.modules[0].clone());
-        let (entry, entry_meta, _) = catalog.commit(&id, &on_parent, keyed("k")).await.unwrap();
+        let (entry, entry_meta, _) = catalog
+            .commit(&id, &on_parent, None, keyed("k"))
+            .await
+            .unwrap();
         assert_eq!((entry, entry_meta.module), (taken.clone(), other_id));
         assert_eq!(kv_keys(&kv).await, before);
 
         let contents = [b"ours".to_vec()];
         let error = s
-            .commit(&own, &contents, &on_parent, keyed("k"))
+            .commit(&own, &contents, &on_parent, None, keyed("k"))
             .await
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadRequest);
@@ -1439,7 +1497,7 @@ mod tests {
         upload(&s, &theirs, b"theirs").await;
         let mut labelled = keyed("k");
         labelled.labels.insert("a".into(), "1".into());
-        let (taken, _, _) = catalog.commit(&id, &theirs, labelled).await.unwrap();
+        let (taken, _, _) = catalog.commit(&id, &theirs, None, labelled).await.unwrap();
         let before = kv_keys(&kv).await;
 
         let ours = built(&id, b"ours");
@@ -1447,8 +1505,10 @@ mod tests {
         upload(&s, &ours, b"ours").await;
         std::fs::write(s.file(&id, "olean"), b"ours").unwrap();
         let contents = [b"ours".to_vec()];
-        let (stored, (entry, entry_meta)) =
-            s.commit(&own, &contents, &ours, keyed("k")).await.unwrap();
+        let (stored, (entry, entry_meta)) = s
+            .commit(&own, &contents, &ours, None, keyed("k"))
+            .await
+            .unwrap();
         assert_eq!(entry, taken);
         assert_eq!(entry_meta.labels["a"], "1");
         assert_eq!(stored.modules, theirs.modules);
