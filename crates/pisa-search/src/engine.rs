@@ -898,7 +898,7 @@ impl Engine {
     }
 }
 
-fn flags(d: &StoredDecl, sibling: Option<String>) -> Flags {
+pub fn flags(d: &StoredDecl, sibling: Option<String>) -> Flags {
     Flags {
         uses_sorry: d.uses_sorry,
         informal: d.informal_result,
@@ -982,7 +982,7 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// The first sentence of the description, or of the docstring.
-fn summary(d: &StoredDecl) -> Option<String> {
+pub fn summary(d: &StoredDecl) -> Option<String> {
     let text = d
         .informal
         .as_ref()
@@ -998,7 +998,7 @@ fn summary(d: &StoredDecl) -> Option<String> {
 
 /// About 150 tokens for a model: name, kind and library; signature; a summary;
 /// a line of flags when there are any.
-fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) -> String {
+pub fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) -> String {
     let mut out = format!(
         "{n}. {}   {} · {}\n   {}",
         d.name,

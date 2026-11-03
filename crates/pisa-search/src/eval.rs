@@ -10,7 +10,8 @@ use std::path::Path;
 use pisa_protocol::search::Query;
 use serde::Deserialize;
 
-use crate::engine::{Engine, Lanes};
+use crate::engine::Lanes;
+use crate::qengine::{Engine, Weights};
 
 pub const MATHLIB_QR_URL: &str = "https://raw.githubusercontent.com/frenzymath/LeanSearch-v2/94f4888cbaf9f4322535755f86cbac690ec18080/benchmark/MathlibQR.json";
 
@@ -97,81 +98,67 @@ impl Metrics {
 pub struct Report {
     pub targets: usize,
     pub missing: Vec<String>,
-    /// Vectors per library, when the engine has a dense lane.
-    pub coverage: Option<BTreeMap<String, usize>>,
-    /// Targets that have a vector.
-    pub covered_targets: usize,
-    /// (lanes label, style or "all") → metrics. Labels ending in
-    /// " (covered)" count only targets that have a vector.
+    /// (lanes label, style or "all") → metrics.
     pub rows: BTreeMap<(String, String), Metrics>,
 }
 
-pub fn run(engine: &Engine, items: &[Item], configs: &[(&str, Lanes)]) -> Report {
-    let mut missing = Vec::new();
+/// Queries sent per search request.
+const BATCH: usize = 64;
+
+/// Runs every query style of every item under each `(label, lanes,
+/// weights)` configuration.
+pub async fn run(
+    engine: &mut Engine,
+    items: &[Item],
+    configs: &[(String, Lanes, Weights)],
+) -> anyhow::Result<Report> {
     let mut targets = Vec::new();
-    for item in items {
-        let target = engine
-            .id_of(&item.full_name)
-            .map(|_| item.full_name.clone())
-            .or_else(|| {
-                let r = engine.resolve(&item.full_name);
-                r.deprecated_to.filter(|t| engine.id_of(t).is_some())
-            });
-        match target {
-            Some(t) => targets.push((item, t)),
-            None => missing.push(item.full_name.clone()),
+    let mut missing = Vec::new();
+    for chunk in items.chunks(BATCH) {
+        let names: Vec<String> = chunk.iter().map(|i| i.full_name.clone()).collect();
+        for (item, r) in chunk.iter().zip(engine.resolve(&names).await?) {
+            if r.exists {
+                targets.push(item);
+            } else {
+                missing.push(item.full_name.clone());
+            }
         }
     }
-    let covered = |name: &str| {
-        engine
-            .dense
-            .as_ref()
-            .zip(engine.id_of(name))
-            .is_some_and(|(d, id)| d.contains(id))
-    };
     let mut rows: BTreeMap<(String, String), Metrics> = BTreeMap::new();
-    for (label, lanes) in configs {
-        for (item, target) in &targets {
-            let labels = if covered(target) {
-                vec![label.to_string(), format!("{label} (covered)")]
-            } else {
-                vec![label.to_string()]
-            };
-            for style in STYLES {
-                let Some(text) = item.query(style) else {
-                    continue;
-                };
-                let q = Query {
-                    q: Some(text.to_string()),
-                    k: 50,
-                    ..Default::default()
-                };
-                let hits = engine.search_with(&q, *lanes).hits;
-                let rank = hits.iter().position(|h| &h.name == target).map(|i| i + 1);
-                for label in &labels {
-                    rows.entry((label.clone(), style.to_string()))
-                        .or_default()
-                        .add(rank);
-                    rows.entry((label.clone(), "all".to_string()))
-                        .or_default()
-                        .add(rank);
+    for (label, lanes, weights) in configs {
+        engine.weights = weights.clone();
+        for style in STYLES {
+            let asked: Vec<(&str, &str)> = targets
+                .iter()
+                .filter_map(|item| Some((item.full_name.as_str(), item.query(style)?)))
+                .collect();
+            for chunk in asked.chunks(BATCH) {
+                let queries: Vec<Query> = chunk
+                    .iter()
+                    .map(|(_, text)| Query {
+                        q: Some(text.to_string()),
+                        k: 50,
+                        ..Default::default()
+                    })
+                    .collect();
+                let results = engine.search_batch(&queries, *lanes).await?;
+                for ((target, _), r) in chunk.iter().zip(results) {
+                    let rank = r.hits.iter().position(|h| h.name == *target).map(|i| i + 1);
+                    for key in [style, "all"] {
+                        rows.entry((label.clone(), key.to_string()))
+                            .or_default()
+                            .add(rank);
+                    }
                 }
             }
         }
     }
     let rows = rows.into_iter().map(|(k, m)| (k, m.finish())).collect();
-    let coverage = engine.dense.as_ref().map(|d| {
-        crate::dense::coverage(&engine.bundle.decls, d)
-            .into_iter()
-            .collect()
-    });
-    Report {
-        covered_targets: targets.iter().filter(|(_, t)| covered(t)).count(),
+    Ok(Report {
         targets: targets.len(),
         missing,
-        coverage,
         rows,
-    }
+    })
 }
 
 impl Report {
@@ -186,17 +173,6 @@ impl Report {
                 self.missing.join(", ")
             },
         );
-        if let Some(coverage) = &self.coverage {
-            let per_library: Vec<String> =
-                coverage.iter().map(|(l, n)| format!("{l} {n}")).collect();
-            out.push_str(&format!(
-                "The dense lane has vectors for {} declarations ({}), including {} of the targets. \
-                 Rows labelled `(covered)` count only those targets.\n\n",
-                coverage.values().sum::<usize>(),
-                per_library.join(", "),
-                self.covered_targets
-            ));
-        }
         out.push_str(
             "| Lanes | Style | Queries | R@1 | R@5 | R@10 | R@50 | MRR | nDCG@10 |\n\
              | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n",

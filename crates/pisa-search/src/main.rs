@@ -6,12 +6,13 @@ use clap::{Parser, Subcommand};
 use pisa_protocol::search::Informal;
 use pisa_search::corpus::{self, Corpus};
 use pisa_search::dense::{self, Embedder};
-use pisa_search::engine::{Engine, Lanes};
+use pisa_search::engine::Engine;
 use pisa_search::index::{self, Bundle};
 use pisa_search::informal_store::Store;
 use pisa_search::informalize;
 use pisa_search::llm::Llm;
 use pisa_search::qdrant::Qdrant;
+use pisa_search::qengine::{self, Weights};
 use pisa_search::snapshots;
 use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
@@ -224,14 +225,18 @@ enum Command {
     },
     /// Measure retrieval quality on MathlibQR.
     Eval {
+        #[command(flatten)]
+        qdrant: QdrantArgs,
+        /// The environment whose loaded bundle to search.
         #[arg(long)]
-        bundle: PathBuf,
+        env_id: String,
         /// MathlibQR.json (downloaded from the pinned commit if absent).
         #[arg(long)]
         data: PathBuf,
-        /// Weights to use instead of the defaults, as JSON (fields of `Weights`).
+        /// Weights to use instead of the defaults, as JSON (fields of
+        /// `Weights`); several are evaluated in turn, embedding queries once.
         #[arg(long)]
-        weights: Option<String>,
+        weights: Vec<String>,
         /// Only the fused result, not each lane alone.
         #[arg(long)]
         fused_only: bool,
@@ -242,10 +247,12 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Run one search against a bundle and print the hits.
+    /// Run one search against a loaded bundle and print the hits.
     Query {
+        #[command(flatten)]
+        qdrant: QdrantArgs,
         #[arg(long)]
-        bundle: PathBuf,
+        env_id: String,
         #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
         embedder: Option<String>,
         #[arg(long, default_value_t = 5)]
@@ -283,6 +290,26 @@ fn read_names(path: &Path) -> anyhow::Result<std::collections::HashSet<String>> 
         .filter(|l| !l.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// The Qdrant engine for `env_id`, embedding queries with `embedder`.
+async fn open_engine(
+    qdrant: &QdrantArgs,
+    env_id: &str,
+    embedder: Option<String>,
+) -> anyhow::Result<qengine::Engine> {
+    // The embedder's blocking HTTP client is made off the async threads.
+    let embedder = match embedder {
+        Some(spec) => Some(tokio::task::spawn_blocking(move || Embedder::parse(&spec)).await??),
+        None => None,
+    };
+    let symbols = Symbols::parse(symbols::DEFAULT)?;
+    qengine::Engine::open(qdrant.client()?, env_id, symbols, embedder).await
+}
+
+/// Drops `value`, which may hold a blocking HTTP client, off the async threads.
+async fn drop_blocking<T: Send + 'static>(value: T) {
+    let _ = tokio::task::spawn_blocking(move || drop(value)).await;
 }
 
 fn load_engine(
@@ -699,61 +726,39 @@ async fn main() -> anyhow::Result<()> {
             axum::serve(listener, pisa_search::server::router(engine)).await?;
         }
         Command::Eval {
-            bundle,
+            qdrant,
+            env_id,
             data,
             weights,
             fused_only,
             embedder,
             out,
         } => {
-            let mut engine = load_engine(&bundle, None, embedder.as_deref())?;
-            if let Some(w) = weights {
-                engine.weights = serde_json::from_str(&w)?;
-            }
-            let items = pisa_search::eval::load(&data).await?;
-            let none = Lanes {
-                lexical: false,
-                name: false,
-                structural: false,
-                dense: false,
+            let mut engine = open_engine(&qdrant, &env_id, embedder).await?;
+            engine.cache = Some(Default::default());
+            let weights: Vec<Weights> = if weights.is_empty() {
+                vec![Weights::default()]
+            } else {
+                weights
+                    .iter()
+                    .map(|w| serde_json::from_str(w))
+                    .collect::<Result<_, _>>()?
             };
-            let mut configs = vec![("fused", Lanes::ALL)];
-            if !fused_only {
-                configs.push((
-                    "lexical",
-                    Lanes {
-                        lexical: true,
-                        ..none
-                    },
-                ));
-                configs.push((
-                    "structural",
-                    Lanes {
-                        structural: true,
-                        ..none
-                    },
-                ));
-                configs.push(("name", Lanes { name: true, ..none }));
-                if engine.dense.is_some() {
-                    configs.push((
-                        "dense",
-                        Lanes {
-                            dense: true,
-                            ..none
-                        },
-                    ));
+            let items = pisa_search::eval::load(&data).await?;
+            let labels = qengine::weight_labels(weights.len());
+            let mut configs = Vec::new();
+            for (w, suffix) in weights.iter().zip(&labels) {
+                for (label, lanes) in qengine::lane_configs(fused_only) {
+                    configs.push((format!("{label}{suffix}"), lanes, w.clone()));
                 }
             }
-            let engine = Arc::new(engine);
-            let report = tokio::task::spawn_blocking(move || {
-                let r = pisa_search::eval::run(&engine, &items, &configs);
-                r.markdown(engine.env_id())
-            })
-            .await?;
+            let report = pisa_search::eval::run(&mut engine, &items, &configs).await?;
+            let report = report.markdown(engine.env_id());
             print!("{report}");
             if let Some(out) = out {
                 std::fs::write(out, report)?;
             }
+            drop_blocking(engine).await;
         }
         Command::RepairDescriptions { informal } => {
             let store = Store::open(&informal)?;
@@ -829,23 +834,25 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Command::Query {
-            bundle,
+            qdrant,
+            env_id,
             embedder,
             k,
             text,
         } => {
-            let engine = load_engine(&bundle, None, embedder.as_deref())?;
+            let engine = open_engine(&qdrant, &env_id, embedder).await?;
             let q = pisa_protocol::search::Query {
                 q: Some(text),
                 k,
                 ..Default::default()
             };
             let started = std::time::Instant::now();
-            let r = tokio::task::spawn_blocking(move || engine.search(&q)).await?;
+            let r = engine.search(&q).await?;
             for hit in &r.hits {
-                println!("{}  [{}]\n", hit.text, hit.lanes.join(","));
+                println!("{}  ({:.4})\n", hit.text, hit.score);
             }
             eprintln!("{:.1} ms", started.elapsed().as_secs_f64() * 1e3);
+            drop_blocking(engine).await;
         }
     }
     Ok(())

@@ -32,6 +32,14 @@ impl Symbols {
         Ok(toml::from_str(toml_text)?)
     }
 
+    /// Every constant the dictionary names.
+    pub fn all_constants(&self) -> std::collections::BTreeSet<String> {
+        self.entries
+            .iter()
+            .flat_map(|e| e.constants.iter().cloned())
+            .collect()
+    }
+
     /// Drops constants the index doesn't have, logging them.
     pub fn retain_known(mut self, known: impl Fn(&str) -> bool) -> Symbols {
         for e in &mut self.entries {

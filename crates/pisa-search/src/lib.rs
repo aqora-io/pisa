@@ -13,6 +13,7 @@ pub mod lsv2;
 pub mod openai;
 pub mod points;
 pub mod qdrant;
+pub mod qengine;
 pub mod server;
 pub mod snapshots;
 pub mod symbols;

@@ -48,8 +48,10 @@ pub fn entry_id(e: &str) -> String {
     id(&["entry", e])
 }
 
-/// What a declaration's point carries besides its vectors.
+/// What a declaration's point carries besides its vectors. Every field has
+/// a default, so a request for some of them reads as one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PointPayload {
     /// `base` or `snapshot`.
     pub source: String,
