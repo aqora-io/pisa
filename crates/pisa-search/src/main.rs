@@ -29,7 +29,7 @@ struct QdrantArgs {
     #[arg(long = "qdrant", env = "PISA_SEARCH_QDRANT")]
     url: String,
     /// The environment variable holding Qdrant's API key, if it needs one.
-    #[arg(long = "qdrant-key-env")]
+    #[arg(long = "qdrant-key-env", env = "PISA_SEARCH_QDRANT_KEY_ENV")]
     key_env: Option<String>,
 }
 

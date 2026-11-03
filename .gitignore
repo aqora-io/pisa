@@ -9,3 +9,6 @@ __pycache__/
 /search/work
 /search/lsv2.jsonl
 /search/release
+
+# Helm chart dependencies (see Chart.lock)
+/deploy/helm/pisa/charts

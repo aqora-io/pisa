@@ -12,3 +12,10 @@ Workers scale between {{ .Values.keda.minReplicas }} and {{ .Values.keda.maxRepl
   kubectl get scaledobject {{ include "pisa.fullname" . }}-worker
   kubectl get deploy {{ include "pisa.fullname" . }}-worker -w
 {{- end }}
+{{- if .Values.search.enabled }}
+
+Search runs {{ .Values.search.replicas }} replicas over Qdrant, serving env {{ .Values.search.envId }}.
+Load its bundle into Qdrant once (and after each rebuild), e.g. through a port-forward:
+  pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2
+  kubectl port-forward svc/{{ include "pisa.fullname" . }}-search 8100:{{ .Values.search.service.port }}
+{{- end }}

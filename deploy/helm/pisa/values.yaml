@@ -114,3 +114,61 @@ keda:
     # jobs, once even if the router is scraped by more than one job.
     query: ""
 
+
+# Declaration search: stateless replicas over Qdrant, which holds the index
+# (see the README's Search section). Load a bundle into Qdrant first, with
+# `pisa-search load`.
+search:
+  enabled: false
+  image:
+    # Built from docker/Dockerfile (target search).
+    repository: pisa-search
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 2
+  # The env_id of the bundle loaded into Qdrant, e.g. v4.35.0-da683984. Required.
+  envId: ""
+  # Embeds queries and snapshot declarations; it must serve the model that
+  # embedded the bundle. See `pisa-search embed`.
+  embedder: "openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"
+  # Search the workers' snapshots (needs metadata.tikv.pdEndpoints). The
+  # replica holding a lease in TiKV indexes them.
+  snapshots: true
+  # Claude or OpenAI model that describes every snapshot declaration, so all
+  # snapshot code goes to that provider; empty for none.
+  describeModel: ""
+  # LLM and embedding requests in flight for snapshots.
+  describeConcurrency: 8
+  # An existing Secret with the API keys, under these keys; missing ones are skipped.
+  secret:
+    name: ""
+    scwSecretKey: SCW_SECRET_KEY
+    anthropicApiKey: ANTHROPIC_API_KEY
+    openaiApiKey: OPENAI_API_KEY
+  qdrant:
+    # A Qdrant you run; empty means this release's qdrant subchart.
+    url: ""
+    # An existing Secret holding Qdrant's API key, if it needs one.
+    apiKeySecret:
+      name: ""
+      key: api-key
+  service:
+    type: ClusterIP
+    port: 8100
+  resources:
+    requests: { cpu: 500m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  # Replicas kept through voluntary disruptions such as node drains.
+  minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+# The official Qdrant chart (https://qdrant.github.io/qdrant-helm), used when
+# search.qdrant.url is empty. Load bundles with `--replication 2`, so that
+# each collection keeps a copy when a node goes.
+qdrant:
+  enabled: false
+  replicaCount: 3

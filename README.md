@@ -149,6 +149,15 @@ python3 scripts/e2e.py --no-failover   # checks, policy, sessions against real L
 python3 scripts/k8s_scale.py           # scales up under load, back down, drains on delete
 ```
 
+**Search.** `search.enabled` adds `pisa-search` replicas (`search.replicas`, 2,
+or `search.autoscaling`) with a PodDisruptionBudget, over Qdrant: the official
+chart as a dependency (`qdrant.enabled`, 3 nodes) or `search.qdrant.url`. They
+search snapshots through `metadata.tikv`. Set `search.envId`, and give API keys
+as an existing Secret (`search.secret.name`). Load each bundle once, e.g.
+through `kubectl port-forward svc/<release>-qdrant 6333`, with
+`pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2`;
+until it has, replicas exit at startup and restart.
+
 **Not covered by the chart:**
 - Separate pools per project version. The scaling query counts every job, so one release should serve one version.
 - Auth on the API.
@@ -169,6 +178,15 @@ To the release that searches snapshots:
   each module's declarations and a log of changes.
 - Modules built before the upgrade aren't searchable, and creating the same
   code again doesn't make them so, as it doesn't build them again.
+
+To the release that moved search onto Qdrant:
+- Run Qdrant (≥ 1.19.1), build bundles again (format 4, without `tantivy/`),
+  and load them with `pisa-search load`. `serve` takes `--qdrant` and
+  `--env-id` where it took `--bundle`.
+- Hits no longer carry `lanes`: Qdrant fuses the lanes and doesn't say which
+  found a hit.
+- Snapshots are indexed again from TiKV by the first leader, without calling the
+  LLM or the embedder again for what was described and embedded.
 
 ## API
 
@@ -445,30 +463,41 @@ cd crates/pisa-python && maturin develop && pytest tests
 
 `pisa-search` finds Mathlib and Physlib declarations from a description,
 LaTeX, a Lean pattern or goal, or a partial or misspelled name. It is meant for
-agents that know what they need but not what it is called. It runs as its own
-service. Its index is built from the same pinned project as the workers, and
-every response carries that project's version label as `env_id`, so the
-declarations it returns exist in the matching worker pool.
+agents that know what they need but not what it is called. Its index is built
+from the same pinned project as the workers, and every response carries that
+project's version label as `env_id`, so the declarations it returns exist in
+the matching worker pool.
 
-**How it ranks.** Four lanes each return candidates, and reciprocal rank fusion
-(k = 60) merges them:
-- **lexical:** BM25 over names, descriptions, signatures and docstrings;
-- **name:** exact, case-insensitive, last-component and fuzzy name matches;
+**How it runs.** The index lives in [Qdrant](https://qdrant.tech) (≥ 1.19.1):
+a collection `pisa-<env_id>` with a point per declaration, loaded from a bundle
+with `pisa-search load`. Servers (`pisa-search serve --qdrant URL --env-id
+ENV`) hold nothing, so any number of replicas serve one environment, behind any
+load balancer. Each collection has one shard, as Qdrant's IDF is per shard; for
+availability, run Qdrant as a cluster and load with `--replication 2`.
+
+**How it ranks.** Each of four lanes is a Qdrant query, and Qdrant fuses them
+with weighted reciprocal rank fusion:
+- **lexical:** BM25 over names, descriptions, signatures and docstrings, as a
+  sparse vector with a token per field and term;
+- **name:** the name's trigrams, plus an exact match, which always comes first;
 - **structural:** constants the query names or implies, matched against each
   type's constants. LaTeX symbols map to constants through
   `search/symbols.toml`;
 - **dense:** Qwen3-Embedding-8B vectors for every declaration, from Scaleway's
-  serverless API, which also embeds each query. The lane's weight scales with
-  how many of the lexical lane's top hits have vectors, so a partially embedded
-  bundle doesn't crowd out other results. Qwen3-Embedding-0.6B is a free,
-  local alternative (TEI on CPU, or llama.cpp on a GPU) that retrieves somewhat
-  worse; see `search/bench/2026-10-22/report.md`.
+  serverless API, which also embeds each query. Qwen3-Embedding-0.6B is a
+  free, local alternative (TEI on CPU, or llama.cpp on a GPU) that retrieves
+  somewhat worse; see `search/bench/2026-10-22/report.md`.
 
-PageRank over the dependency graph is a prior. Declarations that depend on
-`sorry` are hidden unless `include_sorried` is set, and so are Lean-generated
-helpers (`….mk.injEq`) and metaprogramming internals (`Mathlib.Tactic.…`);
-any of them is still returned, flagged, when a query names it exactly.
-Deprecated aliases and `to_additive` pairs fold into one hit.
+Qdrant's weights scale a lane's ranks rather than its scores: a weight below 1
+makes a lane count only for its first few hits. The tuned defaults (`Weights`
+in `crates/pisa-search/src/engine.rs`) lean on the dense lane, with lexical and
+structural matches lifting their top hits. PageRank over the dependency graph is
+a prior, added after fusion, and a name query also favours names close to it by
+edit distance. Declarations that depend on `sorry` are hidden unless
+`include_sorried` is set, and so are Lean-generated helpers (`….mk.injEq`) and
+metaprogramming internals (`Mathlib.Tactic.…`); any of them is still returned,
+flagged, when a query names it exactly. Deprecated aliases and `to_additive`
+pairs fold into one hit.
 
 **Descriptions.** Mathlib declarations reuse LeanSearch v2's descriptions
 (Apache-2.0, see `search/NOTICE`), matched by name and by the constants in
@@ -484,7 +513,7 @@ OpenAI models are a flag away):
 **Prebuilt indexes.** Each index is a GitHub release tagged `index-<env_id>`,
 on the commit that built it. Its assets are archives of the gitignored `search/`
 directories, each with `NOTICE`:
-- `bundle.tar.zst`: `search/bundle`, which the service serves;
+- `bundle.tar.zst`: `search/bundle`, which `load` puts into Qdrant;
 - `store.tar.zst`: `search/store`, the descriptions and vectors. A rebuild that
   starts from it only describes and embeds new or changed declarations;
 - `corpus.tar.zst`: `search/corpus`, the exported declarations.
@@ -495,8 +524,13 @@ directories, each with `NOTICE`:
 gh release list -R aqora-io/pisa
 gh release download index-v4.35.0-da683984 -R aqora-io/pisa -p bundle.tar.zst -O - \
   | tar -I zstd -x -C search
-docker compose --profile search up --build
+docker compose --profile search-load run --rm search-load   # into Qdrant, once
+docker compose --profile search up --build                   # two replicas, :8100 and :8101
 ```
+
+Bundles of releases before format 4 (search on Qdrant) have no type constants
+or field statistics: build one again from that release's `store` and `corpus`
+(below, from `pisa-search build`), and publish it.
 
 To publish an index after building it (below), from the pushed commit that built
 it:
@@ -531,11 +565,18 @@ pisa-search embed --corpus search/corpus --informal search/store --libraries $LI
   --follow search/work/described &
 pisa-search informalize --corpus search/corpus --informal search/store --libraries $LIBS \
   --concurrency 40 && touch search/work/described; wait
-# Build the bundle and serve it on :8100.
+# Build the bundle, load it into Qdrant and serve it on :8100 and :8101.
 pisa-search build --corpus search/corpus --informal search/store \
   --embedding-model qwen3-embedding-8b@scaleway --out search/bundle
+docker compose --profile search-load run --rm search-load
 docker compose --profile search up --build
 ```
+
+`load` refuses a bundle whose vectors cover less than 99% of its declarations
+(`--min-coverage`). Loading again the same `env_id` replaces its declarations in
+place, keeping the snapshots'; queries meanwhile may see some of each. Restart
+the replicas after it: they read the manifest (libraries, kinds, field
+statistics) when they start.
 
 `--informal` takes a directory or an `s3://bucket/prefix` URL (credentials come
 from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
@@ -552,7 +593,7 @@ Each hit carries:
 - name, kind, library, module and signature;
 - a description, when one exists;
 - flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
-- the lanes that found it, and a source link;
+- a score, comparable only within one query, and a source link;
 - `text`, about 150 tokens ready for a model's context;
 - for a snapshot declaration, `snapshot` (see [below](#snapshot-search)).
 
@@ -560,7 +601,9 @@ Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists
 the known ones. Pinning an `env_id` the server doesn't have is a 404. If the
 embedding API fails, the query still returns results from the other lanes,
-after at most a few seconds, and says so in the result's `warnings`.
+after at most a few seconds, and says so in the result's `warnings`. If Qdrant
+doesn't answer, requests are a 503 and `/health` is too, so a readiness probe
+takes the replica out of rotation.
 
 ```python
 from pisa_client import SearchClient
@@ -571,8 +614,9 @@ for hit in search.search(nl="trace of a density matrix is one", libraries=["Phys
 search.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqrt_mul_self"
 ```
 
-The Rust `pisa_client::SearchClient` has the same methods. To run the Python
-search tests, first run `cargo build -p pisa-search`.
+The Rust `pisa_client::SearchClient` has the same methods. The search tests,
+Rust and Python, need a Qdrant at `PISA_TEST_QDRANT_URL` and are skipped
+without one; for the Python ones, first run `cargo build -p pisa-search`.
 
 <a id="snapshot-search"></a>
 **Snapshots in search.** With `PISA_TIKV_PD` pointing at the workers' TiKV, the
@@ -588,26 +632,35 @@ the bundle's in every lane:
   entries on that module, newest first, at most 10, with the module's
   `dirty` and `verified`. Names can repeat across snapshots, and each is a hit
   of its own. `/v1/resolve` and `/v1/decl` cover the bundle only.
+- **The leader.** One replica at a time, holding a lease in TiKV (30 s,
+  renewed every 10 s), indexes snapshots: it writes each module's
+  declarations to Qdrant, and each entry to `pisa-<env_id>-entries`, which a
+  label scope is resolved against. So a module can have any number of
+  entries, but a label scope may cover at most 20,000 modules. When the
+  leader goes, another replica takes the lease, makes Qdrant match TiKV,
+  and carries on; `/health` says which replica leads.
 - **Freshness.** Workers export a module's declarations when they build it,
-  and log every create, relabel, delete and re-check in TiKV. The service
+  and log every create, relabel, delete and re-check in TiKV. The leader
   reads that log every 2 s. A snapshot is searchable by name, signature and
-  docstring seconds after it is created; its description and vector follow
-  when the LLM and the embedder answer. Module-system snapshots have no
-  docstrings in the export.
+  docstring seconds after it is created, with a vector of its docstring;
+  its description, and a vector of that, follow when the LLM and the
+  embedder answer. Module-system snapshots have no docstrings in the export.
 - **Descriptions.** With `PISA_SEARCH_DESCRIBE_MODEL` set to a Claude model
-  (with `ANTHROPIC_API_KEY`) or an OpenAI one (with `OPENAI_API_KEY`), every
-  snapshot declaration is described as `informalize` describes the libraries.
+  (with `ANTHROPIC_API_KEY`) or an OpenAI one (with `OPENAI_API_KEY`), the
+  leader describes every snapshot declaration as `informalize` describes the
+  libraries.
   So all snapshot code goes to that provider, at about $0.0003 a declaration
   with Claude Haiku 5.5. Without one, declarations are embedded from their
   docstrings. A failed description is tried 3 times in all; an
-  authentication error pauses describing for 5 minutes.
-  `PISA_SEARCH_DESCRIBE_CONCURRENCY` (8) bounds the requests in flight.
+  authentication error pauses describing for 5 minutes, and a failed
+  embedding pauses embedding for one. `PISA_SEARCH_DESCRIBE_CONCURRENCY` (8)
+  bounds the requests in flight.
 - **Vectors.** The embedder that embeds queries (`PISA_SEARCH_TEI`, Scaleway or
   TEI) also embeds each snapshot declaration's signature, docstring and
   description, so it must serve the model that embedded the bundle.
 - **Storage.** Descriptions and vectors are kept in TiKV with the module, so a
-  restart rebuilds the in-memory index without calling either API. They are
-  deleted with the module.
+  new leader writes the same points without calling either API, and Qdrant can
+  be rebuilt from TiKV and the bundle. They are deleted with the module.
 - **Version.** It searches the snapshots of the workers whose version is the
   bundle's `env_id`; `PISA_SEARCH_SNAPSHOT_VERSION` names another.
 
@@ -617,8 +670,11 @@ hits[0]["module"], hits[0]["snapshot"]["entries"]  # "PisaSnap.s1f…", ["9c0e�
 ```
 
 **Quality.** Two reports track it:
-- `search/eval/<env_id>.md`: recall, MRR and nDCG on LeanSearch v2's MathlibQR
-  benchmark, per lane and per query style;
+- `search/eval/<env_id>-qdrant.md`: recall, MRR and nDCG on LeanSearch v2's
+  MathlibQR benchmark, per lane and per query style, with
+  `<env_id>-before-qdrant.md` for the in-memory engine it replaced. Run it with
+  `pisa-search eval --qdrant URL --env-id ENV --data MathlibQR.json`; several
+  `--weights` are compared in one run;
 - `search/pilot/2026-10-22/report.md`: the informalization pilot, with cost,
   a full-run estimate, check pass rates and samples to review.
 

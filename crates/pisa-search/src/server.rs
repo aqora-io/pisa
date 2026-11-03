@@ -83,13 +83,22 @@ fn check_batch(n: usize) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn health(State(engine): State<Arc<Engine>>) -> Json<serde_json::Value> {
+/// 503 while Qdrant doesn't answer, so a readiness probe takes the replica
+/// out of rotation.
+async fn health(State(engine): State<Arc<Engine>>) -> (StatusCode, Json<serde_json::Value>) {
     let qdrant = engine.q.healthy().await;
-    Json(json!({
-        "status": if qdrant { "ok" } else { "degraded" },
+    let status = if qdrant {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let body = json!({
+        "status": if qdrant { "ok" } else { "unavailable" },
         "env_id": engine.env_id(),
         "qdrant": qdrant,
-    }))
+        "leader": engine.leader.load(std::sync::atomic::Ordering::Acquire),
+    });
+    (status, Json(body))
 }
 
 fn unavailable(e: impl std::fmt::Display) -> ApiError {

@@ -6,9 +6,10 @@
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
 # PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
 #
-# Declaration search is an optional profile; it serves a bundle built with
-# `pisa-search build` (see the README) and embeds queries with Qwen3-Embedding-8B
-# on Scaleway:
+# Declaration search is an optional profile: two replicas over Qdrant. Load a
+# bundle built with `pisa-search build` (see the README) into Qdrant once, then
+# serve it; queries are embedded with Qwen3-Embedding-8B on Scaleway:
+#   docker compose --profile search-load run --rm search-load
 #   SCW_SECRET_KEY=... docker compose --profile search up --build
 
 x-worker: &worker
@@ -105,6 +106,14 @@ services:
       <<: *worker-env
       PISA_WORKER_ID: worker-2
 
+  # Holds the search index: the bundle's declarations and the snapshots'.
+  qdrant:
+    profiles: [search, search-load]
+    image: qdrant/qdrant:v1.20.0
+    ports: ["127.0.0.1:6333:6333"]
+    volumes:
+      - qdrant-data:/qdrant/storage
+
   search:
     profiles: [search]
     build:
@@ -112,19 +121,22 @@ services:
       dockerfile: docker/Dockerfile
       target: search
     image: pisa-search
-    ports: ["8100:8100"]
+    # Two replicas, on 8100 and 8101; the one holding a lease in TiKV
+    # indexes snapshots.
+    deploy:
+      replicas: 2
+    ports: ["8100-8101:8100"]
     # It reads the workers' snapshot catalog, and exits if PD isn't serving yet.
-    depends_on: [tikv]
+    depends_on: [qdrant, tikv]
     restart: on-failure
-    # Writable: tantivy takes a lock file when it opens the index.
-    volumes:
-      - ${PISA_SEARCH_BUNDLE:-./search/bundle}:/bundle
     # Queries are embedded by the model that embedded the bundle: by default
     # Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a bundle
     # embedded with the local 0.6B model, set PISA_SEARCH_EMBEDDER=http://tei:80
     # and add --profile search-local.
     environment:
-      PISA_SEARCH_BUNDLE: /bundle
+      PISA_SEARCH_QDRANT: http://qdrant:6333
+      # The env_id of the loaded bundle: that of docker/lean-project.
+      PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.35.0-da683984}
       PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
       # Snapshot search. Set a describe model (e.g. claude-haiku-5-5, with
@@ -134,6 +146,21 @@ services:
       PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      RUST_LOG: info
+
+  # Loads the bundle in PISA_SEARCH_BUNDLE (default search/bundle) into Qdrant.
+  search-load:
+    profiles: [search-load]
+    image: pisa-search
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: search
+    depends_on: [qdrant]
+    volumes:
+      - ${PISA_SEARCH_BUNDLE:-./search/bundle}:/bundle:ro
+    command: ["load", "--bundle", "/bundle", "--qdrant", "http://qdrant:6333"]
+    environment:
       RUST_LOG: info
 
   # Qwen3-Embedding-0.6B on the CPU, for bundles embedded with it.
@@ -146,4 +173,5 @@ services:
       - tei-models:/data
 
 volumes:
+  qdrant-data:
   tei-models:
