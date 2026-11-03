@@ -305,7 +305,8 @@ impl SearchClient {
 
     #[pyo3(signature = (
         q = None, *, nl = None, latex = None, pattern = None, goal = None, name = None,
-        libraries = Vec::new(), kinds = Vec::new(), k = 5, include_sorried = false
+        libraries = Vec::new(), kinds = Vec::new(), k = 5, include_sorried = false,
+        snapshots = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search<'py>(
@@ -321,7 +322,13 @@ impl SearchClient {
         kinds: Vec<String>,
         k: usize,
         include_sorried: bool,
+        snapshots: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let snapshots = match snapshots {
+            Some(s) => serde_json::from_value(from_py(&s)?)
+                .map_err(|e| PyValueError::new_err(format!("invalid snapshots: {e}")))?,
+            None => Default::default(),
+        };
         let query = pisa_client::Query {
             q,
             nl,
@@ -334,6 +341,7 @@ impl SearchClient {
             k,
             include_sorried,
             verify: false,
+            snapshots,
         };
         call(py, async move { self.inner.search(&query).await })
     }

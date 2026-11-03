@@ -10,6 +10,8 @@
 //! are ordinary answers, never errors. Every response names the `env_id` (the
 //! project version) its index was built from; a request may pin one.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 fn default_k() -> usize {
@@ -60,6 +62,26 @@ pub struct Query {
     /// Check hits against `goal` on a Lean worker (not available yet).
     #[serde(default)]
     pub verify: bool,
+    /// Snapshots to search as well as the base libraries (default: none).
+    #[serde(default, skip_serializing_if = "SnapshotScope::is_none")]
+    pub snapshots: SnapshotScope,
+}
+
+/// Which snapshot modules a query searches: `"none"`, `"all"`, or
+/// `{"labels": {"k": "v"}}`, the modules of the entries that have every label.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotScope {
+    #[default]
+    None,
+    All,
+    Labels(BTreeMap<String, String>),
+}
+
+impl SnapshotScope {
+    pub fn is_none(&self) -> bool {
+        *self == SnapshotScope::None
+    }
 }
 
 impl Default for Query {
@@ -76,6 +98,7 @@ impl Default for Query {
             k: default_k(),
             include_sorried: false,
             verify: false,
+            snapshots: SnapshotScope::None,
         }
     }
 }
@@ -121,6 +144,21 @@ pub struct Hit {
     pub source_url: Option<String>,
     /// About 150 tokens for a model's context.
     pub text: String,
+    /// For a declaration of a snapshot module (named in `module`, with the
+    /// header that loads it in `flags.imports`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<SnapshotHit>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotHit {
+    /// The query's entries on the module, newest first, at most 10.
+    pub entries: Vec<String>,
+    /// See the snapshot API: the module depends on `sorry` or other axioms
+    /// outside the allowed list.
+    pub dirty: bool,
+    /// The module and everything it imports passed the kernel re-check.
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,5 +267,27 @@ mod tests {
         assert!(!q.include_sorried);
         let f = Flags::default();
         assert_eq!(serde_json::to_value(&f).unwrap(), json!({}));
+        assert_eq!(q.snapshots, SnapshotScope::None);
+        assert!(serde_json::to_value(&q).unwrap().get("snapshots").is_none());
+    }
+
+    #[test]
+    fn snapshot_scopes() {
+        for (scope, wire) in [
+            (SnapshotScope::None, json!("none")),
+            (SnapshotScope::All, json!("all")),
+            (
+                SnapshotScope::Labels(BTreeMap::from([("run".into(), "7".into())])),
+                json!({"labels": {"run": "7"}}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&scope).unwrap(), wire);
+            let q: Query = serde_json::from_value(json!({"q": "x", "snapshots": wire})).unwrap();
+            assert_eq!(q.snapshots, scope);
+        }
+        for bad in [json!("some"), json!({"label": {}}), json!(["all"])] {
+            let q = serde_json::from_value::<Query>(json!({"q": "x", "snapshots": bad}));
+            assert!(q.is_err(), "{bad}");
+        }
     }
 }

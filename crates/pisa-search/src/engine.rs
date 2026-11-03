@@ -712,6 +712,7 @@ impl Engine {
             score,
             lanes: lanes.into_iter().map(String::from).collect(),
             source_url: d.source_url.clone(),
+            snapshot: None,
         }
     }
 }

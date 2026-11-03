@@ -215,6 +215,12 @@ class Query(TypedDict, total=False):
     kinds: list[str]
     k: int
     include_sorried: bool
+    snapshots: SnapshotScope
+
+class SnapshotLabels(TypedDict):
+    labels: dict[str, str]
+
+SnapshotScope = Literal["none", "all"] | SnapshotLabels
 
 class Flags(TypedDict):
     uses_sorry: NotRequired[bool]
@@ -236,6 +242,12 @@ class Hit(TypedDict):
     lanes: list[str]
     source_url: NotRequired[str]
     text: str
+    snapshot: NotRequired[SnapshotHit]
+
+class SnapshotHit(TypedDict):
+    entries: list[str]
+    dirty: bool
+    verified: bool
 
 class QueryResult(TypedDict):
     hits: list[Hit]
@@ -295,9 +307,12 @@ class SearchClient:
         kinds: list[str] = [],
         k: int = 5,
         include_sorried: bool = False,
+        snapshots: SnapshotScope | None = None,
     ) -> QueryResult:
         """Search by free text `q` or by the fields that apply: a description,
-        LaTeX, a Lean pattern, a goal state or a (partial) name."""
+        LaTeX, a Lean pattern, a goal state or a (partial) name. `snapshots`
+        also searches snapshot modules: "all", or {"labels": {...}} for those
+        of the entries with every label."""
     def search_batch(self, queries: list[Query]) -> list[QueryResult]:
         """Run up to 64 queries in one request; results keep their order."""
     def resolve(self, names: list[str]) -> list[Resolution]:
