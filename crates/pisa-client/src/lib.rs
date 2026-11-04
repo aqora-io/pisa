@@ -350,10 +350,8 @@ impl Client {
     /// Entries newest first, as summaries without code or check results: those
     /// with every `(key, value)` label in `labels` (up to 64), or all of them.
     /// A page has up to `limit` (1 to 1000, default 100). Keep passing its
-    /// `next` as `after` while it has one: a request reads a bounded number of
-    /// index entries, so a page may be short, even empty, and still have
-    /// `next`. The first label is the one scanned, so put the most selective
-    /// first.
+    /// `next` as `after` while it has one; a full page has one, and the page
+    /// after it may be empty.
     pub async fn list_snapshots(
         &self,
         labels: &[(&str, &str)],

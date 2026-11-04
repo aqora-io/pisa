@@ -104,7 +104,7 @@ async fn worker_reports_a_new_warm_header_before_the_result() {
     tokio::spawn(pisa_worker::run_with_stores(
         cfg,
         store,
-        pisa_worker::kv::Kv::memory(),
+        pisa_worker::db::Db::memory().await,
         std::future::pending(),
     ));
     let (stream, _) = listener.accept().await.unwrap();
@@ -158,7 +158,7 @@ async fn a_job_that_does_not_decode_fails_alone() {
     tokio::spawn(pisa_worker::run_with_stores(
         cfg,
         store,
-        pisa_worker::kv::Kv::memory(),
+        pisa_worker::db::Db::memory().await,
         std::future::pending(),
     ));
     let (stream, _) = listener.accept().await.unwrap();

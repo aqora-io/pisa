@@ -1,0 +1,28 @@
+[package]
+name = "pisa-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The metadata database, PostgreSQL or SQLite, and the snapshot catalog stored in it"
+
+[dependencies]
+deadpool = { version = "0.13", features = ["rt_tokio_1"] }
+diesel = { version = "2.3", default-features = false, features = ["sqlite", "postgres_backend", "serde_json"] }
+diesel-async = { version = "0.9", features = ["postgres", "sqlite", "deadpool", "async-connection-wrapper"] }
+diesel_migrations = { version = "2.3", default-features = false }
+futures.workspace = true
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
+pisa-protocol.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-native-certs = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-postgres = "0.7"
+tokio-postgres-rustls = "0.14"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

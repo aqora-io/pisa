@@ -13,7 +13,7 @@ use pisa_protocol::wire::{
 };
 
 use crate::check::{axiom_report, header_error, policy_error, run, run_check, unexpected};
-use crate::kv::KvError;
+use crate::db::DbError;
 use crate::policy::parse_report;
 use crate::pool::{Lease, Pool, Resident};
 use crate::store::{SessionMeta, StateMeta, Store, now_secs};
@@ -30,10 +30,10 @@ fn internal(e: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::Internal, e.to_string())
 }
 
-/// The error for a [`Store`] call that failed: `unavailable` if the KV store
+/// The error for a [`Store`] call that failed: `unavailable` if the database
 /// did, else `internal`.
 fn store_error(e: anyhow::Error) -> Error {
-    match e.downcast::<KvError>() {
+    match e.downcast::<DbError>() {
         Ok(e) => e.into(),
         Err(e) => internal(e),
     }

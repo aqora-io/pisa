@@ -51,7 +51,7 @@ use crate::catalog::{
     record_fits, unknown_module,
 };
 use crate::check::{header_error, policy_error, run, unexpected};
-use crate::kv::Kv;
+use crate::db::Db;
 use crate::policy::{module_export, module_report, parse_export, parse_report, uses_macros};
 use crate::pool::{Lease, Pool};
 
@@ -240,14 +240,14 @@ impl Snapshots {
     /// cached snapshot for `confirm_every`.
     pub fn new(
         store: Arc<dyn ObjectStore>,
-        kv: Kv,
+        db: Db,
         version: String,
         root: PathBuf,
         confirm_every: Duration,
     ) -> Self {
         Snapshots {
             store,
-            catalog: Catalog::new(kv, version.clone()),
+            catalog: Catalog::new(db, version.clone()),
             version,
             root,
             confirm_every,
@@ -759,7 +759,10 @@ impl Snapshots {
             .map(|decls| SnapshotDecls::new(&meta, decls))
             .filter(|d| {
                 record_fits(d) || {
-                    tracing::warn!(module = %id, "too many declarations to index for search");
+                    tracing::warn!(
+                        module = %id,
+                        "declarations too large, or with a NUL character, to index for search"
+                    );
                     false
                 }
             });
@@ -1108,14 +1111,13 @@ impl Snapshots {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::{ROOT, prefix};
     use object_store::memory::InMemory;
 
-    /// A worker's snapshots over `kv`, with its local cache in `dir`.
-    fn snapshots(kv: Kv, dir: &Path) -> Arc<Snapshots> {
+    /// A worker's snapshots over `db`, with its local cache in `dir`.
+    fn snapshots(db: Db, dir: &Path) -> Arc<Snapshots> {
         std::fs::create_dir_all(dir.join(snapshot::ROOT)).unwrap();
         let store = Arc::new(InMemory::new());
-        let s = Snapshots::new(store, kv, "v".into(), dir.into(), Duration::from_secs(60));
+        let s = Snapshots::new(store, db, "v".into(), dir.into(), Duration::from_secs(60));
         Arc::new(s)
     }
 
@@ -1156,17 +1158,10 @@ mod tests {
         }
     }
 
-    /// Every KV key of version `v`, except the change log's, which outlive
-    /// what they describe.
-    async fn kv_keys(kv: &Kv) -> Vec<Vec<u8>> {
-        let mut txn = kv.begin().await.unwrap();
-        let pairs = txn.scan(prefix(&[ROOT, "v"]), u32::MAX).await.unwrap();
-        let log = prefix(&[ROOT, "v", "log"]);
-        pairs
-            .into_iter()
-            .map(|(key, _)| key)
-            .filter(|key| !log.contains(key))
-            .collect()
+    /// Every row of version `v`, except the change log's, which outlive what
+    /// they describe.
+    async fn rows(db: &Db) -> Vec<Vec<String>> {
+        db.rows("v").await.unwrap()
     }
 
     async fn upload(s: &Snapshots, meta: &ModuleMeta, content: &[u8]) {
@@ -1189,9 +1184,9 @@ mod tests {
     #[tokio::test]
     async fn a_delete_leaves_a_new_build_of_its_module_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
-        let catalog = Catalog::new(kv, "v".into());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
+        let catalog = Catalog::new(db, "v".into());
         let id = snapshot::id("code");
         let old = built(&id, b"old");
         upload(&s, &old, b"old").await;
@@ -1246,9 +1241,9 @@ mod tests {
     #[tokio::test]
     async fn a_verify_of_an_old_build_leaves_the_new_one_unverified() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
-        let catalog = Catalog::new(kv, "v".into());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
+        let catalog = Catalog::new(db, "v".into());
         let id = snapshot::id("code");
         let old = built(&id, b"old");
         let (entry, _, _) = catalog.commit(&id, &old, None, no_labels()).await.unwrap();
@@ -1280,8 +1275,8 @@ mod tests {
     #[tokio::test]
     async fn a_verify_fetches_the_build_it_checks() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
         let id = snapshot::id("code");
         let old = built(&id, b"old");
         std::fs::write(s.file(&id, "olean"), b"old").unwrap();
@@ -1295,7 +1290,7 @@ mod tests {
             .insert(id.clone(), Instant::now());
         let new = built(&id, b"new");
         upload(&s, &new, b"new").await;
-        let catalog = Catalog::new(kv, "v".into());
+        let catalog = Catalog::new(db, "v".into());
         catalog.commit(&id, &new, None, no_labels()).await.unwrap();
 
         assert_eq!(s.before_recheck(&new.modules[0]).await.unwrap(), None);
@@ -1308,8 +1303,8 @@ mod tests {
     #[tokio::test]
     async fn a_record_too_large_is_refused_and_its_files_go() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
         let id = snapshot::id("code");
         let mut ours = built(&id, b"ours");
         ours.code = "x".repeat(7 * 1024 * 1024);
@@ -1324,64 +1319,14 @@ mod tests {
             error.message.contains("snapshot record too large"),
             "{error:?}"
         );
-        assert!(kv_keys(&kv).await.is_empty());
+        assert!(rows(&db).await.is_empty());
         assert!(!has_files(&s, &ours).await, "this build's files go");
-    }
-
-    /// A listing reads a bounded number of index keys. One cut short has
-    /// `next`, even when it found nothing, and following it reaches the rest.
-    #[tokio::test]
-    async fn a_listing_cut_short_by_its_budget_goes_on_from_next() {
-        let catalog = Catalog::new(Kv::memory(), "v".into()).with_max_scan(4);
-        let id = snapshot::id("code");
-        let with = |labels: &[(&str, &str)]| NewEntry {
-            labels: labels
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            key: None,
-        };
-        let only_match = with(&[("k", "a"), ("p", "x")]);
-        let (oldest, _, _) = catalog
-            .commit(&id, &built(&id, b"x"), None, only_match)
-            .await
-            .unwrap();
-        let mut newest_first = vec![oldest.clone()];
-        for _ in 0..5 {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            let added = catalog.add_entry(&id, with(&[("k", "a")])).await.unwrap();
-            newest_first.insert(0, added.unwrap().0);
-        }
-        let ids = |page: Vec<(String, EntryMeta)>| -> Vec<String> {
-            page.into_iter().map(|(e, _)| e).collect()
-        };
-
-        // Each entry costs its one key.
-        let (page, next) = catalog.list(&[], 10, None).await.unwrap();
-        assert_eq!(ids(page), newest_first[..4]);
-        let (page, next) = catalog.list(&[], 10, next.as_deref()).await.unwrap();
-        assert_eq!(ids(page), newest_first[4..]);
-        assert_eq!(next, None);
-
-        // Each costs its key and a lookup of `p:x`, so a page covers two.
-        let filters = [("k", "a"), ("p", "x")].map(|(k, v)| (k.to_string(), v.to_string()));
-        let mut pages = Vec::new();
-        let mut after = None;
-        loop {
-            let (page, next) = catalog.list(&filters, 10, after.as_deref()).await.unwrap();
-            pages.push(ids(page));
-            match next {
-                Some(next) => after = Some(next),
-                None => break,
-            }
-        }
-        assert_eq!(pages, [vec![], vec![], vec![oldest]]);
     }
 
     #[tokio::test]
     async fn a_listing_takes_at_most_64_filters() {
         let dir = tempfile::tempdir().unwrap();
-        let s = snapshots(Kv::memory(), dir.path());
+        let s = snapshots(Db::memory().await, dir.path());
         let filters = |n: usize| -> Vec<(String, String)> {
             (0..n).map(|i| (i.to_string(), String::new())).collect()
         };
@@ -1396,12 +1341,12 @@ mod tests {
     #[tokio::test]
     async fn a_commit_that_finds_the_module_stored_keeps_that_build() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
         let id = snapshot::id("code");
         let theirs = built(&id, b"theirs");
         upload(&s, &theirs, b"theirs").await;
-        let catalog = Catalog::new(kv, "v".into());
+        let catalog = Catalog::new(db, "v".into());
         catalog
             .commit(&id, &theirs, None, no_labels())
             .await
@@ -1433,9 +1378,9 @@ mod tests {
     #[tokio::test]
     async fn a_commit_whose_key_is_used_by_other_code_keeps_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
-        let catalog = Catalog::new(kv.clone(), "v".into());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
+        let catalog = Catalog::new(db.clone(), "v".into());
         let (parent_id, other_id, id) = (
             snapshot::id("parent"),
             snapshot::id("other"),
@@ -1452,7 +1397,7 @@ mod tests {
             .await
             .unwrap();
         upload(&s, &other, b"other").await;
-        let before = kv_keys(&kv).await;
+        let before = rows(&db).await;
 
         let ours = built(&id, b"ours");
         let own = ours.modules[0].clone();
@@ -1465,7 +1410,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((entry, entry_meta.module), (taken.clone(), other_id));
-        assert_eq!(kv_keys(&kv).await, before);
+        assert_eq!(rows(&db).await, before);
 
         let contents = [b"ours".to_vec()];
         let error = s
@@ -1474,14 +1419,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadRequest);
         assert!(error.message.contains("different code"), "{error:?}");
-        assert_eq!(kv_keys(&kv).await, before);
+        assert_eq!(rows(&db).await, before);
         assert!(catalog.module(&id).await.is_err());
         assert!(!has_files(&s, &ours).await, "this build's files go");
         assert!(has_files(&s, &other).await);
 
         let added = catalog.add_entry(&parent_id, keyed("k")).await.unwrap();
         assert_eq!(added.map(|(e, _)| e), Some(taken));
-        assert_eq!(kv_keys(&kv).await, before);
+        assert_eq!(rows(&db).await, before);
     }
 
     /// The key is already on an entry of this very module: that entry is
@@ -1489,16 +1434,16 @@ mod tests {
     #[tokio::test]
     async fn a_commit_whose_key_is_on_the_same_module_returns_that_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let kv = Kv::memory();
-        let s = snapshots(kv.clone(), dir.path());
-        let catalog = Catalog::new(kv.clone(), "v".into());
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
+        let catalog = Catalog::new(db.clone(), "v".into());
         let id = snapshot::id("code");
         let theirs = built(&id, b"theirs");
         upload(&s, &theirs, b"theirs").await;
         let mut labelled = keyed("k");
         labelled.labels.insert("a".into(), "1".into());
         let (taken, _, _) = catalog.commit(&id, &theirs, None, labelled).await.unwrap();
-        let before = kv_keys(&kv).await;
+        let before = rows(&db).await;
 
         let ours = built(&id, b"ours");
         let own = ours.modules[0].clone();
@@ -1512,7 +1457,7 @@ mod tests {
         assert_eq!(entry, taken);
         assert_eq!(entry_meta.labels["a"], "1");
         assert_eq!(stored.modules, theirs.modules);
-        assert_eq!(kv_keys(&kv).await, before);
+        assert_eq!(rows(&db).await, before);
         assert!(!has_files(&s, &ours).await, "this build's files go");
         assert!(has_files(&s, &theirs).await);
     }

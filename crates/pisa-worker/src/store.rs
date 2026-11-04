@@ -1,18 +1,13 @@
 //! Pickled proof states in object storage; the records that make them loadable,
-//! and sessions, in the KV store.
+//! and sessions, in the database.
 //!
 //! Object storage, per pool version:
 //! - `states/<version>/<hash>.olean.zst`: a pickled proof state, zstd-compressed,
 //!   addressed by the SHA-256 of the compressed bytes
 //!
-//! KV keys, per pool version (every key starts with [`ROOT`]):
-//! - `(pisa, <version>, "state", <hash>)`: what is needed to load a state
-//!   ([`StateMeta`])
-//! - `(pisa, <version>, "session", <id>)`: the session's code and declarations
-//!   ([`SessionMeta`])
-//! - `(pisa, <version>, "age", <created>, <kind>, <id>)`: empty; orders records
-//!   by creation time so that [`Store::sweep`] finds the expired ones. `created`
-//!   is 16 hex digits and `kind` is `state` or `session`.
+//! Database [`Records`], per pool version:
+//! - state `<hash>`: what is needed to load a state ([`StateMeta`])
+//! - session `<id>`: the session's code and declarations ([`SessionMeta`])
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -24,10 +19,8 @@ use pisa_protocol::verify::Declaration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::kv::{self, Kv, KvError, ROOT, decode, key};
-
-/// Records deleted per transaction when sweeping.
-const SWEEP_BATCH: u32 = 256;
+use crate::db::Db;
+use crate::records::Records;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateMeta {
@@ -59,36 +52,22 @@ pub fn now_secs() -> u64 {
 #[derive(Clone)]
 pub struct Store {
     inner: Arc<dyn ObjectStore>,
-    kv: Kv,
+    records: Arc<Records>,
     version: String,
 }
 
 impl Store {
-    pub fn new(inner: Arc<dyn ObjectStore>, kv: Kv, version: String) -> Self {
-        Store { inner, kv, version }
+    pub fn new(inner: Arc<dyn ObjectStore>, db: Db, version: String) -> Self {
+        let records = Arc::new(Records::new(db, version.clone()));
+        Store {
+            inner,
+            records,
+            version,
+        }
     }
 
     fn pickle_path(&self, hash: &str) -> Path {
         Path::from(format!("states/{}/{hash}.olean.zst", self.version))
-    }
-
-    fn state_key(&self, hash: &str) -> Vec<u8> {
-        key(&[ROOT, &self.version, "state", hash])
-    }
-
-    fn session_key(&self, id: &str) -> Vec<u8> {
-        key(&[ROOT, &self.version, "session", id])
-    }
-
-    fn age_key(&self, created: u64, kind: &str, id: &str) -> Vec<u8> {
-        key(&[
-            ROOT,
-            &self.version,
-            "age",
-            &format!("{created:016x}"),
-            kind,
-            id,
-        ])
     }
 
     /// Stores a pickled state and returns its content hash.
@@ -99,30 +78,16 @@ impl Store {
         self.inner
             .put(&self.pickle_path(&hash), PutPayload::from(compressed))
             .await?;
-        let record = serde_json::to_vec(meta)?;
-        let state_key = self.state_key(&hash);
-        let age_key = self.age_key(meta.created, "state", &hash);
-        kv::retry(|| async {
-            let mut txn = self.kv.begin().await?;
-            if let Some(old) = txn.get(&state_key).await? {
-                // A stored state gets a new age, so the old key must go.
-                if let Ok(old) = serde_json::from_slice::<StateMeta>(&old) {
-                    txn.delete(self.age_key(old.created, "state", &hash))
-                        .await?;
-                }
-            }
-            txn.put(state_key.clone(), record.clone()).await?;
-            txn.put(age_key.clone(), Vec::new()).await?;
-            txn.commit().await
-        })
-        .await?;
+        let record = serde_json::to_value(meta)?;
+        self.records.put_state(&hash, meta.created, &record).await?;
         Ok(hash)
     }
 
-    /// The state's record, `None` if there is none. An error is the KV
-    /// store's ([`KvError`]) or an unreadable record.
+    /// The state's record, `None` if there is none. An error is the
+    /// database's ([`DbError`](crate::db::DbError)) or an unreadable record.
     pub async fn state_meta(&self, hash: &str) -> anyhow::Result<Option<StateMeta>> {
-        self.get_record(self.state_key(hash)).await
+        let record = self.records.state(hash).await?;
+        Ok(record.map(serde_json::from_value).transpose()?)
     }
 
     /// The state's decompressed pickle, or `None` if it has been deleted.
@@ -136,69 +101,22 @@ impl Store {
     }
 
     pub async fn put_session(&self, id: &str, meta: &SessionMeta) -> anyhow::Result<()> {
-        let record = serde_json::to_vec(meta)?;
-        let session_key = self.session_key(id);
-        let age_key = self.age_key(meta.created, "session", id);
-        kv::retry(|| async {
-            let mut txn = self.kv.begin().await?;
-            txn.put(session_key.clone(), record.clone()).await?;
-            txn.put(age_key.clone(), Vec::new()).await?;
-            txn.commit().await
-        })
-        .await?;
+        let record = serde_json::to_value(meta)?;
+        self.records.put_session(id, meta.created, &record).await?;
         Ok(())
     }
 
     /// The session's record, `None` if there is none; errors as for
     /// [`state_meta`](Self::state_meta).
     pub async fn session(&self, id: &str) -> anyhow::Result<Option<SessionMeta>> {
-        self.get_record(self.session_key(id)).await
-    }
-
-    async fn get_record<T: serde::de::DeserializeOwned>(
-        &self,
-        key: Vec<u8>,
-    ) -> anyhow::Result<Option<T>> {
-        let value = kv::retry(|| async { self.kv.begin().await?.get(&key).await }).await?;
-        Ok(value.map(|v| serde_json::from_slice(&v)).transpose()?)
+        let record = self.records.session(id).await?;
+        Ok(record.map(serde_json::from_value).transpose()?)
     }
 
     /// Deletes states and sessions of this version older than `ttl`.
     pub async fn sweep(&self, ttl: Duration) -> anyhow::Result<usize> {
         let cutoff = now_secs().saturating_sub(ttl.as_secs());
-        let mut start = key(&[ROOT, &self.version, "age"]);
-        let end = key(&[ROOT, &self.version, "age", &format!("{cutoff:016x}")]);
-        let mut deleted = 0;
-        loop {
-            let (batch, last) = kv::retry(|| async {
-                let mut txn = self.kv.begin().await?;
-                let aged = txn.scan(start.clone()..end.clone(), SWEEP_BATCH).await?;
-                for (age_key, _) in &aged {
-                    if let [.., kind, id] = decode(age_key).as_slice() {
-                        let record = if kind == "state" {
-                            self.state_key(id)
-                        } else {
-                            self.session_key(id)
-                        };
-                        txn.delete(record).await?;
-                    }
-                    txn.delete(age_key.clone()).await?;
-                }
-                txn.commit().await?;
-                let last = aged.last().map(|(age_key, _)| age_key.clone());
-                Ok::<_, KvError>((aged.len(), last))
-            })
-            .await?;
-            deleted += batch;
-            if batch < SWEEP_BATCH as usize {
-                break;
-            }
-            // TiKV keeps what a batch deleted as tombstones until GC: scanning
-            // from the start again would skip over every one of them.
-            if let Some(last) = last {
-                start = [last, vec![0]].concat();
-            }
-        }
+        let mut deleted = self.records.sweep(cutoff).await?;
 
         let prefix = Path::from(format!("states/{}", self.version));
         let mut objects = self.inner.list(Some(&prefix));
@@ -216,7 +134,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv::{decode, prefix};
     use object_store::memory::InMemory;
 
     fn state(created: u64) -> StateMeta {
@@ -248,7 +165,7 @@ mod tests {
     #[tokio::test]
     async fn states_round_trip_and_sweep() {
         let s3 = Arc::new(InMemory::new());
-        let store = Store::new(s3.clone(), Kv::memory(), "v1".into());
+        let store = Store::new(s3.clone(), Db::memory().await, "v1".into());
         let meta = state(now_secs());
         let pickle = b"olean bytes".repeat(100);
         let hash = store.put_state(&pickle, &meta).await.unwrap();
@@ -274,25 +191,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storing_a_state_again_keeps_one_age_key() {
-        let kv = Kv::memory();
-        let store = Store::new(Arc::new(InMemory::new()), kv.clone(), "v1".into());
+    async fn storing_a_state_again_keeps_one_record() {
+        let db = Db::memory().await;
+        let store = Store::new(Arc::new(InMemory::new()), db.clone(), "v1".into());
         let pickle = b"olean bytes".repeat(100);
         let hash = store.put_state(&pickle, &state(1)).await.unwrap();
         store.put_state(&pickle, &state(2)).await.unwrap();
 
-        let mut txn = kv.begin().await.unwrap();
-        let ages = txn.scan(prefix(&[ROOT, "v1", "age"]), 10).await.unwrap();
-        assert_eq!(ages.len(), 1);
-        assert_eq!(
-            decode(&ages[0].0),
-            [ROOT, "v1", "age", &format!("{:016x}", 2), "state", &hash]
-        );
+        assert_eq!(db.rows("v1").await.unwrap(), [["states", hash.as_str()]]);
+        assert_eq!(store.state_meta(&hash).await.unwrap().unwrap().created, 2);
     }
 
     #[tokio::test]
-    async fn sweep_deletes_in_batches() {
-        let store = Store::new(Arc::new(InMemory::new()), Kv::memory(), "v1".into());
+    async fn sweep_deletes_only_old_records() {
+        let store = Store::new(Arc::new(InMemory::new()), Db::memory().await, "v1".into());
         for i in 0..300 {
             store
                 .put_session(&format!("old{i}"), &session(1))
@@ -311,7 +223,7 @@ mod tests {
     /// A missing record is `None`, not an error: errors are the store's.
     #[tokio::test]
     async fn missing_records_are_none() {
-        let store = Store::new(Arc::new(InMemory::new()), Kv::memory(), "v1".into());
+        let store = Store::new(Arc::new(InMemory::new()), Db::memory().await, "v1".into());
         assert!(store.state_meta("0f").await.unwrap().is_none());
         assert!(store.session("s").await.unwrap().is_none());
     }

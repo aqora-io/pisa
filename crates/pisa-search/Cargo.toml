@@ -13,7 +13,7 @@ clap.workspace = true
 futures.workspace = true
 hex.workspace = true
 object_store.workspace = true
-pisa-kv.workspace = true
+pisa-db.workspace = true
 pisa-protocol.workspace = true
 rayon = "1"
 reqwest = { workspace = true, features = ["rustls", "blocking"] }

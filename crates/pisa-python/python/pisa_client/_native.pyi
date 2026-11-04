@@ -188,10 +188,8 @@ class Client:
         """Entries newest first, as summaries without code or check results:
         those with every label in `labels` (exact matches, up to 64), or all of
         them. A page has up to `limit` entries (1 to 1000, default 100). Keep
-        passing its `next` as `after` while it has one: a request reads a
-        bounded number of index entries, so a page may be short, even empty,
-        and still have `next`. The first label in `labels` is the one the
-        server scans, so put the most selective first."""
+        passing its `next` as `after` while it has one; a full page has one,
+        and the page after it may be empty."""
     def set_snapshot_labels(
         self,
         entry: str,

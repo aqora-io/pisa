@@ -17,7 +17,7 @@ metadata:
     app.kubernetes.io/component: search
 spec:
   # Replicas hold no state: Qdrant holds the index, and the one holding a
-  # lease in TiKV indexes snapshots.
+  # lease in the database indexes snapshots.
   {{- if not .Values.search.autoscaling.enabled }}
   replicas: {{ .Values.search.replicas }}
   {{- end }}
@@ -41,7 +41,8 @@ spec:
             - { name: PISA_SEARCH_TEI, value: {{ . | quote }} }
             {{- end }}
             {{- if .Values.search.snapshots }}
-            - { name: PISA_TIKV_PD, value: {{ required "search.snapshots needs metadata.tikv.pdEndpoints" (join "," .Values.metadata.tikv.pdEndpoints) | quote }} }
+            - name: PISA_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ required "search.snapshots needs metadata.database.urlSecret.name" .Values.metadata.database.urlSecret.name | quote }}, key: {{ .Values.metadata.database.urlSecret.key | quote }} } }
             {{- with .Values.search.describeModel }}
             - { name: PISA_SEARCH_DESCRIBE_MODEL, value: {{ . | quote }} }
             {{- end }}

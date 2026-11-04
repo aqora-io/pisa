@@ -18,8 +18,8 @@ Lean 4 Server in Rust*:
    - Worker pools are labelled by version.
 3. **Tactic sessions.**
    - Proof states are pickled into object storage (S3, or Garage in Compose),
-     and their records and the sessions are kept in TiKV, so any worker can
-     continue a session.
+     and their records and the sessions are kept in PostgreSQL, so any worker
+     can continue a session.
    - A final check re-runs the whole proof from scratch and confirms it proves
      the original statements, with the original imports.
 
@@ -34,7 +34,7 @@ imports it instead of re-checking it.
 | `pisa-protocol` | The HTTP API types, REPL protocol types, header splitting, router↔worker frames |
 | `pisa-repl` | Async driver for one REPL process: blank-line framing, timeouts, crash reporting |
 | `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store |
-| `pisa-kv` | The transactional KV layer (in-memory or TiKV) and the snapshot catalog stored in it, shared by the workers and the search service |
+| `pisa-db` | The metadata database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, and the snapshot catalog stored in it, shared by the workers and the search service |
 | `pisa-router` | HTTP API, worker registry, global queue, routing, metrics |
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
@@ -50,19 +50,27 @@ python3 scripts/e2e.py [--mathlib] [--search http://localhost:8100]   # end-to-e
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 ```
 
-Compose also starts a single-node TiKV (a PD and a TiKV) and Garage. Workers keep
-session data in two places, chosen by environment variables that Compose and the
-chart set:
+Compose also starts PostgreSQL and Garage. Workers keep session data in two
+places, chosen by environment variables that Compose and the chart set:
 - **Metadata**, the sessions, the records that make proof states loadable,
-  and the snapshot entries and module records, is in TiKV. `PISA_METADATA` is
-  `tikv` or `memory` (the default). `memory` keeps it in the worker process, so
-  it isn't shared between workers or kept across restarts. `PISA_TIKV_PD` lists
-  the PD endpoints, comma-separated (e.g. `pd:2379`), and `tikv` requires it.
-  - TiKV holds the only copy of the snapshot entries and module records, which
-    never expire, so run it durably and back it up.
-  - Without TiDB nothing collects the old versions TiKV keeps of what was
-    rewritten or deleted, so the workers do: every 10 minutes, each moves the
-    cluster's GC safepoint to 10 minutes ago.
+  and the snapshot entries and module records, is in a database.
+  `PISA_DATABASE_URL` is a PostgreSQL URL (`postgres://user:password@host/db`)
+  or the path of a SQLite file. Unset, the worker keeps it in an in-memory
+  SQLite database, so it isn't shared between workers or kept across
+  restarts; a SQLite file is kept, but only one host can use it.
+  - Each process creates or updates the tables when it starts, one process
+    at a time.
+  - PostgreSQL holds the only copy of the snapshot entries and module
+    records, which never expire, so run it durably and back it up.
+  - `sslmode=require` in the URL connects with TLS and checks the server's
+    certificate against the system's roots; for a private CA, set
+    `SSL_CERT_FILE` to its certificate. Other modes connect without TLS.
+  - Each process opens at most 8 connections. Connect directly, or through
+    PgBouncer in session mode: the tables are created under a session-level
+    advisory lock.
+  - The tests use in-memory SQLite, and also the PostgreSQL that
+    `PISA_TEST_DATABASE_URL` names when it is set. Each test has versions of
+    its own there, so tests can share one database.
 - **Blobs**, the pickled proof states and snapshot modules, are in S3.
   `PISA_STORE` is `s3`, which reads the `AWS_*` variables, or `memory`.
 
@@ -89,14 +97,14 @@ own KEDA and Prometheus:
   to load.
 
 **Storage.** Metadata (sessions, proof-state records, snapshot entries and module
-records) lives in TiKV, and blobs (pickled proof states, snapshot modules) in an
+records) lives in PostgreSQL, and blobs (pickled proof states, snapshot modules) in an
 S3-compatible bucket.
-- The chart doesn't deploy TiKV. Set `metadata.tikv.pdEndpoints` to the PD
-  endpoints of a cluster you run, for example with the
-  [TiDB Operator](https://docs.pingcap.com/tidb-in-kubernetes/stable). It is
-  required. TiKV holds the only copy of the snapshot entries and module
-  records, which never expire, so it must be durable and backed up. The
-  workers move its GC safepoint themselves, as there is no TiDB to.
+- The chart doesn't deploy PostgreSQL. Put the URL of one you run, for
+  example with [CloudNativePG](https://cloudnative-pg.io) or a managed
+  service, in a Secret, and name it in `metadata.database.urlSecret.name`
+  (`metadata.database.urlSecret.key` names the key, `url` by default). It is
+  required. PostgreSQL holds the only copy of the snapshot entries and module
+  records, which never expire, so it must be durable and backed up.
 - Give the bucket's credentials as an existing Secret, or leave
   `store.s3.credentialsSecret.name` empty to use the pod's ambient credentials
   (e.g. EKS IRSA).
@@ -106,10 +114,12 @@ helm repo add kedacore https://kedacore.github.io/charts
 helm install keda kedacore/keda -n keda --create-namespace --version 2.21.0
 kubectl create secret generic pisa-s3 \
   --from-literal=AWS_ACCESS_KEY_ID=... --from-literal=AWS_SECRET_ACCESS_KEY=...
+kubectl create secret generic pisa-db \
+  --from-literal=url='postgres://pisa:...@<host>/pisa?sslmode=require'
 helm install pisa deploy/helm/pisa \
   --set worker.image.repository=<registry>/pisa-worker \
   --set keda.prometheus.serverAddress=http://prometheus-server.monitoring.svc.cluster.local \
-  --set metadata.tikv.pdEndpoints={pd.tikv:2379} \
+  --set metadata.database.urlSecret.name=pisa-db \
   --set store.s3.bucket=<bucket> --set store.s3.region=<region> \
   --set store.s3.credentialsSecret.name=pisa-s3
 ```
@@ -142,7 +152,7 @@ helm install prometheus prometheus-community/prometheus --version 29.37.0 \
   -n monitoring --create-namespace -f deploy/minikube/prometheus-values.yaml
 minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
 kubectl apply -f deploy/minikube/garage.yaml   # a throwaway S3 store and its Secret
-kubectl apply -f deploy/minikube/tikv.yaml     # a throwaway single-node TiKV
+kubectl apply -f deploy/minikube/postgres.yaml # a throwaway PostgreSQL and its Secret
 helm install pisa deploy/helm/pisa -f deploy/minikube/values.yaml
 kubectl port-forward svc/pisa-router 8000:8000 &
 python3 scripts/e2e.py --no-failover   # checks, policy, sessions against real Lean
@@ -152,7 +162,7 @@ python3 scripts/k8s_scale.py           # scales up under load, back down, drains
 **Search.** `search.enabled` adds `pisa-search` replicas (`search.replicas`, 2,
 or `search.autoscaling`) with a PodDisruptionBudget, over Qdrant: the official
 chart as a dependency (`qdrant.enabled`, 3 nodes) or `search.qdrant.url`. They
-search snapshots through `metadata.tikv`. Set `search.envId`, and give API keys
+search snapshots through `metadata.database`. Set `search.envId`, and give API keys
 as an existing Secret (`search.secret.name`). Load each bundle once, e.g.
 through `kubectl port-forward svc/<release>-qdrant 6333`, with
 `pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2`;
@@ -164,6 +174,17 @@ until it has, replicas exit at startup and restart.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that moved metadata from TiKV into PostgreSQL:
+- Run PostgreSQL, and set `PISA_DATABASE_URL` where `PISA_METADATA` and
+  `PISA_TIKV_PD` were, for the search service too (in the chart,
+  `metadata.database.urlSecret` where `metadata.tikv` was). The workers and
+  the search service create the tables.
+- Nothing is carried over from TiKV: snapshot entries and modules, sessions
+  and proof states start over, and the first search leader removes the old
+  snapshots from the index.
+- A listing page that has `next` is full; the page after it may be empty.
+- A label value or filter with a NUL character is a `bad_request`.
 
 To the release that moved metadata into TiKV and snapshots onto entries:
 - Upgrade the router and the workers together. Their snapshot jobs changed
@@ -274,7 +295,7 @@ isn't kept.
 <a id="labels"></a>
 **Labels.** An entry's labels are string key/value pairs, at most 64 of them. A
 key is 1–128 bytes of letters, digits, `.`, `_`, `/` and `-`; a value is up to
-512 bytes of UTF-8. Labels that break these rules are a `bad_request`: in
+512 bytes of UTF-8 without NUL characters. Labels that break these rules are a `bad_request`: in
 `result.error` on a create, which then keeps nothing, and a 400 on a `PATCH`,
 which then changes nothing.
 - **Editing.** `PATCH /snapshots/{entry}` with `{"set": {"stage": "done"},
@@ -288,14 +309,11 @@ which then changes nothing.
 - **Order and pages.** Entries come newest first, as summaries: what
   `GET /snapshots/{entry}` returns without `code` and `result`. `limit` is 1–1000
   (default 100), and a listing takes up to 64 `label`s. Keep requesting while a
-  page has `next`, an opaque cursor, passing it as `after`: a page may be
-  short, or even empty, and still have `next`. A cursor is a position, so it
+  page has `next`, an opaque cursor, passing it as `after`: a full page has
+  `next`, and the page after it may be empty. A cursor is a position, so it
   keeps working when its entry is deleted.
-- **Speed.** The first `label` is scanned and the others are looked up for
-  each entry it finds, so put the most selective label first. One request
-  reads at most about 10,000 of these index keys, then returns what it found
-  with `next`: so a filter that matches few of the first label's entries
-  gives short pages.
+- **Speed.** On PostgreSQL, labels are matched through an index (GIN), so the
+  order of the `label`s doesn't matter.
 
 **Retrying a create.** A create can carry an idempotency `key`, 1–256 bytes of
 letters, digits, `.`, `_`, `:`, `/` and `-` (anything else is a `bad_request`
@@ -619,8 +637,8 @@ Rust and Python, need a Qdrant at `PISA_TEST_QDRANT_URL` and are skipped
 without one; for the Python ones, first run `cargo build -p pisa-search`.
 
 <a id="snapshot-search"></a>
-**Snapshots in search.** With `PISA_TIKV_PD` pointing at the workers' TiKV, the
-service also searches the declarations of [snapshots](#snapshots), ranked with
+**Snapshots in search.** With `PISA_DATABASE_URL` pointing at the workers'
+database, the service also searches the declarations of [snapshots](#snapshots), ranked with
 the bundle's in every lane:
 - **Scope.** A query's `snapshots` says which: `"none"` (the default), `"all"`,
   or `{"labels": {"run": "7"}}`, the modules of the entries that have every
@@ -632,16 +650,16 @@ the bundle's in every lane:
   entries on that module, newest first, at most 10, with the module's
   `dirty` and `verified`. Names can repeat across snapshots, and each is a hit
   of its own. `/v1/resolve` and `/v1/decl` cover the bundle only.
-- **The leader.** One replica at a time, holding a lease in TiKV (30 s,
-  renewed every 10 s), indexes snapshots: it writes each module's
+- **The leader.** One replica at a time, holding a lease in the database
+  (30 s, renewed every 10 s), indexes snapshots: it writes each module's
   declarations to Qdrant, and each entry to `pisa-<env_id>-entries`, which a
   label scope is resolved against. So a module can have any number of
   entries, but a label scope may cover at most 20,000 modules. When the
-  leader goes, another replica takes the lease, makes Qdrant match TiKV,
-  and carries on; `/health` says which replica leads.
+  leader goes, another replica takes the lease, makes Qdrant match the
+  catalog, and carries on; `/health` says which replica leads.
 - **Freshness.** Workers export a module's declarations when they build it,
-  and log every create, relabel, delete and re-check in TiKV. The leader
-  reads that log every 2 s. A snapshot is searchable by name, signature and
+  and log every create, relabel, delete and re-check in the database. The
+  leader reads that log every 2 s. A snapshot is searchable by name, signature and
   docstring seconds after it is created, with a vector of its docstring;
   its description, and a vector of that, follow when the LLM and the
   embedder answer. Module-system snapshots have no docstrings in the export.
@@ -658,9 +676,10 @@ the bundle's in every lane:
 - **Vectors.** The embedder that embeds queries (`PISA_SEARCH_TEI`, Scaleway or
   TEI) also embeds each snapshot declaration's signature, docstring and
   description, so it must serve the model that embedded the bundle.
-- **Storage.** Descriptions and vectors are kept in TiKV with the module, so a
-  new leader writes the same points without calling either API, and Qdrant can
-  be rebuilt from TiKV and the bundle. They are deleted with the module.
+- **Storage.** Descriptions and vectors are kept in the database with the
+  module, so a new leader writes the same points without calling either API,
+  and Qdrant can be rebuilt from the database and the bundle. They are
+  deleted with the module.
 - **Version.** It searches the snapshots of the workers whose version is the
   bundle's `env_id`; `PISA_SEARCH_SNAPSHOT_VERSION` names another.
 

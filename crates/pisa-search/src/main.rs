@@ -210,11 +210,11 @@ enum Command {
         /// that embedded the bundle.
         #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
         embedder: Option<String>,
-        /// PD endpoints of the TiKV holding the workers' snapshot catalog,
-        /// comma-separated; with them, queries can search snapshots, and the
-        /// replica that holds the lease indexes them.
-        #[arg(long, env = "PISA_TIKV_PD", value_delimiter = ',')]
-        tikv_pd: Vec<String>,
+        /// The workers' database (`postgres://…`), which holds their snapshot
+        /// catalog; with it, queries can search snapshots, and the replica
+        /// that holds the lease indexes them.
+        #[arg(long, env = "PISA_DATABASE_URL")]
+        database_url: Option<String>,
         /// The worker version whose snapshots to search (default: the env_id).
         #[arg(long, env = "PISA_SEARCH_SNAPSHOT_VERSION")]
         snapshot_version: Option<String>,
@@ -653,13 +653,13 @@ async fn main() -> anyhow::Result<()> {
             http,
             symbols,
             embedder,
-            tikv_pd,
+            database_url,
             snapshot_version,
             describe_model,
             describe_concurrency,
         } => {
             // Compose passes unset variables as empty ones.
-            let tikv_pd: Vec<String> = tikv_pd.into_iter().filter(|p| !p.is_empty()).collect();
+            let database_url = database_url.filter(|url| !url.is_empty());
             let describe_model = describe_model.filter(|m| !m.is_empty());
             let symbols = match symbols {
                 Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
@@ -678,12 +678,12 @@ async fn main() -> anyhow::Result<()> {
                 embedder.clone(),
             )
             .await?;
-            engine.snapshots = !tikv_pd.is_empty();
+            engine.snapshots = database_url.is_some();
             let engine = Arc::new(engine);
-            if !tikv_pd.is_empty() {
-                let kv = pisa_kv::kv::Kv::tikv(&tikv_pd)
+            if let Some(url) = database_url {
+                let db = pisa_db::db::Db::connect(Some(&url))
                     .await
-                    .map_err(|e| anyhow::anyhow!("connecting to TiKV: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("connecting to the database: {e}"))?;
                 let version = snapshot_version.unwrap_or_else(|| env_id.clone());
                 tracing::info!(%version, "searching snapshots");
                 let llm = match describe_model {
@@ -703,7 +703,7 @@ async fn main() -> anyhow::Result<()> {
                 let how = indexer::Describe { llm, embedder };
                 let indexer = indexer::Indexer::new(
                     engine.clone(),
-                    kv,
+                    db,
                     version,
                     how,
                     describe_concurrency,

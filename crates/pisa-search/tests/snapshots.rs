@@ -1,8 +1,9 @@
 //! Searches snapshot declarations next to a small bundle in Qdrant: the
-//! catalog is a KV store written as workers write it (in memory, or the TiKV
-//! at `PISA_TEST_TIKV_PD` when that is set), an indexer mirrors it into
-//! Qdrant, and the LLM and the embedder are mock servers. Needs a Qdrant at
-//! `PISA_TEST_QDRANT_URL`; without one, every test is skipped.
+//! catalog is a database written as workers write it (SQLite in memory, or
+//! the PostgreSQL at `PISA_TEST_DATABASE_URL` when that is set), an indexer
+//! mirrors it into Qdrant, and the LLM and the embedder are mock servers.
+//! Needs a Qdrant at `PISA_TEST_QDRANT_URL`; without one, every test is
+//! skipped.
 //!
 //! The embedder's blocking HTTP client can't be made or dropped on the
 //! runtime's threads, so every test shares one, [`Setup::embedder`], and
@@ -15,8 +16,8 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
-use pisa_kv::catalog::{Catalog, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls};
-use pisa_kv::kv::Kv;
+use pisa_db::catalog::{Catalog, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls};
+use pisa_db::db::Db;
 use pisa_protocol::api::CheckResult;
 use pisa_protocol::search::{Hit, Query, SnapshotScope};
 use pisa_search::anthropic::Client;
@@ -105,8 +106,9 @@ fn base_decl(name: &str, signature: &str, doc: &str) -> Decl {
 struct Setup {
     q: Qdrant,
     env_id: String,
-    kv: Kv,
-    /// The catalog's version: the test's own on TiKV, which tests share.
+    db: Db,
+    /// The catalog's version: the test's own on PostgreSQL, which tests
+    /// share.
     version: String,
     catalog: Catalog,
     mocks: Arc<Mocks>,
@@ -177,20 +179,17 @@ async fn setup() -> Option<Setup> {
     .unwrap();
     let q = Qdrant::new(&qdrant, None).unwrap();
     load::load(dir.path(), &q, 1, 1.0).await.unwrap();
-    let (kv, version) = match std::env::var("PISA_TEST_TIKV_PD") {
-        Ok(pd) => {
-            let pd: Vec<String> = pd.split(',').map(String::from).collect();
-            (Kv::tikv(&pd).await.unwrap(), env_id.clone())
-        }
-        Err(_) => (Kv::memory(), "v".to_string()),
+    let (db, version) = match std::env::var("PISA_TEST_DATABASE_URL") {
+        Ok(url) => (Db::connect(Some(&url)).await.unwrap(), env_id.clone()),
+        Err(_) => (Db::memory().await, "v".to_string()),
     };
     let tei = url.clone();
     let embedder = tokio::task::spawn_blocking(move || Embedder::parse(&tei).unwrap());
     Some(Setup {
         q,
         env_id,
-        catalog: Catalog::new(kv.clone(), version.clone()),
-        kv,
+        catalog: Catalog::new(db.clone(), version.clone()),
+        db,
         version,
         mocks,
         embedder: embedder.await.unwrap(),
@@ -233,7 +232,7 @@ impl Setup {
     fn index(&mut self, engine: &Arc<Engine>, llm: bool) -> usize {
         let indexer = Indexer::new(
             engine.clone(),
-            self.kv.clone(),
+            self.db.clone(),
             self.version.clone(),
             self.how(llm),
             2,
@@ -387,8 +386,8 @@ fn has(hits: &[Hit], name: &str) -> bool {
 /// Module `m`'s stored record for declaration `name`.
 async fn described(catalog: &Catalog, m: &str, name: &str) -> Option<Described> {
     let records = catalog.described(m).await.unwrap();
-    let (_, bytes) = records.into_iter().find(|(n, _)| n == name)?;
-    Some(serde_json::from_slice(&bytes).unwrap())
+    let (_, record) = records.into_iter().find(|(n, _)| n == name)?;
+    Some(serde_json::from_value(record).unwrap())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -660,7 +659,10 @@ async fn a_name_in_two_modules_is_two_hits() {
         name: Some("double_eq".into()),
         ..about_doubling(SnapshotScope::All)
     };
-    let hits = until(&e, q, |h| h.iter().filter(|h| h.name == "double_eq").count() == 2).await;
+    let hits = until(&e, q, |h| {
+        h.iter().filter(|h| h.name == "double_eq").count() == 2
+    })
+    .await;
     let mut modules: Vec<&str> = hits
         .iter()
         .filter(|h| h.name == "double_eq")

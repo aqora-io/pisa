@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 pisa-client = { path = "crates/pisa-client" }
-pisa-kv = { path = "crates/pisa-kv" }
+pisa-db = { path = "crates/pisa-db" }
 pisa-protocol = { path = "crates/pisa-protocol" }
 pisa-repl = { path = "crates/pisa-repl" }
 pisa-worker = { path = "crates/pisa-worker" }
@@ -32,7 +32,6 @@ serde_json = "1"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
-tikv-client = { version = "0.4", default-features = false }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"

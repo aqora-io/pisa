@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use common::Cluster;
 use object_store::ObjectStoreExt;
 use object_store::path::Path;
-use pisa_worker::kv::{ROOT as KV_ROOT, key};
+use pisa_worker::catalog::Catalog;
 use serde_json::{Value, json};
 
 async fn create(c: &Cluster, code: &str) -> Value {
@@ -45,9 +45,9 @@ fn names(result: &Value) -> Vec<&str> {
         .collect()
 }
 
-/// The snapshot blobs and the KV keys of version `v`.
+/// The snapshot blobs and the rows of version `v`.
 async fn stored(c: &Cluster) -> (Vec<String>, Vec<Vec<String>>) {
-    (c.stored_blobs().await, c.stored_keys("v").await)
+    (c.stored_blobs().await, c.stored_rows("v").await)
 }
 
 fn entry(snapshot: &Value) -> &str {
@@ -59,11 +59,12 @@ fn entry(snapshot: &Value) -> &str {
 async fn blob(c: &Cluster, snapshot: &Value, ext: &str) -> String {
     let id = &module(snapshot)["PisaSnap.s".len()..];
     let v = c.version("v");
-    let record = key(&[KV_ROOT, &v, "mod", id]);
-    let bytes = c.kv.begin().await.unwrap().get(&record).await.unwrap();
-    let meta: Value = serde_json::from_slice(&bytes.unwrap()).unwrap();
-    let build = meta["modules"].as_array().unwrap().last().unwrap()["build"].clone();
-    format!("snapshots/{v}/{id}.{}.{ext}.zst", build.as_str().unwrap())
+    let meta = Catalog::new(c.db.clone(), v.clone())
+        .module(id)
+        .await
+        .unwrap();
+    let build = &meta.modules.last().unwrap().build;
+    format!("snapshots/{v}/{id}.{build}.{ext}.zst")
 }
 
 async fn request(c: &Cluster, method: reqwest::Method, path: &str) -> (u16, Value) {
@@ -233,12 +234,10 @@ async fn create_keyed(c: &Cluster, code: &str, key: &str, labels: Value) -> Valu
     r
 }
 
-/// Whether the KV store has the idempotency key `k`.
+/// Whether an entry has the idempotency key `k`.
 async fn has_key(c: &Cluster, k: &str) -> bool {
-    let want = [KV_ROOT, &c.version("v"), "key", k]
-        .map(String::from)
-        .to_vec();
-    c.stored_keys("v").await.contains(&want)
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    catalog.keyed(k).await.unwrap().is_some()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -833,14 +832,14 @@ async fn verify_true_re_checks_the_chunk_and_its_imports() {
 
     // A kept module that fails the re-check gets no new entry, as new code
     // that fails it isn't kept.
-    let before = c.stored_keys("v").await;
+    let before = c.stored_rows("v").await;
     let r = create_with(&c, FORGED, true).await;
     assert_eq!(r["snapshot"], forged["snapshot"], "still kept: {r}");
     assert_eq!(r["header"], forged["header"], "{r}");
     assert!(r.get("entry").is_none(), "{r}");
     assert_eq!(r["verified"], false, "{r}");
     assert_rejected_by_kernel(&r);
-    assert_eq!(c.stored_keys("v").await, before);
+    assert_eq!(c.stored_rows("v").await, before);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -939,16 +938,22 @@ async fn verify_takes_the_axioms_from_the_kernel_re_check() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let snapshot = kept(&c, "import Foo\n\ntheorem d : 1 = 1 := by sorry").await;
     let id = &module(&snapshot)["PisaSnap.s".len()..];
-    let record = key(&[KV_ROOT, &c.version("v"), "mod", id]);
-    let mut txn = c.kv.begin().await.unwrap();
-    let bytes = txn.get(&record).await.unwrap().unwrap();
-    let mut meta: Value = serde_json::from_slice(&bytes).unwrap();
-    meta["dirty"] = json!(false);
-    meta["result"]["ok"] = json!(true);
-    meta["result"]["reasons"] = json!([]);
-    let bytes = serde_json::to_vec(&meta).unwrap();
-    txn.put(record, bytes).await.unwrap();
-    txn.commit().await.unwrap();
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let build = catalog
+        .module(id)
+        .await
+        .unwrap()
+        .modules
+        .last()
+        .unwrap()
+        .build
+        .clone();
+    let forged = catalog.update_module(id, &build, |meta| {
+        meta.dirty = false;
+        meta.result.ok = true;
+        meta.result.reasons = Vec::new();
+    });
+    assert!(forged.await.unwrap().is_some());
     assert_eq!(info(&c, &snapshot).await["dirty"], false);
 
     let r = verify(&c, &snapshot).await;

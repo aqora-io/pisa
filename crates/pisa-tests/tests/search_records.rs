@@ -27,13 +27,13 @@ fn module(r: &Value) -> String {
 /// Every change logged so far, oldest first.
 async fn changes(catalog: &Catalog) -> Vec<Change> {
     let page = catalog.changes(0, None, 1000).await.unwrap();
-    page.into_iter().map(|(_, c)| c).collect()
+    page.into_iter().map(|logged| logged.change).collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_create_records_declarations_and_a_change() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let catalog = Catalog::new(c.kv.clone(), c.version("v"));
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({"run": "1"})).await;
     let m = module(&r);
     let entry = r["entry"].as_str().unwrap();
@@ -61,7 +61,7 @@ async fn a_create_records_declarations_and_a_change() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sorry_is_flagged() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let catalog = Catalog::new(c.kv.clone(), c.version("v"));
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, "import Foo\n\ntheorem t : 1 = 2 := sorry", json!({})).await;
     let decls = catalog.decls(&module(&r)).await.unwrap().unwrap();
     assert!(decls.dirty);
@@ -71,13 +71,13 @@ async fn sorry_is_flagged() {
 #[tokio::test(flavor = "multi_thread")]
 async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let catalog = Catalog::new(c.kv.clone(), c.version("v"));
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({})).await;
     let m = module(&r);
     let entry = r["entry"].as_str().unwrap();
     assert!(
         catalog
-            .put_described(&m, &[("one".into(), b"{}".to_vec())])
+            .put_described(&m, &[("one".into(), json!({}))])
             .await
             .unwrap()
     );
@@ -108,7 +108,7 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     // The module is gone, so nothing more can be described for it.
     assert!(
         !catalog
-            .put_described(&m, &[("one".into(), b"{}".to_vec())])
+            .put_described(&m, &[("one".into(), json!({}))])
             .await
             .unwrap()
     );

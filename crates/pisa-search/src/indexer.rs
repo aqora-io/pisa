@@ -1,12 +1,12 @@
 //! Snapshot declarations in Qdrant. One search replica at a time, the
-//! leader, holds a lease in TiKV and runs the indexer:
+//! leader, holds a lease in the workers' database and runs the indexer:
 //! - it mirrors the snapshot catalog into Qdrant: a point per declaration
 //!   of each module, and a point per entry;
 //! - it describes (with an LLM, when one is configured) and embeds those
-//!   declarations, keeping descriptions and vectors in TiKV (`described`
-//!   records), so that a new leader pays for nothing again.
+//!   declarations, keeping descriptions and vectors in the catalog
+//!   (`described` records), so that a new leader pays for nothing again.
 //!
-//! A new leader reconciles Qdrant with TiKV, then follows the catalog's
+//! A new leader reconciles Qdrant with the catalog, then follows its
 //! change log. It reconciles again every few hours, which also repairs what
 //! a deposed leader may have written late.
 
@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::StreamExt;
-use pisa_kv::catalog::{Catalog, Change, SnapshotDecl, SnapshotDecls};
-use pisa_kv::kv::Kv;
+use pisa_db::catalog::{Catalog, Change, SnapshotDecl, SnapshotDecls};
+use pisa_db::db::Db;
 use pisa_protocol::search::Informal;
 use pisa_protocol::snapshot;
 use serde::{Deserialize, Serialize};
@@ -46,10 +46,8 @@ const LOOKBACK: Duration = Duration::from_secs(120);
 const POLL_EVERY: Duration = Duration::from_secs(2);
 const RECONCILE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
-/// Keys read per page of a scan, and modules' declaration records, which
-/// can be large, per page.
+/// Rows read per page of the catalog.
 const PAGE: u32 = 1000;
-const DECLS_PAGE: u32 = 64;
 
 /// Attempts at describing a declaration; after these it keeps its docstring view.
 const MAX_ATTEMPTS: u32 = 3;
@@ -140,10 +138,10 @@ fn decode_vector(s: &str) -> Option<Vec<f32>> {
     })
 }
 
-fn parse_described(records: Vec<(String, Vec<u8>)>) -> HashMap<String, Described> {
+fn parse_described(records: Vec<(String, Value)>) -> HashMap<String, Described> {
     records
         .into_iter()
-        .filter_map(|(name, bytes)| Some((name, serde_json::from_slice(&bytes).ok()?)))
+        .filter_map(|(name, record)| Some((name, serde_json::from_value(record).ok()?)))
         .collect()
 }
 
@@ -156,15 +154,6 @@ fn now_micros() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_micros() as u64)
-}
-
-/// The time a change-log key names.
-fn logged_at(key: &[u8]) -> u64 {
-    let parts = pisa_kv::kv::decode(key);
-    parts
-        .get(3)
-        .and_then(|t| u64::from_str_radix(t, 16).ok())
-        .unwrap_or(0)
 }
 
 /// How long until `until`, if that is later than now.
@@ -196,7 +185,7 @@ pub struct Describe {
     pub embedder: Option<Embedder>,
 }
 
-/// A module as TiKV has it.
+/// A module as the catalog has it.
 struct Module {
     decls: SnapshotDecls,
     described: HashMap<String, Described>,
@@ -220,8 +209,8 @@ pub struct Indexer {
     /// queued again meanwhile, which go back once they are done.
     queued: Mutex<HashSet<String>>,
     again: Mutex<HashSet<String>>,
-    /// One writer at a time per module, so that each upsert is of what TiKV
-    /// has, read under the lock.
+    /// One writer at a time per module, so that each upsert is of what the
+    /// catalog has, read under the lock.
     module_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Set by an authentication error: describing waits until then.
     paused_until: Mutex<Option<Instant>>,
@@ -230,11 +219,11 @@ pub struct Indexer {
 }
 
 impl Indexer {
-    /// The indexer of the snapshots of `version` in `kv`, for `engine`'s
+    /// The indexer of the snapshots of `version` in `db`, for `engine`'s
     /// collections, leading with leases of `ttl` (normally [`LEASE_TTL`]).
     pub fn new(
         engine: Arc<Engine>,
-        kv: Kv,
+        db: Db,
         version: String,
         how: Describe,
         concurrency: usize,
@@ -248,7 +237,7 @@ impl Indexer {
             .to_string();
         Arc::new(Indexer {
             engine,
-            catalog: Catalog::new(kv, version),
+            catalog: Catalog::new(db, version),
             how,
             owner,
             ttl,
@@ -347,7 +336,7 @@ impl Indexer {
         }
     }
 
-    /// Module `m` as TiKV has it, if it is kept.
+    /// Module `m` as the catalog has it, if it is kept.
     async fn read_module(&self, m: &str) -> anyhow::Result<Option<Module>> {
         let Some(decls) = self.catalog.decls(m).await.map_err(store)? else {
             return Ok(None);
@@ -434,7 +423,7 @@ impl Indexer {
         locks.entry(m.to_string()).or_default().clone()
     }
 
-    /// Makes module `m`'s points what TiKV has, reading it under the
+    /// Makes module `m`'s points what the catalog has, reading it under the
     /// module's lock. Skips the write if Qdrant's revision is already that:
     /// `known`, as the caller found it, or else read from Qdrant. Returns the
     /// module, or `None` if it is gone.
@@ -559,20 +548,14 @@ impl Indexer {
         // The entries: those missing or different, then those gone.
         let mut entries: Vec<Value> = Vec::new();
         let mut want_entries: HashSet<String> = HashSet::new();
-        let mut after: Option<Vec<u8>> = None;
+        let mut after: Option<String> = None;
         loop {
             let page = self
                 .catalog
-                .scan("entry", after.as_deref(), PAGE)
+                .entries_after(after.as_deref(), PAGE)
                 .await
                 .map_err(store)?;
-            for (_, parts, bytes) in &page {
-                let (Some(e), Ok(meta)) = (
-                    parts.first(),
-                    serde_json::from_slice::<pisa_kv::catalog::EntryMeta>(bytes),
-                ) else {
-                    continue;
-                };
+            for (e, meta) in &page {
                 let id = points::entry_id(e);
                 want_entries.insert(id.clone());
                 let point = points::entry_point(e, &meta.module, meta.created_micros, &meta.labels);
@@ -581,7 +564,7 @@ impl Indexer {
                 }
             }
             match page.last() {
-                Some((k, ..)) if page.len() == PAGE as usize => after = Some(k.clone()),
+                Some((e, _)) if page.len() == PAGE as usize => after = Some(e.clone()),
                 _ => break,
             }
         }
@@ -600,22 +583,15 @@ impl Indexer {
         }
         // The modules.
         let mut want: HashSet<String> = HashSet::new();
-        let (mut after, mut size): (Option<Vec<u8>>, u32) = (None, DECLS_PAGE);
+        let mut after: Option<String> = None;
         let mut failed = 0;
         loop {
-            let page = match self.catalog.scan("decls", after.as_deref(), size).await {
-                Ok(page) => page,
-                Err(e) if size > 1 => {
-                    tracing::debug!(size, "reading a page failed, halving it: {e}");
-                    size /= 2;
-                    continue;
-                }
-                Err(e) => return Err(store(e)),
-            };
-            let more = page.len() == size as usize;
-            size = (size * 2).min(DECLS_PAGE);
-            for (_, parts, _) in &page {
-                let Some(m) = parts.first() else { continue };
+            let page = self
+                .catalog
+                .modules_with_decls_after(after.as_deref(), PAGE)
+                .await
+                .map_err(store)?;
+            for m in &page {
                 want.insert(m.clone());
                 // A module not in Qdrant yet has a revision none has.
                 let known = have.get(m).map_or("", String::as_str);
@@ -634,7 +610,7 @@ impl Indexer {
                 }
             }
             match page.last() {
-                Some((k, ..)) if more => after = Some(k.clone()),
+                Some(m) if page.len() == PAGE as usize => after = Some(m.clone()),
                 _ => break,
             }
         }
@@ -656,7 +632,7 @@ impl Indexer {
     async fn tail(&self, since: u64) {
         let started = Instant::now();
         let mut from = since;
-        let mut seen: HashMap<Vec<u8>, u64> = HashMap::new();
+        let mut seen: HashMap<i64, u64> = HashMap::new();
         let mut last_read = Instant::now();
         while started.elapsed() < RECONCILE_EVERY {
             tokio::time::sleep(POLL_EVERY).await;
@@ -683,23 +659,25 @@ impl Indexer {
     }
 
     /// Applies each change logged at `from` or later that isn't in `seen`.
-    async fn poll(&self, from: u64, seen: &mut HashMap<Vec<u8>, u64>) -> anyhow::Result<()> {
-        let mut after: Option<Vec<u8>> = None;
+    async fn poll(&self, from: u64, seen: &mut HashMap<i64, u64>) -> anyhow::Result<()> {
+        let mut after = None;
         loop {
             let page = self
                 .catalog
-                .changes(from, after.as_deref(), PAGE)
+                .changes(from, after, PAGE)
                 .await
                 .map_err(store)?;
-            for (key, change) in &page {
-                if seen.contains_key(key) {
+            for logged in &page {
+                if seen.contains_key(&logged.id) {
                     continue;
                 }
-                self.apply(change).await?;
-                seen.insert(key.clone(), logged_at(key));
+                self.apply(&logged.change).await?;
+                seen.insert(logged.id, logged.logged_micros);
             }
             match page.last() {
-                Some((k, _)) if page.len() == PAGE as usize => after = Some(k.clone()),
+                Some(last) if page.len() == PAGE as usize => {
+                    after = Some((last.logged_micros, last.id));
+                }
                 _ => return Ok(()),
             }
         }
@@ -856,8 +834,9 @@ impl Indexer {
         Ok(retry)
     }
 
-    /// Stores the records of `module` that `changed` names in TiKV, then
-    /// writes the module's points from what TiKV now has; empties `changed`.
+    /// Stores the records of `module` that `changed` names in the catalog,
+    /// then writes the module's points from what it now has; empties
+    /// `changed`.
     async fn save(
         &self,
         m: &str,
@@ -867,9 +846,9 @@ impl Indexer {
         if changed.is_empty() {
             return Ok(());
         }
-        let records: Vec<(String, Vec<u8>)> = changed
+        let records: Vec<(String, Value)> = changed
             .iter()
-            .map(|name| Ok((name.clone(), serde_json::to_vec(&module.described[name])?)))
+            .map(|name| Ok((name.clone(), serde_json::to_value(&module.described[name])?)))
             .collect::<anyhow::Result<_>>()?;
         changed.clear();
         self.writable()?;

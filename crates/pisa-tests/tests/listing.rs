@@ -202,11 +202,8 @@ async fn deleted_entries_leave_listings() {
 
     delete(&c, &kept).await;
     assert!(listed(&c, &[]).await.is_empty());
-    let keys = c.stored_keys("v").await;
-    assert!(
-        keys.iter().all(|k| k[2] != "new" && k[2] != "label"),
-        "{keys:?}"
-    );
+    let rows = c.stored_rows("v").await;
+    assert!(rows.iter().all(|r| r[0] != "entries"), "{rows:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

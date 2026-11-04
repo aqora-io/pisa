@@ -23,7 +23,8 @@ const MAX_IDEMPOTENCY_KEY: usize = 256;
 
 /// Checks an entry's labels: at most [`MAX_LABELS`] of them, each key 1–128
 /// bytes of `[A-Za-z0-9._/-]` (so `key:value` splits on the first `:`), and
-/// each value at most 512 bytes. The error says which rule a label breaks.
+/// each value at most 512 bytes, without NUL characters, which the database
+/// can't store. The error says which rule a label breaks.
 pub fn check_labels(labels: &BTreeMap<String, String>) -> Result<(), String> {
     if labels.len() > MAX_LABELS {
         return Err(format!(
@@ -38,6 +39,14 @@ pub fn check_labels(labels: &BTreeMap<String, String>) -> Result<(), String> {
                 "the value of label {key} is longer than {MAX_VALUE} bytes"
             ));
         }
+        check_label_value(value)?;
+    }
+    Ok(())
+}
+
+fn check_label_value(value: &str) -> Result<(), String> {
+    if value.contains('\0') {
+        return Err(format!("label value {value:?} has a NUL character"));
     }
     Ok(())
 }
@@ -59,6 +68,7 @@ pub fn parse_filter(s: &str) -> Result<(String, String), String> {
         return Err(format!("label filter {s:?} must be key:value"));
     };
     check_label_key(key)?;
+    check_label_value(value)?;
     Ok((key.to_string(), value.to_string()))
 }
 
@@ -114,6 +124,7 @@ mod tests {
             assert!(check_labels(&labels(&[(bad, "x")])).is_err(), "{bad:?}");
         }
         assert!(check_labels(&labels(&[("a", &"v".repeat(513))])).is_err());
+        assert!(check_labels(&labels(&[("a", "x\0y")])).is_err());
 
         let many = |n: usize| (0..n).map(|i| (i.to_string(), String::new())).collect();
         assert_eq!(check_labels(&many(MAX_LABELS)), Ok(()));
@@ -136,6 +147,7 @@ mod tests {
         assert_eq!(parse_filter("k:"), pair("k", ""));
         assert!(parse_filter("k").is_err());
         assert!(parse_filter("bad key:x").is_err());
+        assert!(parse_filter("k:x\0y").is_err());
 
         let cursor = "0123456789abcdef".repeat(3);
         assert!(is_cursor(&cursor));

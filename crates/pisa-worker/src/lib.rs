@@ -22,17 +22,13 @@ pub mod sessions;
 pub mod snapshots;
 pub mod store;
 
+use config::StoreKind;
 pub use config::WorkerConfig;
-use config::{MetadataKind, StoreKind};
-pub use pisa_kv::{catalog, kv};
+pub use pisa_db::{catalog, db, records};
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;
 
-/// How often a worker on TiKV moves its GC safepoint, and how far behind the
-/// present it puts it; see [`kv::Kv::gc`].
-const TIKV_GC_EVERY: Duration = Duration::from_secs(600);
-
-/// How often a worker deletes the snapshot change log's expired keys.
+/// How often a worker deletes the snapshot change log's expired rows.
 const LOG_PRUNE_EVERY: Duration = Duration::from_secs(600);
 
 /// How long dialling the router may take. A Service without ready endpoints
@@ -42,15 +38,15 @@ const ROUTER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
-    if cfg.metadata == MetadataKind::Memory && cfg.store == StoreKind::S3 {
+    if cfg.records_in_memory() && cfg.store == StoreKind::S3 {
         tracing::warn!(
-            "PISA_METADATA=memory with PISA_STORE=s3: the metadata is in this worker's \
+            "PISA_STORE=s3 without PISA_DATABASE_URL: the metadata is in this worker's \
              memory, not shared with other workers or kept across restarts"
         );
     }
     let store = cfg.object_store()?;
-    let kv = cfg.kv().await?;
-    run_with_stores(cfg, store, kv, shutdown_signal()).await
+    let db = cfg.db().await?;
+    run_with_stores(cfg, store, db, shutdown_signal()).await
 }
 
 async fn shutdown_signal() {
@@ -64,14 +60,14 @@ async fn shutdown_signal() {
 
 /// Runs the worker with pickled proof states and snapshot modules kept in
 /// `store`, and the records that describe them, the sessions and the snapshot
-/// entries in `kv`. Every worker of the same version must share both. When
+/// entries in `db`. Every worker of the same version must share both. When
 /// `shutdown` completes, the worker drains: it tells the router to send no
 /// more jobs, finishes the ones it has (for at most `drain_timeout_secs`), and
 /// returns.
 pub async fn run_with_stores(
     cfg: WorkerConfig,
     store: Arc<dyn ObjectStore>,
-    kv: kv::Kv,
+    db: db::Db,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let version = cfg.version()?;
@@ -79,7 +75,7 @@ pub async fn run_with_stores(
     let launcher = launcher::Launcher::new(&cfg, &worker_id, &version).await?;
     let snapshots = snapshots::Snapshots::new(
         store.clone(),
-        kv.clone(),
+        db.clone(),
         version.clone(),
         launcher.snapshot_root().to_path_buf(),
         Duration::from_secs(cfg.snapshot_confirm_secs),
@@ -97,22 +93,7 @@ pub async fn run_with_stores(
     );
     tracing::info!(%worker_id, %version, slots = pool.slots(), "worker starting");
     prewarm(&pool, &cfg.prewarm);
-    // Every worker does it: one moving the safepoint is enough, and more do
-    // no harm.
-    if cfg.metadata == MetadataKind::Tikv {
-        let kv = kv.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(TIKV_GC_EVERY);
-            loop {
-                tick.tick().await;
-                match kv.gc(TIKV_GC_EVERY).await {
-                    Ok(()) => tracing::debug!("moved TiKV's GC safepoint"),
-                    Err(e) => tracing::warn!("moving TiKV's GC safepoint failed: {e}"),
-                }
-            }
-        });
-    }
-    let catalog = catalog::Catalog::new(kv.clone(), version.clone());
+    let catalog = catalog::Catalog::new(db.clone(), version.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(LOG_PRUNE_EVERY);
         loop {
@@ -124,7 +105,7 @@ pub async fn run_with_stores(
         }
     });
     let sessions = Arc::new(Sessions {
-        store: store::Store::new(store, kv, version.clone()),
+        store: store::Store::new(store, db, version.clone()),
         version: version.clone(),
     });
     if cfg.state_ttl_secs > 0 {

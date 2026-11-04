@@ -67,17 +67,23 @@ store:
   # Delete stored states and sessions older than this (0 keeps them).
   stateTtlSecs: 86400
 
-# TiKV holds the metadata that all workers of a release share: the session
-# and proof-state records, and the snapshot entries and module records. It has
-# the only copy of the snapshot records, which never expire, so it must be
-# durable and backed up. The workers move its GC safepoint themselves, as
-# there is no TiDB to. The chart doesn't deploy TiKV; run it with the TiDB
-# Operator (https://docs.pingcap.com/tidb-in-kubernetes/stable) or any other
-# means.
+# PostgreSQL holds the metadata that all workers of a release share: the
+# session and proof-state records, and the snapshot entries and module
+# records. It has the only copy of the snapshot records, which never expire,
+# so it must be durable and backed up. The chart doesn't deploy PostgreSQL;
+# run it with CloudNativePG (https://cloudnative-pg.io), as a managed service
+# or by any other means. The workers create the tables. Connect directly, or
+# through PgBouncer in session mode, not transaction mode.
 metadata:
-  tikv:
-    # Required: the cluster's PD endpoints, e.g. ["pd.tikv:2379"].
-    pdEndpoints: []
+  database:
+    # Required: an existing Secret holding the database's URL, e.g.
+    # postgres://pisa:...@db.example.com/pisa?sslmode=require. With
+    # sslmode=require the server's certificate is checked against the
+    # image's roots; for a private CA, mount it and set SSL_CERT_FILE through
+    # worker.extraEnv.
+    urlSecret:
+      name: ""
+      key: url
 
 # How the cluster's Prometheus finds the router's /metrics.
 metrics:
@@ -131,8 +137,8 @@ search:
   # Embeds queries and snapshot declarations; it must serve the model that
   # embedded the bundle. See `pisa-search embed`.
   embedder: "openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"
-  # Search the workers' snapshots (needs metadata.tikv.pdEndpoints). The
-  # replica holding a lease in TiKV indexes them.
+  # Search the workers' snapshots (needs metadata.database.urlSecret). The
+  # replica holding a lease in the database indexes them.
   snapshots: true
   # Claude or OpenAI model that describes every snapshot declaration, so all
   # snapshot code goes to that provider; empty for none.

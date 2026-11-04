@@ -1,5 +1,6 @@
 //! A router plus workers running fake-repl, all in-process. Their metadata
-//! is in memory, or in the TiKV at `PISA_TEST_TIKV_PD` when that is set.
+//! is in an in-memory SQLite database, or in the PostgreSQL at
+//! `PISA_TEST_DATABASE_URL` when that is set.
 
 #![allow(dead_code)]
 
@@ -14,8 +15,8 @@ use object_store::memory::InMemory;
 use object_store::path::Path;
 use pisa_router::{RouterConfig, Running};
 use pisa_worker::WorkerConfig;
-use pisa_worker::config::{MetadataKind, Sandbox, StoreKind};
-use pisa_worker::kv::{Kv, ROOT, decode, prefix};
+use pisa_worker::config::{Sandbox, StoreKind};
+use pisa_worker::db::Db;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
@@ -25,10 +26,11 @@ pub struct Cluster {
     pub client: reqwest::Client,
     /// Shared by all workers, standing in for S3.
     pub store: Arc<dyn ObjectStore>,
-    /// Shared by all workers: in memory, or the TiKV at `PISA_TEST_TIKV_PD`.
-    pub kv: Kv,
-    /// What workers' versions get on TiKV, so that clusters there don't share
-    /// keys; see [`Cluster::version`].
+    /// Shared by all workers: in memory, or the PostgreSQL at
+    /// `PISA_TEST_DATABASE_URL`.
+    pub db: Db,
+    /// What workers' versions get on PostgreSQL, so that clusters there don't
+    /// share rows; see [`Cluster::version`].
     suffix: String,
     /// Workers' scratch space, private to this cluster so that tests running
     /// in parallel with the same worker names don't share files.
@@ -69,8 +71,7 @@ pub fn worker_config(router: SocketAddr, name: &str, version: &str, slots: usize
         allowed_options: split(pisa_worker::policy::DEFAULT_OPTIONS),
         allow_metaprogramming: false,
         store: StoreKind::Memory,
-        metadata: MetadataKind::Memory,
-        tikv_pd: vec![],
+        database_url: None,
         state_ttl_secs: 0,
         snapshot_confirm_secs: 60,
         drain_timeout_secs: 30,
@@ -81,16 +82,16 @@ fn split(list: &str) -> Vec<String> {
     list.split(',').map(String::from).collect()
 }
 
-/// A new cluster's KV store, and the suffix for its versions: a random one
-/// on TiKV, which every cluster shares.
-async fn kv_store() -> (Kv, String) {
-    match std::env::var("PISA_TEST_TIKV_PD") {
-        Ok(pd) => {
-            let kv = Kv::tikv(&split(&pd)).await.unwrap();
+/// A new cluster's database, and the suffix for its versions: a random one
+/// on PostgreSQL, which every cluster shares.
+async fn db_store() -> (Db, String) {
+    match std::env::var("PISA_TEST_DATABASE_URL") {
+        Ok(url) => {
+            let db = Db::connect(Some(&url)).await.unwrap();
             let id = uuid::Uuid::new_v4().simple().to_string();
-            (kv, format!("-{}", &id[..12]))
+            (db, format!("-{}", &id[..12]))
         }
-        Err(_) => (Kv::memory(), String::new()),
+        Err(_) => (Db::memory().await, String::new()),
     }
 }
 
@@ -106,7 +107,7 @@ impl Cluster {
         workers: &[(&str, &str, usize)],
         tweak: impl Fn(WorkerConfig) -> WorkerConfig,
     ) -> Cluster {
-        let (kv, suffix) = kv_store().await;
+        let (db, suffix) = db_store().await;
         if !suffix.is_empty() {
             for (_, version) in &mut router.alias {
                 version.push_str(&suffix);
@@ -123,7 +124,7 @@ impl Cluster {
             workers: Vec::new(),
             client: reqwest::Client::new(),
             store: Arc::new(InMemory::new()),
-            kv,
+            db,
             suffix,
             dir: tempfile::tempdir().unwrap(),
         };
@@ -169,9 +170,9 @@ impl Cluster {
             .get_or_insert_with(|| self.dir.path().join(name));
         cfg.version = cfg.version.map(|v| self.version(&v));
         let store = self.store.clone();
-        let kv = self.kv.clone();
+        let db = self.db.clone();
         self.workers.push(tokio::spawn(async move {
-            pisa_worker::run_with_stores(cfg, store, kv, shutdown)
+            pisa_worker::run_with_stores(cfg, store, db, shutdown)
                 .await
                 .unwrap();
         }));
@@ -214,17 +215,11 @@ impl Cluster {
         out
     }
 
-    /// Every KV key of `version` (as [`Cluster::version`] maps it), decoded,
-    /// except the change log's, which outlive what they describe.
-    pub async fn stored_keys(&self, version: &str) -> Vec<Vec<String>> {
-        let mut txn = self.kv.begin().await.unwrap();
-        let range = prefix(&[ROOT, &self.version(version)]);
-        let pairs = txn.scan(range, u32::MAX).await.unwrap();
-        pairs
-            .iter()
-            .map(|(key, _)| decode(key))
-            .filter(|parts| parts[2] != "log")
-            .collect()
+    /// Every row of `version` (as [`Cluster::version`] maps it), as its
+    /// table and key, except the change log's, which outlive what they
+    /// describe.
+    pub async fn stored_rows(&self, version: &str) -> Vec<Vec<String>> {
+        self.db.rows(&self.version(version)).await.unwrap()
     }
 
     pub async fn metrics(&self) -> String {

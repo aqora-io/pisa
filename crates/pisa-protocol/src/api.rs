@@ -412,14 +412,12 @@ pub struct SnapshotSummary {
 /// `GET /snapshots`: the version's entries, newest first, that have every
 /// label the query names as `label=key:value` (split on the first `:`; up to
 /// 64 filters), at most `limit` of them (1 to 1000, default 100). Keep
-/// requesting with `next` as `after` while a page has it: one request reads
-/// at most about 10,000 index entries, so a page may be short, even empty,
-/// and still have `next`.
+/// requesting with `next` as `after` while a page has it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotList {
     pub entries: Vec<SnapshotSummary>,
-    /// Where the next page starts, unless the listing reached the end. The
-    /// page after it may be empty.
+    /// Where the next page starts, if this page is full. The page after it
+    /// may be empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
 }

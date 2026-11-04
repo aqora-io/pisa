@@ -1,0 +1,52 @@
+# A single PostgreSQL for trying the chart on minikube, with the Secret the
+# minikube values expect. Not durable: emptyDir storage, a fixed password.
+#   kubectl apply -f deploy/minikube/postgres.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pisa-db
+stringData:
+  password: pisa
+  url: postgres://pisa:pisa@postgres:5432/pisa
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18
+          env:
+            - { name: POSTGRES_USER, value: pisa }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: pisa-db, key: password } }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          # Over TCP, which only the server started after initialisation
+          # listens on.
+          readinessProbe:
+            exec: { command: ["pg_isready", "-h", "127.0.0.1", "-U", "pisa"] }
+            periodSeconds: 2
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: { app: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }

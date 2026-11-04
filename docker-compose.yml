@@ -1,6 +1,6 @@
 # Local development stack: one router, two workers, Garage (S3) for pickled
-# proof states and snapshot modules, and a single-node TiKV for the session,
-# state and snapshot records.
+# proof states and snapshot modules, and PostgreSQL for the session, state and
+# snapshot records.
 #   docker compose up --build
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
@@ -20,9 +20,11 @@ x-worker: &worker
     args:
       PROJECT: ${PROJECT:-lean-project}
   image: pisa-worker:${PROJECT:-lean-project}
-  depends_on: [router, garage, tikv]
-  # PD takes a few seconds to start serving, and a worker exits if it can't
-  # connect to it.
+  depends_on:
+    router: { condition: service_started }
+    garage: { condition: service_started }
+    postgres: { condition: service_healthy }
+  # A worker exits if it can't connect to the database.
   restart: on-failure
   # bubblewrap needs to create namespaces and the worker writes to its own
   # cgroup subtree, so dev workers run privileged in a private cgroup namespace.
@@ -38,8 +40,7 @@ x-worker: &worker
     PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
     PISA_PREWARM: ${PISA_PREWARM:-}
     PISA_STORE: s3
-    PISA_METADATA: tikv
-    PISA_TIKV_PD: pd:2379
+    PISA_DATABASE_URL: &database-url postgres://pisa:pisa@postgres:5432/pisa
     PISA_STATE_TTL_SECS: 86400
     AWS_ENDPOINT: http://garage:3900
     AWS_ALLOW_HTTP: "true"
@@ -61,27 +62,18 @@ services:
     volumes:
       - ./docker/garage.toml:/etc/garage.toml:ro
 
-  # A single PD and a single TiKV. Not durable: the data lives in the containers.
-  pd:
-    image: pingcap/pd:v8.5.1
-    command:
-      - --name=pd
-      - --data-dir=/data
-      - --client-urls=http://0.0.0.0:2379
-      - --advertise-client-urls=http://pd:2379
-      - --peer-urls=http://0.0.0.0:2380
-      - --advertise-peer-urls=http://pd:2380
-
-  tikv:
-    image: pingcap/tikv:v8.5.1
-    command:
-      - --addr=0.0.0.0:20160
-      - --advertise-addr=tikv:20160
-      - --status-addr=0.0.0.0:20180
-      - --data-dir=/data
-      - --pd=pd:2379
-    ulimits: { nofile: 1048576 }
-    depends_on: [pd]
+  # Its data is in an anonymous volume, which `docker compose down -v` deletes.
+  # The workers create the tables.
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: pisa
+      POSTGRES_PASSWORD: pisa
+    # Over TCP, which only the server started after initialisation listens on.
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "pisa"]
+      interval: 2s
+      retries: 30
 
   router:
     build:
@@ -121,13 +113,15 @@ services:
       dockerfile: docker/Dockerfile
       target: search
     image: pisa-search
-    # Two replicas, on 8100 and 8101; the one holding a lease in TiKV
+    # Two replicas, on 8100 and 8101; the one holding a lease in the database
     # indexes snapshots.
     deploy:
       replicas: 2
     ports: ["8100-8101:8100"]
-    # It reads the workers' snapshot catalog, and exits if PD isn't serving yet.
-    depends_on: [qdrant, tikv]
+    # It reads the workers' snapshot catalog.
+    depends_on:
+      qdrant: { condition: service_started }
+      postgres: { condition: service_healthy }
     restart: on-failure
     # Queries are embedded by the model that embedded the bundle: by default
     # Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a bundle
@@ -142,7 +136,7 @@ services:
       # Snapshot search. Set a describe model (e.g. claude-haiku-5-5, with
       # ANTHROPIC_API_KEY) to describe every snapshot declaration with it;
       # without one they are searched by name, signature and docstring.
-      PISA_TIKV_PD: pd:2379
+      PISA_DATABASE_URL: *database-url
       PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
