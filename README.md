@@ -54,9 +54,13 @@ python3 scripts/e2e.py [--mathlib] [--search]   # end-to-end checks against the 
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 ```
 
-Compose starts two servers, on ports 8000 and 8001, and PostgreSQL and
-Garage. The servers and the workers keep their data in two places, chosen by
-environment variables that Compose and the chart set:
+Compose is laid out like a deployment: Traefik on port 8000 (`PISA_PORT` to
+change it) spreads requests over two servers, which it finds through Docker
+and health-checks on `/health`, and two workers take jobs from PostgreSQL,
+next to Garage for S3.
+`--scale server=N` or `--scale worker=N` runs more of either. The servers and
+the workers keep their data in two places, chosen by environment variables
+that Compose and the chart set:
 - **The job queue and the metadata**, the sessions, the records that make
   proof states loadable, and the snapshot entries and module records, are in
   a database, which every server and worker share. `PISA_DATABASE_URL` is
@@ -147,10 +151,10 @@ running, which KEDA's `postgresql` trigger counts in the job queue every
 - The pod's grace period is that plus 30s.
 
 A server that receives SIGTERM answers `/health` with a 503 `draining` but
-keeps taking requests for 5s, while its readiness probe takes it out of
-rotation, then waits up to `server.drainTimeoutSecs` (360) for those in
-flight; its grace period is that plus 30s. A request it cuts off still runs,
-as its job is in the queue.
+keeps taking requests for 5s, while its readiness probe (or Traefik's health
+check, in Compose) takes it out of rotation, then waits up to
+`server.drainTimeoutSecs` (360) for those in flight; its grace period is that
+plus 30s. A request it cuts off still runs, as its job is in the queue.
 
 Scale-downs and rollouts therefore don't cut jobs off.
 
@@ -587,7 +591,7 @@ gh release download index-v4.35.0-da683984 -R aqora-io/pisa -p bundle.tar.zst -O
   | tar -I zstd -x -C search
 docker compose --profile search-load run --rm search-load   # into Qdrant, once
 PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
-  docker compose --profile search up --build                 # servers on :8000 and :8001
+  docker compose --profile search up --build                 # on :8000, through Traefik
 ```
 
 Bundles of releases before format 4 (search on Qdrant) have no type constants
@@ -627,7 +631,7 @@ pisa-search embed --corpus search/corpus --informal search/store --libraries $LI
   --follow search/work/described &
 pisa-search informalize --corpus search/corpus --informal search/store --libraries $LIBS \
   --concurrency 40 && touch search/work/described; wait
-# Build the bundle, load it into Qdrant and serve it on :8000 and :8001.
+# Build the bundle, load it into Qdrant and serve it on :8000.
 pisa-search build --corpus search/corpus --informal search/store \
   --embedding-model qwen3-embedding-8b@scaleway --out search/bundle
 docker compose --profile search-load run --rm search-load

@@ -6,11 +6,11 @@
     python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
     python3 scripts/e2e.py --search   # also snapshot search (PISA_SEARCH_QDRANT
                                       # set and compose --profile search)
-    PISA_URL=http://localhost:8001 python3 scripts/e2e.py  # through the other server
 
-It stops and restarts workers to check that tactic sessions resume on another
-worker (gate 3), so run it against a dev stack only. Pass --no-failover to skip
-that step, e.g. against Kubernetes through a port-forward.
+It stops and restarts each of the stack's two workers to check that tactic
+sessions resume on the other (gate 3), so run it against a dev stack only.
+Pass --no-failover to skip that step, e.g. against Kubernetes through a
+port-forward.
 """
 
 import argparse
@@ -58,8 +58,13 @@ def wait_for_workers(n):
     sys.exit(f"timed out waiting for {n} workers")
 
 
-def compose(*args):
-    subprocess.run(COMPOSE + list(args), check=True, capture_output=True)
+def worker_containers():
+    out = subprocess.run(COMPOSE + ["ps", "-q", "worker"], check=True, capture_output=True, text=True)
+    return out.stdout.split()
+
+
+def docker(*args):
+    subprocess.run(["docker", *args], check=True, capture_output=True)
 
 
 def check(code, **extra):
@@ -111,19 +116,20 @@ def core(failover=True):
     # Gate 3: continue with each worker stopped in turn; at least one of the two
     # steps must load the state from Garage on the other worker.
     if failover:
-        compose("stop", "worker-1")
+        first, second = worker_containers()
+        docker("stop", first)
         wait_for_workers(1)
     left = post(f"/states/{split['state']}/tactic", {"tactic": "simp"})
     assert left.get("goals") == ["case right\nn : Nat\n⊢ 0 + n = n"], left
     if failover:
-        compose("start", "worker-1")
+        docker("start", first)
         wait_for_workers(2)
-        compose("stop", "worker-2")
+        docker("stop", second)
         wait_for_workers(1)
     done = post(f"/states/{left['state']}/tactic", {"tactic": "simp"})
     assert done.get("complete"), done
     if failover:
-        compose("start", "worker-2")
+        docker("start", second)
         wait_for_workers(2)
         step("sessions resume on another worker")
     else:

@@ -424,7 +424,9 @@ def phase_api(src, order, url, checks, out, as_modules=False):
     return res
 
 
-WORKERS = ["pisa-worker-1-1", "pisa-worker-2-1"]
+def workers():
+    """The compose stack's worker containers."""
+    return sh("docker", "compose", "ps", "-q", "worker").decode().split()
 
 
 def phase_restart(url, out, as_modules=False):
@@ -435,7 +437,7 @@ def phase_restart(url, out, as_modules=False):
     lib = raw["api"]["library"]["snapshot"]
     hit = MODULE_HIT if as_modules else HIT
     _, info = api(url, "GET", f"/snapshots/{lib}")
-    sh("docker", "compose", "restart", "worker-1", "worker-2")
+    sh("docker", "compose", "restart", "worker")
     for _ in range(120):
         try:
             with urllib.request.urlopen(url + "/health") as r:
@@ -449,7 +451,7 @@ def phase_restart(url, out, as_modules=False):
     res = {"cold": [checks[0][1]], "hits": [dt for _, dt in checks[1:]], "memory_mb": []}
     script = ('for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = repl ] && echo "$p $(grep -E '
               '"^(Rss|Pss|Shared_Clean|Shared_Dirty|Private_Clean|Private_Dirty):" $p/smaps_rollup | tr -s " " | tr "\\n" " ")"; done; true')
-    for w in WORKERS:
+    for w in workers():
         for line in sh("docker", "exec", w, "bash", "-c", script).decode().splitlines():
             parts = line.split()
             fields = {parts[i].rstrip(":"): int(parts[i + 1]) // 1024 for i in range(1, len(parts) - 1, 3)}
@@ -471,7 +473,7 @@ def phase_determinism(src, out, as_modules=False, n=3):
         # One digest over all of the module's files (one, or five for module-system code).
         digest = f"ls s{sid}.* | grep -v '[.]lean$' | sort | xargs sha256sum | sha256sum | cut -c1-64"
         fresh, cached = set(), set()
-        for w in WORKERS:
+        for w in workers():
             script = (f"mkdir -p /tmp/det/PisaSnap && cat > /tmp/det/PisaSnap/s{sid}.lean && cd {PROJECT} && "
                       f"LEAN_PATH=$(lake env printenv LEAN_PATH) lean -R /tmp/det -o /tmp/det/PisaSnap/s{sid}.olean "
                       f"/tmp/det/PisaSnap/s{sid}.lean >/dev/null && (cd /tmp/det/PisaSnap && {digest}); "

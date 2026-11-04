@@ -1,10 +1,13 @@
-# Local development stack: two servers (on 8000 and 8001), two workers, Garage
-# (S3) for pickled proof states and snapshot modules, and PostgreSQL for the
-# job queue between them and the session, state and snapshot records.
+# Local development stack, shaped like production: Traefik on port 8000
+# (PISA_PORT to change it) in front of two servers, two workers, Garage (S3)
+# for pickled proof states and snapshot modules, and PostgreSQL for the job
+# queue between the servers and the workers and the session, state and
+# snapshot records.
 #   docker compose up --build
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
 # PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
+# --scale server=N or --scale worker=N runs more of either.
 #
 # The servers also search declarations when PISA_SEARCH_QDRANT is set, with
 # Qdrant from the search profile. Load a bundle built with `pisa-search build`
@@ -14,43 +17,25 @@
 #   PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
 #     docker compose --profile search up --build
 
-x-worker: &worker
-  build:
-    context: .
-    dockerfile: docker/Dockerfile
-    target: worker
-    args:
-      PROJECT: ${PROJECT:-lean-project}
-  image: pisa-worker:${PROJECT:-lean-project}
-  depends_on:
-    garage: { condition: service_started }
-    postgres: { condition: service_healthy }
-  # A worker exits if it can't connect to the database.
-  restart: on-failure
-  # bubblewrap needs to create namespaces and the worker writes to its own
-  # cgroup subtree, so dev workers run privileged in a private cgroup namespace.
-  # Production would grant only what these need (see the design doc).
-  privileged: true
-  cgroup: private
-  environment: &worker-env
-    PISA_SLOTS: ${PISA_SLOTS:-2}
-    PISA_SANDBOX: bwrap
-    PISA_CGROUP_ROOT: /sys/fs/cgroup
-    PISA_MEMORY_MAX_MB: ${PISA_MEMORY_MAX_MB:-16000}
-    PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
-    PISA_PREWARM: ${PISA_PREWARM:-}
-    PISA_STORE: s3
-    PISA_DATABASE_URL: &database-url postgres://pisa:pisa@postgres:5432/pisa
-    PISA_STATE_TTL_SECS: 86400
-    AWS_ENDPOINT: http://garage:3900
-    AWS_ALLOW_HTTP: "true"
-    AWS_REGION: garage
-    AWS_BUCKET: pisa
-    AWS_ACCESS_KEY_ID: &garage-key GK000000000000000000000001
-    AWS_SECRET_ACCESS_KEY: &garage-secret 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
-    RUST_LOG: info
+x-database-url: &database-url postgres://pisa:pisa@postgres:5432/pisa
+x-garage-key: &garage-key GK000000000000000000000001
+x-garage-secret: &garage-secret 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
 
 services:
+  # The ingress: it spreads requests over the servers, which it finds through
+  # Docker (those of this project only), and stops sending them to one that
+  # fails its health check or stops.
+  traefik:
+    image: traefik:v3.7.12
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME}`)
+      - --entrypoints.web.address=:8000
+    ports: ["${PISA_PORT:-8000}:8000"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
   garage:
     image: dxflrs/garage:v2.4.1
     # --default-bucket creates the bucket and key below on first start.
@@ -75,7 +60,7 @@ services:
       interval: 2s
       retries: 30
 
-  # Workers take their jobs from the database, so either server serves any
+  # Workers take their jobs from the database, so any server serves any
   # request. The one holding a lease in the database indexes snapshots.
   server:
     build:
@@ -85,10 +70,16 @@ services:
     image: pisa-server
     deploy:
       replicas: 2
-    ports: ["8000-8001:8000"]
     depends_on:
       postgres: { condition: service_healthy }
     restart: on-failure
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.pisa.entrypoints: web
+      traefik.http.routers.pisa.rule: PathPrefix(`/`)
+      traefik.http.services.pisa.loadbalancer.server.port: "8000"
+      traefik.http.services.pisa.loadbalancer.healthcheck.path: /health
+      traefik.http.services.pisa.loadbalancer.healthcheck.interval: 2s
     # Search's queries are embedded by the model that embedded the bundle: by
     # default Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a
     # bundle embedded with the local 0.6B model, set
@@ -109,17 +100,45 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RUST_LOG: info
 
-  worker-1:
-    <<: *worker
+  # Each names itself after its container and a random suffix.
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: worker
+      args:
+        PROJECT: ${PROJECT:-lean-project}
+    image: pisa-worker:${PROJECT:-lean-project}
+    deploy:
+      replicas: 2
+    depends_on:
+      garage: { condition: service_started }
+      postgres: { condition: service_healthy }
+    # A worker exits if it can't connect to the database.
+    restart: on-failure
+    # bubblewrap needs to create namespaces and the worker writes to its own
+    # cgroup subtree, so dev workers run privileged in a private cgroup
+    # namespace. Production would grant only what these need (see the design
+    # doc).
+    privileged: true
+    cgroup: private
     environment:
-      <<: *worker-env
-      PISA_WORKER_ID: worker-1
-
-  worker-2:
-    <<: *worker
-    environment:
-      <<: *worker-env
-      PISA_WORKER_ID: worker-2
+      PISA_SLOTS: ${PISA_SLOTS:-2}
+      PISA_SANDBOX: bwrap
+      PISA_CGROUP_ROOT: /sys/fs/cgroup
+      PISA_MEMORY_MAX_MB: ${PISA_MEMORY_MAX_MB:-16000}
+      PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
+      PISA_PREWARM: ${PISA_PREWARM:-}
+      PISA_STORE: s3
+      PISA_DATABASE_URL: *database-url
+      PISA_STATE_TTL_SECS: 86400
+      AWS_ENDPOINT: http://garage:3900
+      AWS_ALLOW_HTTP: "true"
+      AWS_REGION: garage
+      AWS_BUCKET: pisa
+      AWS_ACCESS_KEY_ID: *garage-key
+      AWS_SECRET_ACCESS_KEY: *garage-secret
+      RUST_LOG: info
 
   # Holds the search index: the bundle's declarations and the snapshots'.
   qdrant:
