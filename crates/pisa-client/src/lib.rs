@@ -23,7 +23,7 @@
 //! // The entry keeps the module; deleting it lets the module go.
 //! client.delete_snapshot(&base.entry.expect("kept")).await?;
 //!
-//! let search = pisa_client::SearchClient::new("http://localhost:8100")?;
+//! let search = pisa_client::SearchClient::new("http://localhost:8000")?;
 //! let hits = search
 //!     .search(&pisa_client::Query { nl: Some("trace of a density matrix is one".into()), ..Default::default() })
 //!     .await?
@@ -420,8 +420,8 @@ impl Client {
     }
 }
 
-/// A client for a declaration search server (`pisa-search`). Unknown names
-/// and empty results are answers, not errors.
+/// A client for declaration search on a `pisa-server`. Unknown names and
+/// empty results are answers, not errors.
 #[derive(Debug, Clone)]
 pub struct SearchClient {
     endpoint: Endpoint,

@@ -1,13 +1,14 @@
 # Values for trying the chart on minikube with locally built images, the
 # Garage from garage.yaml for proof states and snapshot modules, and the
-# PostgreSQL from postgres.yaml for the session, state and snapshot records:
-#   minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
+# PostgreSQL from postgres.yaml for the job queue and the session, state and
+# snapshot records:
+#   minikube -p pisa image load pisa-server:latest pisa-worker:lean-core
 #   kubectl apply -f deploy/minikube/garage.yaml
 #   kubectl apply -f deploy/minikube/postgres.yaml
-#   helm install prometheus prometheus-community/prometheus -n monitoring \
-#     --create-namespace -f deploy/minikube/prometheus-values.yaml
-router:
+server:
   image: { pullPolicy: Never }
+  # Rollouts of the demo needn't wait out long requests.
+  drainTimeoutSecs: 30
   resources:
     requests: { cpu: 100m, memory: 64Mi }
 
@@ -40,6 +41,4 @@ keda:
   maxReplicas: 4
   # Scale back down quickly so the demo doesn't wait five minutes.
   scaleDownStabilizationSecs: 30
-  prometheus:
-    # prometheus-community/prometheus installed as "prometheus" in "monitoring".
-    serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+  pollingInterval: 5

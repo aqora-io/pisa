@@ -284,8 +284,8 @@ class DeclDetail(TypedDict):
     used_by: list[str]
 
 class SearchClient:
-    """A client for one declaration search server (pisa-search). Safe to
-    share between threads; calls release the GIL while waiting."""
+    """A client for declaration search on one pisa-server. Safe to share
+    between threads; calls release the GIL while waiting."""
 
     def __init__(self, url: str, *, env_id: str | None = None) -> None:
         """`env_id` pins the index's environment (a worker pool version); a

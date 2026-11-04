@@ -34,6 +34,7 @@ spec:
           env:
             - name: PISA_WORKER_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: PISA_QUEUE, value: {{ include "pisa.queue" $ | quote }} }
             - { name: PISA_SLOTS, value: {{ $w.slots | quote }} }
             - { name: PISA_SANDBOX, value: {{ $w.sandbox | quote }} }
             {{- if $w.cgroups }}

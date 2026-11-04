@@ -1,8 +1,8 @@
-"""Tests SearchClient against a real pisa-search server over a tiny corpus,
+"""Tests SearchClient against a real pisa-server searching a tiny corpus,
 loaded into the Qdrant at PISA_TEST_QDRANT_URL (skipped when unset). Build
-the binary first:
+the binaries first:
 
-    cargo build -p pisa-search
+    cargo build -p pisa-server -p pisa-search
 """
 
 import json
@@ -79,17 +79,20 @@ def url(tmp_path_factory):
     subprocess.run([exe, "load", "--bundle", tmp / "bundle", "--qdrant", qdrant, "--min-coverage", "0"],
                    check=True, env=env, stdout=subprocess.DEVNULL)
     port = free_port()
-    server = subprocess.Popen([exe, "serve", "--qdrant", qdrant, "--env-id", env_id,
-                               "--http", f"127.0.0.1:{port}"], env=env)
+    server = subprocess.Popen([BIN / "pisa-server", "--http", f"127.0.0.1:{port}",
+                               "--database-url", tmp / "pisa.db", "--qdrant", qdrant,
+                               "--env-id", env_id, "--no-snapshots"], env=env)
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
-            SearchClient(url).health()
-            break
+            with urllib.request.urlopen(f"{url}/health") as r:
+                if json.load(r)["search"]["ready"]:
+                    break
         except Exception:
-            time.sleep(0.05)
+            pass
+        time.sleep(0.05)
     else:
-        pytest.fail("pisa-search did not start")
+        pytest.fail("pisa-server did not start searching")
     yield url
     server.terminate()
     for collection in [f"pisa-{env_id}", f"pisa-{env_id}-entries"]:
@@ -133,7 +136,7 @@ def test_env_pin(url):
 def test_snapshot_scopes(url):
     client = SearchClient(url)
     assert client.search(nl="trace of the identity matrix", snapshots="none")["hits"]
-    # This server follows no snapshot catalog, so asking for snapshots is refused.
+    # This server doesn't search snapshots, so asking for them is refused.
     for scope in ["all", {"labels": {"run": "1"}}]:
         with pytest.raises(PisaError, match="doesn't search snapshots") as e:
             client.search(nl="trace", snapshots=scope)

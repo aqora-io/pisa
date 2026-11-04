@@ -1,11 +1,7 @@
-{{- define "pisa.scalingQuery" -}}
-{{- $sel := printf "namespace=%q,service=\"%s-router\"" .Release.Namespace (include "pisa.fullname" .) -}}
-max(sum by (job) (pisa_queue_depth{ {{- $sel -}} }) + sum by (job) (pisa_slots{state="busy", {{- $sel -}} }))
-{{- end -}}
 {{- if .Values.keda.enabled }}
 {{- $name := include "pisa.fullname" . }}
-# Scales workers on outstanding jobs (queued + running), so that
-# replicas = ceil(outstanding / jobsPerWorker).
+# Scales workers on outstanding jobs (queued + running) in the database's job
+# queue, so that replicas = ceil(outstanding / jobsPerWorker).
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -17,9 +13,9 @@ spec:
     name: {{ $name }}-worker
   minReplicaCount: {{ .Values.keda.minReplicas }}
   maxReplicaCount: {{ .Values.keda.maxReplicas }}
-  {{- if eq (int .Values.keda.minReplicas) 0 }}
-  # Only used when scaling to and from zero.
   pollingInterval: {{ .Values.keda.pollingInterval }}
+  {{- if eq (int .Values.keda.minReplicas) 0 }}
+  # Only used when scaling to zero.
   cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
   {{- end }}
   advanced:
@@ -30,10 +26,24 @@ spec:
           # workers drain, so this trades idle pods against cold imports.
           stabilizationWindowSeconds: {{ .Values.keda.scaleDownStabilizationSecs }}
   triggers:
-    - type: prometheus
+    - type: postgresql
       metadata:
-        serverAddress: {{ required "keda.prometheus.serverAddress is required" .Values.keda.prometheus.serverAddress | quote }}
-        query: {{ .Values.keda.prometheus.query | default (include "pisa.scalingQuery" .) | quote }}
-        threshold: {{ .Values.keda.jobsPerWorker | default .Values.worker.slots | quote }}
-        ignoreNullValues: "true"
+        # Jobs not done yet: queued, running, or given up a moment ago.
+        query: {{ printf "SELECT count(*) FROM jobs WHERE queue = '%s' AND result IS NULL" (include "pisa.queue" .) | quote }}
+        targetQueryValue: {{ .Values.keda.jobsPerWorker | default .Values.worker.slots | quote }}
+        activationTargetQueryValue: "0"
+      authenticationRef:
+        name: {{ $name }}-worker-database
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ $name }}-worker-database
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: connection
+      name: {{ required "metadata.database.urlSecret.name is required" .Values.metadata.database.urlSecret.name | quote }}
+      key: {{ .Values.metadata.database.urlSecret.key | quote }}
 {{- end }}

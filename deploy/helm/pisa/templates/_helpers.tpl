@@ -19,3 +19,8 @@ app.kubernetes.io/name: {{ .root.Chart.Name }}
 app.kubernetes.io/instance: {{ .root.Release.Name }}
 app.kubernetes.io/component: {{ .component }}
 {{- end -}}
+
+{{- /* The job queue that the release's servers and workers share. */ -}}
+{{- define "pisa.queue" -}}
+{{- .Values.queue | default (include "pisa.fullname" .) -}}
+{{- end -}}

@@ -1,0 +1,158 @@
+{{- $name := include "pisa.fullname" . }}
+{{- $qdrant := .Values.search.qdrant.url }}
+{{- if and .Values.search.enabled (not $qdrant) }}
+{{- if not .Values.qdrant.enabled }}
+{{- fail "search needs search.qdrant.url, or qdrant.enabled for the Qdrant subchart" }}
+{{- end }}
+{{- $qname := ternary .Release.Name (printf "%s-qdrant" .Release.Name) (contains "qdrant" .Release.Name) }}
+{{- $qdrant = printf "http://%s:6333" ($qname | trunc 63 | trimSuffix "-") }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}-server
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  # Replicas hold no state: the jobs they queue are in the database, and the
+  # one holding a lease there indexes snapshots for search.
+  {{- if not .Values.server.autoscaling.enabled }}
+  replicas: {{ .Values.server.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "pisa.selector" (dict "root" . "component" "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "pisa.selector" (dict "root" . "component" "server") | nindent 8 }}
+    spec:
+      # A replica told to stop keeps serving its requests in flight.
+      terminationGracePeriodSeconds: {{ add .Values.server.drainTimeoutSecs 30 }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "pisa.selector" (dict "root" . "component" "server") | nindent 14 }}
+      containers:
+        - name: server
+          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag }}"
+          imagePullPolicy: {{ .Values.server.image.pullPolicy }}
+          env:
+            - { name: PISA_HTTP, value: "0.0.0.0:8000" }
+            - name: PISA_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ required "metadata.database.urlSecret.name is required" .Values.metadata.database.urlSecret.name | quote }}, key: {{ .Values.metadata.database.urlSecret.key | quote }} } }
+            - { name: PISA_QUEUE, value: {{ include "pisa.queue" . | quote }} }
+            - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ .Values.server.drainTimeoutSecs | quote }} }
+            - { name: PISA_MAX_WAIT_SECS, value: {{ .Values.router.maxWaitSecs | quote }} }
+            - { name: PISA_MAX_RETRIES, value: {{ .Values.router.maxRetries | quote }} }
+            {{- with .Values.router.defaultVersion }}
+            - { name: PISA_DEFAULT_VERSION, value: {{ . | quote }} }
+            {{- end }}
+            {{- with .Values.router.aliases }}
+            - { name: PISA_ALIASES, value: {{ join "," . | quote }} }
+            {{- end }}
+            {{- if .Values.search.enabled }}
+            - { name: PISA_SEARCH_QDRANT, value: {{ $qdrant | quote }} }
+            - { name: PISA_SEARCH_ENV_ID, value: {{ required "search.envId is required" .Values.search.envId | quote }} }
+            {{- with .Values.search.embedder }}
+            - { name: PISA_SEARCH_TEI, value: {{ . | quote }} }
+            {{- end }}
+            {{- if .Values.search.snapshots }}
+            {{- with .Values.search.describeModel }}
+            - { name: PISA_SEARCH_DESCRIBE_MODEL, value: {{ . | quote }} }
+            {{- end }}
+            - { name: PISA_SEARCH_DESCRIBE_CONCURRENCY, value: {{ .Values.search.describeConcurrency | quote }} }
+            {{- else }}
+            - { name: PISA_SEARCH_NO_SNAPSHOTS, value: "true" }
+            {{- end }}
+            {{- with .Values.search.secret.name }}
+            {{- range $var, $key := dict "SCW_SECRET_KEY" $.Values.search.secret.scwSecretKey "ANTHROPIC_API_KEY" $.Values.search.secret.anthropicApiKey "OPENAI_API_KEY" $.Values.search.secret.openaiApiKey }}
+            - name: {{ $var }}
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.search.secret.name | quote }}, key: {{ $key | quote }}, optional: true }
+            {{- end }}
+            {{- end }}
+            {{- with .Values.search.qdrant.apiKeySecret.name }}
+            - { name: PISA_SEARCH_QDRANT_KEY_ENV, value: QDRANT_API_KEY }
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ . | quote }}, key: {{ $.Values.search.qdrant.apiKeySecret.key | quote }} }
+            {{- end }}
+            {{- end }}
+            - { name: RUST_LOG, value: info }
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - { name: http, containerPort: 8000 }
+          # Ready while the API answers, whether or not search can: checks
+          # don't need it, and every replica shares one Qdrant.
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-server
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  {{- if .Values.metrics.scrapeAnnotations }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: /metrics
+  {{- end }}
+spec:
+  type: {{ .Values.server.service.type }}
+  selector:
+    {{- include "pisa.selector" (dict "root" . "component" "server") | nindent 4 }}
+  ports:
+    - { name: http, port: {{ .Values.server.service.port }}, targetPort: http }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}-server
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  minAvailable: {{ .Values.server.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "pisa.selector" (dict "root" . "component" "server") | nindent 6 }}
+{{- if .Values.server.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}-server
+  labels:
+    {{- include "pisa.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $name }}-server
+  minReplicas: {{ .Values.server.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.server.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.server.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

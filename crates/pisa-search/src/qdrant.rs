@@ -82,6 +82,16 @@ pub fn any(field: &str, values: &[String]) -> Value {
 
 impl Qdrant {
     /// The Qdrant at `url`, with an API key if it needs one.
+    /// A client of the Qdrant at `url`, with the API key in environment
+    /// variable `key_env`, if it names one.
+    pub fn with_key_env(url: &str, key_env: Option<&str>) -> anyhow::Result<Qdrant> {
+        let key = match key_env {
+            Some(var) => Some(std::env::var(var).map_err(|_| anyhow::anyhow!("{var} is not set"))?),
+            None => None,
+        };
+        Qdrant::new(url, key)
+    }
+
     pub fn new(url: &str, key: Option<String>) -> anyhow::Result<Qdrant> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))

@@ -2026,7 +2026,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2057,6 +2056,24 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "zstd",
+]
+
+[[package]]
+name = "pisa-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "pisa-db",
+ "pisa-protocol",
+ "pisa-router",
+ "pisa-search",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

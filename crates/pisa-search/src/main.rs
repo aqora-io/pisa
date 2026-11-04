@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use pisa_protocol::search::Informal;
@@ -8,7 +7,6 @@ use pisa_search::corpus::{self, Corpus};
 use pisa_search::dense::{self, Embedder};
 use pisa_search::engine::{self, Weights};
 use pisa_search::index::{self, Bundle};
-use pisa_search::indexer;
 use pisa_search::informal_store::Store;
 use pisa_search::informalize;
 use pisa_search::llm::Llm;
@@ -35,11 +33,7 @@ struct QdrantArgs {
 
 impl QdrantArgs {
     fn client(&self) -> anyhow::Result<Qdrant> {
-        let key = match &self.key_env {
-            Some(var) => Some(std::env::var(var).map_err(|_| anyhow::anyhow!("{var} is not set"))?),
-            None => None,
-        };
-        Qdrant::new(&self.url, key)
+        Qdrant::with_key_env(&self.url, self.key_env.as_deref())
     }
 }
 
@@ -191,41 +185,6 @@ enum Command {
         /// Refuse a bundle whose vectors cover less than this share of its declarations.
         #[arg(long, default_value_t = 0.99)]
         min_coverage: f64,
-    },
-    /// Serve the HTTP API for the bundle loaded for an environment. Any
-    /// number of replicas can serve one environment.
-    Serve {
-        #[command(flatten)]
-        qdrant: QdrantArgs,
-        /// The environment whose loaded bundle to serve.
-        #[arg(long, env = "PISA_SEARCH_ENV_ID")]
-        env_id: String,
-        #[arg(long, env = "PISA_SEARCH_HTTP", default_value = "0.0.0.0:8100")]
-        http: std::net::SocketAddr,
-        /// Symbol dictionary; defaults to the shipped search/symbols.toml.
-        #[arg(long, env = "PISA_SEARCH_SYMBOLS")]
-        symbols: Option<PathBuf>,
-        /// Embedding server for queries (enables the dense lane); see `embed`.
-        /// It also embeds snapshot declarations, so it must serve the model
-        /// that embedded the bundle.
-        #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
-        embedder: Option<String>,
-        /// The workers' database (`postgres://…`), which holds their snapshot
-        /// catalog; with it, queries can search snapshots, and the replica
-        /// that holds the lease indexes them.
-        #[arg(long, env = "PISA_DATABASE_URL")]
-        database_url: Option<String>,
-        /// The worker version whose snapshots to search (default: the env_id).
-        #[arg(long, env = "PISA_SEARCH_SNAPSHOT_VERSION")]
-        snapshot_version: Option<String>,
-        /// Claude or OpenAI model that describes every snapshot declaration
-        /// (needs ANTHROPIC_API_KEY or OPENAI_API_KEY); without one they are
-        /// searched by name, signature and docstring.
-        #[arg(long, env = "PISA_SEARCH_DESCRIBE_MODEL")]
-        describe_model: Option<String>,
-        /// LLM and embedding requests in flight for snapshots.
-        #[arg(long, env = "PISA_SEARCH_DESCRIBE_CONCURRENCY", default_value_t = 8)]
-        describe_concurrency: usize,
     },
     /// Measure retrieval quality on MathlibQR.
     Eval {
@@ -646,80 +605,6 @@ async fn main() -> anyhow::Result<()> {
                 elapsed = format!("{:.0}s", started.elapsed().as_secs_f64()),
                 "loaded the bundle"
             );
-        }
-        Command::Serve {
-            qdrant,
-            env_id,
-            http,
-            symbols,
-            embedder,
-            database_url,
-            snapshot_version,
-            describe_model,
-            describe_concurrency,
-        } => {
-            // Compose passes unset variables as empty ones.
-            let database_url = database_url.filter(|url| !url.is_empty());
-            let describe_model = describe_model.filter(|m| !m.is_empty());
-            let symbols = match symbols {
-                Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
-                None => Symbols::parse(symbols::DEFAULT)?,
-            };
-            let embedder = match embedder.clone() {
-                Some(spec) => {
-                    Some(tokio::task::spawn_blocking(move || Embedder::parse(&spec)).await??)
-                }
-                None => None,
-            };
-            let mut engine = pisa_search::engine::Engine::open(
-                qdrant.client()?,
-                &env_id,
-                symbols,
-                embedder.clone(),
-            )
-            .await?;
-            engine.snapshots = database_url.is_some();
-            let engine = Arc::new(engine);
-            if let Some(url) = database_url {
-                let db = pisa_db::db::Db::connect(Some(&url))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("connecting to the database: {e}"))?;
-                let version = snapshot_version.unwrap_or_else(|| env_id.clone());
-                tracing::info!(%version, "searching snapshots");
-                let llm = match describe_model {
-                    Some(model) => Some((
-                        Llm::for_model(&model)?,
-                        informalize::Config {
-                            model,
-                            effort: "low".into(),
-                            max_tokens: 4096,
-                            concurrency: describe_concurrency,
-                        },
-                    )),
-                    None => None,
-                };
-                // Snapshot vectors join the bundle's, so without those there are none.
-                let embedder = embedder.filter(|_| engine.manifest.embedding_model.is_some());
-                let how = indexer::Describe { llm, embedder };
-                let indexer = indexer::Indexer::new(
-                    engine.clone(),
-                    db,
-                    version,
-                    how,
-                    describe_concurrency,
-                    indexer::LEASE_TTL,
-                );
-                tokio::spawn(indexer.run());
-            }
-            tracing::info!(
-                env_id = engine.env_id(),
-                decls = engine.manifest.decls,
-                snapshots = engine.snapshots,
-                %http,
-                "serving"
-            );
-            let listener = tokio::net::TcpListener::bind(http).await?;
-            axum::serve(listener, pisa_search::server::router(engine)).await?;
         }
         Command::Eval {
             qdrant,

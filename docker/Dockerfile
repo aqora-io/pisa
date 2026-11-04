@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
-# Targets: `router`, `worker`, `search`, and `corpus` (the search corpus of the
-# pinned project, written out with --output). Build from the repository root:
+# Targets: `server`, `worker`, and `corpus` (the search corpus of the pinned
+# project, written out with --output). Build from the repository root:
 #   docker build -f docker/Dockerfile --target worker .
 #   docker build -f docker/Dockerfile --target corpus --output search/corpus .
 # Set PROJECT=lean-core for a small image without Mathlib, for quick tests
@@ -11,24 +11,25 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p pisa-router -p pisa-worker \
-    && cp target/release/pisa-router target/release/pisa-worker /usr/local/bin/
+    cargo build --release -p pisa-worker \
+    && cp target/release/pisa-worker /usr/local/bin/
 
-# Its own stage, so router and worker builds don't wait for tantivy.
-FROM rust:1.99-trixie AS build-search
+# Its own stage, so worker builds don't wait for search's dependencies.
+FROM rust:1.99-trixie AS build-server
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p pisa-search \
-    && cp target/release/pisa-search /usr/local/bin/
+    cargo build --release -p pisa-server -p pisa-search \
+    && cp target/release/pisa-server target/release/pisa-search /usr/local/bin/
 
-FROM debian:trixie-slim AS router
+# The server, and `pisa-search` for loading bundles and other offline work.
+FROM debian:trixie-slim AS server
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /usr/local/bin/pisa-router /usr/local/bin/
+COPY --from=build-server /usr/local/bin/pisa-server /usr/local/bin/pisa-search /usr/local/bin/
 EXPOSE 8000
-ENTRYPOINT ["pisa-router"]
+ENTRYPOINT ["pisa-server"]
 
 FROM debian:trixie-slim AS lean
 RUN apt-get update \
@@ -60,21 +61,13 @@ COPY --from=build /usr/local/bin/pisa-worker /usr/local/bin/
 ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl
 ENTRYPOINT ["pisa-worker"]
 
-FROM debian:trixie-slim AS search
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=build-search /usr/local/bin/pisa-search /usr/local/bin/
-EXPOSE 8100
-ENTRYPOINT ["pisa-search"]
-CMD ["serve"]
-
 # Exports every declaration of the project (about 40 minutes) and ingests it.
 # QuantumInfo can't be imported alongside Mathlib (both declare
 # `Commute.log_left`), so it comes from a second environment and its
 # declarations record the header that loads them.
 FROM lean AS search-export
 COPY search/exporter /opt/exporter
-COPY --from=build-search /usr/local/bin/pisa-search /usr/local/bin/
+COPY --from=build-server /usr/local/bin/pisa-search /usr/local/bin/
 RUN lake env lean --run /opt/exporter/PisaExport.lean --env mathlib-physlib Mathlib Physlib \
         > /tmp/decls.ndjson \
     && lake env lean --run /opt/exporter/PisaExport.lean --env physlib-quantuminfo Physlib QuantumInfo \

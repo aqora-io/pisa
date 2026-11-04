@@ -1,17 +1,19 @@
 # pisa
 
 A Rust control plane for serving Lean 4 to machines. It runs unmodified
-upstream [Lean REPL](https://github.com/leanprover-community/repl) processes. A
-router queues requests in the database, and each job goes to a worker that has
-the right project version and, ideally, the right imports already loaded.
+upstream [Lean REPL](https://github.com/leanprover-community/repl) processes.
+Servers, as many as you run, queue requests in the database, and each job goes
+to a worker that has the right project version and, ideally, the right imports
+already loaded.
 
 This repository implements stages 1–3 of the design doc *Building a Scalable
 Lean 4 Server in Rust*:
 
-1. **Router and workers.** The router puts each request's job on a queue in
+1. **Servers and workers.** A server puts each request's job on a queue in
    the database, with two priority classes, and exports Prometheus metrics.
    Workers claim jobs, preferring those whose proof state they hold or whose
-   header they have warm, and a job whose worker dies runs on another.
+   header they have warm, and a job whose worker dies runs on another. Servers
+   hold no state, so they run in replicas.
 2. **Hardened workers.**
    - Each REPL runs in a bubblewrap sandbox and its own cgroup v2 limits.
    - Proofs are judged by the axioms they depend on, not by string matching.
@@ -35,34 +37,35 @@ imports it instead of re-checking it.
 | `pisa-protocol` | The HTTP API types, REPL protocol types, header splitting, the jobs and results that go through the queue |
 | `pisa-repl` | Async driver for one REPL process: blank-line framing, timeouts, crash reporting |
 | `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store, claiming jobs |
-| `pisa-db` | The database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, the job queue and the workers' registry, and the snapshot catalog, shared by the router, the workers and the search service |
-| `pisa-router` | HTTP API, queueing jobs and waiting for their results, metrics |
+| `pisa-db` | The database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, the job queue and the workers' registry, and the snapshot catalog, shared by the servers and the workers |
+| `pisa-server` | The server: `pisa-router`'s API and `pisa-search`'s in one process, with a combined `/health` and graceful shutdown |
+| `pisa-router` | The check, session and snapshot API: queueing jobs and waiting for their results, metrics |
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
 | `pisa-tests` | `fake-repl` (speaks the REPL protocol without Lean) and in-process integration tests |
-| `pisa-search` | Declaration search over Mathlib and Physlib: corpus, descriptions, index, HTTP API (see [Search](#search)) |
+| `pisa-search` | Declaration search over Mathlib and Physlib: corpus, descriptions, index, HTTP API, and the CLI that builds and loads bundles (see [Search](#search)) |
 
 ## Running
 
 ```sh
 docker compose up --build              # Lean v4.35.0 + Mathlib + Physlib (first build compiles Physlib)
 PROJECT=lean-core docker compose up --build   # no Mathlib, for quick checks
-python3 scripts/e2e.py [--mathlib] [--search http://localhost:8100]   # end-to-end checks against the running stack
+python3 scripts/e2e.py [--mathlib] [--search]   # end-to-end checks against the running stack
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 ```
 
-Compose also starts PostgreSQL and Garage. The router and the workers keep
-their data in two places, chosen by environment variables that Compose and
-the chart set:
+Compose starts two servers, on ports 8000 and 8001, and PostgreSQL and
+Garage. The servers and the workers keep their data in two places, chosen by
+environment variables that Compose and the chart set:
 - **The job queue and the metadata**, the sessions, the records that make
   proof states loadable, and the snapshot entries and module records, are in
-  a database, which the router and every worker share. `PISA_DATABASE_URL` is
+  a database, which every server and worker share. `PISA_DATABASE_URL` is
   a PostgreSQL URL (`postgres://user:password@host/db`) or the path of a
   SQLite file, which only one host can use. It is required.
   - Each process creates or updates the tables when it starts, one process
     at a time.
   - Jobs and workers are kept apart by `PISA_QUEUE` (default `pisa`), which
-    the router and its workers must agree on. Deployments that share a
+    the servers and their workers must agree on. Deployments that share a
     database need queues of their own.
   - PostgreSQL holds the only copy of the snapshot entries and module
     records, which never expire, so run it durably and back it up.
@@ -89,30 +92,34 @@ on the same Lean version.
 ## Kubernetes
 
 `deploy/helm/pisa` is a Helm chart containing:
-- the router;
+- the server Deployment (`server.replicas`, 2), with its Service and a
+  PodDisruptionBudget;
 - the worker Deployment;
 - a KEDA `ScaledObject`;
 - an optional `ServiceMonitor`.
 
 **Cluster prerequisites.** Like most application charts, it uses the cluster's
-own KEDA and Prometheus:
-- `keda.prometheus.serverAddress` must point at that Prometheus.
-- Prometheus must scrape the router. The router Service carries
-  `prometheus.io/scrape` annotations, which `prometheus-community/prometheus`
-  picks up. With the Prometheus Operator, set
-  `metrics.serviceMonitor.enabled=true`, plus any labels its selector needs.
-- Keep the scrape interval short, e.g. 5–15s: it bounds how fast workers react
-  to load.
+own KEDA, which reads the job queue from the database (see Scaling below).
+Prometheus is optional, for dashboards:
+- The server Service carries `prometheus.io/scrape` annotations, which
+  `prometheus-community/prometheus` picks up. With the Prometheus Operator,
+  set `metrics.serviceMonitor.enabled=true`, plus any labels its selector
+  needs.
+- Every replica reports the queue's gauges (`pisa_queue_depth`, `pisa_slots`,
+  `pisa_workers`) for the whole queue, so take their max; the counters are
+  each replica's own, so sum them.
 
-**Storage.** Metadata (sessions, proof-state records, snapshot entries and module
-records) lives in PostgreSQL, and blobs (pickled proof states, snapshot modules) in an
-S3-compatible bucket.
+**Storage.** The job queue and the metadata (sessions, proof-state records,
+snapshot entries and module records) live in PostgreSQL, and blobs (pickled
+proof states, snapshot modules) in an S3-compatible bucket.
 - The chart doesn't deploy PostgreSQL. Put the URL of one you run, for
   example with [CloudNativePG](https://cloudnative-pg.io) or a managed
   service, in a Secret, and name it in `metadata.database.urlSecret.name`
   (`metadata.database.urlSecret.key` names the key, `url` by default). It is
-  required. PostgreSQL holds the only copy of the snapshot entries and module
-  records, which never expire, so it must be durable and backed up.
+  required, for the servers, the workers and KEDA. PostgreSQL holds the only
+  copy of the snapshot entries and module records, which never expire, so it
+  must be durable and backed up. The release's servers and workers share the
+  queue `queue` (the release's name unless set).
 - Give the bucket's credentials as an existing Secret, or leave
   `store.s3.credentialsSecret.name` empty to use the pod's ambient credentials
   (e.g. EKS IRSA).
@@ -125,8 +132,8 @@ kubectl create secret generic pisa-s3 \
 kubectl create secret generic pisa-db \
   --from-literal=url='postgres://pisa:...@<host>/pisa?sslmode=require'
 helm install pisa deploy/helm/pisa \
+  --set server.image.repository=<registry>/pisa-server \
   --set worker.image.repository=<registry>/pisa-worker \
-  --set keda.prometheus.serverAddress=http://prometheus-server.monitoring.svc.cluster.local \
   --set metadata.database.urlSecret.name=pisa-db \
   --set store.s3.bucket=<bucket> --set store.s3.region=<region> \
   --set store.s3.credentialsSecret.name=pisa-s3
@@ -137,15 +144,21 @@ store such as MinIO or Garage. `credentialsSecret.accessKeyIdKey` and
 `credentialsSecret.secretAccessKeyKey` name the keys inside the Secret.
 
 **Scaling.** Workers scale on the release's outstanding jobs, queued plus
-running, read from the router's `pisa_queue_depth` and `pisa_slots{state="busy"}`
-metrics. The query counts each job once even if two scrape jobs collect the
-router; `keda.prometheus.query` overrides it.
+running, which KEDA's `postgresql` trigger counts in the job queue every
+`keda.pollingInterval` seconds, through `metadata.database.urlSecret`.
 - The target is `keda.jobsPerWorker` jobs per pod, which defaults to `worker.slots`.
 - `keda.scaleDownStabilizationSecs` sets how long demand must stay low before pods are removed.
+- The servers scale on their own: `server.replicas`, or `server.autoscaling`
+  on CPU. Any replica serves any request, as the jobs are in the database.
 
 **Draining.** A worker that receives SIGTERM claims no more jobs, finishes the ones it has, and exits. Two settings bound this:
 - `worker.drainTimeoutSecs` is the longest it waits for running jobs.
 - The pod's grace period is that plus 30s.
+
+A server that receives SIGTERM keeps taking requests for 5s, while its
+Service stops sending them, then waits up to `server.drainTimeoutSecs` (360)
+for those in flight; its grace period is that plus 30s. A request it cuts off
+still runs, as its job is in the queue.
 
 Scale-downs and rollouts therefore don't cut jobs off.
 
@@ -154,27 +167,24 @@ Scale-downs and rollouts therefore don't cut jobs off.
 ```sh
 minikube start -p pisa --driver=docker --cpus=8 --memory=20g
 helm repo add kedacore https://kedacore.github.io/charts
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm install keda kedacore/keda -n keda --create-namespace --version 2.21.0
-helm install prometheus prometheus-community/prometheus --version 29.37.0 \
-  -n monitoring --create-namespace -f deploy/minikube/prometheus-values.yaml
-minikube -p pisa image load pisa-router:latest pisa-worker:lean-core
+minikube -p pisa image load pisa-server:latest pisa-worker:lean-core
 kubectl apply -f deploy/minikube/garage.yaml   # a throwaway S3 store and its Secret
 kubectl apply -f deploy/minikube/postgres.yaml # a throwaway PostgreSQL and its Secret
 helm install pisa deploy/helm/pisa -f deploy/minikube/values.yaml
-kubectl port-forward svc/pisa-router 8000:8000 &
+kubectl port-forward svc/pisa-server 8000:8000 &
 python3 scripts/e2e.py --no-failover   # checks, policy, sessions against real Lean
 python3 scripts/k8s_scale.py           # scales up under load, back down, drains on delete
 ```
 
-**Search.** `search.enabled` adds `pisa-search` replicas (`search.replicas`, 2,
-or `search.autoscaling`) with a PodDisruptionBudget, over Qdrant: the official
+**Search.** `search.enabled` has the servers search, over Qdrant: the official
 chart as a dependency (`qdrant.enabled`, 3 nodes) or `search.qdrant.url`. They
-search snapshots through `metadata.database`. Set `search.envId`, and give API keys
-as an existing Secret (`search.secret.name`). Load each bundle once, e.g.
-through `kubectl port-forward svc/<release>-qdrant 6333`, with
-`pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2`;
-until it has, replicas exit at startup and restart.
+search snapshots too, unless `search.snapshots` is false. Set `search.envId`,
+and give API keys as an existing Secret (`search.secret.name`). Load each
+bundle once, e.g. through `kubectl port-forward svc/<release>-qdrant 6333`,
+with `pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2`
+(the server image has `pisa-search`). Until it has, `/v1/search` answers 503
+and the rest of the API works.
 
 **Not covered by the chart:**
 - Separate pools per project version. The scaling query counts every job, so one release should serve one version.
@@ -183,14 +193,34 @@ until it has, replicas exit at startup and restart.
 
 ## Upgrading
 
-To the release whose workers take jobs from the database:
-- Upgrade the router and the workers together. The router no longer listens
-  for workers (`PISA_WORKERS`, port 7070), and workers no longer dial it
+To the release with replicated servers, whose workers take jobs from the
+database:
+- `pisa-server` replaces `pisa-router` and `pisa-search serve`: one image
+  (the Dockerfile's `server` target, which also has `pisa-search`) serves the
+  check, session and snapshot API and search, on one port (8000; search was
+  on 8100). Point `SearchClient` at the server's URL.
+- Upgrade the servers and the workers together. Servers no longer listen for
+  workers (`PISA_WORKERS`, port 7070), and workers no longer dial them
   (`PISA_ROUTER`): both need `PISA_DATABASE_URL`, the same database, and the
-  same `PISA_QUEUE`. In the chart, the `-router-workers` Service is gone and
-  the router reads `metadata.database.urlSecret` too.
+  same `PISA_QUEUE`.
+- Search is on when `PISA_SEARCH_QDRANT` is set. It always has the database,
+  so snapshots are searched unless `PISA_SEARCH_NO_SNAPSHOTS` is set. Until
+  Qdrant answers with the bundle, `/v1/search` answers 503 instead of the
+  process exiting, and `/health` is 200 whenever the API is up, with search's
+  state under `search`.
+- In the chart:
+  - `server.*` holds what `router.image`, `router.service`, `router.resources`
+    and `search.image`, `search.replicas`, `search.service`,
+    `search.resources`, `search.minAvailable` and `search.autoscaling` held;
+  - the `-router`, `-router-workers` and `-search` Services are replaced by
+    `-server`;
+  - KEDA counts the queue in the database, so `keda.prometheus` is gone and
+    Prometheus is optional;
+  - `queue` names the release's queue, its name by default.
 - Prewarming follows the headers of the jobs that are queued when a worker
   starts, rather than the router's counts since it started.
+- The queue gauges are the same on every server, so dashboards should take
+  their max.
 
 To the release that moved metadata from TiKV into PostgreSQL:
 - Run PostgreSQL, and set `PISA_DATABASE_URL` where `PISA_METADATA` and
@@ -245,7 +275,7 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
-| `GET /health`, `GET /metrics` | Liveness, Prometheus metrics |
+| `GET /health`, `GET /metrics` | Liveness, with search's state under `search` (`null` if the server doesn't search); Prometheus metrics |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
 - `ok` is the verdict.
@@ -434,7 +464,7 @@ cache: whoever can write the store can still install an unchecked module, and
 the recorded SHA-256 catches only corruption, not a malicious write. The base
 Mathlib/Physlib oleans and the kernel are the trusted base.
 
-**Searching them.** The search service can search snapshot declarations, by
+**Searching them.** The servers can search snapshot declarations, by
 label, next to Mathlib's; see [Snapshots in search](#snapshot-search).
 
 ## Clients
@@ -490,13 +520,13 @@ Exceptions carry `.kind` and `.status`, and their class says what to do:
 To run the Python tests:
 
 ```sh
-cargo build -p pisa-router -p pisa-worker -p pisa-tests -p pisa-search
+cargo build -p pisa-server -p pisa-worker -p pisa-tests -p pisa-search
 cd crates/pisa-python && maturin develop && pytest tests
 ```
 
 ## Search
 
-`pisa-search` finds Mathlib and Physlib declarations from a description,
+Search finds Mathlib and Physlib declarations from a description,
 LaTeX, a Lean pattern or goal, or a partial or misspelled name. It is meant for
 agents that know what they need but not what it is called. Its index is built
 from the same pinned project as the workers, and every response carries that
@@ -505,10 +535,13 @@ the matching worker pool.
 
 **How it runs.** The index lives in [Qdrant](https://qdrant.tech) (≥ 1.19.1):
 a collection `pisa-<env_id>` with a point per declaration, loaded from a bundle
-with `pisa-search load`. Servers (`pisa-search serve --qdrant URL --env-id
-ENV`) hold nothing, so any number of replicas serve one environment, behind any
-load balancer. Each collection has one shard, as Qdrant's IDF is per shard; for
-availability, run Qdrant as a cluster and load with `--replication 2`.
+with `pisa-search load`. The servers search when given `--qdrant URL --env-id
+ENV` (`PISA_SEARCH_QDRANT`, `PISA_SEARCH_ENV_ID`), and hold nothing, so any
+number of replicas serve one environment. Each collection has one shard, as
+Qdrant's IDF is per shard; for availability, run Qdrant as a cluster and load
+with `--replication 2`. A server opens its index in the background, so until
+Qdrant answers with the bundle, `/v1/search` answers 503, `/health` says why,
+and the rest of the API works.
 
 **How it ranks.** Each of four lanes is a Qdrant query, and Qdrant fuses them
 with weighted reciprocal rank fusion:
@@ -560,7 +593,8 @@ gh release list -R aqora-io/pisa
 gh release download index-v4.35.0-da683984 -R aqora-io/pisa -p bundle.tar.zst -O - \
   | tar -I zstd -x -C search
 docker compose --profile search-load run --rm search-load   # into Qdrant, once
-docker compose --profile search up --build                   # two replicas, :8100 and :8101
+PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
+  docker compose --profile search up --build                 # servers on :8000 and :8001
 ```
 
 Bundles of releases before format 4 (search on Qdrant) have no type constants
@@ -600,18 +634,18 @@ pisa-search embed --corpus search/corpus --informal search/store --libraries $LI
   --follow search/work/described &
 pisa-search informalize --corpus search/corpus --informal search/store --libraries $LIBS \
   --concurrency 40 && touch search/work/described; wait
-# Build the bundle, load it into Qdrant and serve it on :8100 and :8101.
+# Build the bundle, load it into Qdrant and serve it on :8000 and :8001.
 pisa-search build --corpus search/corpus --informal search/store \
   --embedding-model qwen3-embedding-8b@scaleway --out search/bundle
 docker compose --profile search-load run --rm search-load
-docker compose --profile search up --build
+PISA_SEARCH_QDRANT=http://qdrant:6333 docker compose --profile search up --build
 ```
 
 `load` refuses a bundle whose vectors cover less than 99% of its declarations
 (`--min-coverage`). Loading again the same `env_id` replaces its declarations in
 place, keeping the snapshots'; queries meanwhile may see some of each. Restart
-the replicas after it: they read the manifest (libraries, kinds, field
-statistics) when they start.
+the servers after it: they read the manifest (libraries, kinds, field
+statistics) when they open the index.
 
 `--informal` takes a directory or an `s3://bucket/prefix` URL (credentials come
 from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
@@ -637,13 +671,14 @@ Unknown names and empty results are answers, not errors. A `libraries` or
 the known ones. Pinning an `env_id` the server doesn't have is a 404. If the
 embedding API fails, the query still returns results from the other lanes,
 after at most a few seconds, and says so in the result's `warnings`. If Qdrant
-doesn't answer, requests are a 503 and `/health` is too, so a readiness probe
-takes the replica out of rotation.
+doesn't answer, search requests are a 503 and `/health`'s `search.qdrant` is
+false; the server stays ready, as the rest of its API works and every replica
+shares the one Qdrant.
 
 ```python
 from pisa_client import SearchClient
 
-search = SearchClient("http://localhost:8100")
+search = SearchClient("http://localhost:8000")
 for hit in search.search(nl="trace of a density matrix is one", libraries=["Physlib"])["hits"]:
     print(hit["text"])
 search.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqrt_mul_self"
@@ -651,12 +686,13 @@ search.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqr
 
 The Rust `pisa_client::SearchClient` has the same methods. The search tests,
 Rust and Python, need a Qdrant at `PISA_TEST_QDRANT_URL` and are skipped
-without one; for the Python ones, first run `cargo build -p pisa-search`.
+without one; for the Python ones, first run
+`cargo build -p pisa-server -p pisa-search`.
 
 <a id="snapshot-search"></a>
-**Snapshots in search.** With `PISA_DATABASE_URL` pointing at the workers'
-database, the service also searches the declarations of [snapshots](#snapshots), ranked with
-the bundle's in every lane:
+**Snapshots in search.** The servers also search the declarations of
+[snapshots](#snapshots), from the database they share with the workers, ranked with
+the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
 - **Scope.** A query's `snapshots` says which: `"none"` (the default), `"all"`,
   or `{"labels": {"run": "7"}}`, the modules of the entries that have every
   label, as `GET /snapshots?label=` matches them. The snapshots those import
@@ -667,13 +703,13 @@ the bundle's in every lane:
   entries on that module, newest first, at most 10, with the module's
   `dirty` and `verified`. Names can repeat across snapshots, and each is a hit
   of its own. `/v1/resolve` and `/v1/decl` cover the bundle only.
-- **The leader.** One replica at a time, holding a lease in the database
+- **The leader.** One server at a time, holding a lease in the database
   (30 s, renewed every 10 s), indexes snapshots: it writes each module's
   declarations to Qdrant, and each entry to `pisa-<env_id>-entries`, which a
   label scope is resolved against. So a module can have any number of
   entries, but a label scope may cover at most 20,000 modules. When the
-  leader goes, another replica takes the lease, makes Qdrant match the
-  catalog, and carries on; `/health` says which replica leads.
+  leader goes, another server takes the lease, makes Qdrant match the
+  catalog, and carries on; `/health`'s `search.leader` says which leads.
 - **Freshness.** Workers export a module's declarations when they build it,
   and log every create, relabel, delete and re-check in the database. The
   leader reads that log every 2 s. A snapshot is searchable by name, signature and

@@ -1,7 +1,7 @@
-"""Tests the Python client against a real router and worker that run
+"""Tests the Python client against a real server and worker that run
 fake-repl in place of Lean. Build the binaries first:
 
-    cargo build -p pisa-router -p pisa-worker -p pisa-tests
+    cargo build -p pisa-server -p pisa-worker -p pisa-tests
 """
 
 import os
@@ -27,17 +27,17 @@ def free_port():
 @pytest.fixture(scope="module")
 def url(tmp_path_factory):
     http = free_port()
-    # The router and the worker share the job queue in this file.
+    # The server and the worker share the job queue in this file.
     db = str(tmp_path_factory.mktemp("db") / "pisa.db")
     env = {**os.environ, "RUST_LOG": "warn"}
-    router = subprocess.Popen(
-        [BIN / "pisa-router", "--http", f"127.0.0.1:{http}", "--database-url", db,
+    server = subprocess.Popen(
+        [BIN / "pisa-server", "--http", f"127.0.0.1:{http}", "--database-url", db,
          "--max-wait-secs", "1"],
         env=env,
     )
     url = f"http://127.0.0.1:{http}"
     client = Client(url)
-    # The router creates the tables first, so the two don't race to.
+    # The server creates the tables first, so the two don't race to.
     wait_for(lambda: client.health() is None)
     worker = subprocess.Popen(
         [BIN / "pisa-worker", "--database-url", db, "--version", "v",
@@ -47,7 +47,7 @@ def url(tmp_path_factory):
     wait_for(lambda: "pisa_workers 1" in metrics(url))
     yield url
     worker.terminate()
-    router.terminate()
+    server.terminate()
 
 
 def wait_for(ready):

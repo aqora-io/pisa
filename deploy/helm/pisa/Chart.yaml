@@ -1,6 +1,6 @@
 apiVersion: v2
 name: pisa
-description: Lean 4 checking and tactic sessions behind a Rust router, with KEDA autoscaling
+description: Lean 4 checking, tactic sessions and declaration search behind replicated Rust servers, with KEDA autoscaling
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

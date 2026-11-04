@@ -4,8 +4,9 @@
     PROJECT=lean-core docker compose up -d --build
     python3 scripts/e2e.py            # core checks
     python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
-    python3 scripts/e2e.py --search http://localhost:8100  # also snapshot search
-                                      # (compose --profile search)
+    python3 scripts/e2e.py --search   # also snapshot search (PISA_SEARCH_QDRANT
+                                      # set and compose --profile search)
+    PISA_URL=http://localhost:8001 python3 scripts/e2e.py  # through the other server
 
 It stops and restarts workers to check that tactic sessions resume on another
 worker (gate 3), so run it against a dev stack only. Pass --no-failover to skip
@@ -344,7 +345,7 @@ def module_snapshots():
     step("module snapshot: plain code imports it, a module can't import plain code")
 
 
-def snapshot_search(url):
+def snapshot_search():
     run = str(int(time.time()))
     # The comment makes it a new module, which this release has exported.
     code = (f"-- e2e {run}\n/-- Tripling a number adds it to itself twice. -/\n"
@@ -353,7 +354,7 @@ def snapshot_search(url):
 
     def hits(scope):
         query = {"nl": "tripling a number", "name": "e2e_triple", "snapshots": scope}
-        status, out = call("POST", "/v1/search", {"queries": [query]}, base=url)
+        status, out = call("POST", "/v1/search", {"queries": [query]})
         assert status == 200, out
         return [h for h in out["results"][0]["hits"] if h["module"] == created["snapshot"]]
 
@@ -406,7 +407,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--mathlib", action="store_true")
     p.add_argument("--no-failover", action="store_true", help="don't stop workers (not using compose)")
-    p.add_argument("--search", metavar="URL", help="also check snapshot search on this pisa-search")
+    p.add_argument("--search", action="store_true", help="also check snapshot search")
     args = p.parse_args()
     if not args.no_failover:
         wait_for_workers(2)
@@ -417,5 +418,5 @@ if __name__ == "__main__":
     if args.mathlib:
         mathlib()
     if args.search:
-        snapshot_search(args.search)
+        snapshot_search()
     print("all end-to-end checks passed")

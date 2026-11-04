@@ -1,11 +1,41 @@
 # Default values for pisa. Like most application charts, it expects the
-# cluster's own Prometheus and KEDA, and doesn't bundle either.
+# cluster's own KEDA, and doesn't bundle it.
 
-router:
+# The HTTP API: checks, sessions and snapshots, and search when
+# search.enabled. Its replicas put jobs on the database's job queue, which the
+# workers take them from, so any replica serves any request.
+server:
   image:
-    repository: pisa-router
+    # Built from docker/Dockerfile (target server).
+    repository: pisa-server
     tag: latest
     pullPolicy: IfNotPresent
+  replicas: 2
+  service:
+    type: ClusterIP
+    port: 8000
+  resources:
+    requests: { cpu: 500m, memory: 256Mi }
+    limits: { memory: 1Gi }
+  # On SIGTERM, how long a replica waits for its requests in flight. Keep it
+  # above router.maxWaitSecs plus the longest job, or rollouts cut some off.
+  drainTimeoutSecs: 360
+  # Replicas kept through voluntary disruptions such as node drains.
+  minAvailable: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  # e.g. SSL_CERT_FILE for a database with a private CA.
+  extraEnv: []
+
+# The job queue that the release's servers and workers share; empty means
+# the release's name, so releases sharing a database keep their jobs apart.
+queue: ""
+
+# How the servers queue jobs.
+router:
   # Seconds a request may wait for a free worker. Keep it above the time a new
   # worker pod takes to start, so requests queued during a scale-up don't fail.
   maxWaitSecs: 300
@@ -13,12 +43,6 @@ router:
   # Version used when a request names none, and NAME=VERSION aliases.
   defaultVersion: ""
   aliases: []
-  service:
-    type: ClusterIP
-    port: 8000
-  resources:
-    requests: { cpu: 250m, memory: 128Mi }
-    limits: { memory: 512Mi }
 
 worker:
   image:
@@ -67,27 +91,30 @@ store:
   # Delete stored states and sessions older than this (0 keeps them).
   stateTtlSecs: 86400
 
-# PostgreSQL holds the metadata that all workers of a release share: the
-# session and proof-state records, and the snapshot entries and module
-# records. It has the only copy of the snapshot records, which never expire,
-# so it must be durable and backed up. The chart doesn't deploy PostgreSQL;
-# run it with CloudNativePG (https://cloudnative-pg.io), as a managed service
-# or by any other means. The workers create the tables. Connect directly, or
-# through PgBouncer in session mode, not transaction mode.
+# PostgreSQL holds the job queue between the servers and the workers, and
+# the metadata that all workers of a release share: the session and
+# proof-state records, and the snapshot entries and module records. It has
+# the only copy of the snapshot records, which never expire, so it must be
+# durable and backed up. The chart doesn't deploy PostgreSQL; run it with
+# CloudNativePG (https://cloudnative-pg.io), as a managed service or by any
+# other means. The servers and workers create the tables. Connect directly,
+# or through PgBouncer in session mode, not transaction mode.
 metadata:
   database:
     # Required: an existing Secret holding the database's URL, e.g.
     # postgres://pisa:...@db.example.com/pisa?sslmode=require. With
     # sslmode=require the server's certificate is checked against the
     # image's roots; for a private CA, mount it and set SSL_CERT_FILE through
-    # worker.extraEnv.
+    # server.extraEnv and worker.extraEnv. KEDA reads the queue through it too.
     urlSecret:
       name: ""
       key: url
 
-# How the cluster's Prometheus finds the router's /metrics.
+# How a Prometheus finds the servers' /metrics, for dashboards. Every replica
+# reports the queue's gauges (pisa_queue_depth, pisa_slots, pisa_workers) for
+# the whole queue, so take their max, not their sum.
 metrics:
-  # prometheus.io/scrape annotations on the router Service, for Prometheus
+  # prometheus.io/scrape annotations on the server Service, for Prometheus
   # setups that discover annotated services (e.g. prometheus-community/prometheus).
   scrapeAnnotations: true
   # A ServiceMonitor, for the Prometheus Operator (e.g. kube-prometheus-stack).
@@ -97,6 +124,7 @@ metrics:
     # Labels the operator's serviceMonitorSelector matches, e.g. release: kube-prometheus-stack.
     labels: {}
 
+# Workers scale on the jobs in the queue, which KEDA counts in the database.
 keda:
   enabled: true
   # 0 lets the pool scale to zero; the first request then waits for a cold
@@ -105,40 +133,27 @@ keda:
   maxReplicas: 4
   # Seconds of low demand before workers are removed.
   scaleDownStabilizationSecs: 300
-  # Only used with minReplicas 0: how often KEDA checks for demand, and how
-  # long the pool stays up after the last demand.
+  # How often KEDA counts the jobs, which bounds how quickly workers react to
+  # load; with minReplicas 0, how long the pool stays up after the last job.
   pollingInterval: 15
   cooldownPeriod: 300
   # Outstanding jobs (queued + running) per worker pod. Defaults to slots.
   jobsPerWorker: null
-  prometheus:
-    # The cluster's Prometheus, e.g.
-    # http://prometheus-server.monitoring.svc.cluster.local. Required.
-    # Its scrape interval bounds how quickly workers react to load.
-    serverAddress: ""
-    # Outstanding jobs for this release. The default counts queued and running
-    # jobs, once even if the router is scraped by more than one job.
-    query: ""
 
 
-# Declaration search: stateless replicas over Qdrant, which holds the index
-# (see the README's Search section). Load a bundle into Qdrant first, with
-# `pisa-search load`.
+# Declaration search in the servers, over Qdrant, which holds the index (see
+# the README's Search section). Load a bundle into Qdrant first, with
+# `pisa-search load`; until then search answers 503 and the rest of the API
+# works.
 search:
   enabled: false
-  image:
-    # Built from docker/Dockerfile (target search).
-    repository: pisa-search
-    tag: latest
-    pullPolicy: IfNotPresent
-  replicas: 2
   # The env_id of the bundle loaded into Qdrant, e.g. v4.35.0-da683984. Required.
   envId: ""
   # Embeds queries and snapshot declarations; it must serve the model that
   # embedded the bundle. See `pisa-search embed`.
   embedder: "openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"
-  # Search the workers' snapshots (needs metadata.database.urlSecret). The
-  # replica holding a lease in the database indexes them.
+  # Search the workers' snapshots. The replica holding a lease in the
+  # database indexes them.
   snapshots: true
   # Claude or OpenAI model that describes every snapshot declaration, so all
   # snapshot code goes to that provider; empty for none.
@@ -158,19 +173,6 @@ search:
     apiKeySecret:
       name: ""
       key: api-key
-  service:
-    type: ClusterIP
-    port: 8100
-  resources:
-    requests: { cpu: 500m, memory: 256Mi }
-    limits: { memory: 1Gi }
-  # Replicas kept through voluntary disruptions such as node drains.
-  minAvailable: 1
-  autoscaling:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 6
-    targetCPUUtilizationPercentage: 70
 
 # The official Qdrant chart (https://qdrant.github.io/qdrant-helm), used when
 # search.qdrant.url is empty. Load bundles with `--replication 2`, so that

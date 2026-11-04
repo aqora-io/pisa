@@ -1,16 +1,18 @@
-# Local development stack: one router, two workers, Garage (S3) for pickled
-# proof states and snapshot modules, and PostgreSQL for the job queue between
-# them and the session, state and snapshot records.
+# Local development stack: two servers (on 8000 and 8001), two workers, Garage
+# (S3) for pickled proof states and snapshot modules, and PostgreSQL for the
+# job queue between them and the session, state and snapshot records.
 #   docker compose up --build
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
 # PROJECT=lean-core builds workers without Mathlib/Physlib, for quick tests.
 #
-# Declaration search is an optional profile: two replicas over Qdrant. Load a
-# bundle built with `pisa-search build` (see the README) into Qdrant once, then
-# serve it; queries are embedded with Qwen3-Embedding-8B on Scaleway:
+# The servers also search declarations when PISA_SEARCH_QDRANT is set, with
+# Qdrant from the search profile. Load a bundle built with `pisa-search build`
+# (see the README) into Qdrant once, then serve it; queries are embedded with
+# Qwen3-Embedding-8B on Scaleway:
 #   docker compose --profile search-load run --rm search-load
-#   SCW_SECRET_KEY=... docker compose --profile search up --build
+#   PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
+#     docker compose --profile search up --build
 
 x-worker: &worker
   build:
@@ -61,7 +63,7 @@ services:
       - ./docker/garage.toml:/etc/garage.toml:ro
 
   # Its data is in an anonymous volume, which `docker compose down -v` deletes.
-  # The router and workers create the tables.
+  # The servers and workers create the tables.
   postgres:
     image: postgres:18
     environment:
@@ -73,19 +75,38 @@ services:
       interval: 2s
       retries: 30
 
-  router:
+  # Workers take their jobs from the database, so either server serves any
+  # request. The one holding a lease in the database indexes snapshots.
+  server:
     build:
       context: .
       dockerfile: docker/Dockerfile
-      target: router
-    image: pisa-router
-    ports: ["8000:8000"]
+      target: server
+    image: pisa-server
+    deploy:
+      replicas: 2
+    ports: ["8000-8001:8000"]
     depends_on:
       postgres: { condition: service_healthy }
     restart: on-failure
+    # Search's queries are embedded by the model that embedded the bundle: by
+    # default Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a
+    # bundle embedded with the local 0.6B model, set
+    # PISA_SEARCH_EMBEDDER=http://tei:80 and add --profile search-local.
     environment:
       PISA_DATABASE_URL: *database-url
       PISA_MAX_WAIT_SECS: 120
+      PISA_SEARCH_QDRANT: ${PISA_SEARCH_QDRANT:-}
+      # The env_id of the loaded bundle: that of docker/lean-project.
+      PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.35.0-da683984}
+      PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
+      SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
+      # Set a describe model (e.g. claude-haiku-5-5, with ANTHROPIC_API_KEY)
+      # to describe every snapshot declaration with it; without one they are
+      # searched by name, signature and docstring.
+      PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       RUST_LOG: info
 
   worker-1:
@@ -108,50 +129,15 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
 
-  search:
-    profiles: [search]
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      target: search
-    image: pisa-search
-    # Two replicas, on 8100 and 8101; the one holding a lease in the database
-    # indexes snapshots.
-    deploy:
-      replicas: 2
-    ports: ["8100-8101:8100"]
-    # It reads the workers' snapshot catalog.
-    depends_on:
-      qdrant: { condition: service_started }
-      postgres: { condition: service_healthy }
-    restart: on-failure
-    # Queries are embedded by the model that embedded the bundle: by default
-    # Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a bundle
-    # embedded with the local 0.6B model, set PISA_SEARCH_EMBEDDER=http://tei:80
-    # and add --profile search-local.
-    environment:
-      PISA_SEARCH_QDRANT: http://qdrant:6333
-      # The env_id of the loaded bundle: that of docker/lean-project.
-      PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.35.0-da683984}
-      PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
-      SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
-      # Snapshot search. Set a describe model (e.g. claude-haiku-5-5, with
-      # ANTHROPIC_API_KEY) to describe every snapshot declaration with it;
-      # without one they are searched by name, signature and docstring.
-      PISA_DATABASE_URL: *database-url
-      PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      RUST_LOG: info
-
   # Loads the bundle in PISA_SEARCH_BUNDLE (default search/bundle) into Qdrant.
   search-load:
     profiles: [search-load]
-    image: pisa-search
+    image: pisa-server
     build:
       context: .
       dockerfile: docker/Dockerfile
-      target: search
+      target: server
+    entrypoint: ["pisa-search"]
     depends_on: [qdrant]
     volumes:
       - ${PISA_SEARCH_BUNDLE:-./search/bundle}:/bundle:ro

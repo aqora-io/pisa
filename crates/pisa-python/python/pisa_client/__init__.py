@@ -16,7 +16,7 @@
     base = client.create_snapshot("import Mathlib\\ndef double (n : Nat) := 2 * n")
     assert client.check(base["header"] + "\\nexample : double 2 = 4 := rfl")["ok"]
 
-    search = SearchClient("http://localhost:8100")
+    search = SearchClient("http://localhost:8000")
     hits = search.search(nl="trace of a density matrix is one")["hits"]
 """
 

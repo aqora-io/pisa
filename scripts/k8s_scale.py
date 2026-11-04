@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks KEDA autoscaling and graceful drain of a pisa Helm release.
 
-    kubectl port-forward svc/pisa-router 8000:8000 &
+    kubectl port-forward svc/pisa-server 8000:8000 &
     python3 scripts/k8s_scale.py
 
 1. Sends a burst of slow checks and waits for the worker Deployment to scale
@@ -9,7 +9,7 @@
 2. Waits for the Deployment to scale back down to its minimum.
 3. Deletes the worker pod while it runs a check; the pod drains, so the check
    still passes.
-Throughout, the router must not have retried any job: retries would mean a
+Throughout, the server must not have retried any job: retries would mean a
 worker was killed mid-job instead of draining.
 """
 

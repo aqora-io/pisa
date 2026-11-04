@@ -1,6 +1,9 @@
-//! HTTP API; types and conventions in `pisa_protocol::search`.
+//! HTTP API; types and conventions in `pisa_protocol::search`. `pisa-server`
+//! serves it next to the rest of pisa's API, from [`Search`].
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::extract::{FromRequest, Path, Request, State};
 use axum::http::StatusCode;
@@ -14,20 +17,243 @@ use pisa_protocol::search::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
+use crate::dense::Embedder;
 use crate::engine::Lanes;
 use crate::engine::{Engine, SearchError};
+use crate::llm::Llm;
+use crate::qdrant::Qdrant;
+use crate::symbols::{self, Symbols};
+use crate::{indexer, informalize};
 
 /// Most queries or names one request may carry.
 const MAX_BATCH: usize = 64;
 
-pub fn router(engine: Arc<Engine>) -> Router {
+/// The longest wait between tries to open the engine.
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// How a server searches, if it does.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct SearchArgs {
+    /// Qdrant's REST URL. Without it, the server doesn't search.
+    #[arg(long = "qdrant", env = "PISA_SEARCH_QDRANT")]
+    pub qdrant: Option<String>,
+    /// The environment variable holding Qdrant's API key, if it needs one.
+    #[arg(long = "qdrant-key-env", env = "PISA_SEARCH_QDRANT_KEY_ENV")]
+    pub qdrant_key_env: Option<String>,
+    /// The environment whose loaded bundle to serve; required with `--qdrant`.
+    #[arg(long, env = "PISA_SEARCH_ENV_ID")]
+    pub env_id: Option<String>,
+    /// Symbol dictionary; defaults to the shipped search/symbols.toml.
+    #[arg(long, env = "PISA_SEARCH_SYMBOLS")]
+    pub symbols: Option<PathBuf>,
+    /// Embedding server for queries (enables the dense lane); see `embed`.
+    /// It also embeds snapshot declarations, so it must serve the model
+    /// that embedded the bundle.
+    #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+    pub embedder: Option<String>,
+    /// Don't search the workers' snapshots, from the database's catalog.
+    #[arg(long, env = "PISA_SEARCH_NO_SNAPSHOTS")]
+    pub no_snapshots: bool,
+    /// The worker version whose snapshots to search (default: the env_id).
+    #[arg(long, env = "PISA_SEARCH_SNAPSHOT_VERSION")]
+    pub snapshot_version: Option<String>,
+    /// Claude or OpenAI model that describes every snapshot declaration
+    /// (needs ANTHROPIC_API_KEY or OPENAI_API_KEY); without one they are
+    /// searched by name, signature and docstring.
+    #[arg(long, env = "PISA_SEARCH_DESCRIBE_MODEL")]
+    pub describe_model: Option<String>,
+    /// LLM and embedding requests in flight for snapshots.
+    #[arg(long, env = "PISA_SEARCH_DESCRIBE_CONCURRENCY", default_value_t = 8)]
+    pub describe_concurrency: usize,
+}
+
+/// Where snapshots to search come from, and how to describe them.
+struct Snapshots {
+    db: pisa_db::db::Db,
+    /// The workers' version.
+    version: String,
+    llm: Option<(Llm, informalize::Config)>,
+    concurrency: usize,
+}
+
+/// Search over a bundle loaded into Qdrant, and the snapshots in the
+/// database. Its engine opens in the background: until Qdrant answers with
+/// the bundle, requests get a 503.
+pub struct Search {
+    engine: OnceLock<Arc<Engine>>,
+    env_id: String,
+    q: Qdrant,
+    /// Why the engine isn't open yet.
+    waiting: Mutex<String>,
+}
+
+impl Search {
+    /// Starts search as `args` say, with the snapshots in `db`; `None` if
+    /// `args` name no Qdrant. Bad settings are errors now; Qdrant being down,
+    /// or the bundle not loaded yet, only delays search.
+    pub async fn start(
+        args: SearchArgs,
+        db: pisa_db::db::Db,
+    ) -> anyhow::Result<Option<Arc<Search>>> {
+        // Compose passes unset variables as empty ones.
+        let some = |s: Option<String>| s.filter(|s| !s.is_empty());
+        let Some(url) = some(args.qdrant) else {
+            return Ok(None);
+        };
+        let env_id = some(args.env_id)
+            .ok_or_else(|| anyhow::anyhow!("searching needs --env-id with --qdrant"))?;
+        let q = Qdrant::with_key_env(&url, some(args.qdrant_key_env).as_deref())?;
+        let symbols = match args.symbols {
+            Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
+            None => Symbols::parse(symbols::DEFAULT)?,
+        };
+        let embedder = match some(args.embedder) {
+            // Its blocking client mustn't be made on an async thread.
+            Some(spec) => Some(tokio::task::spawn_blocking(move || Embedder::parse(&spec)).await??),
+            None => None,
+        };
+        let llm = match some(args.describe_model) {
+            Some(model) => Some((
+                Llm::for_model(&model)?,
+                informalize::Config {
+                    model,
+                    effort: "low".into(),
+                    max_tokens: 4096,
+                    concurrency: args.describe_concurrency,
+                },
+            )),
+            None => None,
+        };
+        let snapshots = (!args.no_snapshots).then(|| Snapshots {
+            version: some(args.snapshot_version).unwrap_or_else(|| env_id.clone()),
+            db,
+            llm,
+            concurrency: args.describe_concurrency,
+        });
+        let search = Arc::new(Search {
+            engine: OnceLock::new(),
+            env_id,
+            q,
+            waiting: Mutex::new("opening the engine".into()),
+        });
+        tokio::spawn(search.clone().open(symbols, embedder, snapshots));
+        Ok(Some(search))
+    }
+
+    /// Search over `engine`, open already.
+    pub fn ready(engine: Arc<Engine>) -> Arc<Search> {
+        let search = Search {
+            env_id: engine.env_id().to_string(),
+            q: engine.q.clone(),
+            engine: OnceLock::from(engine),
+            waiting: Mutex::new(String::new()),
+        };
+        Arc::new(search)
+    }
+
+    /// Opens the engine, trying again until it opens, then indexes the
+    /// snapshots, if it searches them.
+    async fn open(
+        self: Arc<Self>,
+        symbols: Symbols,
+        embedder: Option<Embedder>,
+        snapshots: Option<Snapshots>,
+    ) {
+        let mut backoff = Duration::from_secs(1);
+        let mut engine = loop {
+            match Engine::open(
+                self.q.clone(),
+                &self.env_id,
+                symbols.clone(),
+                embedder.clone(),
+            )
+            .await
+            {
+                Ok(engine) => break engine,
+                Err(e) => {
+                    let why = e.to_string();
+                    let mut waiting = self.waiting.lock().unwrap();
+                    if *waiting != why {
+                        tracing::warn!("search isn't ready: {why}");
+                        *waiting = why;
+                    }
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+        };
+        engine.snapshots = snapshots.is_some();
+        let engine = Arc::new(engine);
+        if let Some(s) = snapshots {
+            tracing::info!(version = %s.version, "searching snapshots");
+            // Snapshot vectors join the bundle's, so without those there are none.
+            let embedder = embedder.filter(|_| engine.manifest.embedding_model.is_some());
+            let how = indexer::Describe {
+                llm: s.llm,
+                embedder,
+            };
+            let indexer = indexer::Indexer::new(
+                engine.clone(),
+                s.db,
+                s.version,
+                how,
+                s.concurrency,
+                indexer::LEASE_TTL,
+            );
+            tokio::spawn(indexer.run());
+        }
+        tracing::info!(
+            env_id = engine.env_id(),
+            decls = engine.manifest.decls,
+            snapshots = engine.snapshots,
+            "searching"
+        );
+        let _ = self.engine.set(engine);
+    }
+
+    fn engine(&self) -> Result<&Arc<Engine>, ApiError> {
+        self.engine.get().ok_or_else(|| {
+            let why = self.waiting.lock().unwrap().clone();
+            ApiError::new(ErrorKind::Unavailable, format!("search isn't ready: {why}"))
+        })
+    }
+
+    /// Search's state, for a server's `/health`, and whether it can serve.
+    pub async fn health(&self) -> (bool, serde_json::Value) {
+        let qdrant = self.q.healthy().await;
+        let engine = self.engine.get();
+        let ready = engine.is_some() && qdrant;
+        let mut body = json!({
+            "ready": ready,
+            "env_id": self.env_id,
+            "qdrant": qdrant,
+            "leader": engine.is_some_and(|e| e.leader.load(std::sync::atomic::Ordering::Acquire)),
+        });
+        if engine.is_none() {
+            body["error"] = self.waiting.lock().unwrap().clone().into();
+        }
+        (ready, body)
+    }
+}
+
+/// Search's routes, to serve next to others.
+pub fn routes(search: Arc<Search>) -> Router {
     Router::new()
-        .route("/health", get(health))
-        .route("/v1/search", post(search))
+        .route("/v1/search", post(search_handler))
         .route("/v1/resolve", post(resolve))
         .route("/v1/decl/{name}", get(decl))
+        .with_state(search)
+}
+
+/// Search's routes on their own, with a `/health` that is 503 while search
+/// can't serve, and the API's 404s.
+pub fn router(search: Arc<Search>) -> Router {
+    let health = Router::new()
+        .route("/health", get(health))
+        .with_state(search.clone());
+    routes(search)
+        .merge(health)
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
-        .with_state(engine)
 }
 
 pub struct ApiError(Error);
@@ -83,21 +309,14 @@ fn check_batch(n: usize) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// 503 while Qdrant doesn't answer, so a readiness probe takes the replica
-/// out of rotation.
-async fn health(State(engine): State<Arc<Engine>>) -> (StatusCode, Json<serde_json::Value>) {
-    let qdrant = engine.q.healthy().await;
-    let status = if qdrant {
+async fn health(State(search): State<Arc<Search>>) -> (StatusCode, Json<serde_json::Value>) {
+    let (ready, mut body) = search.health().await;
+    let status = if ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    let body = json!({
-        "status": if qdrant { "ok" } else { "unavailable" },
-        "env_id": engine.env_id(),
-        "qdrant": qdrant,
-        "leader": engine.leader.load(std::sync::atomic::Ordering::Acquire),
-    });
+    body["status"] = if ready { "ok" } else { "unavailable" }.into();
     (status, Json(body))
 }
 
@@ -109,11 +328,12 @@ fn unavailable(e: impl std::fmt::Display) -> ApiError {
     )
 }
 
-async fn search(
-    State(engine): State<Arc<Engine>>,
+async fn search_handler(
+    State(search): State<Arc<Search>>,
     Body(mut req): Body<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    check_env(&engine, req.env_id.as_deref())?;
+    let engine = search.engine()?;
+    check_env(engine, req.env_id.as_deref())?;
     check_batch(req.queries.len())?;
     for q in &mut req.queries {
         engine
@@ -130,10 +350,11 @@ async fn search(
 }
 
 async fn resolve(
-    State(engine): State<Arc<Engine>>,
+    State(search): State<Arc<Search>>,
     Body(req): Body<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
-    check_env(&engine, req.env_id.as_deref())?;
+    let engine = search.engine()?;
+    check_env(engine, req.env_id.as_deref())?;
     check_batch(req.names.len())?;
     let results = engine.resolve(&req.names).await.map_err(unavailable)?;
     let env_id = engine.env_id().to_string();
@@ -141,9 +362,10 @@ async fn resolve(
 }
 
 async fn decl(
-    State(engine): State<Arc<Engine>>,
+    State(search): State<Arc<Search>>,
     Path(name): Path<String>,
 ) -> Result<Json<DeclResponse>, ApiError> {
+    let engine = search.engine()?;
     match engine.detail(&name).await.map_err(unavailable)? {
         Some(decl) => Ok(Json(DeclResponse {
             env_id: engine.env_id().to_string(),
