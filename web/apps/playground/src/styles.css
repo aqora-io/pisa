@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+.cm-editor {
+  font-size: 13px;
+  height: 100%;
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+.cm-scroller {
+  font-family: ui-monospace, "JuliaMono", "DejaVu Sans Mono", monospace;
+}

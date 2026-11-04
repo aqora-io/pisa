@@ -45,6 +45,9 @@ imports it instead of re-checking it.
 | `pisa-tests` | `fake-repl` (speaks the REPL protocol without Lean) and in-process integration tests |
 | `pisa-search` | Declaration search over Mathlib and Physlib: corpus, descriptions, index, HTTP API, and the CLI that builds and loads bundles (see [Search](#search)) |
 
+`web/` is a pnpm workspace with the TypeScript client, the React hooks and a
+playground (see [Clients](#clients)).
+
 ## Running
 
 ```sh
@@ -524,6 +527,51 @@ To run the Python tests:
 cargo build -p pisa-server -p pisa-worker -p pisa-tests -p pisa-search
 cd crates/pisa-python && maturin develop && pytest tests
 ```
+
+TypeScript (`@aqora/pisa-client`, in `web/packages/client`) has no
+dependencies, and runs in browsers and Node:
+
+```ts
+import { PisaClient } from "@aqora/pisa-client";
+
+const client = new PisaClient({ url: "http://localhost:8000", timeout: 60 });
+const result = await client.check("theorem t : 2 + 2 = 4 := by decide");
+const session = await client.startSession("theorem t (n : Nat) : n + 0 = n := by sorry");
+// Throws a PisaError (kind "lean") if the tactic doesn't parse; an error Lean
+// recovers from, like an unknown identifier, is in step.messages instead.
+const step = await client.tactic(session.states[0]!.state, "simp");
+```
+
+React (`@aqora/pisa-react`, in `web/packages/react`) has hooks over TanStack
+Query: `useCheck` and `useLiveCheck` for an editor, `useProofSession` for a
+tree of tactics, the snapshot queries and mutations, `useSearch`, `useResolve`
+and `useDecl`. The packages' READMEs have examples.
+
+The playground (`web/apps/playground`) uses the hooks for checks, proofs,
+snapshots and search. `vite dev` proxies `/api` to `PISA_URL`, by default the
+compose stack's `http://localhost:8000`:
+
+```sh
+cd web && pnpm install
+pnpm dev                                  # http://localhost:5173
+PISA_URL=http://localhost:8001 pnpm dev   # another server
+```
+
+To serve the built playground from another origin, build it with
+`VITE_PISA_URL` set to the server, and allow its origin with
+`PISA_CORS_ORIGINS` (see [API](#api)).
+
+To run the web tests (`test:integration` starts a server and a fake worker,
+and searches too when `PISA_TEST_QDRANT_URL` is set):
+
+```sh
+cd web && pnpm typecheck && pnpm test
+cargo build -p pisa-server -p pisa-worker -p pisa-tests && pnpm test:integration
+```
+
+The TypeScript types are written by hand; `cargo test -p pisa-protocol --test
+ts_fixtures` checks them against the Rust ones (`PISA_UPDATE_FIXTURES=1`
+rewrites the fixtures after a change to the API).
 
 ## Search
 
