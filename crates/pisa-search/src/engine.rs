@@ -5,15 +5,19 @@
 //! `to_additive` pairs and renders the hits.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use lru::LruCache;
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope, Suggestion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::dense::{Embedder, QUERY_INSTRUCTION};
 use crate::encode;
@@ -30,6 +34,20 @@ pub const MAX_SCOPE_MODULES: usize = 20_000;
 
 /// The most entries a snapshot hit names.
 const MAX_HIT_ENTRIES: usize = 10;
+
+/// How many query vectors an engine keeps, about 2 KB each: the embedder is
+/// slow, and a search that changes only its filters sends the same text.
+const QUERY_VECTORS: NonZeroUsize = NonZeroUsize::new(1024).unwrap();
+
+/// How long a search waits for its query's vector. The embedding goes on
+/// after that, and its vector is kept for the next search.
+const EMBED_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a query embedding may take before it is given up.
+pub const EMBED_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The most query embedding requests running at once.
+const MAX_EMBEDDINGS: usize = 32;
 
 /// The library of snapshot declarations.
 pub const SNAPSHOT_LIBRARY: &str = pisa_protocol::snapshot::ROOT;
@@ -122,8 +140,77 @@ pub struct Engine {
     pub snapshots: bool,
     /// Whether this replica leads the snapshot index.
     pub leader: Arc<AtomicBool>,
-    /// Query vectors by text, kept while evaluating many weightings.
-    pub cache: Option<Mutex<HashMap<String, Vec<f32>>>>,
+    /// Query vectors by text, and the texts being embedded: the most recently
+    /// used [`QUERY_VECTORS`], or all of them while evaluating many weightings.
+    pub cache: Arc<Mutex<LruCache<String, Slot>>>,
+    /// How long a search waits for its query's vector ([`EMBED_WAIT`]).
+    pub embed_wait: Duration,
+    /// A permit for each query embedding request running.
+    running: Arc<Semaphore>,
+}
+
+/// A query's vector, once the embedder has answered.
+type Answer = Option<Result<Vec<f32>, String>>;
+
+/// A cached query: its vector, or the request that will bring it.
+pub enum Slot {
+    Ready(Vec<f32>),
+    Pending(watch::Receiver<Answer>),
+}
+
+/// What the dense lane has for a query.
+enum Embedded {
+    Vector(Vec<f32>),
+    /// Still being embedded when the search stopped waiting.
+    Pending,
+    Unavailable(String),
+}
+
+/// One query embedding request. It keeps what it gets in the cache, whether
+/// or not a search still waits for it.
+struct Flight {
+    cache: Arc<Mutex<LruCache<String, Slot>>>,
+    texts: Vec<String>,
+    senders: Vec<watch::Sender<Answer>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Flight {
+    /// Runs on a blocking thread, which is also where the embedder's blocking
+    /// client may be dropped.
+    fn run(self, embedder: &Embedder) {
+        let inputs: Vec<String> = self
+            .texts
+            .iter()
+            .map(|t| format!("{QUERY_INSTRUCTION}{t}"))
+            .collect();
+        let embedded = embedder
+            .embed_queries(&inputs, EMBED_TIMEOUT)
+            .map_err(|e| format!("{e:#}"));
+        if let Err(e) = &embedded {
+            tracing::warn!(queries = inputs.len(), "query embedding failed: {e}");
+        }
+        let mut cache = self.cache.lock().unwrap();
+        for (i, (text, tx)) in self.texts.into_iter().zip(&self.senders).enumerate() {
+            let answer = match &embedded {
+                Ok(vectors) => {
+                    cache.put(text, Slot::Ready(vectors[i].clone()));
+                    Ok(vectors[i].clone())
+                }
+                Err(e) => {
+                    // Not kept, so the next search asks again; a newer
+                    // request's entry stays.
+                    if let Some(Slot::Pending(rx)) = cache.peek(&text)
+                        && rx.same_channel(&tx.subscribe())
+                    {
+                        cache.pop(&text);
+                    }
+                    Err(e.clone())
+                }
+            };
+            tx.send_replace(Some(answer));
+        }
+    }
 }
 
 /// A candidate hit.
@@ -190,7 +277,9 @@ impl Engine {
             embedder,
             snapshots: false,
             leader: Arc::default(),
-            cache: None,
+            cache: Arc::new(Mutex::new(LruCache::new(QUERY_VECTORS))),
+            embed_wait: EMBED_WAIT,
+            running: Arc::new(Semaphore::new(MAX_EMBEDDINGS)),
         })
     }
 
@@ -268,13 +357,19 @@ impl Engine {
             if q.k == 0 {
                 continue;
             }
+            let unavailable = "dense lane unavailable, results from the other lanes only";
             let vector = match &vectors[i] {
-                Some(Ok(v)) => Some(v.as_slice()),
-                Some(Err(e)) => {
-                    tracing::warn!("query embedding failed: {e}");
+                Some(Embedded::Vector(v)) => Some(v.as_slice()),
+                Some(Embedded::Pending) => {
+                    results[i].dense_pending = true;
                     results[i].warnings.push(format!(
-                        "dense lane unavailable, results from the other lanes only: {e}"
+                        "{unavailable}: the query is still being embedded after {} s; ask again shortly to include it",
+                        self.embed_wait.as_secs_f64()
                     ));
+                    None
+                }
+                Some(Embedded::Unavailable(e)) => {
+                    results[i].warnings.push(format!("{unavailable}: {e}"));
                     None
                 }
                 None => None,
@@ -332,64 +427,92 @@ impl Engine {
         Ok(results)
     }
 
-    /// Each query's vector for the dense lane, or why there is none.
+    /// Each query's vector for the dense lane, or why there is none. A text
+    /// that no request is embedding yet goes into one of this search's own,
+    /// which carries on after the search stops waiting.
     async fn embed(
         &self,
         queries: &[Query],
         parsed: &[Parsed],
         lanes: Lanes,
-    ) -> Vec<Option<Result<Vec<f32>, String>>> {
-        let mut out: Vec<Option<Result<Vec<f32>, String>>> = vec![None; queries.len()];
+    ) -> Vec<Option<Embedded>> {
+        let mut out: Vec<Option<Embedded>> = (0..queries.len()).map(|_| None).collect();
         let Some(embedder) = &self.embedder else {
             return out;
         };
         if !lanes.dense {
             return out;
         }
-        let mut wanted: Vec<usize> = Vec::new();
-        for i in 0..queries.len() {
-            if queries[i].k == 0 || parsed[i].dense_text.is_empty() {
-                continue;
-            }
-            let cached = self
-                .cache
-                .as_ref()
-                .and_then(|c| c.lock().unwrap().get(&parsed[i].dense_text).cloned());
-            match cached {
-                Some(v) => out[i] = Some(Ok(v)),
-                None => wanted.push(i),
-            }
-        }
-        if wanted.is_empty() {
-            return out;
-        }
-        let texts: Vec<String> = wanted
-            .iter()
-            .map(|&i| format!("{QUERY_INSTRUCTION}{}", parsed[i].dense_text))
-            .collect();
-        let embedder = embedder.clone();
-        let embedded = tokio::task::spawn_blocking(move || embedder.embed_queries(&texts)).await;
-        match embedded {
-            Ok(Ok(vectors)) => {
-                for (&i, v) in wanted.iter().zip(vectors) {
-                    if let Some(c) = &self.cache {
-                        c.lock()
-                            .unwrap()
-                            .insert(parsed[i].dense_text.clone(), v.clone());
+        let deadline = tokio::time::Instant::now() + self.embed_wait;
+        let mut waits = Vec::new();
+        let mut flight: Option<Flight> = None;
+        let mut busy = false;
+        {
+            let mut cache = self.cache.lock().unwrap();
+            for i in 0..queries.len() {
+                let text = &parsed[i].dense_text;
+                if queries[i].k == 0 || text.is_empty() {
+                    continue;
+                }
+                match cache.get(text) {
+                    Some(Slot::Ready(v)) => {
+                        out[i] = Some(Embedded::Vector(v.clone()));
+                        continue;
                     }
-                    out[i] = Some(Ok(v));
+                    // A closed channel's request is gone without an answer.
+                    Some(Slot::Pending(rx)) if rx.has_changed().is_ok() => {
+                        waits.push((i, rx.clone()));
+                        continue;
+                    }
+                    _ => {}
                 }
-            }
-            Ok(Err(e)) => {
-                for &i in &wanted {
-                    out[i] = Some(Err(e.to_string()));
+                if flight.is_none() && !busy {
+                    match self.running.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                            flight = Some(Flight {
+                                cache: self.cache.clone(),
+                                texts: Vec::new(),
+                                senders: Vec::new(),
+                                _permit: permit,
+                            })
+                        }
+                        Err(_) => {
+                            tracing::warn!("{MAX_EMBEDDINGS} query embeddings are already running");
+                            busy = true;
+                        }
+                    }
                 }
+                let Some(f) = &mut flight else {
+                    out[i] = Some(Embedded::Unavailable(format!(
+                        "{MAX_EMBEDDINGS} query embeddings are already running"
+                    )));
+                    continue;
+                };
+                // In the cache at once, so that the same text later in this
+                // batch, or in another search, waits for this request.
+                let (tx, rx) = watch::channel(None);
+                cache.put(text.clone(), Slot::Pending(rx.clone()));
+                f.texts.push(text.clone());
+                f.senders.push(tx);
+                waits.push((i, rx));
             }
-            Err(e) => {
-                for &i in &wanted {
-                    out[i] = Some(Err(e.to_string()));
+        }
+        if let Some(f) = flight {
+            let embedder = embedder.clone();
+            drop(tokio::task::spawn_blocking(move || f.run(&embedder)));
+        }
+        for (i, mut rx) in waits {
+            let answer = tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some))
+                .await
+                .map(|r| r.ok().and_then(|v| v.clone()));
+            out[i] = Some(match answer {
+                Ok(Some(Ok(v))) => Embedded::Vector(v),
+                Ok(Some(Err(e))) => Embedded::Unavailable(e),
+                Ok(None) => {
+                    Embedded::Unavailable("the query embedding stopped without an answer".into())
                 }
-            }
+                Err(_) => Embedded::Pending,
+            });
         }
         out
     }

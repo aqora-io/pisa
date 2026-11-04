@@ -250,6 +250,7 @@ class QueryResult(TypedDict):
     hits: list[Hit]
     verification: NotRequired[str]
     warnings: NotRequired[list[str]]
+    dense_pending: NotRequired[bool]
 
 class Suggestion(TypedDict):
     name: str

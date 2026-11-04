@@ -10,20 +10,21 @@
 //! ends with [`Setup::done`].
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::StatusCode;
 use pisa_db::catalog::{Catalog, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls};
 use pisa_db::db::Db;
 use pisa_protocol::api::CheckResult;
-use pisa_protocol::search::{Hit, Query, SnapshotScope};
+use pisa_protocol::search::{Hit, Query, QueryResult, SnapshotScope};
 use pisa_search::anthropic::Client;
 use pisa_search::corpus::{Corpus, Decl, Manifest};
 use pisa_search::dense::{self, Embedder};
-use pisa_search::engine::Engine;
+use pisa_search::engine::{Engine, Lanes};
 use pisa_search::indexer::{Describe, Described, Indexer};
 use pisa_search::informalize::Config;
 use pisa_search::llm::Llm;
@@ -58,6 +59,14 @@ fn embed(text: &str) -> Vec<f32> {
 struct Mocks {
     llm_calls: AtomicUsize,
     embed_calls: AtomicUsize,
+    /// How long each embedding request takes.
+    embed_delay_ms: AtomicU64,
+    /// How many of the coming embedding requests fail.
+    embed_failures: AtomicUsize,
+    /// Each embedding request's inputs.
+    embedded: Mutex<Vec<Vec<String>>>,
+    /// Embedding requests answered, failed ones too.
+    embed_answered: AtomicUsize,
 }
 
 async fn messages(State(mocks): State<Arc<Mocks>>, Json(body): Json<Value>) -> Json<Value> {
@@ -82,11 +91,30 @@ async fn messages(State(mocks): State<Arc<Mocks>>, Json(body): Json<Value>) -> J
     }))
 }
 
-async fn tei(State(mocks): State<Arc<Mocks>>, Json(body): Json<Value>) -> Json<Value> {
+async fn tei(
+    State(mocks): State<Arc<Mocks>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
     mocks.embed_calls.fetch_add(1, Ordering::SeqCst);
-    let inputs = body["inputs"].as_array().unwrap();
-    let vectors: Vec<Vec<f32>> = inputs.iter().map(|t| embed(t.as_str().unwrap())).collect();
-    Json(json!(vectors))
+    let inputs: Vec<String> = body["inputs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect();
+    mocks.embedded.lock().unwrap().push(inputs.clone());
+    let fail = mocks
+        .embed_failures
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .is_ok();
+    let delay = mocks.embed_delay_ms.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(delay)).await;
+    mocks.embed_answered.fetch_add(1, Ordering::SeqCst);
+    if fail {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    let vectors: Vec<Vec<f32>> = inputs.iter().map(|t| embed(t)).collect();
+    Ok(Json(json!(vectors)))
 }
 
 fn base_decl(name: &str, signature: &str, doc: &str) -> Decl {
@@ -202,13 +230,23 @@ async fn setup() -> Option<Setup> {
 impl Setup {
     /// An engine that searches snapshots too.
     async fn engine(&self) -> Arc<Engine> {
+        Arc::new(self.open().await)
+    }
+
+    /// [`Setup::engine`], for a test to adjust first.
+    async fn open(&self) -> Engine {
         let symbols = Symbols::parse(symbols::DEFAULT).unwrap();
         let embedder = Some(self.embedder.clone());
         let mut e = Engine::open(self.q.clone(), &self.env_id, symbols, embedder)
             .await
             .unwrap();
         e.snapshots = true;
-        Arc::new(e)
+        e
+    }
+
+    /// Waits until the embedder has answered `n` requests.
+    async fn answered(&self, n: usize) {
+        until_true(async || self.mocks.embed_answered.load(Ordering::SeqCst) >= n).await;
     }
 
     fn how(&self, llm: bool) -> Describe {
@@ -342,6 +380,15 @@ fn labels(pairs: &[(&str, &str)]) -> SnapshotScope {
 
 async fn search(e: &Engine, q: Query) -> Vec<Hit> {
     e.search(&q).await.unwrap().hits
+}
+
+async fn result(e: &Engine, q: &Query) -> QueryResult {
+    e.search(q).await.unwrap()
+}
+
+/// Whether `r` came from every lane.
+fn complete(r: &QueryResult) -> bool {
+    r.warnings.is_empty() && !r.dense_pending
 }
 
 fn about_doubling(snapshots: SnapshotScope) -> Query {
@@ -493,6 +540,146 @@ async fn snapshots_only() {
         "{:?}",
         names(&hits)
     );
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_query_is_embedded_once() {
+    let Some(s) = setup().await else { return };
+    let e = s.engine().await;
+    let before = s.mocks.embed_calls.load(Ordering::SeqCst);
+    let q = about_doubling(SnapshotScope::None);
+    let r = result(&e, &q).await;
+    assert!(complete(&r), "{r:?}");
+    // Other filters, the same text.
+    search(&e, Query { k: 3, ..q }).await;
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), before + 1);
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_embedding_is_kept_for_the_next_search() {
+    let Some(s) = setup().await else { return };
+    s.mocks.embed_delay_ms.store(1000, Ordering::SeqCst);
+    let mut e = s.open().await;
+    e.embed_wait = Duration::from_millis(300);
+    let q = about_doubling(SnapshotScope::None);
+
+    let started = Instant::now();
+    let r = result(&e, &q).await;
+    assert!(started.elapsed() < Duration::from_millis(900));
+    assert!(r.dense_pending);
+    assert!(r.warnings[0].contains("still being embedded"), "{r:?}");
+
+    s.answered(1).await;
+    let r = result(&e, &q).await;
+    assert!(complete(&r), "{r:?}");
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), 1);
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_abandoned_search_still_caches_its_vector() {
+    let Some(s) = setup().await else { return };
+    s.mocks.embed_delay_ms.store(500, Ordering::SeqCst);
+    let e = s.engine().await;
+    let q = about_doubling(SnapshotScope::None);
+    // Dropped while it waits, as a server drops a request whose client left.
+    let gone = tokio::time::timeout(Duration::from_millis(100), e.search(&q)).await;
+    assert!(gone.is_err());
+
+    s.answered(1).await;
+    let r = result(&e, &q).await;
+    assert!(complete(&r), "{r:?}");
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), 1);
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_searches_share_one_embedding() {
+    let Some(s) = setup().await else { return };
+    s.mocks.embed_delay_ms.store(1000, Ordering::SeqCst);
+    let mut e = s.open().await;
+    e.embed_wait = Duration::from_secs(3);
+    let qs: Vec<Query> = (1..=5)
+        .map(|k| Query {
+            k,
+            ..about_doubling(SnapshotScope::None)
+        })
+        .collect();
+    let rs = futures::future::join_all(qs.iter().map(|q| e.search(q))).await;
+    for r in rs {
+        let r = r.unwrap();
+        assert!(complete(&r), "{r:?}");
+    }
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), 1);
+
+    // A text three times in one batch goes into its request once.
+    let t = Query {
+        nl: Some("twice a number is the number plus itself".into()),
+        ..Default::default()
+    };
+    let u = Query {
+        nl: Some("one is a unit for multiplication".into()),
+        ..Default::default()
+    };
+    let batch = [t.clone(), t.clone(), t, u];
+    let rs = e.search_batch(&batch, Lanes::ALL).await.unwrap();
+    assert!(rs.iter().all(complete), "{rs:?}");
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(s.mocks.embedded.lock().unwrap()[1].len(), 2);
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_embedding_is_not_cached() {
+    let Some(s) = setup().await else { return };
+    s.mocks.embed_failures.store(1, Ordering::SeqCst);
+    let e = s.engine().await;
+    let q = about_doubling(SnapshotScope::None);
+    let r = result(&e, &q).await;
+    assert!(!r.dense_pending);
+    assert!(
+        r.warnings[0].starts_with("dense lane unavailable") && r.warnings[0].contains("500"),
+        "{r:?}"
+    );
+
+    let r = result(&e, &q).await;
+    assert!(complete(&r), "{r:?}");
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), 2);
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn too_many_embeddings_skip_the_dense_lane() {
+    let Some(s) = setup().await else { return };
+    s.mocks.embed_delay_ms.store(1000, Ordering::SeqCst);
+    let mut e = s.open().await;
+    e.embed_wait = Duration::from_millis(300);
+    let qs: Vec<Query> = (0..33)
+        .map(|i| Query {
+            nl: Some(format!("doubling number {i}")),
+            ..Default::default()
+        })
+        .collect();
+    let rs: Vec<QueryResult> = futures::future::join_all(qs.iter().map(|q| e.search(q)))
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect();
+    let busy: Vec<usize> = (0..rs.len())
+        .filter(|&i| rs[i].warnings.iter().any(|w| w.contains("already running")))
+        .collect();
+    assert_eq!(busy.len(), 1, "{rs:?}");
+    assert!(!rs[busy[0]].dense_pending);
+    assert_eq!(rs.iter().filter(|r| r.dense_pending).count(), 32);
+
+    // Nothing was kept for the text left out, and the permits come back.
+    s.answered(32).await;
+    s.mocks.embed_delay_ms.store(0, Ordering::SeqCst);
+    let left_out = &qs[busy[0]];
+    until_true(async || complete(&result(&e, left_out).await)).await;
+    assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), 33);
     s.done(e).await;
 }
 

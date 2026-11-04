@@ -616,7 +616,8 @@ async fn main() -> anyhow::Result<()> {
             out,
         } => {
             let mut engine = open_engine(&qdrant, &env_id, embedder).await?;
-            engine.cache = Some(Default::default());
+            engine.cache = std::sync::Arc::new(std::sync::Mutex::new(lru::LruCache::unbounded()));
+            engine.embed_wait = engine::EMBED_TIMEOUT + std::time::Duration::from_secs(1);
             let weights: Vec<Weights> = if weights.is_empty() {
                 vec![Weights::default()]
             } else {
@@ -721,7 +722,9 @@ async fn main() -> anyhow::Result<()> {
             k,
             text,
         } => {
-            let engine = open_engine(&qdrant, &env_id, embedder).await?;
+            let mut engine = open_engine(&qdrant, &env_id, embedder).await?;
+            // Answering without the dense lane would skew what it shows.
+            engine.embed_wait = engine::EMBED_TIMEOUT + std::time::Duration::from_secs(1);
             let q = pisa_protocol::search::Query {
                 q: Some(text),
                 k,

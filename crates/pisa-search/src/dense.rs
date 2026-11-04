@@ -68,7 +68,7 @@ pub struct Embedder {
     api: Api,
     /// For bulk embedding: patient, and retries rate limits and server errors.
     http: reqwest::blocking::Client,
-    /// For search queries: fails fast, so a search degrades rather than waits.
+    /// For search queries: connects within 2 s, and never retries.
     query_http: reqwest::blocking::Client,
 }
 
@@ -147,10 +147,13 @@ impl Embedder {
         self.embed_with(&self.http, texts, None)
     }
 
-    /// Search queries, in one request: no retries, and a timeout of 8 s
-    /// plus 0.1 s per query.
-    pub fn embed_queries(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-        let timeout = std::time::Duration::from_millis(8000 + 100 * texts.len() as u64);
+    /// Search queries, in one request with no retries, given up after
+    /// `timeout`.
+    pub fn embed_queries(
+        &self,
+        texts: &[String],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
         self.embed_with(&self.query_http, texts, Some(timeout))
     }
 
@@ -159,6 +162,24 @@ impl Embedder {
         http: &reqwest::blocking::Client,
         texts: &[String],
         // Set for queries, which fail fast instead of retrying.
+        timeout: Option<std::time::Duration>,
+    ) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.post(http, texts, timeout).map_err(|e| match timeout {
+            // reqwest says only "error sending request" when it gives up.
+            Some(t)
+                if e.downcast_ref::<reqwest::Error>()
+                    .is_some_and(reqwest::Error::is_timeout) =>
+            {
+                anyhow::anyhow!("the embedder didn't answer within {:.1} s", t.as_secs_f64())
+            }
+            _ => e,
+        })
+    }
+
+    fn post(
+        &self,
+        http: &reqwest::blocking::Client,
+        texts: &[String],
         timeout: Option<std::time::Duration>,
     ) -> anyhow::Result<Vec<Vec<f32>>> {
         let retry = timeout.is_none();
@@ -177,7 +198,14 @@ impl Embedder {
                     .json(&req)
                     .send()?
                     .error_for_status()?;
-                r.json::<Vec<Vec<f32>>>()?
+                let vectors = r.json::<Vec<Vec<f32>>>()?;
+                anyhow::ensure!(
+                    vectors.len() == texts.len(),
+                    "got {} vectors for {} texts",
+                    vectors.len(),
+                    texts.len()
+                );
+                vectors
             }
             Api::OpenAi { model, key } => {
                 let body = serde_json::json!({"model": model, "input": texts});
@@ -576,6 +604,18 @@ mod tests {
         let back = Dense::read(&path).unwrap();
         assert_eq!(back.nearest(&unit(&[1.0, 0.1]), 3), [7, 8, 9]);
         assert_eq!(back.model, "m");
+    }
+
+    #[test]
+    fn a_query_that_times_out_says_so() {
+        // Connections queue on the listener, and nothing ever answers them.
+        let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let e = Embedder::parse(&format!("http://{}", silent.local_addr().unwrap())).unwrap();
+        let timeout = std::time::Duration::from_millis(300);
+        let err = e
+            .embed_with(&e.query_http, &["x".to_string()], Some(timeout))
+            .unwrap_err();
+        assert_eq!(err.to_string(), "the embedder didn't answer within 0.3 s");
     }
 
     #[test]

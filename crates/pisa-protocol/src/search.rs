@@ -119,6 +119,10 @@ pub struct QueryResult {
     /// What made this result worse than usual, e.g. a lane that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The dense lane was left out because the query is still being
+    /// embedded; asking again shortly will likely include it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dense_pending: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

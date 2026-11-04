@@ -723,8 +723,12 @@ Each hit carries:
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists
 the known ones. Pinning an `env_id` the server doesn't have is a 404. If the
-embedding API fails, the query still returns results from the other lanes,
-after at most a few seconds, and says so in the result's `warnings`. If Qdrant
+embedding API fails, or hasn't answered within 10 s, the query still returns
+results from the other lanes and says so in the result's `warnings`. A slow
+embedding goes on in the background, for up to 60 s, and the result has
+`dense_pending`: asking again shortly includes the dense lane. Each server keeps
+the last 1,024 query vectors, and a search for text that is already being
+embedded waits for that request rather than sending another. If Qdrant
 doesn't answer, search requests are a 503 and `/health`'s `search.qdrant` is
 false; the server stays ready, as the rest of its API works and every replica
 shares the one Qdrant.

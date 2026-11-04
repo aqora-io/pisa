@@ -1930,6 +1930,7 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "lru",
  "object_store",
  "pisa-client",
  "pisa-db",

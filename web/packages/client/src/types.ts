@@ -371,6 +371,9 @@ export interface QueryResult {
   hits: Hit[];
   verification?: string;
   warnings?: string[];
+  /** The dense lane was left out because the query is still being embedded;
+   *  asking again shortly will likely include it. */
+  dense_pending?: boolean;
 }
 
 export interface SearchResponse {

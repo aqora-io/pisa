@@ -393,6 +393,7 @@ const searchResponseFull = {
   "env_id": "e",
   "results": [
     {
+      "dense_pending": true,
       "hits": [
         {
           "flags": {

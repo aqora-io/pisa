@@ -12,6 +12,7 @@ axum.workspace = true
 clap.workspace = true
 futures.workspace = true
 hex.workspace = true
+lru = "0.18"
 object_store.workspace = true
 pisa-db.workspace = true
 pisa-protocol.workspace = true

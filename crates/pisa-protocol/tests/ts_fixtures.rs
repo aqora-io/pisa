@@ -318,6 +318,7 @@ fn fixtures() -> Vec<(String, &'static str, serde_json::Value)> {
                     hits: vec![hit(full)],
                     verification: full.then(|| s("unavailable")),
                     warnings: if full { vec![s("slow")] } else { vec![] },
+                    dense_pending: full,
                 }],
             },
         );
