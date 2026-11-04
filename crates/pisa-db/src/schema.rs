@@ -63,6 +63,7 @@ diesel::table! {
         hash -> Text,
         meta -> Jsonb,
         created -> BigInt,
+        holder -> Nullable<Text>,
     }
 }
 
@@ -72,5 +73,40 @@ diesel::table! {
         id -> Text,
         meta -> Jsonb,
         created -> BigInt,
+    }
+}
+
+diesel::table! {
+    jobs (id) {
+        id -> BigInt,
+        queue -> Text,
+        version -> Nullable<Text>,
+        priority -> SmallInt,
+        header_key -> Nullable<Text>,
+        header -> Nullable<Text>,
+        affinity -> Nullable<Text>,
+        job -> Jsonb,
+        enqueued_micros -> BigInt,
+        max_wait_micros -> BigInt,
+        max_attempts -> Integer,
+        worker -> Nullable<Text>,
+        claimed_micros -> Nullable<BigInt>,
+        lease_micros -> Nullable<BigInt>,
+        attempts -> Integer,
+        result -> Nullable<Jsonb>,
+        restarts -> Nullable<Jsonb>,
+        done_micros -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    workers (queue, name) {
+        queue -> Text,
+        name -> Text,
+        version -> Text,
+        slots -> Integer,
+        warm -> Jsonb,
+        draining -> Bool,
+        seen_micros -> BigInt,
     }
 }

@@ -14,6 +14,7 @@ pub(crate) async fn put_state(
     hash: &str,
     created: u64,
     meta: &Value,
+    holder: &str,
 ) -> Result<(), DbError> {
     retry(|| async {
         diesel::insert_into(states::table)
@@ -22,10 +23,15 @@ pub(crate) async fn put_state(
                 states::hash.eq(hash),
                 states::meta.eq(meta),
                 states::created.eq(created as i64),
+                states::holder.eq(holder),
             ))
             .on_conflict((states::version, states::hash))
             .do_update()
-            .set((states::meta.eq(meta), states::created.eq(created as i64)))
+            .set((
+                states::meta.eq(meta),
+                states::created.eq(created as i64),
+                states::holder.eq(holder),
+            ))
             .execute(&mut *conn(db).await?)
             .await?;
         Ok(())

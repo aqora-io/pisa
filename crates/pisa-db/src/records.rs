@@ -17,9 +17,19 @@ impl Records {
     }
 
     /// Stores state `hash`'s record, created at `created` (seconds since the
-    /// Unix epoch), in place of any it had.
-    pub async fn put_state(&self, hash: &str, created: u64, meta: &Value) -> Result<(), DbError> {
-        dispatch!(&self.db, put_state(&self.version, hash, created, meta))
+    /// Unix epoch) by worker `holder`, in place of any it had. Jobs that
+    /// continue the state prefer the holder, which may still have it loaded.
+    pub async fn put_state(
+        &self,
+        hash: &str,
+        created: u64,
+        meta: &Value,
+        holder: &str,
+    ) -> Result<(), DbError> {
+        dispatch!(
+            &self.db,
+            put_state(&self.version, hash, created, meta, holder)
+        )
     }
 
     pub async fn state(&self, hash: &str) -> Result<Option<Value>, DbError> {

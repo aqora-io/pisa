@@ -7,7 +7,7 @@
 //! again. SQLite takes the database's write lock when such a transaction
 //! begins, so they run one at a time.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use diesel::connection::SimpleConnection;
@@ -18,7 +18,8 @@ use diesel_async::pooled_connection::deadpool::Pool;
 use diesel_async::pooled_connection::{AsyncDieselConnectionManager, ManagerConfig};
 use diesel_async::sync_connection_wrapper::SyncConnectionWrapper;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-use tokio::sync::Mutex;
+use futures::StreamExt;
+use tokio::sync::{Mutex, OnceCell, broadcast};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 /// The most times [`retry`] runs an attempt: enough that its sleeps come to
@@ -53,11 +54,62 @@ const MIGRATION_LOCK: i64 = 0x7069_7361_6462; // "pisadb"
 const PG_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/postgres");
 const SQLITE_MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations/sqlite");
 
+/// How long [`Db::notices`] waits for PostgreSQL's `LISTEN` before going on
+/// without it, when waiters only poll.
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The channels of the queue's notifications: a job was queued (the payload
+/// is its queue), or one is done (its id).
+pub(crate) const QUEUED: &str = "pisa_jobs";
+pub(crate) const DONE: &str = "pisa_done";
+
 pub(crate) type PgPool = Pool<AsyncPgConnection>;
 
+/// PostgreSQL's connections, and what this process hears through `LISTEN`.
+pub struct PgDb {
+    pub(crate) pool: PgPool,
+    pub(crate) notices: broadcast::Sender<Notice>,
+    /// Set once this process listens for notifications.
+    listening: OnceCell<()>,
+}
+
 /// One connection, which keeps an in-memory database alive and runs one
-/// query at a time.
-pub(crate) type SqliteDb = Arc<Mutex<SyncConnectionWrapper<SqliteConnection>>>;
+/// query at a time, and the notices of this process's queue writes: SQLite
+/// has no `NOTIFY`.
+pub struct SqliteDb {
+    pub(crate) conn: Mutex<SyncConnectionWrapper<SqliteConnection>>,
+    pub(crate) notices: broadcast::Sender<Notice>,
+}
+
+/// A notification from the job queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Notice {
+    /// Jobs were queued on this queue.
+    Queued(String),
+    /// This job is done.
+    Done(i64),
+}
+
+impl Notice {
+    pub(crate) fn channel_and_payload(&self) -> (&'static str, String) {
+        match self {
+            Notice::Queued(queue) => (QUEUED, queue.clone()),
+            Notice::Done(id) => (DONE, id.to_string()),
+        }
+    }
+
+    fn parse(channel: &str, payload: &str) -> Option<Notice> {
+        match channel {
+            QUEUED => Some(Notice::Queued(payload.to_string())),
+            DONE => payload.parse().ok().map(Notice::Done),
+            _ => None,
+        }
+    }
+}
+
+fn notices() -> broadcast::Sender<Notice> {
+    broadcast::channel(1024).0
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -157,8 +209,8 @@ fn jittered(d: Duration) -> Duration {
 
 #[derive(Clone)]
 pub enum Db {
-    Pg(PgPool),
-    Sqlite(SqliteDb),
+    Pg(Arc<PgDb>),
+    Sqlite(Arc<SqliteDb>),
 }
 
 impl Db {
@@ -180,6 +232,41 @@ impl Db {
         open_sqlite(":memory:")
             .await
             .expect("an in-memory SQLite database opens")
+    }
+
+    /// The job queue's notifications from now on: from every process on
+    /// PostgreSQL, from this one on SQLite. The first call on PostgreSQL
+    /// starts listening, and waits a moment for it. Notifications can be
+    /// missed, so whoever waits for one also polls, every
+    /// [`Db::poll_interval`]; a lagging receiver should look again too.
+    pub async fn notices(&self) -> broadcast::Receiver<Notice> {
+        match self {
+            Db::Pg(pg) => {
+                pg.listening
+                    .get_or_init(|| async {
+                        let (ready, listening) = tokio::sync::oneshot::channel();
+                        tokio::spawn(listen(Arc::downgrade(pg), ready));
+                        if tokio::time::timeout(LISTEN_TIMEOUT, listening)
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("not listening for notifications yet; polling");
+                        }
+                    })
+                    .await;
+                pg.notices.subscribe()
+            }
+            Db::Sqlite(sqlite) => sqlite.notices.subscribe(),
+        }
+    }
+
+    /// How often a waiter looks again without a notification. Other
+    /// processes' writes to a SQLite file send none.
+    pub fn poll_interval(&self) -> Duration {
+        match self {
+            Db::Pg(_) => Duration::from_secs(2),
+            Db::Sqlite(_) => Duration::from_millis(100),
+        }
     }
 
     /// Every row kept for pool version `version` but the change log, each as
@@ -207,9 +294,10 @@ async fn open_sqlite(path: &str) -> Result<Db, DbError> {
     })
     .await
     .map_err(|e| DbError::Other(e.to_string()))??;
-    Ok(Db::Sqlite(Arc::new(Mutex::new(
-        SyncConnectionWrapper::new(conn),
-    ))))
+    Ok(Db::Sqlite(Arc::new(SqliteDb {
+        conn: Mutex::new(SyncConnectionWrapper::new(conn)),
+        notices: notices(),
+    })))
 }
 
 async fn connect_pg(url: &str) -> Result<Db, DbError> {
@@ -236,7 +324,62 @@ async fn connect_pg(url: &str) -> Result<Db, DbError> {
         .runtime(deadpool::Runtime::Tokio1)
         .build()
         .map_err(|e| DbError::Other(e.to_string()))?;
-    Ok(Db::Pg(pool))
+    Ok(Db::Pg(Arc::new(PgDb {
+        pool,
+        notices: notices(),
+        listening: OnceCell::new(),
+    })))
+}
+
+/// Listens for the queue's notifications on a connection of its own, taken
+/// out of the pool, and passes them on until the database is dropped. A
+/// broken connection is replaced; what was sent meanwhile is missed.
+async fn listen(db: Weak<PgDb>, ready: tokio::sync::oneshot::Sender<()>) {
+    let mut ready = Some(ready);
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        let Some(pg) = db.upgrade() else { return };
+        let conn = pg.pool.get().await;
+        drop(pg);
+        match conn {
+            Ok(conn) => {
+                let mut conn = deadpool::managed::Object::take(conn);
+                let listened = diesel_async::SimpleAsyncConnection::batch_execute(
+                    &mut conn,
+                    &format!("LISTEN {QUEUED}; LISTEN {DONE}"),
+                )
+                .await;
+                match listened {
+                    Ok(()) => {
+                        if let Some(ready) = ready.take() {
+                            let _ = ready.send(());
+                        }
+                        backoff = Duration::from_millis(100);
+                        let mut stream = std::pin::pin!(conn.notifications_stream());
+                        while let Some(n) = stream.next().await {
+                            let Some(pg) = db.upgrade() else { return };
+                            match n {
+                                Ok(n) => {
+                                    if let Some(notice) = Notice::parse(&n.channel, &n.payload) {
+                                        let _ = pg.notices.send(notice);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("listening for notifications failed: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        tracing::warn!("the notification connection closed; reconnecting");
+                    }
+                    Err(e) => tracing::warn!("listening for notifications failed: {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("no connection to listen for notifications on: {e}"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(5));
+    }
 }
 
 /// A TLS connector if `url` has `sslmode=require`, which then verifies the

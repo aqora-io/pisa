@@ -4,7 +4,9 @@
 //! - `Handle`, what a [`Db`](crate::db::Db) variant holds;
 //! - `conn`, a connection from it;
 //! - `begin`, which begins a serializable transaction;
-//! - `label_filter`, which narrows an entries query to those with labels.
+//! - `label_filter`, which narrows an entries query to those with labels;
+//! - `notify`, which sends a [`Notice`](crate::db::Notice) to whoever
+//!   listens.
 
 use diesel_async::{AsyncConnection, TransactionManager};
 
@@ -47,19 +49,37 @@ async fn finish<C: AsyncConnection, T>(conn: &mut C, result: Result<T, Fail>) ->
 }
 
 pub(crate) mod pg {
+    use std::sync::Arc;
+
     use diesel::pg::Pg;
+    use diesel::sql_types::Text;
     use diesel::{PgJsonbExpressionMethods, QueryDsl, QueryResult};
     use diesel_async::pooled_connection::deadpool::Object;
-    use diesel_async::{AnsiTransactionManager, AsyncPgConnection};
+    use diesel_async::{AnsiTransactionManager, AsyncPgConnection, RunQueryDsl};
 
-    use crate::db::{DbError, PgPool};
+    use crate::db::{DbError, Notice, PgDb};
     use crate::schema::entries;
 
-    type Handle = PgPool;
+    type Handle = Arc<PgDb>;
     type Conn = AsyncPgConnection;
 
-    async fn conn(pool: &PgPool) -> Result<Object<Conn>, DbError> {
-        pool.get().await.map_err(|e| DbError::Other(e.to_string()))
+    async fn conn(db: &PgDb) -> Result<Object<Conn>, DbError> {
+        db.pool
+            .get()
+            .await
+            .map_err(|e| DbError::Other(e.to_string()))
+    }
+
+    /// `pg_notify`, which every process's listener hears once the
+    /// statements before it on `conn` are committed.
+    async fn notify(_db: &PgDb, conn: &mut Conn, notice: Notice) -> QueryResult<()> {
+        let (channel, payload) = notice.channel_and_payload();
+        diesel::sql_query("SELECT pg_notify($1, $2)")
+            .bind::<Text, _>(channel)
+            .bind::<Text, _>(payload)
+            .execute(conn)
+            .await
+            .map(drop)
     }
 
     async fn begin(conn: &mut Conn) -> QueryResult<()> {
@@ -93,11 +113,18 @@ pub(crate) mod pg {
         use super::*;
         include!("queries/records.rs");
     }
+    mod queue {
+        use super::*;
+        include!("queries/queue.rs");
+    }
     pub(crate) use catalog::*;
+    pub(crate) use queue::*;
     pub(crate) use records::*;
 }
 
 pub(crate) mod sqlite {
+    use std::sync::Arc;
+
     use diesel::sql_types::{Jsonb, Nullable, Text};
     use diesel::sqlite::Sqlite;
     use diesel::{ExpressionMethods, QueryDsl, QueryResult, SqliteConnection};
@@ -105,17 +132,17 @@ pub(crate) mod sqlite {
     use diesel_async::{AsyncConnection, TransactionManager};
     use tokio::sync::MutexGuard;
 
-    use crate::db::{DbError, SqliteDb};
+    use crate::db::{DbError, Notice, SqliteDb};
     use crate::schema::entries;
 
-    type Handle = SqliteDb;
+    type Handle = Arc<SqliteDb>;
     type Conn = SyncConnectionWrapper<SqliteConnection>;
 
     /// The connection, rolled back first if a transaction was left open on it
     /// by a future dropped partway.
     async fn conn(db: &SqliteDb) -> Result<MutexGuard<'_, Conn>, DbError> {
         type Tm = <Conn as AsyncConnection>::TransactionManager;
-        let mut conn = db.lock().await;
+        let mut conn = db.conn.lock().await;
         if Tm::transaction_manager_status_mut(&mut conn)
             .transaction_depth()?
             .is_some()
@@ -135,6 +162,13 @@ pub(crate) mod sqlite {
             )
         })
         .await
+    }
+
+    /// A broadcast to this process only: SQLite has no `NOTIFY`, and other
+    /// processes on the same file poll.
+    async fn notify(db: &SqliteDb, _conn: &mut Conn, notice: Notice) -> QueryResult<()> {
+        let _ = db.notices.send(notice);
+        Ok(())
     }
 
     diesel::define_sql_function! {
@@ -161,6 +195,11 @@ pub(crate) mod sqlite {
         use super::*;
         include!("queries/records.rs");
     }
+    mod queue {
+        use super::*;
+        include!("queries/queue.rs");
+    }
     pub(crate) use catalog::*;
+    pub(crate) use queue::*;
     pub(crate) use records::*;
 }

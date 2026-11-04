@@ -54,15 +54,18 @@ pub struct Store {
     inner: Arc<dyn ObjectStore>,
     records: Arc<Records>,
     version: String,
+    /// This worker, recorded as the holder of the states it stores.
+    worker: String,
 }
 
 impl Store {
-    pub fn new(inner: Arc<dyn ObjectStore>, db: Db, version: String) -> Self {
+    pub fn new(inner: Arc<dyn ObjectStore>, db: Db, version: String, worker: String) -> Self {
         let records = Arc::new(Records::new(db, version.clone()));
         Store {
             inner,
             records,
             version,
+            worker,
         }
     }
 
@@ -79,7 +82,9 @@ impl Store {
             .put(&self.pickle_path(&hash), PutPayload::from(compressed))
             .await?;
         let record = serde_json::to_value(meta)?;
-        self.records.put_state(&hash, meta.created, &record).await?;
+        self.records
+            .put_state(&hash, meta.created, &record, &self.worker)
+            .await?;
         Ok(hash)
     }
 
@@ -165,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn states_round_trip_and_sweep() {
         let s3 = Arc::new(InMemory::new());
-        let store = Store::new(s3.clone(), Db::memory().await, "v1".into());
+        let store = Store::new(s3.clone(), Db::memory().await, "v1".into(), "w".into());
         let meta = state(now_secs());
         let pickle = b"olean bytes".repeat(100);
         let hash = store.put_state(&pickle, &meta).await.unwrap();
@@ -193,7 +198,12 @@ mod tests {
     #[tokio::test]
     async fn storing_a_state_again_keeps_one_record() {
         let db = Db::memory().await;
-        let store = Store::new(Arc::new(InMemory::new()), db.clone(), "v1".into());
+        let store = Store::new(
+            Arc::new(InMemory::new()),
+            db.clone(),
+            "v1".into(),
+            "w".into(),
+        );
         let pickle = b"olean bytes".repeat(100);
         let hash = store.put_state(&pickle, &state(1)).await.unwrap();
         store.put_state(&pickle, &state(2)).await.unwrap();
@@ -204,7 +214,12 @@ mod tests {
 
     #[tokio::test]
     async fn sweep_deletes_only_old_records() {
-        let store = Store::new(Arc::new(InMemory::new()), Db::memory().await, "v1".into());
+        let store = Store::new(
+            Arc::new(InMemory::new()),
+            Db::memory().await,
+            "v1".into(),
+            "w".into(),
+        );
         for i in 0..300 {
             store
                 .put_session(&format!("old{i}"), &session(1))
@@ -223,7 +238,12 @@ mod tests {
     /// A missing record is `None`, not an error: errors are the store's.
     #[tokio::test]
     async fn missing_records_are_none() {
-        let store = Store::new(Arc::new(InMemory::new()), Db::memory().await, "v1".into());
+        let store = Store::new(
+            Arc::new(InMemory::new()),
+            Db::memory().await,
+            "v1".into(),
+            "w".into(),
+        );
         assert!(store.state_meta("0f").await.unwrap().is_none());
         assert!(store.session("s").await.unwrap().is_none());
     }

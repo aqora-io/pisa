@@ -105,7 +105,7 @@ pub async fn run_with_stores(
         }
     });
     let sessions = Arc::new(Sessions {
-        store: store::Store::new(store, db, version.clone()),
+        store: store::Store::new(store, db, version.clone(), worker_id.clone()),
         version: version.clone(),
     });
     if cfg.state_ttl_secs > 0 {
