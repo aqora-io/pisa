@@ -410,10 +410,9 @@ async fn other_workers_load_snapshots_from_the_store() {
     let root = kept(&c, ROOT).await;
     let child = kept(&c, &on(&root, "theorem c : 2 = 2 := rfl\nneeds base")).await;
 
-    c.add_worker(common::worker_config(c.router.worker_addr, "w1", "v", 1));
+    c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
-    c.workers[0].abort();
-    c.wait_for_workers(1).await;
+    c.kill_worker(0).await;
 
     let r = check(&c, &on(&child, "needs base\nneeds c")).await;
     assert_eq!(r["ok"], true, "{r}");
@@ -446,10 +445,9 @@ async fn sessions_run_on_snapshots_and_keep_their_imports() {
     assert_eq!(status, 200, "{s}");
     assert_eq!(s["states"][0]["pos"]["line"], 5);
 
-    c.add_worker(common::worker_config(c.router.worker_addr, "w1", "v", 1));
+    c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
-    c.workers[0].abort();
-    c.wait_for_workers(1).await;
+    c.kill_worker(0).await;
 
     let state = s["states"][0]["state"].as_str().unwrap();
     let (status, step) = c
@@ -666,10 +664,9 @@ async fn module_system_snapshots_keep_all_their_files() {
 
     // Another worker must fetch every file: a module-system module without
     // its .olean.private imports as empty.
-    c.add_worker(common::worker_config(c.router.worker_addr, "w1", "v", 1));
+    c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
-    c.workers[0].abort();
-    c.wait_for_workers(1).await;
+    c.kill_worker(0).await;
     let r = check(&c, &on(&child, "needs mbase\nneeds mchild")).await;
     assert_eq!(r["ok"], true, "{r}");
     let r = check(&c, &on(&child, "needs mhidden")).await;
@@ -971,10 +968,9 @@ async fn verify_runs_on_a_worker_that_never_saw_the_snapshot() {
     let root = kept(&c, MODULE_ROOT).await;
     let child = kept(&c, &on(&root, "public theorem mchild : 3 = 3 := rfl")).await;
 
-    c.add_worker(common::worker_config(c.router.worker_addr, "w1", "v", 1));
+    c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
-    c.workers[0].abort();
-    c.wait_for_workers(1).await;
+    c.kill_worker(0).await;
 
     let r = verify(&c, &child).await;
     assert_eq!(r["verified"], true, "{r}");

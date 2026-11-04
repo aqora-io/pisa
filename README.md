@@ -2,15 +2,16 @@
 
 A Rust control plane for serving Lean 4 to machines. It runs unmodified
 upstream [Lean REPL](https://github.com/leanprover-community/repl) processes. A
-router queues requests globally and routes each one to a worker that has the
-right project version and, ideally, the right imports already loaded.
+router queues requests in the database, and each job goes to a worker that has
+the right project version and, ideally, the right imports already loaded.
 
 This repository implements stages 1–3 of the design doc *Building a Scalable
 Lean 4 Server in Rust*:
 
-1. **Router and workers.** The router keeps a global queue with two priority classes, routes by
-   warm header with rendezvous hashing under a load bound, retries jobs when a
-   worker disconnects, and exports Prometheus metrics.
+1. **Router and workers.** The router puts each request's job on a queue in
+   the database, with two priority classes, and exports Prometheus metrics.
+   Workers claim jobs, preferring those whose proof state they hold or whose
+   header they have warm, and a job whose worker dies runs on another.
 2. **Hardened workers.**
    - Each REPL runs in a bubblewrap sandbox and its own cgroup v2 limits.
    - Proofs are judged by the axioms they depend on, not by string matching.
@@ -31,11 +32,11 @@ imports it instead of re-checking it.
 
 | Crate | Role |
 | --- | --- |
-| `pisa-protocol` | The HTTP API types, REPL protocol types, header splitting, router↔worker frames |
+| `pisa-protocol` | The HTTP API types, REPL protocol types, header splitting, the jobs and results that go through the queue |
 | `pisa-repl` | Async driver for one REPL process: blank-line framing, timeouts, crash reporting |
-| `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store |
-| `pisa-db` | The metadata database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, and the snapshot catalog stored in it, shared by the workers and the search service |
-| `pisa-router` | HTTP API, worker registry, global queue, routing, metrics |
+| `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store, claiming jobs |
+| `pisa-db` | The database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, the job queue and the workers' registry, and the snapshot catalog, shared by the router, the workers and the search service |
+| `pisa-router` | HTTP API, queueing jobs and waiting for their results, metrics |
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
 | `pisa-tests` | `fake-repl` (speaks the REPL protocol without Lean) and in-process integration tests |
@@ -50,24 +51,31 @@ python3 scripts/e2e.py [--mathlib] [--search http://localhost:8100]   # end-to-e
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 ```
 
-Compose also starts PostgreSQL and Garage. Workers keep session data in two
-places, chosen by environment variables that Compose and the chart set:
-- **Metadata**, the sessions, the records that make proof states loadable,
-  and the snapshot entries and module records, is in a database.
-  `PISA_DATABASE_URL` is a PostgreSQL URL (`postgres://user:password@host/db`)
-  or the path of a SQLite file. Unset, the worker keeps it in an in-memory
-  SQLite database, so it isn't shared between workers or kept across
-  restarts; a SQLite file is kept, but only one host can use it.
+Compose also starts PostgreSQL and Garage. The router and the workers keep
+their data in two places, chosen by environment variables that Compose and
+the chart set:
+- **The job queue and the metadata**, the sessions, the records that make
+  proof states loadable, and the snapshot entries and module records, are in
+  a database, which the router and every worker share. `PISA_DATABASE_URL` is
+  a PostgreSQL URL (`postgres://user:password@host/db`) or the path of a
+  SQLite file, which only one host can use. It is required.
   - Each process creates or updates the tables when it starts, one process
     at a time.
+  - Jobs and workers are kept apart by `PISA_QUEUE` (default `pisa`), which
+    the router and its workers must agree on. Deployments that share a
+    database need queues of their own.
   - PostgreSQL holds the only copy of the snapshot entries and module
     records, which never expire, so run it durably and back it up.
   - `sslmode=require` in the URL connects with TLS and checks the server's
     certificate against the system's roots; for a private CA, set
     `SSL_CERT_FILE` to its certificate. Other modes connect without TLS.
-  - Each process opens at most 8 connections. Connect directly, or through
-    PgBouncer in session mode: the tables are created under a session-level
-    advisory lock.
+  - Each process opens at most 8 connections, plus one that `LISTEN`s for
+    the queue's notifications. Connect directly, or through PgBouncer in
+    session mode: the tables are created under a session-level advisory
+    lock, and notifications need a session of their own.
+  - A worker's claim on a job lasts `PISA_LEASE_SECS` (default 10) without a
+    heartbeat; a job whose worker died runs elsewhere once it lapses, up to
+    `PISA_MAX_RETRIES` more times.
   - The tests use in-memory SQLite, and also the PostgreSQL that
     `PISA_TEST_DATABASE_URL` names when it is set. Each test has versions of
     its own there, so tests can share one database.
@@ -135,7 +143,7 @@ router; `keda.prometheus.query` overrides it.
 - The target is `keda.jobsPerWorker` jobs per pod, which defaults to `worker.slots`.
 - `keda.scaleDownStabilizationSecs` sets how long demand must stay low before pods are removed.
 
-**Draining.** A worker that receives SIGTERM tells the router it is draining, gets no new jobs, finishes the ones it has, and exits. Two settings bound this:
+**Draining.** A worker that receives SIGTERM claims no more jobs, finishes the ones it has, and exits. Two settings bound this:
 - `worker.drainTimeoutSecs` is the longest it waits for running jobs.
 - The pod's grace period is that plus 30s.
 
@@ -174,6 +182,15 @@ until it has, replicas exit at startup and restart.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release whose workers take jobs from the database:
+- Upgrade the router and the workers together. The router no longer listens
+  for workers (`PISA_WORKERS`, port 7070), and workers no longer dial it
+  (`PISA_ROUTER`): both need `PISA_DATABASE_URL`, the same database, and the
+  same `PISA_QUEUE`. In the chart, the `-router-workers` Service is gone and
+  the router reads `metadata.database.urlSecret` too.
+- Prewarming follows the headers of the jobs that are queued when a worker
+  starts, rather than the router's counts since it started.
 
 To the release that moved metadata from TiKV into PostgreSQL:
 - Run PostgreSQL, and set `PISA_DATABASE_URL` where `PISA_METADATA` and

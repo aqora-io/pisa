@@ -32,7 +32,6 @@ spec:
             privileged: true
           {{- end }}
           env:
-            - { name: PISA_ROUTER, value: "{{ $name }}-router-workers:7070" }
             - name: PISA_WORKER_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - { name: PISA_SLOTS, value: {{ $w.slots | quote }} }

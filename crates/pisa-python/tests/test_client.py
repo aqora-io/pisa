@@ -25,34 +25,40 @@ def free_port():
 
 
 @pytest.fixture(scope="module")
-def url():
-    http, workers = free_port(), free_port()
+def url(tmp_path_factory):
+    http = free_port()
+    # The router and the worker share the job queue in this file.
+    db = str(tmp_path_factory.mktemp("db") / "pisa.db")
     env = {**os.environ, "RUST_LOG": "warn"}
     router = subprocess.Popen(
-        [BIN / "pisa-router", "--http", f"127.0.0.1:{http}", "--workers", f"127.0.0.1:{workers}",
+        [BIN / "pisa-router", "--http", f"127.0.0.1:{http}", "--database-url", db,
          "--max-wait-secs", "1"],
-        env=env,
-    )
-    worker = subprocess.Popen(
-        [BIN / "pisa-worker", "--router", f"127.0.0.1:{workers}", "--version", "v",
-         "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean"],
         env=env,
     )
     url = f"http://127.0.0.1:{http}"
     client = Client(url)
-    for _ in range(100):
-        try:
-            client.health()
-            if "pisa_workers 1" in metrics(url):
-                break
-        except Exception:
-            pass
-        time.sleep(0.05)
-    else:
-        pytest.fail("cluster did not start")
+    # The router creates the tables first, so the two don't race to.
+    wait_for(lambda: client.health() is None)
+    worker = subprocess.Popen(
+        [BIN / "pisa-worker", "--database-url", db, "--version", "v",
+         "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean"],
+        env=env,
+    )
+    wait_for(lambda: "pisa_workers 1" in metrics(url))
     yield url
     worker.terminate()
     router.terminate()
+
+
+def wait_for(ready):
+    for _ in range(100):
+        try:
+            if ready():
+                return
+        except Exception:
+            pass
+        time.sleep(0.05)
+    pytest.fail("cluster did not start")
 
 
 def metrics(url):

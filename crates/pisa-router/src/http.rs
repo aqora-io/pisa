@@ -26,7 +26,6 @@ use crate::{sessions, snapshots};
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
     pub versions: Versions,
-    pub affinity: sessions::Affinity,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -45,9 +44,9 @@ impl Versions {
     }
 }
 
+/// The API's routes, without `/health`, which whoever serves them adds.
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
-        .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/check", post(check))
         .route("/check/batch", post(check_batch))
@@ -87,7 +86,7 @@ impl From<DispatchError> for api::Error {
     fn from(e: DispatchError) -> Self {
         let kind = match e {
             DispatchError::NoCapacity => ErrorKind::Capacity,
-            DispatchError::WorkerLost(_) => ErrorKind::Unavailable,
+            DispatchError::WorkerLost(_) | DispatchError::Unavailable(_) => ErrorKind::Unavailable,
         };
         api::Error::new(kind, e.to_string())
     }
@@ -113,11 +112,12 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     }
 }
 
-async fn health() -> Json<serde_json::Value> {
+pub async fn health() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok" }))
 }
 
-async fn metrics() -> String {
+async fn metrics(State(app): State<Arc<App>>) -> String {
+    app.dispatcher.record_gauges().await;
     m::handle().render()
 }
 
@@ -171,7 +171,7 @@ async fn check_one(
         version,
         header_key: Some(split.header_key),
         header: prewarm_header(split.header),
-        affinity: None,
+        state: None,
     };
     let job = Job::Check(CheckJob {
         code,
@@ -185,7 +185,7 @@ async fn check_one(
     })
 }
 
-/// The header to remember for pre-warming new workers. Headers that import
+/// The header new workers may pre-warm, when it is in demand. Headers that import
 /// snapshots are left out: there is a new one for every statement, and a new
 /// worker would mostly pre-warm abandoned ones.
 pub fn prewarm_header(header: String) -> Option<String> {

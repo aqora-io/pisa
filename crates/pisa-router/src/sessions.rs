@@ -1,10 +1,9 @@
 //! Tactic session endpoints. Session work is interactive, so it is queued
-//! ahead of batch checks. Each state key names its version and header, and the
-//! router remembers which worker last held each state so the next tactic can
-//! skip loading it from storage.
+//! ahead of batch checks. Each state key names its version, header and hash;
+//! the worker that stored a state gets first refusal of the next tactic on
+//! it, which then needn't load it from storage.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -20,29 +19,6 @@ use crate::http::{
     ApiError, App, Body, check_result, failed_result, prewarm_header, record_rejection,
 };
 use crate::metrics as m;
-
-/// Bound on remembered state locations; the map is reset when it fills up.
-const AFFINITY_CAP: usize = 100_000;
-
-/// State key → name of the worker that last produced or loaded it.
-#[derive(Default)]
-pub struct Affinity(Mutex<HashMap<String, String>>);
-
-impl Affinity {
-    fn get(&self, state: &str) -> Option<String> {
-        self.0.lock().unwrap().get(state).cloned()
-    }
-
-    fn record<'a>(&self, states: impl IntoIterator<Item = &'a String>, worker: &str) {
-        let mut map = self.0.lock().unwrap();
-        for s in states {
-            if map.len() >= AFFINITY_CAP {
-                map.clear();
-            }
-            map.insert(s.clone(), worker.to_string());
-        }
-    }
-}
 
 fn parse_key(id: &str) -> Result<Key, ApiError> {
     Key::parse(id).ok_or_else(|| ApiError::new(ErrorKind::BadRequest, format!("invalid key: {id}")))
@@ -70,7 +46,7 @@ pub async fn start(
         version: app.versions.resolve(req.version.as_deref()),
         header_key: Some(split.header_key),
         header: prewarm_header(split.header),
-        affinity: None,
+        state: None,
     };
     let job = Job::SessionStart(SessionStartJob {
         code: req.code,
@@ -84,10 +60,7 @@ pub async fn start(
         return Err(unexpected(done.result));
     };
     count("session_start", result.is_err());
-    let r = result.map_err(ApiError)?;
-    app.affinity
-        .record(r.states.iter().map(|s| &s.state), &done.worker);
-    Ok(Json(r))
+    Ok(Json(result.map_err(ApiError)?))
 }
 
 pub async fn tactic(
@@ -100,7 +73,7 @@ pub async fn tactic(
         version: Some(key.version),
         header_key: Some(key.header_key),
         header: None,
-        affinity: app.affinity.get(&id),
+        state: Some(key.id),
     };
     let job = Job::SessionTactic(SessionTacticJob {
         state: id,
@@ -115,9 +88,7 @@ pub async fn tactic(
         return Err(unexpected(done.result));
     };
     count("tactic", result.is_err());
-    let r = result.map_err(ApiError)?;
-    app.affinity.record([&r.state], &done.worker);
-    Ok(Json(r))
+    Ok(Json(result.map_err(ApiError)?))
 }
 
 /// The completed proof's check result, with statement changes added to
@@ -133,7 +104,7 @@ pub async fn check(
         version: Some(key.version),
         header_key: Some(key.header_key),
         header: None,
-        affinity: None,
+        state: None,
     };
     let job = Job::SessionCheck(SessionCheckJob {
         session: id,

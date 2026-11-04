@@ -1,15 +1,17 @@
-//! Pisa router: accepts client requests over HTTP, queues them globally, and
-//! routes each one to a worker that dialled in over TCP.
+//! Pisa router: the HTTP API for checks, sessions and snapshots. It hands
+//! each request's job to the workers through the database's job queue and
+//! waits for the result, so any number of servers can serve one queue.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use futures::StreamExt;
-use pisa_protocol::wire::{self, RouterMessage, WorkerMessage};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use pisa_db::db::Db;
+use pisa_db::queue::Queue;
+use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 pub mod dispatch;
 pub mod http;
@@ -20,15 +22,15 @@ pub mod snapshots;
 use dispatch::{DispatchConfig, Dispatcher};
 use http::{App, Versions};
 
-#[derive(Debug, Clone, clap::Parser)]
-#[command(about = "Pisa router: queues Lean jobs and routes them to workers")]
+/// How often a server deletes the queue's leftovers: results nobody took,
+/// jobs nobody can claim, workers gone quiet.
+const SWEEP_EVERY: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, clap::Args)]
 pub struct RouterConfig {
     /// Client HTTP API.
     #[arg(long, env = "PISA_HTTP", default_value = "0.0.0.0:8000")]
     pub http: SocketAddr,
-    /// Where workers connect.
-    #[arg(long, env = "PISA_WORKERS", default_value = "0.0.0.0:7070")]
-    pub workers: SocketAddr,
     /// Seconds a job may wait for a free worker before the request gets 429.
     #[arg(long, env = "PISA_MAX_WAIT_SECS", default_value_t = 60)]
     pub max_wait_secs: u64,
@@ -40,6 +42,10 @@ pub struct RouterConfig {
     /// Version aliases, e.g. `physlib=v4.35.0-1a2b3c4d`. Separate several with ','.
     #[arg(long, env = "PISA_ALIASES", value_delimiter = ',', value_parser = parse_alias)]
     pub alias: Vec<(String, String)>,
+    /// The job queue that the servers and their workers share. Deployments
+    /// sharing a database need queues of their own.
+    #[arg(long, env = "PISA_QUEUE", default_value = "pisa")]
+    pub queue: String,
 }
 
 fn parse_alias(s: &str) -> Result<(String, String), String> {
@@ -49,113 +55,87 @@ fn parse_alias(s: &str) -> Result<(String, String), String> {
 
 pub struct Running {
     pub http_addr: SocketAddr,
-    pub worker_addr: SocketAddr,
     pub app: Arc<App>,
+    stop: watch::Sender<bool>,
+    served: JoinHandle<()>,
+    sweeper: JoinHandle<()>,
 }
 
-/// Binds both listeners and serves in background tasks.
-pub async fn start(cfg: RouterConfig) -> anyhow::Result<Running> {
+impl Running {
+    /// Stops taking connections, and waits up to `drain` for the requests in
+    /// flight. Their jobs are in the queue: one cut off still runs, and its
+    /// result is swept.
+    pub async fn shutdown(self, drain: Duration) {
+        let _ = self.stop.send(true);
+        if tokio::time::timeout(drain, self.served).await.is_err() {
+            tracing::warn!("requests still in flight after {drain:?}");
+        }
+        self.sweeper.abort();
+    }
+}
+
+/// Serves the API, with a plain `/health`, from the queue in `db`.
+pub async fn start(cfg: RouterConfig, db: Db) -> anyhow::Result<Running> {
+    let health = axum::Router::new().route("/health", axum::routing::get(http::health));
+    start_with(cfg, db, health).await
+}
+
+/// Serves the API and `extra`'s routes, which must include `/health`, from
+/// the queue in `db`.
+pub async fn start_with(cfg: RouterConfig, db: Db, extra: axum::Router) -> anyhow::Result<Running> {
     metrics::handle();
-    let dispatcher = Arc::new(Dispatcher::new(DispatchConfig {
-        max_wait: Duration::from_secs(cfg.max_wait_secs),
-        max_retries: cfg.max_retries,
-        ..Default::default()
-    }));
+    let queue = Queue::new(db, cfg.queue.clone());
+    let dispatcher = Dispatcher::start(
+        queue.clone(),
+        DispatchConfig {
+            max_wait: Duration::from_secs(cfg.max_wait_secs),
+            max_retries: cfg.max_retries,
+        },
+    )
+    .await;
     let app = Arc::new(App {
-        dispatcher: dispatcher.clone(),
+        dispatcher: Arc::new(dispatcher),
         versions: Versions {
             default: cfg.default_version.clone(),
-            aliases: cfg.alias.iter().cloned().collect(),
+            aliases: cfg.alias.iter().cloned().collect::<HashMap<_, _>>(),
         },
-        affinity: Default::default(),
     });
 
-    let worker_listener = TcpListener::bind(cfg.workers).await?;
-    let worker_addr = worker_listener.local_addr()?;
-    tokio::spawn(accept_workers(worker_listener, dispatcher.clone()));
-
-    let d = dispatcher.clone();
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(500));
+    let sweeper = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SWEEP_EVERY);
         loop {
             tick.tick().await;
-            d.expire();
+            match queue.sweep().await {
+                Ok(n) => tracing::debug!(deleted = n, "swept the job queue"),
+                Err(e) => tracing::warn!("sweeping the job queue failed: {e}"),
+            }
         }
     });
 
-    let http_listener = TcpListener::bind(cfg.http).await?;
-    let http_addr = http_listener.local_addr()?;
-    let routes = http::router(app.clone());
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(http_listener, routes).await {
+    let listener = TcpListener::bind(cfg.http).await?;
+    let http_addr = listener.local_addr()?;
+    let routes = http::router(app.clone()).merge(extra);
+    let (stop, mut stopping) = watch::channel(false);
+    let served = tokio::spawn(async move {
+        // Dropping `Running` leaves the server serving.
+        let stopped = async move {
+            if stopping.wait_for(|stop| *stop).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        if let Err(e) = axum::serve(listener, routes)
+            .with_graceful_shutdown(stopped)
+            .await
+        {
             tracing::error!("http server failed: {e}");
         }
     });
-    tracing::info!(%http_addr, %worker_addr, "router listening");
+    tracing::info!(%http_addr, queue = %cfg.queue, "router listening");
     Ok(Running {
         http_addr,
-        worker_addr,
         app,
+        stop,
+        served,
+        sweeper,
     })
-}
-
-async fn accept_workers(listener: TcpListener, dispatcher: Arc<Dispatcher>) {
-    static NEXT_CONN: AtomicU64 = AtomicU64::new(0);
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                let conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
-                let d = dispatcher.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = serve_worker(conn, stream, &d).await {
-                        tracing::warn!(%peer, "worker connection error: {e}");
-                    }
-                    d.disconnect(conn);
-                });
-            }
-            Err(e) => tracing::warn!("accept failed: {e}"),
-        }
-    }
-}
-
-async fn serve_worker(conn: u64, stream: TcpStream, d: &Dispatcher) -> anyhow::Result<()> {
-    stream.set_nodelay(true)?;
-    let (mut sink, mut source) = wire::connection(stream).split();
-    let Some(WorkerMessage::Hello {
-        worker_id,
-        version,
-        slots,
-    }) = wire::recv(&mut source).await?
-    else {
-        anyhow::bail!("expected hello");
-    };
-    tracing::info!(%worker_id, %version, slots, "worker connected");
-    let (tx, mut rx) = mpsc::unbounded_channel::<RouterMessage>();
-    let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if wire::send(&mut sink, &msg).await.is_err() {
-                break;
-            }
-        }
-    });
-    d.connect(conn, worker_id, version, slots, tx);
-    let result = async {
-        while let Some(msg) = wire::recv::<_, WorkerMessage>(&mut source).await? {
-            match msg {
-                WorkerMessage::Status { warm_headers } => d.status(conn, warm_headers),
-                WorkerMessage::Result { request_id, result } => {
-                    d.complete(conn, request_id, result)
-                }
-                WorkerMessage::Restart { cause } => {
-                    ::metrics::counter!(metrics::RESTARTS, "cause" => cause).increment(1)
-                }
-                WorkerMessage::Draining => d.drain(conn),
-                WorkerMessage::Hello { .. } => tracing::warn!("duplicate hello"),
-            }
-        }
-        anyhow::Ok(())
-    }
-    .await;
-    writer.abort();
-    result
 }

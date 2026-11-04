@@ -1,6 +1,6 @@
 # Local development stack: one router, two workers, Garage (S3) for pickled
-# proof states and snapshot modules, and PostgreSQL for the session, state and
-# snapshot records.
+# proof states and snapshot modules, and PostgreSQL for the job queue between
+# them and the session, state and snapshot records.
 #   docker compose up --build
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
@@ -21,7 +21,6 @@ x-worker: &worker
       PROJECT: ${PROJECT:-lean-project}
   image: pisa-worker:${PROJECT:-lean-project}
   depends_on:
-    router: { condition: service_started }
     garage: { condition: service_started }
     postgres: { condition: service_healthy }
   # A worker exits if it can't connect to the database.
@@ -32,7 +31,6 @@ x-worker: &worker
   privileged: true
   cgroup: private
   environment: &worker-env
-    PISA_ROUTER: router:7070
     PISA_SLOTS: ${PISA_SLOTS:-2}
     PISA_SANDBOX: bwrap
     PISA_CGROUP_ROOT: /sys/fs/cgroup
@@ -63,7 +61,7 @@ services:
       - ./docker/garage.toml:/etc/garage.toml:ro
 
   # Its data is in an anonymous volume, which `docker compose down -v` deletes.
-  # The workers create the tables.
+  # The router and workers create the tables.
   postgres:
     image: postgres:18
     environment:
@@ -82,7 +80,11 @@ services:
       target: router
     image: pisa-router
     ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: on-failure
     environment:
+      PISA_DATABASE_URL: *database-url
       PISA_MAX_WAIT_SECS: 120
       RUST_LOG: info
 

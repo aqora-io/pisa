@@ -90,33 +90,62 @@ async fn second_request_with_same_header_is_a_warm_hit() {
     );
 }
 
-/// The router must learn that a worker is warm before the client sees the
-/// result, or the client's next request may be routed elsewhere.
-#[tokio::test(flavor = "multi_thread")]
-async fn worker_reports_a_new_warm_header_before_the_result() {
-    use pisa_protocol::header::split_header;
-    use pisa_protocol::wire::{self, CheckJob, Job, RouterMessage, WorkerMessage};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let cfg = common::worker_config(listener.local_addr().unwrap(), "w0", "v", 1);
+/// A worker of version "v" alone on a queue of its own, with the queue.
+async fn lone_worker() -> (pisa_worker::queue::Queue, tempfile::TempDir) {
+    use pisa_worker::queue::{LIVE, Queue};
+    let db = pisa_worker::db::Db::memory().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = common::worker_config("w0", "v", 1);
+    cfg.work_dir = Some(dir.path().into());
     let store: std::sync::Arc<dyn object_store::ObjectStore> =
         std::sync::Arc::new(object_store::memory::InMemory::new());
     tokio::spawn(pisa_worker::run_with_stores(
         cfg,
         store,
-        pisa_worker::db::Db::memory().await,
+        db.clone(),
         std::future::pending(),
     ));
-    let (stream, _) = listener.accept().await.unwrap();
-    let mut conn = wire::connection(stream);
-    async fn recv(conn: &mut wire::Connection<tokio::net::TcpStream>) -> WorkerMessage {
-        wire::recv(conn).await.unwrap().unwrap()
+    let queue = Queue::new(db, "pisa");
+    while queue.counts(LIVE).await.unwrap().workers == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert!(matches!(recv(&mut conn).await, WorkerMessage::Hello { .. }));
-    assert!(matches!(
-        recv(&mut conn).await,
-        WorkerMessage::Status { .. }
-    ));
+    (queue, dir)
+}
+
+/// Queues `job` as it is, as a server would, and waits for its result.
+async fn run_raw(queue: &pisa_worker::queue::Queue, job: Value) -> Value {
+    use pisa_worker::queue::{NewJob, Poll};
+    let id = queue
+        .enqueue(&NewJob {
+            version: Some("v".into()),
+            priority: 1,
+            header_key: None,
+            header: None,
+            state: None,
+            job,
+            max_wait: std::time::Duration::from_secs(10),
+            max_attempts: 1,
+        })
+        .await
+        .unwrap();
+    loop {
+        match queue.poll(id).await.unwrap() {
+            Poll::Done(done) => return done.result,
+            Poll::Waiting { .. } => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// The registry must learn that a worker is warm before the client sees the
+/// result, or the client's next request may go to another worker.
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_publishes_a_new_warm_header_before_the_result() {
+    use pisa_protocol::header::split_header;
+    use pisa_protocol::wire::{CheckJob, Job};
+    use pisa_worker::queue::LIVE;
+
+    let (queue, _dir) = lone_worker().await;
     for i in 0..8 {
         let code = format!("import H{i}\ntheorem t : 1 = 1 := rfl");
         let key = split_header(&code).header_key;
@@ -125,74 +154,38 @@ async fn worker_reports_a_new_warm_header_before_the_result() {
             timeout_secs: 5,
             detail: Vec::new(),
         });
-        let msg = RouterMessage::Job { request_id: i, job };
-        wire::send(&mut conn, &msg).await.unwrap();
-        let mut warm = false;
-        loop {
-            match recv(&mut conn).await {
-                WorkerMessage::Status { warm_headers } => warm = warm_headers.contains(&key),
-                WorkerMessage::Result { .. } => break,
-                WorkerMessage::Restart { .. } => {}
-                other => panic!("unexpected {other:?}"),
-            }
-        }
-        assert!(warm, "job {i}: result arrived before the warm status");
+        run_raw(&queue, serde_json::to_value(job).unwrap()).await;
+        let warm = &queue.registry("v", LIVE).await.unwrap()[0].warm;
+        assert!(
+            warm.contains(&key),
+            "job {i}: result before the warm header"
+        );
     }
 }
 
-/// During a rolling deploy a router of another release can send a job this
-/// worker can't decode. It fails that job and keeps the connection, so the
-/// router doesn't retry everything the worker is running elsewhere.
+/// During a rolling deploy a server of another release can queue a job this
+/// worker can't decode. That job fails, and the worker carries on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_does_not_decode_fails_alone() {
     use pisa_protocol::api::ErrorKind;
-    use pisa_protocol::wire::{self, CheckJob, Job, JobResult, RouterMessage, WorkerMessage};
+    use pisa_protocol::wire::{CheckJob, Job, JobResult};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut cfg = common::worker_config(listener.local_addr().unwrap(), "w0", "v", 1);
-    // Not the default, which the test above shares with any other "w0".
-    let dir = tempfile::tempdir().unwrap();
-    cfg.work_dir = Some(dir.path().into());
-    let store: std::sync::Arc<dyn object_store::ObjectStore> =
-        std::sync::Arc::new(object_store::memory::InMemory::new());
-    tokio::spawn(pisa_worker::run_with_stores(
-        cfg,
-        store,
-        pisa_worker::db::Db::memory().await,
-        std::future::pending(),
-    ));
-    let (stream, _) = listener.accept().await.unwrap();
-    let mut conn = wire::connection(stream);
-    async fn result(conn: &mut wire::Connection<tokio::net::TcpStream>) -> (u64, JobResult) {
-        loop {
-            match wire::recv(conn).await.unwrap().unwrap() {
-                WorkerMessage::Result { request_id, result } => return (request_id, result),
-                WorkerMessage::Hello { .. }
-                | WorkerMessage::Status { .. }
-                | WorkerMessage::Restart { .. } => {}
-                other => panic!("unexpected {other:?}"),
-            }
-        }
-    }
+    let (queue, _dir) = lone_worker().await;
+    let result = async |job: Value| -> JobResult {
+        serde_json::from_value(run_raw(&queue, job).await).unwrap()
+    };
 
-    let bad = json!({"type": "job", "request_id": 1, "job": {"kind": "check", "code": 5}});
-    wire::send(&mut conn, &bad).await.unwrap();
-    let (id, r) = result(&mut conn).await;
+    let r = result(json!({"kind": "check", "code": 5})).await;
     assert!(
-        id == 1 && matches!(&r, JobResult::Failed { error } if error.contains("another release")),
-        "{id} {r:?}"
+        matches!(&r, JobResult::Failed { error } if error.contains("another release")),
+        "{r:?}"
     );
 
     // The release before entries named the entry `snapshot`.
-    let old = json!({
-        "type": "job", "request_id": 2,
-        "job": {"kind": "snapshot_get", "snapshot": "PisaSnap.s0"}
-    });
-    wire::send(&mut conn, &old).await.unwrap();
-    let (id, r) = result(&mut conn).await;
+    let r = result(json!({"kind": "snapshot_get", "snapshot": "PisaSnap.s0"})).await;
     assert!(
-        id == 2 && matches!(&r, JobResult::Snapshot(Err(e)) if e.kind == ErrorKind::BadRequest),
-        "{id} {r:?}"
+        matches!(&r, JobResult::Snapshot(Err(e)) if e.kind == ErrorKind::BadRequest),
+        "{r:?}"
     );
 
     let job = Job::Check(CheckJob {
@@ -200,12 +193,10 @@ async fn a_job_that_does_not_decode_fails_alone() {
         timeout_secs: 5,
         detail: Vec::new(),
     });
-    let msg = RouterMessage::Job { request_id: 3, job };
-    wire::send(&mut conn, &msg).await.unwrap();
-    let (id, r) = result(&mut conn).await;
+    let r = result(serde_json::to_value(job).unwrap()).await;
     assert!(
-        id == 3 && matches!(&r, JobResult::Check(o) if o.error.is_none()),
-        "{id} {r:?}"
+        matches!(&r, JobResult::Check(o) if o.error.is_none()),
+        "{r:?}"
     );
 }
 
@@ -307,8 +298,7 @@ async fn malformed_requests_use_the_error_shape() {
 #[tokio::test(flavor = "multi_thread")]
 async fn draining_worker_finishes_its_jobs_and_exits() {
     let mut c = Cluster::start(&[]).await;
-    let addr = c.router.worker_addr;
-    let stop = c.add_drainable_worker(common::worker_config(addr, "w0", "v", 2));
+    let stop = c.add_drainable_worker(common::worker_config("w0", "v", 2));
     c.wait_for_workers(1).await;
 
     let slow = {
@@ -353,7 +343,7 @@ async fn draining_worker_finishes_its_jobs_and_exits() {
         .expect("drained worker exits")
         .unwrap();
     assert!(!later.is_finished());
-    c.add_worker(common::worker_config(addr, "w1", "v", 1));
+    c.add_worker(common::worker_config("w1", "v", 1));
     let later = later.await.unwrap();
     assert!(later.get("error").is_none(), "{later}");
     assert!(!c.metrics().await.contains("pisa_job_retries_total"));

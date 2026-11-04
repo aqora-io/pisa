@@ -27,7 +27,7 @@ FROM debian:trixie-slim AS router
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/pisa-router /usr/local/bin/
-EXPOSE 8000 7070
+EXPOSE 8000
 ENTRYPOINT ["pisa-router"]
 
 FROM debian:trixie-slim AS lean

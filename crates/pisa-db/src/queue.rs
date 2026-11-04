@@ -31,6 +31,9 @@ pub const RESULT_RETENTION: Duration = Duration::from_secs(600);
 /// are swept after this long.
 pub const STALE_RETENTION: Duration = Duration::from_secs(3600);
 
+/// A worker seen within this long is live. Workers heartbeat well within it.
+pub const LIVE: Duration = Duration::from_secs(30);
+
 /// A job queue: the jobs and workers under one name, so that deployments
 /// sharing a database keep theirs apart.
 #[derive(Clone)]

@@ -5,11 +5,8 @@ use anyhow::Context;
 use crate::db::Db;
 
 #[derive(Debug, Clone, clap::Parser)]
-#[command(about = "Pisa worker: runs Lean REPLs for the router")]
+#[command(about = "Pisa worker: runs Lean REPLs for the servers' jobs")]
 pub struct WorkerConfig {
-    /// Router address that workers dial.
-    #[arg(long, env = "PISA_ROUTER", default_value = "127.0.0.1:7070")]
-    pub router: String,
     #[arg(long, env = "PISA_WORKER_ID")]
     pub worker_id: Option<String>,
     /// Pool label. Defaults to the project's toolchain plus a hash of its lake-manifest.json.
@@ -80,13 +77,19 @@ pub struct WorkerConfig {
     /// AWS_ALLOW_HTTP). All workers of a version must share one store.
     #[arg(long, env = "PISA_STORE", value_enum, default_value_t = StoreKind::Memory)]
     pub store: StoreKind,
-    /// Where session, proof-state and snapshot records live: a PostgreSQL
-    /// database (`postgres://…`), shared by all workers of a version, or a
-    /// SQLite file. Unset or empty, they are kept in this process, so they
-    /// are neither shared between workers nor kept across restarts. Pickled
-    /// states and snapshot modules always go to `--store`.
-    #[arg(long, env = "PISA_DATABASE_URL")]
+    /// The database that holds the job queue, shared with the servers, and
+    /// the session, proof-state and snapshot records, shared by all workers
+    /// of a version: PostgreSQL (`postgres://…`), or a SQLite file for a
+    /// single machine. Pickled states and snapshot modules go to `--store`.
+    #[arg(long, env = "PISA_DATABASE_URL", required = true)]
     pub database_url: Option<String>,
+    /// The job queue to take jobs from, as the servers name it.
+    #[arg(long, env = "PISA_QUEUE", default_value = "pisa")]
+    pub queue: String,
+    /// How long a claimed job stays this worker's without a heartbeat. A job
+    /// whose worker died runs elsewhere once it lapses.
+    #[arg(long, env = "PISA_LEASE_SECS", default_value_t = 10)]
+    pub lease_secs: u64,
     /// Delete stored proof states and sessions older than this (0 keeps them).
     #[arg(long, env = "PISA_STATE_TTL_SECS", default_value_t = 0)]
     pub state_ttl_secs: u64,
@@ -148,11 +151,6 @@ impl WorkerConfig {
                     .context("configuring the S3 store")?,
             ),
         })
-    }
-
-    /// Whether the records are kept in this process only.
-    pub fn records_in_memory(&self) -> bool {
-        self.database_url.as_deref().is_none_or(str::is_empty)
     }
 
     pub async fn db(&self) -> anyhow::Result<Db> {

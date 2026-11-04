@@ -104,10 +104,9 @@ async fn sessions_resume_on_another_worker() {
     let step = tactic(&c, &s["states"][0]["state"], "simp").await;
 
     // Bring up a second worker and kill the first, which held every state.
-    c.add_worker(common::worker_config(c.router.worker_addr, "w1", "v", 1));
+    c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
-    c.workers[0].abort();
-    c.wait_for_workers(1).await;
+    c.kill_worker(0).await;
 
     let done = tactic(&c, &step["state"], "rfl").await;
     assert_eq!(done["complete"], true);

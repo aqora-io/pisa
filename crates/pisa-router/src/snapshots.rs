@@ -33,7 +33,7 @@ pub async fn create(
         version: app.versions.resolve(req.version.as_deref()),
         header_key: Some(header_key(&next)),
         header: None,
-        affinity: None,
+        state: None,
     };
     let job = Job::SnapshotCreate(SnapshotCreateJob {
         code: req.code,

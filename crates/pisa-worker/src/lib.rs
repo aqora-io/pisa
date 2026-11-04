@@ -1,19 +1,17 @@
-//! Pisa worker agent: dials the router, receives jobs, and runs them on a pool
-//! of Lean REPL processes.
+//! Pisa worker agent: takes jobs from the database's job queue and runs them
+//! on a pool of Lean REPL processes.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::StreamExt;
 use object_store::ObjectStore;
 use pisa_protocol::header::split_header;
-use pisa_protocol::wire::{self, Inbound, Job, JobResult, RouterMessage, WorkerMessage};
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use pisa_protocol::wire::{Job, JobResult};
+use tokio::sync::watch;
 
 pub mod cgroup;
 pub mod check;
+pub mod claims;
 pub mod config;
 pub mod launcher;
 pub mod policy;
@@ -22,28 +20,16 @@ pub mod sessions;
 pub mod snapshots;
 pub mod store;
 
-use config::StoreKind;
 pub use config::WorkerConfig;
-pub use pisa_db::{catalog, db, records};
+pub use pisa_db::{catalog, db, queue, records};
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;
 
 /// How often a worker deletes the snapshot change log's expired rows.
 const LOG_PRUNE_EVERY: Duration = Duration::from_secs(600);
 
-/// How long dialling the router may take. A Service without ready endpoints
-/// can drop the connection attempt instead of refusing it, which would
-/// otherwise leave the worker waiting minutes for the OS to give up.
-const ROUTER_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
-    if cfg.records_in_memory() && cfg.store == StoreKind::S3 {
-        tracing::warn!(
-            "PISA_STORE=s3 without PISA_DATABASE_URL: the metadata is in this worker's \
-             memory, not shared with other workers or kept across restarts"
-        );
-    }
     let store = cfg.object_store()?;
     let db = cfg.db().await?;
     run_with_stores(cfg, store, db, shutdown_signal()).await
@@ -58,12 +44,12 @@ async fn shutdown_signal() {
     }
 }
 
-/// Runs the worker with pickled proof states and snapshot modules kept in
-/// `store`, and the records that describe them, the sessions and the snapshot
-/// entries in `db`. Every worker of the same version must share both. When
-/// `shutdown` completes, the worker drains: it tells the router to send no
-/// more jobs, finishes the ones it has (for at most `drain_timeout_secs`), and
-/// returns.
+/// Runs the worker on the job queue in `db`, with pickled proof states and
+/// snapshot modules kept in `store`, and the records that describe them, the
+/// sessions and the snapshot entries in `db`. Every worker of the same
+/// version must share both. When `shutdown` completes, the worker drains: it
+/// claims no more jobs, finishes the ones it has (for at most
+/// `drain_timeout_secs`), and returns.
 pub async fn run_with_stores(
     cfg: WorkerConfig,
     store: Arc<dyn ObjectStore>,
@@ -80,7 +66,7 @@ pub async fn run_with_stores(
         launcher.snapshot_root().to_path_buf(),
         Duration::from_secs(cfg.snapshot_confirm_secs),
     );
-    let (pool, warm_rx, mut restarts_rx) = Pool::new(
+    let (pool, warm_rx, restarts_rx) = Pool::new(
         launcher,
         Arc::new(snapshots),
         PoolConfig {
@@ -105,7 +91,7 @@ pub async fn run_with_stores(
         }
     });
     let sessions = Arc::new(Sessions {
-        store: store::Store::new(store, db, version.clone(), worker_id.clone()),
+        store: store::Store::new(store, db.clone(), version.clone(), worker_id.clone()),
         version: version.clone(),
     });
     if cfg.state_ttl_secs > 0 {
@@ -123,150 +109,28 @@ pub async fn run_with_stores(
         });
     }
 
-    let (drain_tx, mut drain_rx) = watch::channel(false);
+    let (drain_tx, drain_rx) = watch::channel(false);
     tokio::spawn(async move {
         shutdown.await;
         tracing::info!("shutting down: draining");
         let _ = drain_tx.send(true);
     });
-    let drain_timeout = Duration::from_secs(cfg.drain_timeout_secs);
-
-    let hello = WorkerMessage::Hello {
-        worker_id,
+    let claims = claims::Claims {
+        queue: queue::Queue::new(db, cfg.queue.clone()),
+        me: worker_id,
         version,
-        slots: pool.slots() as u32,
+        lease: Duration::from_secs(cfg.lease_secs.max(1)),
+        pool,
+        sessions,
+        warm: warm_rx,
+        restarts: restarts_rx,
     };
-    let mut backoff = Duration::from_millis(100);
-    loop {
-        if *drain_rx.borrow() {
-            return Ok(());
-        }
-        let connect = TcpStream::connect(&cfg.router);
-        match tokio::time::timeout(ROUTER_CONNECT_TIMEOUT, connect).await {
-            Ok(Ok(stream)) => {
-                backoff = Duration::from_millis(100);
-                tracing::info!(router = %cfg.router, "connected");
-                let conn = Connection {
-                    pool: &pool,
-                    sessions: &sessions,
-                    hello: &hello,
-                    drain_timeout,
-                };
-                let result = conn
-                    .serve(stream, warm_rx.clone(), &mut restarts_rx, &mut drain_rx)
-                    .await;
-                if *drain_rx.borrow() {
-                    tracing::info!(?result, "drained");
-                    return Ok(());
-                }
-                tracing::warn!(?result, "router connection closed");
-            }
-            Ok(Err(e)) => tracing::warn!(router = %cfg.router, "connect failed: {e}"),
-            Err(_) => tracing::warn!(router = %cfg.router, "connect timed out"),
-        }
-        tokio::select! {
-            _ = tokio::time::sleep(backoff) => {}
-            _ = drain_rx.changed() => {}
-        }
-        backoff = (backoff * 2).min(Duration::from_secs(5));
-    }
+    claims
+        .run(drain_rx, Duration::from_secs(cfg.drain_timeout_secs))
+        .await
 }
 
-struct Connection<'a> {
-    pool: &'a Arc<Pool>,
-    sessions: &'a Arc<Sessions>,
-    hello: &'a WorkerMessage,
-    drain_timeout: Duration,
-}
-
-impl Connection<'_> {
-    /// Serves one router connection. Returns when the router hangs up, or,
-    /// once draining, when every job received has been answered.
-    async fn serve(
-        &self,
-        stream: TcpStream,
-        mut warm_rx: watch::Receiver<BTreeMap<usize, String>>,
-        restarts_rx: &mut mpsc::UnboundedReceiver<String>,
-        drain_rx: &mut watch::Receiver<bool>,
-    ) -> anyhow::Result<()> {
-        stream.set_nodelay(true)?;
-        let (mut sink, mut source) = wire::connection(stream).split();
-        let (tx, mut rx) = mpsc::unbounded_channel::<WorkerMessage>();
-        wire::send(&mut sink, self.hello).await?;
-        let msg = status(&warm_rx.borrow_and_update());
-        wire::send(&mut sink, &msg).await?;
-        // Jobs received but not yet answered on this connection.
-        let mut outstanding = 0usize;
-        let mut draining = false;
-        let deadline = tokio::time::sleep(Duration::MAX);
-        tokio::pin!(deadline);
-        loop {
-            if draining && outstanding == 0 {
-                return Ok(());
-            }
-            tokio::select! {
-                msg = wire::recv::<_, Inbound>(&mut source) => match msg? {
-                    None => return Ok(()),
-                    Some(Inbound::BadJob { request_id, error }) => {
-                        tracing::warn!(request_id, "a job did not decode: {error}");
-                        let error = format!(
-                            "the worker could not read the job, which may come from \
-                             a router of another release: {error}"
-                        );
-                        let result = JobResult::Failed { error };
-                        wire::send(&mut sink, &WorkerMessage::Result { request_id, result }).await?;
-                    }
-                    Some(Inbound::Message(RouterMessage::Job { request_id, job })) => {
-                        outstanding += 1;
-                        let pool = self.pool.clone();
-                        let sessions = self.sessions.clone();
-                        let tx = tx.clone();
-                        tokio::spawn(async move {
-                            let result = run_job(&pool, &sessions, job).await;
-                            let _ = tx.send(WorkerMessage::Result { request_id, result });
-                        });
-                    }
-                    Some(Inbound::Message(RouterMessage::Prewarm { headers })) if !draining => {
-                        prewarm(self.pool, &headers)
-                    }
-                    Some(Inbound::Message(RouterMessage::Prewarm { .. })) => {}
-                },
-                Some(out) = rx.recv() => {
-                    if matches!(out, WorkerMessage::Result { .. }) {
-                        outstanding -= 1;
-                        // A header the job warmed is announced first, so the
-                        // client's next request can be routed here.
-                        if warm_rx.has_changed().unwrap_or(false) {
-                            let msg = status(&warm_rx.borrow_and_update());
-                            wire::send(&mut sink, &msg).await?;
-                        }
-                    }
-                    wire::send(&mut sink, &out).await?;
-                }
-                Ok(()) = warm_rx.changed() => {
-                    let msg = status(&warm_rx.borrow_and_update());
-                    wire::send(&mut sink, &msg).await?;
-                }
-                Some(cause) = restarts_rx.recv() => {
-                    wire::send(&mut sink, &WorkerMessage::Restart { cause }).await?;
-                }
-                Ok(()) = drain_rx.changed(), if !draining => {
-                    if *drain_rx.borrow() {
-                        draining = true;
-                        tracing::info!(outstanding, "draining");
-                        wire::send(&mut sink, &WorkerMessage::Draining).await?;
-                        deadline.as_mut().reset(tokio::time::Instant::now() + self.drain_timeout);
-                    }
-                }
-                () = &mut deadline, if draining => {
-                    anyhow::bail!("drain timed out with {outstanding} jobs unanswered");
-                }
-            }
-        }
-    }
-}
-
-async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
+pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
     match job {
         Job::Check(c) => JobResult::Check(check::run_check(pool, c).await),
         Job::SessionStart(j) => JobResult::SessionStarted(sessions.start(pool, j).await),
@@ -295,25 +159,22 @@ async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
                 .await,
         ),
         Job::Unsupported => JobResult::Failed {
-            error: "this worker does not support the job; it may be older than the router".into(),
+            error: "this worker does not support the job; it may be older than the server".into(),
         },
     }
 }
 
-fn status(warm: &BTreeMap<usize, String>) -> WorkerMessage {
-    let mut warm_headers: Vec<String> = warm.values().cloned().collect();
-    warm_headers.sort();
-    warm_headers.dedup();
-    WorkerMessage::Status { warm_headers }
-}
-
-/// Imports each header into an idle, empty slot, if there is one.
-fn prewarm(pool: &Arc<Pool>, headers: &[String]) {
+/// Imports each header into an idle, empty slot, if there is one, unless it
+/// is warm or being warmed already.
+pub(crate) fn prewarm(pool: &Arc<Pool>, headers: &[String]) {
     for text in headers {
         let split = split_header(text);
         if pool.is_warm(&split.header_key) {
             continue;
         }
+        let Some(warming) = pool.prewarming(&split.header_key) else {
+            continue;
+        };
         let Some(mut lease) = pool.try_acquire_cold() else {
             return;
         };
@@ -321,6 +182,7 @@ fn prewarm(pool: &Arc<Pool>, headers: &[String]) {
             if let Err(e) = lease.warm_up(&split.header, &split.header_key).await {
                 tracing::warn!(header = %split.header, "prewarm failed: {e:?}");
             }
+            drop(warming);
         });
     }
 }

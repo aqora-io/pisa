@@ -1976,15 +1976,10 @@ dependencies = [
 name = "pisa-protocol"
 version = "0.1.0"
 dependencies = [
- "bytes",
- "futures",
  "hex",
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
- "tokio",
- "tokio-util",
  "uuid",
 ]
 
@@ -2024,6 +2019,7 @@ dependencies = [
  "futures",
  "metrics",
  "metrics-exporter-prometheus",
+ "pisa-db",
  "pisa-protocol",
  "serde",
  "serde_json",

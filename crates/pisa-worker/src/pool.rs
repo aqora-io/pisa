@@ -2,7 +2,7 @@
 //! import header. Idle slots are reused by header (a warm hit) and otherwise
 //! evicted least-recently-used first.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,6 +32,8 @@ pub struct Pool {
     permits: Arc<Semaphore>,
     /// Header key per slot that has one imported.
     warm: watch::Sender<BTreeMap<usize, String>>,
+    /// Header keys a pre-warm is importing, so that none is imported twice.
+    prewarming: Arc<Mutex<HashSet<String>>>,
     restarts: mpsc::UnboundedSender<String>,
     launcher: Launcher,
     snapshots: Arc<Snapshots>,
@@ -100,6 +102,7 @@ impl Pool {
             idle: Mutex::new(slots),
             permits: Arc::new(Semaphore::new(cfg.slots)),
             warm,
+            prewarming: Arc::default(),
             restarts,
             launcher,
             snapshots,
@@ -170,11 +173,37 @@ impl Pool {
         self.warm.borrow().values().any(|k| k == header_key)
     }
 
+    /// Marks `header_key` as being pre-warmed until the guard drops, unless
+    /// it already is.
+    pub fn prewarming(&self, header_key: &str) -> Option<Prewarming> {
+        let key = header_key.to_string();
+        self.prewarming
+            .lock()
+            .unwrap()
+            .insert(key.clone())
+            .then(|| Prewarming {
+                keys: self.prewarming.clone(),
+                key,
+            })
+    }
+
     fn set_warm(&self, slot: usize, key: Option<&str>) {
         self.warm.send_if_modified(|w| match key {
             Some(k) => w.insert(slot, k.to_string()).as_deref() != Some(k),
             None => w.remove(&slot).is_some(),
         });
+    }
+}
+
+/// A header being pre-warmed; see [`Pool::prewarming`].
+pub struct Prewarming {
+    keys: Arc<Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl Drop for Prewarming {
+    fn drop(&mut self) {
+        self.keys.lock().unwrap().remove(&self.key);
     }
 }
 
