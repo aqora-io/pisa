@@ -1,0 +1,52 @@
+import { PisaClient, PisaError } from "@aqora/pisa-client";
+import { describe, expect, it } from "vitest";
+
+import { checkOptions, compactQuery, hasTerms, isTransient, retryQuery, searchOptions } from "../src/index.ts";
+
+const client = new PisaClient({ url: "http://pisa.test", version: "v" });
+const result = (kind?: string) => ({
+  ok: false,
+  time: 1,
+  messages: [],
+  sorries: [],
+  reasons: [],
+  declarations: [],
+  ...(kind !== undefined && { error: { kind: kind as "timeout", message: "" } }),
+});
+
+describe("query options", () => {
+  it("keeps a check's result unless it may not recur", () => {
+    expect(isTransient(result())).toBe(false);
+    expect(isTransient(result("lean"))).toBe(false);
+    expect(isTransient(result("timeout"))).toBe(true);
+    expect(isTransient(result("crash"))).toBe(true);
+  });
+
+  it("keys checks on what they send, client defaults included", () => {
+    expect(checkOptions(client, { code: "x" }).queryKey).toEqual([
+      "pisa",
+      "http://pisa.test",
+      "check",
+      { code: "x", version: "v", timeout: null, detail: [] },
+    ]);
+    expect(checkOptions(client, { code: "x", version: "w" }).queryKey).not.toEqual(
+      checkOptions(client, { code: "x" }).queryKey,
+    );
+  });
+
+  it("drops a query's blank fields, and searches only with a term", () => {
+    expect(compactQuery({ nl: "  ", name: "x", libraries: [], snapshots: "none", k: 3 })).toEqual({ name: "x", k: 3 });
+    expect(hasTerms({ nl: " ", libraries: ["Mathlib"] })).toBe(false);
+    expect(searchOptions(client, { nl: "" }).enabled).toBe(false);
+    expect(searchOptions(client, { nl: "trace" }).staleTime).toBe(Infinity);
+    expect(searchOptions(client, { nl: "trace", snapshots: "all" }).staleTime).toBe(30_000);
+  });
+
+  it("retries once after a 503, twice after a network error, never after a 429", () => {
+    const tries = (e: unknown) => [0, 1, 2].filter((n) => retryQuery(n, e)).length;
+    expect(tries(new PisaError("unavailable", "", 503))).toBe(1);
+    expect(tries(new PisaError("network", ""))).toBe(2);
+    expect(tries(new PisaError("capacity", "", 429))).toBe(0);
+    expect(tries(new PisaError("lean", "", 422))).toBe(0);
+  });
+});

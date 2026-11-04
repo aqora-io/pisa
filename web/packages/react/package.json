@@ -1,0 +1,48 @@
+{
+  "name": "@aqora/pisa-react",
+  "version": "0.1.0",
+  "description": "React hooks for pisa: Lean checks, proof sessions, snapshots and declaration search, over TanStack Query",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aqora/pisa-client": "workspace:^"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "^5.100.0",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tanstack/react-query": "5.105.3",
+    "@testing-library/react": "16.3.3",
+    "@types/react": "19.3.0",
+    "jsdom": "30.1.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tsdown": "0.23.5",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}
