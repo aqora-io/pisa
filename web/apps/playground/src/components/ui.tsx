@@ -21,6 +21,11 @@ export function SubtleButton({ className, ...props }: ButtonHTMLAttributes<HTMLB
   );
 }
 
+/** A small spinning ring, in the text's colour. */
+export function Spinner() {
+  return <span aria-hidden className="inline-block size-3.5 animate-spin rounded-full border-2 border-current border-r-transparent" />;
+}
+
 const TONES = {
   green: "bg-emerald-50 text-emerald-700 ring-emerald-600/20",
   red: "bg-rose-50 text-rose-700 ring-rose-600/20",

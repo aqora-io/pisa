@@ -57,7 +57,8 @@ function Editor({ code }: { code: string }) {
     entries.
 - **Search.**
   - `useSearch(query)` runs once the query has a term, and keeps the last hits
-    while new ones load.
+    while new ones load. A result with `dense_pending` is stale at once, so
+    `refetch()` or asking again gets the dense lane once it's embedded.
   - `useResolve(names)` and `useDecl(name)`.
   - `useDebouncedValue` debounces typed input.
 

@@ -1,8 +1,8 @@
 import type { Hit, Labels, Query, SnapshotScope } from "@aqora/pisa-client";
 import { useDebouncedValue, useDecl, useResolve, useSearch } from "@aqora/pisa-react";
-import { useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 
-import { Badge, ErrorNote, Field, Goals, Panel, inputClass } from "../components/ui.tsx";
+import { Badge, Button, ErrorNote, Field, Goals, Panel, Spinner, SubtleButton, inputClass } from "../components/ui.tsx";
 
 const MODES = {
   q: "anything",
@@ -118,6 +118,28 @@ function Resolver({ onOpen }: { onOpen: (name: string) => void }) {
   );
 }
 
+/** Whole seconds since `active` last became true. */
+function useElapsed(active: boolean): number {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    setSeconds(0);
+    const started = Date.now();
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 250);
+    return () => clearInterval(timer);
+  }, [active]);
+  return seconds;
+}
+
+function Searching({ seconds }: { seconds: number }) {
+  return (
+    <span className="inline-flex items-center gap-2 text-sm font-normal text-slate-500">
+      <Spinner />
+      Searching…{seconds >= 2 && ` ${seconds} s`}
+    </span>
+  );
+}
+
 export function SearchTab() {
   const [mode, setMode] = useState<keyof typeof MODES>("q");
   const [text, setText] = useState("");
@@ -128,71 +150,122 @@ export function SearchTab() {
   const [scope, setScope] = useState<"none" | "all" | "labels">("none");
   const [scopeLabels, setScopeLabels] = useState("");
   const [open, setOpen] = useState<string | null>(null);
-  const snapshots: SnapshotScope = scope === "labels" ? { labels: parseLabels(scopeLabels) } : scope;
-  const query: Query = {
-    [mode]: useDebouncedValue(text, 300),
-    libraries: split(libraries),
-    kinds: split(kinds),
-    k,
-    include_sorried: sorried,
-    snapshots,
+  // What was last asked for, with Enter or the button; nothing runs as you type.
+  const [submitted, setSubmitted] = useState<Query | null>(null);
+  const search = useSearch(submitted ?? {});
+  const elapsed = useElapsed(search.isFetching);
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const snapshots: SnapshotScope = scope === "labels" ? { labels: parseLabels(scopeLabels) } : scope;
+    const query: Query = {
+      [mode]: text,
+      libraries: split(libraries),
+      kinds: split(kinds),
+      k,
+      include_sorried: sorried,
+      snapshots,
+    };
+    // The same query again searches again.
+    if (JSON.stringify(query) === JSON.stringify(submitted)) void search.refetch();
+    else setSubmitted(query);
   };
-  const search = useSearch(query);
+  // The previous query's hits stay up while the next ones load.
+  const result = search.isPlaceholderData ? undefined : search.data;
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_28rem]">
       <div className="space-y-4">
         <Panel>
-          <div className="flex gap-2">
-            <select className={inputClass} value={mode} onChange={(e) => setMode(e.target.value as keyof typeof MODES)}>
-              {Object.entries(MODES).map(([m, label]) => (
-                <option key={m} value={m}>
-                  {label}
-                </option>
-              ))}
-            </select>
-            <input
-              className={`${inputClass} flex-1`}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder="trace of a density matrix is one"
-              autoFocus
-            />
-          </div>
-          <div className="mt-3 grid gap-3 sm:grid-cols-5">
-            <Field label="Libraries">
-              <input className={inputClass} value={libraries} onChange={(e) => setLibraries(e.target.value)} placeholder="Mathlib" />
-            </Field>
-            <Field label="Kinds">
-              <input className={inputClass} value={kinds} onChange={(e) => setKinds(e.target.value)} placeholder="theorem" />
-            </Field>
-            <Field label="Hits">
-              <input className={inputClass} type="number" min={1} max={50} value={k} onChange={(e) => setK(Number(e.target.value))} />
-            </Field>
-            <Field label="Snapshots">
-              <select className={inputClass} value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
-                <option value="none">none</option>
-                <option value="all">all</option>
-                <option value="labels">with labels</option>
+          <form onSubmit={submit}>
+            <div className="flex gap-2">
+              <select className={inputClass} value={mode} onChange={(e) => setMode(e.target.value as keyof typeof MODES)}>
+                {Object.entries(MODES).map(([m, label]) => (
+                  <option key={m} value={m}>
+                    {label}
+                  </option>
+                ))}
               </select>
-            </Field>
-            <label className="flex items-end gap-1.5 pb-1 text-xs font-medium text-slate-600">
-              <input type="checkbox" checked={sorried} onChange={(e) => setSorried(e.target.checked)} />
-              include sorried
-            </label>
-          </div>
-          {scope === "labels" && (
-            <input className={`${inputClass} mt-3 w-full`} value={scopeLabels} onChange={(e) => setScopeLabels(e.target.value)} placeholder="run=7" />
-          )}
+              <input
+                className={`${inputClass} flex-1`}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="trace of a density matrix is one"
+                autoFocus
+              />
+              <Button type="submit" disabled={text.trim() === ""} className="inline-flex items-center gap-2">
+                {search.isFetching ? (
+                  <>
+                    <Spinner />
+                    Searching…
+                  </>
+                ) : (
+                  "Search"
+                )}
+              </Button>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-5">
+              <Field label="Libraries">
+                <input className={inputClass} value={libraries} onChange={(e) => setLibraries(e.target.value)} placeholder="Mathlib" />
+              </Field>
+              <Field label="Kinds">
+                <input className={inputClass} value={kinds} onChange={(e) => setKinds(e.target.value)} placeholder="theorem" />
+              </Field>
+              <Field label="Hits">
+                <input className={inputClass} type="number" min={1} max={50} value={k} onChange={(e) => setK(Number(e.target.value))} />
+              </Field>
+              <Field label="Snapshots">
+                <select className={inputClass} value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
+                  <option value="none">none</option>
+                  <option value="all">all</option>
+                  <option value="labels">with labels</option>
+                </select>
+              </Field>
+              <label className="flex items-end gap-1.5 pb-1 text-xs font-medium text-slate-600">
+                <input type="checkbox" checked={sorried} onChange={(e) => setSorried(e.target.checked)} />
+                include sorried
+              </label>
+            </div>
+            {scope === "labels" && (
+              <input className={`${inputClass} mt-3 w-full`} value={scopeLabels} onChange={(e) => setScopeLabels(e.target.value)} placeholder="run=7" />
+            )}
+          </form>
         </Panel>
         <ErrorNote error={search.error} />
-        {search.data?.warnings?.map((w) => (
-          <p key={w} className="text-sm text-amber-800">
-            {w}
-          </p>
-        ))}
+        {result?.warnings !== undefined && result.warnings.length > 0 && (
+          <div className="flex flex-wrap items-start gap-3 rounded-md bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">
+            <div className="min-w-0 flex-1 space-y-1">
+              {result.warnings.map((w) => (
+                <p key={w}>{w}</p>
+              ))}
+            </div>
+            {result.dense_pending === true && (
+              <SubtleButton onClick={() => void search.refetch()} disabled={search.isFetching} className="inline-flex items-center gap-2">
+                {search.isFetching ? (
+                  <>
+                    <Spinner />
+                    Trying…
+                  </>
+                ) : (
+                  "Try again"
+                )}
+              </SubtleButton>
+            )}
+          </div>
+        )}
+        {search.data === undefined && search.isFetching && (
+          <Panel>
+            <Searching seconds={elapsed} />
+          </Panel>
+        )}
         {search.data !== undefined && (
-          <Panel title={`${search.data.hits.length} hits${search.isFetching ? " (updating…)" : ""}`}>
-            <ul className="divide-y divide-slate-100">
+          <Panel
+            title={
+              <span className="flex items-center gap-3">
+                {search.data.hits.length} hit{search.data.hits.length === 1 ? "" : "s"}
+                {search.isFetching && <Searching seconds={elapsed} />}
+              </span>
+            }
+          >
+            <ul className={`divide-y divide-slate-100 transition-opacity ${search.isFetching ? "opacity-50" : ""}`}>
               {search.data.hits.map((hit) => (
                 <HitView key={`${hit.module}.${hit.name}`} hit={hit} onOpen={setOpen} />
               ))}

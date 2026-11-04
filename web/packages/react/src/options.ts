@@ -111,8 +111,9 @@ export function searchOptions(client: PisaClient, query: Query, input: SearchInp
   return {
     queryKey: [...pisaKeys.search(client), envId ?? null, compact] as QueryKey,
     queryFn: ({ signal }) => client.search(compact, { ...(envId !== undefined && { envId }), signal }),
-    // Snapshots keep being indexed; the libraries don't change.
-    staleTime: compact.snapshots === undefined ? Infinity : 30_000,
+    // Snapshots keep being indexed; the libraries don't change. A query still
+    // being embedded gets the dense lane if asked again.
+    staleTime: (q) => (q.state.data?.dense_pending === true ? 0 : compact.snapshots === undefined ? Infinity : 30_000),
     enabled: hasTerms(compact),
     retry: retryQuery,
   };

@@ -1,4 +1,4 @@
-import { PisaClient, PisaError } from "@aqora/pisa-client";
+import { PisaClient, PisaError, type Query, type QueryResult } from "@aqora/pisa-client";
 import { describe, expect, it } from "vitest";
 
 import { checkOptions, compactQuery, hasTerms, isTransient, retryQuery, searchOptions } from "../src/index.ts";
@@ -13,6 +13,12 @@ const result = (kind?: string) => ({
   declarations: [],
   ...(kind !== undefined && { error: { kind: kind as "timeout", message: "" } }),
 });
+
+/** How long a search like `query` stays fresh with `data` cached. */
+const staleTime = (query: Query, data?: QueryResult) => {
+  const s = searchOptions(client, query).staleTime;
+  return typeof s === "function" ? s({ state: { data } } as never) : s;
+};
 
 describe("query options", () => {
   it("keeps a check's result unless it may not recur", () => {
@@ -38,8 +44,13 @@ describe("query options", () => {
     expect(compactQuery({ nl: "  ", name: "x", libraries: [], snapshots: "none", k: 3 })).toEqual({ name: "x", k: 3 });
     expect(hasTerms({ nl: " ", libraries: ["Mathlib"] })).toBe(false);
     expect(searchOptions(client, { nl: "" }).enabled).toBe(false);
-    expect(searchOptions(client, { nl: "trace" }).staleTime).toBe(Infinity);
-    expect(searchOptions(client, { nl: "trace", snapshots: "all" }).staleTime).toBe(30_000);
+    expect(staleTime({ nl: "trace" })).toBe(Infinity);
+    expect(staleTime({ nl: "trace", snapshots: "all" })).toBe(30_000);
+  });
+
+  it("searches again for a result that left out the dense lane while it was embedded", () => {
+    expect(staleTime({ nl: "trace" }, { hits: [], dense_pending: true })).toBe(0);
+    expect(staleTime({ nl: "trace" }, { hits: [], warnings: ["dense lane unavailable"] })).toBe(Infinity);
   });
 
   it("retries once after a 503, twice after a network error, never after a 429", () => {
