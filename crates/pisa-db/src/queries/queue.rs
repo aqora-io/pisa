@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::catalog::now_micros;
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
-    Candidate, Claimed, Counts, Done, NewJob, Peer, Poll, RESULT_RETENTION, STALE_RETENTION,
+    Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION, STALE_RETENTION,
 };
 use crate::schema::{jobs, states, workers};
 
@@ -93,35 +93,12 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
     retry(|| async {
         let mut c = conn(db).await?;
         let done = diesel::delete(jobs::table.find(id).filter(jobs::result.is_not_null()))
-            .returning((
-                jobs::result,
-                jobs::worker,
-                jobs::attempts,
-                jobs::enqueued_micros,
-                jobs::claimed_micros,
-                jobs::restarts,
-            ))
-            .get_result::<(
-                Option<Value>,
-                Option<String>,
-                i32,
-                i64,
-                Option<i64>,
-                Option<Value>,
-            )>(&mut *c)
+            .returning(jobs::result)
+            .get_result::<Option<Value>>(&mut *c)
             .await
             .optional()?;
-        if let Some((result, worker, attempts, enqueued, claimed, restarts)) = done {
-            let waited = claimed.unwrap_or(enqueued).saturating_sub(enqueued).max(0);
-            return Ok(Poll::Done(Done {
-                result: result.unwrap_or_default(),
-                worker: worker.unwrap_or_default(),
-                attempts: attempts as u32,
-                waited: Duration::from_micros(waited as u64),
-                restarts: restarts
-                    .and_then(|r| serde_json::from_value(r).ok())
-                    .unwrap_or_default(),
-            }));
+        if let Some(result) = done {
+            return Ok(Poll::Done(result.unwrap_or_default()));
         }
         let status = jobs::table
             .find(id)
@@ -431,10 +408,8 @@ pub(crate) async fn complete(
     worker: &str,
     id: i64,
     result: &Value,
-    restarts: &[String],
 ) -> Result<bool, DbError> {
     let now = now();
-    let restarts = (!restarts.is_empty()).then(|| Value::from(restarts.to_vec()));
     retry(|| async {
         let mut c = conn(db).await?;
         let n = diesel::update(
@@ -443,11 +418,7 @@ pub(crate) async fn complete(
                 .filter(jobs::worker.eq(worker))
                 .filter(jobs::result.is_null()),
         )
-        .set((
-            jobs::result.eq(result),
-            jobs::restarts.eq(&restarts),
-            jobs::done_micros.eq(now),
-        ))
+        .set((jobs::result.eq(result), jobs::done_micros.eq(now)))
         .execute(&mut *c)
         .await?;
         if n == 1 {

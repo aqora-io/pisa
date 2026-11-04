@@ -19,8 +19,7 @@ use pisa_protocol::wire::{
 };
 
 use crate::dispatch::{Priority, Route};
-use crate::http::{ApiError, App, Body, record_result};
-use crate::metrics as m;
+use crate::http::{ApiError, App, Body};
 use crate::sessions::unexpected;
 
 pub async fn create(
@@ -43,10 +42,9 @@ pub async fn create(
         key: req.key,
     });
     let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
-    let JobResult::SnapshotCreated(r) = done.result else {
-        return Err(unexpected(done.result));
+    let JobResult::SnapshotCreated(r) = done else {
+        return Err(unexpected(done));
     };
-    record_result(&r.result, "snapshot");
     Ok(Json(*r))
 }
 
@@ -152,13 +150,7 @@ pub async fn verify(
 ) -> Result<Json<SnapshotVerified>, ApiError> {
     let job = Job::SnapshotVerify(SnapshotJob { entry });
     match submit(&app, job, q, Priority::Batch).await? {
-        JobResult::SnapshotVerified(r) => {
-            let r = r.map_err(ApiError)?;
-            let outcome = if r.failure.is_some() { "error" } else { "ok" };
-            metrics::counter!(m::JOBS, "kind" => "snapshot_verify", "outcome" => outcome)
-                .increment(1);
-            Ok(Json(r))
-        }
+        JobResult::SnapshotVerified(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
     }
 }
@@ -173,6 +165,5 @@ async fn submit(
         version: app.versions.resolve(q.version.as_deref()),
         ..Default::default()
     };
-    let done = app.dispatcher.submit(job, route, priority).await?;
-    Ok(done.result)
+    Ok(app.dispatcher.submit(job, route, priority).await?)
 }

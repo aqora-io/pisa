@@ -438,8 +438,8 @@ def phase_restart(url, out, as_modules=False):
     sh("docker", "compose", "restart", "worker-1", "worker-2")
     for _ in range(120):
         try:
-            with urllib.request.urlopen(url + "/metrics") as r:
-                if "pisa_workers 2" in r.read().decode():
+            with urllib.request.urlopen(url + "/health") as r:
+                if json.load(r)["workers"] == 2:
                     break
         except OSError:
             pass

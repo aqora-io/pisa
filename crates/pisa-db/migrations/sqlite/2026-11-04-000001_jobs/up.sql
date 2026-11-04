@@ -29,8 +29,6 @@ CREATE TABLE jobs (
     lease_micros BIGINT,
     attempts INTEGER NOT NULL DEFAULT 0,
     result BLOB,
-    -- Causes of the Lean processes the worker replaced since its last result.
-    restarts BLOB,
     done_micros BIGINT
 );
 CREATE INDEX jobs_open ON jobs (queue, priority, id) WHERE result IS NULL;

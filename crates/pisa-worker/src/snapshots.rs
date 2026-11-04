@@ -614,7 +614,6 @@ impl Snapshots {
             error: None,
             response: None,
             verification: None,
-            warm: false,
         };
         let fail = |mut outcome: CheckOutcome, error: Error| {
             outcome.error = Some(error);

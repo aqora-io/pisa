@@ -77,7 +77,10 @@ async fn without_qdrant_there_is_no_search() {
     let url = |path: &str| format!("http://{}{path}", server.running.http_addr);
     let (status, health) = get(&url("/health")).await;
     assert_eq!(status, 200);
-    assert_eq!(health, json!({"status": "ok", "search": null}));
+    assert_eq!(
+        health,
+        json!({"status": "ok", "workers": 0, "search": null})
+    );
     let (status, body) = post(&url("/v1/search"), json!({"queries": []})).await;
     assert_eq!(status, 404, "{body}");
     assert!(

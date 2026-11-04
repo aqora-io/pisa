@@ -8,26 +8,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::{DbError, Notice};
-use pisa_db::queue::{Done, LIVE, NewJob, Poll, Queue};
+use pisa_db::queue::{LIVE, NewJob, Poll, Queue};
 use pisa_protocol::wire::{Job, JobResult};
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
-
-use crate::metrics as m;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
     Interactive = 0,
     Batch = 1,
-}
-
-impl Priority {
-    fn label(self) -> &'static str {
-        match self {
-            Priority::Interactive => "interactive",
-            Priority::Batch => "batch",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,13 +68,6 @@ pub struct Dispatcher {
     queue: Queue,
     cfg: DispatchConfig,
     waiters: Arc<Waiters>,
-}
-
-/// Where a finished job ran, for the caller's bookkeeping.
-#[derive(Debug, Clone)]
-pub struct Completion {
-    pub result: JobResult,
-    pub worker: String,
 }
 
 /// This process's requests waiting for their jobs, woken by the queue's
@@ -183,7 +165,7 @@ impl Dispatcher {
         job: Job,
         route: Route,
         priority: Priority,
-    ) -> Result<Completion, DispatchError> {
+    ) -> Result<JobResult, DispatchError> {
         let job = serde_json::to_value(&job)
             .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?;
         let new = NewJob {
@@ -205,7 +187,7 @@ impl Dispatcher {
         let poll_every = self.queue.db().poll_interval();
         let outcome = loop {
             match self.queue.poll(id).await? {
-                Poll::Done(done) => break Ok(self.finish(done, priority)),
+                Poll::Done(result) => break Ok(decode(result)),
                 Poll::Lost { attempts } => break Err(DispatchError::WorkerLost(attempts)),
                 Poll::Gone => {
                     break Err(DispatchError::Unavailable(
@@ -218,10 +200,7 @@ impl Dispatcher {
                     if let Some(at) = give_up_at {
                         if at <= now {
                             match self.queue.give_up(id).await? {
-                                Some(0) => {
-                                    metrics::counter!(m::EXPIRED).increment(1);
-                                    break Err(DispatchError::NoCapacity);
-                                }
+                                Some(0) => break Err(DispatchError::NoCapacity),
                                 Some(attempts) => break Err(DispatchError::WorkerLost(attempts)),
                                 // A worker claimed it meanwhile.
                                 None => continue,
@@ -238,44 +217,24 @@ impl Dispatcher {
         outcome
     }
 
-    fn finish(&self, done: Done, priority: Priority) -> Completion {
-        if done.attempts <= 1 {
-            metrics::histogram!(m::QUEUE_WAIT, "priority" => priority.label())
-                .record(done.waited.as_secs_f64());
-        }
-        if done.attempts > 1 {
-            metrics::counter!(m::RETRIES).increment((done.attempts - 1) as u64);
-        }
-        for cause in done.restarts {
-            metrics::counter!(m::RESTARTS, "cause" => cause).increment(1);
-        }
-        let result = serde_json::from_value(done.result).unwrap_or_else(|e| JobResult::Failed {
-            error: format!(
-                "the worker's result doesn't decode, which may come from a worker of another \
-                 release: {e}"
-            ),
-        });
-        Completion {
-            result,
-            worker: done.worker,
-        }
-    }
-
-    /// Sets the gauges of the queue's state, shared by every server on it.
-    pub async fn record_gauges(&self) {
-        let counts = match self.queue.counts(LIVE).await {
-            Ok(counts) => counts,
+    /// The live workers on the queue, if it can be read.
+    pub async fn workers(&self) -> Option<u64> {
+        match self.queue.counts(LIVE).await {
+            Ok(counts) => Some(counts.workers),
             Err(e) => {
                 tracing::warn!("reading the queue's state failed: {e}");
-                return;
+                None
             }
-        };
-        for p in [Priority::Interactive, Priority::Batch] {
-            metrics::gauge!(m::QUEUE_DEPTH, "priority" => p.label())
-                .set(counts.queued[p as usize] as f64);
         }
-        metrics::gauge!(m::SLOTS, "state" => "total").set(counts.slots as f64);
-        metrics::gauge!(m::SLOTS, "state" => "busy").set(counts.running as f64);
-        metrics::gauge!(m::WORKERS).set(counts.workers as f64);
     }
+}
+
+/// A worker's result, or why it isn't one.
+fn decode(result: serde_json::Value) -> JobResult {
+    serde_json::from_value(result).unwrap_or_else(|e| JobResult::Failed {
+        error: format!(
+            "the worker's result doesn't decode, which may come from a worker of another \
+             release: {e}"
+        ),
+    })
 }

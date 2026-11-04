@@ -16,7 +16,7 @@ use pisa_db::db::Notice;
 use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue};
 use pisa_protocol::wire::{Job, JobResult};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Mutex, Notify, mpsc, watch};
+use tokio::sync::{Mutex, Notify, watch};
 
 use crate::pool::Pool;
 use crate::sessions::Sessions;
@@ -108,7 +108,6 @@ pub struct Claims {
     pub pool: Arc<Pool>,
     pub sessions: Arc<Sessions>,
     pub warm: watch::Receiver<BTreeMap<usize, String>>,
-    pub restarts: mpsc::UnboundedReceiver<String>,
 }
 
 /// What the running claim loop shares with its jobs.
@@ -124,7 +123,6 @@ struct Shared {
     warm: watch::Receiver<BTreeMap<usize, String>>,
     /// The warm header keys last written to the registry.
     published: Mutex<Vec<String>>,
-    restarts: std::sync::Mutex<mpsc::UnboundedReceiver<String>>,
 }
 
 impl Shared {
@@ -148,11 +146,6 @@ impl Shared {
         }
     }
 
-    fn take_restarts(&self) -> Vec<String> {
-        let mut rx = self.restarts.lock().unwrap();
-        std::iter::from_fn(|| rx.try_recv().ok()).collect()
-    }
-
     /// Runs one claimed job and writes its result.
     async fn run_one(self: Arc<Self>, claimed: Claimed) {
         let result = match serde_json::from_value::<Job>(claimed.job) {
@@ -170,17 +163,12 @@ impl Shared {
         // A header the job warmed is published first, so the client's next
         // request can find this worker.
         self.publish_warm().await;
-        let restarts = self.take_restarts();
         let result = serde_json::to_value(&result).unwrap_or_else(
             |e| serde_json::json!({"kind": "failed", "error": format!("encoding the result: {e}")}),
         );
         let mut backoff = Duration::from_millis(100);
         for attempt in 1.. {
-            match self
-                .queue
-                .complete(&self.me, claimed.id, &result, &restarts)
-                .await
-            {
+            match self.queue.complete(&self.me, claimed.id, &result).await {
                 Ok(true) => break,
                 Ok(false) => {
                     tracing::warn!(id = claimed.id, "the job's claim lapsed; result dropped");
@@ -222,7 +210,6 @@ impl Claims {
             finished: Notify::new(),
             warm: self.warm,
             published: Mutex::new(Vec::new()),
-            restarts: std::sync::Mutex::new(self.restarts),
         });
         shared.serve(drain, drain_timeout).await
     }

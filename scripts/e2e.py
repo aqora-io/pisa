@@ -49,8 +49,8 @@ def post(path, body):
 def wait_for_workers(n):
     for _ in range(120):
         try:
-            _, metrics = call("GET", "/metrics")
-            if f"pisa_workers {n}" in metrics:
+            _, health = call("GET", "/health")
+            if health["workers"] == n:
                 return
         except OSError:
             pass
@@ -142,11 +142,6 @@ def core(failover=True):
     weaker = post(f"/sessions/{session}/check", {"code": "theorem t (n : Nat) : n + 0 = n := by simp"})
     assert not weaker["ok"] and "statement: t has a different type" in weaker["reasons"], weaker
     step("final check with statement check")
-
-    _, metrics = call("GET", "/metrics")
-    for series in ["pisa_header_cache_total", "pisa_queue_wait_seconds_bucket", "pisa_repl_restarts_total"]:
-        assert series in metrics, series
-    step("metrics")
 
 
 TACTIC_PROOF = "theorem t (n : Nat) : n + 0 = n ∧ 0 + n = n := by\n  constructor\n  · simp\n  · simp"

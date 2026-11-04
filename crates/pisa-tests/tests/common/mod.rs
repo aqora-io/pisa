@@ -250,17 +250,6 @@ impl Cluster {
     pub async fn stored_rows(&self, version: &str) -> Vec<Vec<String>> {
         self.db.rows(&self.version(version)).await.unwrap()
     }
-
-    pub async fn metrics(&self) -> String {
-        self.client
-            .get(self.url("/metrics"))
-            .send()
-            .await
-            .unwrap()
-            .text()
-            .await
-            .unwrap()
-    }
 }
 
 pub fn url_of(server: &Running, path: &str) -> String {

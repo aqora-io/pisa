@@ -203,7 +203,6 @@ impl Sessions {
                 error: Some(error),
                 response: None,
                 verification: None,
-                warm: false,
             },
             statement_reasons: Vec::new(),
         };

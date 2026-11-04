@@ -66,7 +66,7 @@ pub async fn run_with_stores(
         launcher.snapshot_root().to_path_buf(),
         Duration::from_secs(cfg.snapshot_confirm_secs),
     );
-    let (pool, warm_rx, restarts_rx) = Pool::new(
+    let (pool, warm_rx) = Pool::new(
         launcher,
         Arc::new(snapshots),
         PoolConfig {
@@ -123,7 +123,6 @@ pub async fn run_with_stores(
         pool,
         sessions,
         warm: warm_rx,
-        restarts: restarts_rx,
     };
     claims
         .run(drain_rx, Duration::from_secs(cfg.drain_timeout_secs))

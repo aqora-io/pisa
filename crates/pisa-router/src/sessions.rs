@@ -15,10 +15,7 @@ use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{Job, JobResult, SessionCheckJob, SessionStartJob, SessionTacticJob};
 
 use crate::dispatch::{Priority, Route};
-use crate::http::{
-    ApiError, App, Body, check_result, failed_result, prewarm_header, record_rejection,
-};
-use crate::metrics as m;
+use crate::http::{ApiError, App, Body, failed_result, prewarm_header};
 
 fn parse_key(id: &str) -> Result<Key, ApiError> {
     Key::parse(id).ok_or_else(|| ApiError::new(ErrorKind::BadRequest, format!("invalid key: {id}")))
@@ -30,11 +27,6 @@ pub(crate) fn unexpected(result: JobResult) -> ApiError {
         other => format!("unexpected worker result: {other:?}"),
     };
     ApiError::new(ErrorKind::Internal, message)
-}
-
-fn count(kind: &'static str, error: bool) {
-    let outcome = if error { "error" } else { "ok" };
-    metrics::counter!(m::JOBS, "kind" => kind, "outcome" => outcome).increment(1);
 }
 
 pub async fn start(
@@ -56,10 +48,9 @@ pub async fn start(
         .dispatcher
         .submit(job, route, Priority::Interactive)
         .await?;
-    let JobResult::SessionStarted(result) = done.result else {
-        return Err(unexpected(done.result));
+    let JobResult::SessionStarted(result) = done else {
+        return Err(unexpected(done));
     };
-    count("session_start", result.is_err());
     Ok(Json(result.map_err(ApiError)?))
 }
 
@@ -84,10 +75,9 @@ pub async fn tactic(
         .dispatcher
         .submit(job, route, Priority::Interactive)
         .await?;
-    let JobResult::TacticApplied(result) = done.result else {
-        return Err(unexpected(done.result));
+    let JobResult::TacticApplied(result) = done else {
+        return Err(unexpected(done));
     };
-    count("tactic", result.is_err());
     Ok(Json(result.map_err(ApiError)?))
 }
 
@@ -115,8 +105,8 @@ pub async fn check(
         .dispatcher
         .submit(job, route, Priority::Interactive)
         .await?;
-    let JobResult::SessionChecked(checked) = done.result else {
-        return Ok(Json(failed_result(done.result, "session_check")));
+    let JobResult::SessionChecked(checked) = done else {
+        return Ok(Json(failed_result(done)));
     };
     let about_the_request = |e: &&pisa_protocol::api::Error| {
         matches!(e.kind, ErrorKind::NotFound | ErrorKind::BadRequest)
@@ -124,11 +114,7 @@ pub async fn check(
     if let Some(e) = checked.outcome.error.as_ref().filter(about_the_request) {
         return Err(ApiError(e.clone()));
     }
-    let mut result = check_result(checked.outcome, "session_check");
-    checked
-        .statement_reasons
-        .iter()
-        .for_each(|r| record_rejection(r));
+    let mut result = CheckResult::from(checked.outcome);
     result.ok &= checked.statement_reasons.is_empty();
     result.reasons.extend(checked.statement_reasons);
     Ok(Json(result))

@@ -49,11 +49,6 @@ async fn unsound_proofs_are_rejected() {
         let reasons = r["reasons"].as_array().unwrap();
         assert!(reasons.iter().any(|x| x == reason), "{code}: {r}");
     }
-    let metrics = c.metrics().await;
-    assert!(
-        metrics.contains("pisa_verification_rejections_total{reason=\"axiom\"}"),
-        "{metrics}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

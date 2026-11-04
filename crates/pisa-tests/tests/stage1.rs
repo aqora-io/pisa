@@ -1,4 +1,4 @@
-//! Stage 1: router + REPL workers, the check API, warm headers, metrics.
+//! Stage 1: router + REPL workers, the check API, warm headers.
 
 mod common;
 
@@ -63,31 +63,20 @@ async fn check_reports_tactics_only_when_asked() {
     assert_eq!(r["error"]["kind"], "bad_request", "{r}");
 }
 
+/// A worker's one slot keeps the header it imported, and says so.
 #[tokio::test(flavor = "multi_thread")]
-async fn second_request_with_same_header_is_a_warm_hit() {
+async fn a_header_stays_warm_across_checks() {
+    use pisa_protocol::header::split_header;
+    use pisa_worker::queue::LIVE;
+
     let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let code = |i| format!("import Foo\ntheorem t{i} : True := trivial");
     for i in 0..3 {
-        let code = format!("import Foo\ntheorem t{i} : True := trivial");
-        let r = check(&c, json!({"code": code})).await;
+        let r = check(&c, json!({"code": code(i)})).await;
         assert!(r.get("error").is_none(), "{r}");
+        let peers = c.queue.registry(&c.version("v"), LIVE).await.unwrap();
+        assert_eq!(peers[0].warm, [split_header(&code(i)).header_key]);
     }
-    let metrics = c.metrics().await;
-    assert!(
-        metrics.contains("pisa_header_cache_total{result=\"hit\"}"),
-        "{metrics}"
-    );
-    assert!(
-        metrics.contains("pisa_header_cache_total{result=\"miss\"}"),
-        "{metrics}"
-    );
-    assert!(
-        metrics.contains("pisa_queue_wait_seconds_bucket"),
-        "{metrics}"
-    );
-    assert!(
-        metrics.contains("pisa_queue_depth{priority=\"batch\"}"),
-        "{metrics}"
-    );
 }
 
 /// A worker of version "v" alone on a queue of its own, with the queue.
@@ -130,7 +119,7 @@ async fn run_raw(queue: &pisa_worker::queue::Queue, job: Value) -> Value {
         .unwrap();
     loop {
         match queue.poll(id).await.unwrap() {
-            Poll::Done(done) => return done.result,
+            Poll::Done(result) => return result,
             Poll::Waiting { .. } => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
             other => panic!("{other:?}"),
         }
@@ -236,12 +225,6 @@ async fn timeout_is_in_band_and_replaces_the_process() {
 
     let r = check(&c, json!({"code": "#check Nat"})).await;
     assert!(r.get("error").is_none(), "{r}");
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(
-        c.metrics()
-            .await
-            .contains("pisa_repl_restarts_total{cause=\"timeout\"}")
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -346,5 +329,4 @@ async fn draining_worker_finishes_its_jobs_and_exits() {
     c.add_worker(common::worker_config("w1", "v", 1));
     let later = later.await.unwrap();
     assert!(later.get("error").is_none(), "{later}");
-    assert!(!c.metrics().await.contains("pisa_job_retries_total"));
 }

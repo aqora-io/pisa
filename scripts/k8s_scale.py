@@ -8,9 +8,7 @@
    above its minimum, then for every check to pass.
 2. Waits for the Deployment to scale back down to its minimum.
 3. Deletes the worker pod while it runs a check; the pod drains, so the check
-   still passes.
-Throughout, the server must not have retried any job: retries would mean a
-worker was killed mid-job instead of draining.
+   still passes, without waiting for its claim to lapse and running again.
 """
 
 import argparse
@@ -42,14 +40,6 @@ def slow_check(seconds):
     )
     with urllib.request.urlopen(req, timeout=900) as r:
         return json.loads(r.read())
-
-
-def retries():
-    with urllib.request.urlopen(BASE + "/metrics") as r:
-        for line in r.read().decode().splitlines():
-            if line.startswith("pisa_job_retries_total"):
-                return float(line.split()[-1])
-    return 0.0
 
 
 def run_burst(n, seconds):
@@ -88,7 +78,6 @@ def main():
     args = p.parse_args()
 
     wait_for("minimum replicas", lambda: replicas(args) == args.min, args.scale_down_timeout)
-    before = retries()
 
     threads, results = run_burst(args.jobs, args.seconds)
     peak = args.min
@@ -104,16 +93,17 @@ def main():
     print(f"ok  scaled back down to {args.min}")
 
     pods = kubectl(args, "get", "pods", "-l", "app.kubernetes.io/component=worker", "-o", "name").split()
+    started = time.time()
     threads, results = run_burst(1, args.seconds)
     time.sleep(5)
     # Pods removed by the scale-down may still be listed and exit before the delete.
     kubectl(args, "delete", "--wait=false", "--ignore-not-found", *pods)
     threads[0].join()
+    took = time.time() - started
     assert results[0].get("ok"), results[0]
+    # Run again after its worker's 10s claim lapsed, it would take that much longer.
+    assert took < args.seconds + 10, f"took {took:.0f}s: retried, not drained"
     print("ok  check finished on a worker that was deleted mid-job (drained)")
-
-    assert retries() == before, "jobs were retried: a worker was killed mid-job"
-    print("ok  no jobs retried")
 
 
 if __name__ == "__main__":

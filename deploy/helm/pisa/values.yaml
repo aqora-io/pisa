@@ -110,20 +110,6 @@ metadata:
       name: ""
       key: url
 
-# How a Prometheus finds the servers' /metrics, for dashboards. Every replica
-# reports the queue's gauges (pisa_queue_depth, pisa_slots, pisa_workers) for
-# the whole queue, so take their max, not their sum.
-metrics:
-  # prometheus.io/scrape annotations on the server Service, for Prometheus
-  # setups that discover annotated services (e.g. prometheus-community/prometheus).
-  scrapeAnnotations: true
-  # A ServiceMonitor, for the Prometheus Operator (e.g. kube-prometheus-stack).
-  serviceMonitor:
-    enabled: false
-    interval: 5s
-    # Labels the operator's serviceMonitorSelector matches, e.g. release: kube-prometheus-stack.
-    labels: {}
-
 # Workers scale on the jobs in the queue, which KEDA counts in the database.
 keda:
   enabled: true

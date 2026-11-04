@@ -66,7 +66,6 @@ async fn servers_share_the_workers_slots() {
         started.elapsed() >= Duration::from_millis(1000),
         "one slot ran both at once"
     );
-    assert!(!c.metrics().await.contains("pisa_job_retries_total"));
 }
 
 /// Without the stored pickles, only the worker holding a state can continue

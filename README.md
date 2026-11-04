@@ -10,7 +10,7 @@ This repository implements stages 1–3 of the design doc *Building a Scalable
 Lean 4 Server in Rust*:
 
 1. **Servers and workers.** A server puts each request's job on a queue in
-   the database, with two priority classes, and exports Prometheus metrics.
+   the database, with two priority classes.
    Workers claim jobs, preferring those whose proof state they hold or whose
    header they have warm, and a job whose worker dies runs on another. Servers
    hold no state, so they run in replicas.
@@ -39,7 +39,7 @@ imports it instead of re-checking it.
 | `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store, claiming jobs |
 | `pisa-db` | The database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, the job queue and the workers' registry, and the snapshot catalog, shared by the servers and the workers |
 | `pisa-server` | The server: `pisa-router`'s API and `pisa-search`'s in one process, with a combined `/health` and graceful shutdown |
-| `pisa-router` | The check, session and snapshot API: queueing jobs and waiting for their results, metrics |
+| `pisa-router` | The check, session and snapshot API: queueing jobs and waiting for their results |
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
 | `pisa-tests` | `fake-repl` (speaks the REPL protocol without Lean) and in-process integration tests |
@@ -95,19 +95,10 @@ on the same Lean version.
 - the server Deployment (`server.replicas`, 2), with its Service and a
   PodDisruptionBudget;
 - the worker Deployment;
-- a KEDA `ScaledObject`;
-- an optional `ServiceMonitor`.
+- a KEDA `ScaledObject`.
 
 **Cluster prerequisites.** Like most application charts, it uses the cluster's
 own KEDA, which reads the job queue from the database (see Scaling below).
-Prometheus is optional, for dashboards:
-- The server Service carries `prometheus.io/scrape` annotations, which
-  `prometheus-community/prometheus` picks up. With the Prometheus Operator,
-  set `metrics.serviceMonitor.enabled=true`, plus any labels its selector
-  needs.
-- Every replica reports the queue's gauges (`pisa_queue_depth`, `pisa_slots`,
-  `pisa_workers`) for the whole queue, so take their max; the counters are
-  each replica's own, so sum them.
 
 **Storage.** The job queue and the metadata (sessions, proof-state records,
 snapshot entries and module records) live in PostgreSQL, and blobs (pickled
@@ -214,13 +205,14 @@ database:
     `search.resources`, `search.minAvailable` and `search.autoscaling` held;
   - the `-router`, `-router-workers` and `-search` Services are replaced by
     `-server`;
-  - KEDA counts the queue in the database, so `keda.prometheus` is gone and
-    Prometheus is optional;
+  - KEDA counts the queue in the database, so `keda.prometheus` is gone;
   - `queue` names the release's queue, its name by default.
+- There are no Prometheus metrics any more: `/metrics`, the chart's
+  `ServiceMonitor`, scrape annotations and `metrics.*` values are gone, and
+  check results no longer carry whether the header was warm. `/health`
+  reports the live workers on the queue as `workers`.
 - Prewarming follows the headers of the jobs that are queued when a worker
   starts, rather than the router's counts since it started.
-- The queue gauges are the same on every server, so dashboards should take
-  their max.
 
 To the release that moved metadata from TiKV into PostgreSQL:
 - Run PostgreSQL, and set `PISA_DATABASE_URL` where `PISA_METADATA` and
@@ -275,7 +267,7 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
-| `GET /health`, `GET /metrics` | Liveness, with search's state under `search` (`null` if the server doesn't search); Prometheus metrics |
+| `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search) |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
 - `ok` is the verdict.

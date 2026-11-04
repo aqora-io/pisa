@@ -15,7 +15,6 @@ use tokio::task::JoinHandle;
 
 pub mod dispatch;
 pub mod http;
-pub mod metrics;
 pub mod sessions;
 pub mod snapshots;
 
@@ -74,16 +73,23 @@ impl Running {
     }
 }
 
-/// Serves the API, with a plain `/health`, from the queue in `db`.
+/// Serves the API, with its `/health`, from the queue in `db`.
 pub async fn start(cfg: RouterConfig, db: Db) -> anyhow::Result<Running> {
-    let health = axum::Router::new().route("/health", axum::routing::get(http::health));
-    start_with(cfg, db, health).await
+    start_with(cfg, db, |app| {
+        axum::Router::new()
+            .route("/health", axum::routing::get(http::health))
+            .with_state(app)
+    })
+    .await
 }
 
-/// Serves the API and `extra`'s routes, which must include `/health`, from
-/// the queue in `db`.
-pub async fn start_with(cfg: RouterConfig, db: Db, extra: axum::Router) -> anyhow::Result<Running> {
-    metrics::handle();
+/// Serves the API and the routes `extra` makes, which must include
+/// `/health`, from the queue in `db`.
+pub async fn start_with(
+    cfg: RouterConfig,
+    db: Db,
+    extra: impl FnOnce(Arc<App>) -> axum::Router,
+) -> anyhow::Result<Running> {
     let queue = Queue::new(db, cfg.queue.clone());
     let dispatcher = Dispatcher::start(
         queue.clone(),
@@ -114,7 +120,7 @@ pub async fn start_with(cfg: RouterConfig, db: Db, extra: axum::Router) -> anyho
 
     let listener = TcpListener::bind(cfg.http).await?;
     let http_addr = listener.local_addr()?;
-    let routes = http::router(app.clone()).merge(extra);
+    let routes = http::router(app.clone()).merge(extra(app.clone()));
     let (stop, mut stopping) = watch::channel(false);
     let served = tokio::spawn(async move {
         // Dropping `Running` leaves the server serving.

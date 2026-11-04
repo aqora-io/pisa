@@ -94,7 +94,6 @@ diesel::table! {
         lease_micros -> Nullable<BigInt>,
         attempts -> Integer,
         result -> Nullable<Jsonb>,
-        restarts -> Nullable<Jsonb>,
         done_micros -> Nullable<BigInt>,
     }
 }

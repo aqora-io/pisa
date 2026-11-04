@@ -15,12 +15,11 @@ use pisa_protocol::api::{
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
-use pisa_protocol::wire::{CheckJob, CheckOutcome, Job, JobResult};
+use pisa_protocol::wire::{CheckJob, Job, JobResult};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
 use crate::dispatch::{DispatchError, Dispatcher, Priority, Route};
-use crate::metrics as m;
 use crate::{sessions, snapshots};
 
 pub struct App {
@@ -47,7 +46,6 @@ impl Versions {
 /// The API's routes, without `/health`, which whoever serves them adds.
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
-        .route("/metrics", get(metrics))
         .route("/check", post(check))
         .route("/check/batch", post(check_batch))
         .route("/sessions", post(sessions::start))
@@ -112,13 +110,16 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     }
 }
 
-pub async fn health() -> Json<serde_json::Value> {
-    Json(json!({ "status": "ok" }))
+pub async fn health(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
+    Json(app.health().await)
 }
 
-async fn metrics(State(app): State<Arc<App>>) -> String {
-    app.dispatcher.record_gauges().await;
-    m::handle().render()
+impl App {
+    /// The API's health: up, with the number of live workers on the queue,
+    /// `null` if the queue can't be read.
+    pub async fn health(&self) -> serde_json::Value {
+        json!({ "status": "ok", "workers": self.dispatcher.workers().await })
+    }
 }
 
 async fn check(
@@ -178,11 +179,12 @@ async fn check_one(
         timeout_secs,
         detail,
     });
-    let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
-    Ok(match done.result {
-        JobResult::Check(o) => check_result(o, "check"),
-        other => failed_result(other, "check"),
-    })
+    Ok(
+        match app.dispatcher.submit(job, route, Priority::Batch).await? {
+            JobResult::Check(o) => CheckResult::from(o),
+            other => failed_result(other),
+        },
+    )
 }
 
 /// The header new workers may pre-warm, when it is in demand. Headers that import
@@ -194,29 +196,8 @@ pub fn prewarm_header(header: String) -> Option<String> {
         .then_some(header)
 }
 
-/// Turns a worker's check outcome into the API result, recording metrics.
-pub fn check_result(o: CheckOutcome, kind: &'static str) -> CheckResult {
-    let hit = if o.warm { "hit" } else { "miss" };
-    metrics::counter!(m::HEADER_CACHE, "result" => hit).increment(1);
-    let result = CheckResult::from(o);
-    record_result(&result, kind);
-    result
-}
-
-/// Counts a finished job and the reasons it was rejected.
-pub fn record_result(result: &CheckResult, kind: &'static str) {
-    result.reasons.iter().for_each(|r| record_rejection(r));
-    let outcome = if result.error.is_some() {
-        "error"
-    } else {
-        "ok"
-    };
-    metrics::counter!(m::JOBS, "kind" => kind, "outcome" => outcome).increment(1);
-}
-
 /// A worker answered with something other than a check outcome.
-pub fn failed_result(result: JobResult, kind: &'static str) -> CheckResult {
-    metrics::counter!(m::JOBS, "kind" => kind, "outcome" => "failed").increment(1);
+pub fn failed_result(result: JobResult) -> CheckResult {
     let message = match result {
         JobResult::Failed { error } => error,
         other => format!("unexpected worker result: {other:?}"),
@@ -225,12 +206,6 @@ pub fn failed_result(result: JobResult, kind: &'static str) -> CheckResult {
         error: Some(api::Error::new(ErrorKind::Internal, message)),
         ..Default::default()
     }
-}
-
-/// Counts a rejection under the reason's prefix, e.g. "axiom" or "statement".
-pub fn record_rejection(reason: &str) {
-    let kind = reason.split(':').next().unwrap_or(reason).to_string();
-    metrics::counter!(m::REJECTIONS, "reason" => kind).increment(1);
 }
 
 #[cfg(test)]

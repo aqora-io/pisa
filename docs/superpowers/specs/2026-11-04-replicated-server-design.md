@@ -128,6 +128,11 @@ The chart runs exactly one.
     always there.
   - Without Qdrant, `/v1/*` is a 404 saying the server doesn't search.
 - **The chart's `queue`** defaults to the release's name.
+- **No metrics.** Prometheus went afterwards, to keep things simple:
+  - no `/metrics`, metrics crates or chart integration;
+  - no `restarts` column, and no `warm` flag on check outcomes;
+  - `/health` reports the live workers instead (`workers`), which the
+    scripts and tests wait on.
 - **Overhead, measured in Compose.**
   - A job that does almost nothing on the worker (a listing) takes 8 ms at
     the median end to end, against 0.6 ms for `/health`: about seven round

@@ -24,7 +24,6 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         error: None,
         response: None,
         verification: None,
-        warm: false,
     };
 
     let mut slot = pool.acquire(&split.header_key, None).await;
@@ -40,10 +39,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     }
 
     let env = match slot.warm_up(&split.header, &split.header_key).await {
-        Ok((env, warm)) => {
-            outcome.warm = warm;
-            env
-        }
+        Ok((env, _)) => env,
         Err(HeaderFailure::Lean(r)) => {
             // Header positions are already those of the submitted code, and
             // its error messages say what went wrong.

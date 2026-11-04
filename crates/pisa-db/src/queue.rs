@@ -61,22 +61,10 @@ pub struct NewJob {
     pub max_attempts: u32,
 }
 
-/// A finished job, taken out of the queue.
-#[derive(Debug, Clone)]
-pub struct Done {
-    pub result: Value,
-    pub worker: String,
-    pub attempts: u32,
-    /// From being enqueued to its last claim.
-    pub waited: Duration,
-    /// Causes of Lean processes its worker replaced, since its last result.
-    pub restarts: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 pub enum Poll {
-    /// Taken out of the queue.
-    Done(Done),
+    /// Its result, taken out of the queue.
+    Done(Value),
     /// Not done. If no worker claims it by `give_up_at` (microseconds), it
     /// is given up; `None` while a worker runs it.
     Waiting { give_up_at: Option<i64> },
@@ -114,7 +102,7 @@ pub struct Claimed {
     pub job: Value,
 }
 
-/// The queue's state, for metrics.
+/// The queue's state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
     /// Unclaimed jobs by priority: interactive, then batch.
@@ -202,14 +190,8 @@ impl Queue {
 
     /// Records job `id`'s result if `worker` still holds its claim, and tells
     /// its server; returns whether it did.
-    pub async fn complete(
-        &self,
-        worker: &str,
-        id: i64,
-        result: &Value,
-        restarts: &[String],
-    ) -> Result<bool, DbError> {
-        dispatch!(&self.db, complete(worker, id, result, restarts))
+    pub async fn complete(&self, worker: &str, id: i64, result: &Value) -> Result<bool, DbError> {
+        dispatch!(&self.db, complete(worker, id, result))
     }
 
     /// Renews the leases of the claims `worker` made since it registered at
@@ -304,18 +286,11 @@ mod tests {
                 Poll::Waiting { give_up_at: None }
             ));
 
-            let restarts = vec!["timeout".to_string()];
-            assert!(
-                q.complete("w", id, &json!({"ok": 1}), &restarts)
-                    .await
-                    .unwrap()
-            );
-            let Poll::Done(done) = q.poll(id).await.unwrap() else {
+            assert!(q.complete("w", id, &json!({"ok": 1})).await.unwrap());
+            let Poll::Done(result) = q.poll(id).await.unwrap() else {
                 panic!("not done");
             };
-            assert_eq!(done.result, json!({"ok": 1}));
-            assert_eq!((done.worker.as_str(), done.attempts), ("w", 1));
-            assert_eq!(done.restarts, restarts);
+            assert_eq!(result, json!({"ok": 1}));
             assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
         }
     }
@@ -381,7 +356,7 @@ mod tests {
             assert_eq!(ids(&q, "v").await, [id]);
             assert_eq!(q.claim("b", &[id], short).await.unwrap().len(), 1);
             // `a` was too slow: its result goes nowhere.
-            assert!(!q.complete("a", id, &json!(1), &[]).await.unwrap());
+            assert!(!q.complete("a", id, &json!(1)).await.unwrap());
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(ids(&q, "v").await.is_empty());
             assert!(q.claim("c", &[id], LEASE).await.unwrap().is_empty());
@@ -409,7 +384,7 @@ mod tests {
             let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             q.claim("w", &[id], LEASE).await.unwrap();
             assert_eq!(q.give_up(id).await.unwrap(), None);
-            assert!(q.complete("w", id, &json!(1), &[]).await.unwrap());
+            assert!(q.complete("w", id, &json!(1)).await.unwrap());
         }
     }
 
@@ -536,7 +511,7 @@ mod tests {
             };
             heard.insert(format!("{:?}", next().await));
             q.claim("w", &[id], LEASE).await.unwrap();
-            q.complete("w", id, &json!(1), &[]).await.unwrap();
+            q.complete("w", id, &json!(1)).await.unwrap();
             // Other tests' queues on a shared PostgreSQL notify too.
             while !heard.contains(&format!("{:?}", Notice::Done(id))) {
                 heard.insert(format!("{:?}", next().await));

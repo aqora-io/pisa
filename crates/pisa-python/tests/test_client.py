@@ -44,7 +44,7 @@ def url(tmp_path_factory):
          "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean"],
         env=env,
     )
-    wait_for(lambda: "pisa_workers 1" in metrics(url))
+    wait_for(lambda: health(url)["workers"] == 1)
     yield url
     worker.terminate()
     server.terminate()
@@ -61,11 +61,12 @@ def wait_for(ready):
     pytest.fail("cluster did not start")
 
 
-def metrics(url):
+def health(url):
+    import json
     import urllib.request
 
-    with urllib.request.urlopen(url + "/metrics") as r:
-        return r.read().decode()
+    with urllib.request.urlopen(url + "/health") as r:
+        return json.load(r)
 
 
 def test_check(url):

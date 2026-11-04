@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use pisa_protocol::api::{Error, ErrorKind};
 use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplResponse, Severity};
 use pisa_repl::{Repl, ReplFailure};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::launcher::{Compiled, Launcher, Verified};
 use crate::policy::{Policy, header_with_report_import};
@@ -34,7 +34,6 @@ pub struct Pool {
     warm: watch::Sender<BTreeMap<usize, String>>,
     /// Header keys a pre-warm is importing, so that none is imported twice.
     prewarming: Arc<Mutex<HashSet<String>>>,
-    restarts: mpsc::UnboundedSender<String>,
     launcher: Launcher,
     snapshots: Arc<Snapshots>,
     cfg: PoolConfig,
@@ -79,11 +78,7 @@ impl Pool {
         launcher: Launcher,
         snapshots: Arc<Snapshots>,
         cfg: PoolConfig,
-    ) -> (
-        Arc<Self>,
-        watch::Receiver<BTreeMap<usize, String>>,
-        mpsc::UnboundedReceiver<String>,
-    ) {
+    ) -> (Arc<Self>, watch::Receiver<BTreeMap<usize, String>>) {
         let now = Instant::now();
         let slots = (0..cfg.slots)
             .map(|id| Slot {
@@ -97,18 +92,16 @@ impl Pool {
             })
             .collect();
         let (warm, warm_rx) = watch::channel(BTreeMap::new());
-        let (restarts, restarts_rx) = mpsc::unbounded_channel();
         let pool = Pool {
             idle: Mutex::new(slots),
             permits: Arc::new(Semaphore::new(cfg.slots)),
             warm,
             prewarming: Arc::default(),
-            restarts,
             launcher,
             snapshots,
             cfg,
         };
-        (Arc::new(pool), warm_rx, restarts_rx)
+        (Arc::new(pool), warm_rx)
     }
 
     pub fn slots(&self) -> usize {
@@ -404,11 +397,11 @@ impl Lease {
         }
     }
 
-    /// Kills the process (if any) and forgets its header, reporting `cause`.
+    /// Kills the process (if any) and forgets its header, logging `cause`.
     pub fn retire(&mut self, cause: &str) {
         if let Some(mut repl) = self.repl.take() {
             tokio::spawn(async move { repl.kill().await });
-            let _ = self.pool.restarts.send(cause.to_string());
+            tracing::debug!(slot = self.id, cause, "replacing the Lean process");
         }
         self.forget();
     }
@@ -418,7 +411,7 @@ impl Lease {
     pub async fn retire_and_wait(&mut self, cause: &str) {
         if let Some(mut repl) = self.repl.take() {
             repl.kill().await;
-            let _ = self.pool.restarts.send(cause.to_string());
+            tracing::debug!(slot = self.id, cause, "replacing the Lean process");
         }
         self.forget();
         self.pool.launcher.wait_idle(self.id).await;

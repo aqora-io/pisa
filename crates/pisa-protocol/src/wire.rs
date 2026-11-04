@@ -130,8 +130,6 @@ pub struct CheckOutcome {
     pub response: Option<CommandResponse>,
     #[serde(default)]
     pub verification: Option<Verification>,
-    /// Whether the header was already imported in the process that ran the job.
-    pub warm: bool,
 }
 
 impl From<CheckOutcome> for api::CheckResult {
