@@ -1,0 +1,13 @@
+{
+  "name": "pisa-web",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.5.2",
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:integration": "pnpm -r test:integration",
+    "dev": "pnpm --filter playground dev"
+  }
+}

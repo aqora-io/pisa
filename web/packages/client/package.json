@@ -1,0 +1,26 @@
+{
+  "name": "@aqora/pisa-client",
+  "version": "0.1.0",
+  "description": "A typed client for pisa's HTTP API: Lean checks, proof sessions, snapshots and declaration search",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc -p .",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "tsdown": "0.23.5",
+    "typescript": "7.0.2",
+    "vitest": "5.1.0"
+  }
+}

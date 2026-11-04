@@ -1,0 +1,324 @@
+import { PisaError } from "./errors.ts";
+import type {
+  BatchItem,
+  BatchResponse,
+  CheckResult,
+  DeclDetail,
+  DeclResponse,
+  Deleted,
+  Detail,
+  ErrorKind,
+  Health,
+  Labels,
+  ListSnapshotsParams,
+  Query,
+  QueryResult,
+  ResolveResponse,
+  Resolution,
+  SearchResponse,
+  SessionId,
+  SnapshotInfo,
+  SnapshotList,
+  SnapshotRequest,
+  SnapshotResponse,
+  SnapshotSummary,
+  SnapshotVerified,
+  StartResponse,
+  StateKey,
+  TacticResponse,
+} from "./types.ts";
+
+export interface ClientOptions {
+  /** The server, e.g. `https://pisa.example.com` or `/api`; it may have a
+   *  path. */
+  url: string;
+  /** The pool version requests name when they name none. */
+  version?: string;
+  /** Seconds Lean may run for a request, when it says nothing (the server's
+   *  default is 60). */
+  timeout?: number;
+  /** The search environment to pin, so that search fails rather than answer
+   *  from another one. */
+  envId?: string;
+  fetch?: typeof fetch;
+  headers?: Record<string, string>;
+}
+
+/** What any request takes. */
+export interface RequestOptions {
+  signal?: AbortSignal;
+}
+
+/** What a request that runs Lean takes. */
+export interface RunOptions extends RequestOptions {
+  version?: string;
+  timeout?: number;
+}
+
+export interface CheckOptions extends RunOptions {
+  detail?: Detail[];
+}
+
+export interface VersionOptions extends RequestOptions {
+  version?: string;
+}
+
+export interface SearchOptions extends RequestOptions {
+  envId?: string;
+}
+
+export type CreateSnapshotOptions = RunOptions &
+  Pick<SnapshotRequest, "verify" | "labels" | "key">;
+
+const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
+  "timeout",
+  "out_of_memory",
+  "crash",
+  "policy",
+  "lean",
+  "capacity",
+  "unavailable",
+  "bad_request",
+  "not_found",
+  "internal",
+]);
+
+/** A client of one pisa server. Every method returns the response's JSON, or
+ *  throws a `PisaError`. */
+export class PisaClient {
+  readonly url: string;
+  readonly version: string | undefined;
+  readonly timeout: number | undefined;
+  readonly envId: string | undefined;
+  private readonly fetcher: typeof fetch;
+  private readonly headers: Record<string, string>;
+
+  constructor(options: ClientOptions) {
+    this.url = options.url.replace(/\/+$/, "");
+    this.version = options.version;
+    this.timeout = options.timeout;
+    this.envId = options.envId;
+    this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.headers = options.headers ?? {};
+  }
+
+  /** The server's health. A draining server's 503 is returned, not thrown. */
+  async health(options: RequestOptions = {}): Promise<Health> {
+    const r = await this.send("GET", ["health"], undefined, undefined, options.signal);
+    const body = await readJson(r);
+    if (r.status === 503 && isObject(body) && typeof body["status"] === "string") {
+      return body as unknown as Health;
+    }
+    return ok<Health>(r, body);
+  }
+
+  /** Checks one piece of code. `ok` is the verdict; a check that couldn't
+   *  complete has `error` set rather than throwing. */
+  check(code: string, options: CheckOptions = {}): Promise<CheckResult> {
+    return this.call("POST", ["check"], { code, ...this.run(options), ...detail(options) }, options);
+  }
+
+  /** Checks several pieces of code; every item gets a result, in order. */
+  async checkBatch(items: BatchItem[], options: CheckOptions = {}): Promise<CheckResult[]> {
+    const body = { items, ...this.run(options), ...detail(options) };
+    const r = await this.call<BatchResponse>("POST", ["check", "batch"], body, options);
+    return r.results;
+  }
+
+  /** Starts a session on code with `sorry`s, each of which becomes a state. */
+  startSession(code: string, options: RunOptions = {}): Promise<StartResponse> {
+    return this.call("POST", ["sessions"], { code, ...this.run(options) }, options);
+  }
+
+  /** Applies a tactic to a state; the state stays valid, so this can branch.
+   *  A tactic Lean rejects throws `lean`. */
+  tactic(state: StateKey, tactic: string, options: RunOptions = {}): Promise<TacticResponse> {
+    return this.call(
+      "POST",
+      ["states", state, "tactic"],
+      { tactic, ...this.timeoutOf(options) },
+      options,
+    );
+  }
+
+  /** Checks the completed code of a session from scratch. */
+  checkSession(session: SessionId, code: string, options: RunOptions = {}): Promise<CheckResult> {
+    return this.call(
+      "POST",
+      ["sessions", session, "check"],
+      { code, ...this.timeoutOf(options) },
+      options,
+    );
+  }
+
+  /** Checks code and keeps it as a snapshot that later code can import
+   *  through `header`. Failures are in `result.error`. */
+  createSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<SnapshotResponse> {
+    const body: SnapshotRequest = { code, ...this.run(options) };
+    if (options.verify !== undefined) body.verify = options.verify;
+    if (options.labels !== undefined) body.labels = options.labels;
+    if (options.key !== undefined) body.key = options.key;
+    return this.call("POST", ["snapshots"], body, options);
+  }
+
+  getSnapshot(entry: string, options: VersionOptions = {}): Promise<SnapshotInfo> {
+    return this.call("GET", ["snapshots", entry], undefined, options, this.versionQuery(options));
+  }
+
+  /** A page of entries, newest first; pass `next` back as `after`. */
+  listSnapshots(params: ListSnapshotsParams = {}, options: VersionOptions = {}): Promise<SnapshotList> {
+    const query = this.versionQuery(options);
+    for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
+    if (params.limit !== undefined) query.set("limit", String(params.limit));
+    if (params.after !== undefined) query.set("after", params.after);
+    return this.call("GET", ["snapshots"], undefined, options, query);
+  }
+
+  /** Removes the labels in `remove`, then sets those in `set`. */
+  setSnapshotLabels(
+    entry: string,
+    change: { set?: Labels; remove?: string[] },
+    options: VersionOptions = {},
+  ): Promise<SnapshotSummary> {
+    return this.call("PATCH", ["snapshots", entry], change, options, this.versionQuery(options));
+  }
+
+  /** Deletes an entry, and the modules nothing else needs. */
+  deleteSnapshot(entry: string, options: VersionOptions = {}): Promise<Deleted> {
+    return this.call("DELETE", ["snapshots", entry], undefined, options, this.versionQuery(options));
+  }
+
+  /** Re-checks the entry's module and its imports through the kernel. A
+   *  rejection is in `failure`, not thrown. */
+  verifySnapshot(entry: string, options: VersionOptions = {}): Promise<SnapshotVerified> {
+    return this.call(
+      "POST",
+      ["snapshots", entry, "verify"],
+      undefined,
+      options,
+      this.versionQuery(options),
+    );
+  }
+
+  async search(query: Query, options: SearchOptions = {}): Promise<QueryResult> {
+    const [result] = await this.searchBatch([query], options);
+    if (result === undefined) throw new PisaError("bad_response", "the search returned no result");
+    return result;
+  }
+
+  /** Runs up to 64 queries; one result each, in order. */
+  async searchBatch(queries: Query[], options: SearchOptions = {}): Promise<QueryResult[]> {
+    const r = await this.call<SearchResponse>(
+      "POST",
+      ["v1", "search"],
+      { queries, ...this.env(options) },
+      options,
+    );
+    return r.results;
+  }
+
+  /** Whether each name exists, and close names for those that don't. */
+  async resolve(names: string[], options: SearchOptions = {}): Promise<Resolution[]> {
+    const r = await this.call<ResolveResponse>(
+      "POST",
+      ["v1", "resolve"],
+      { names, ...this.env(options) },
+      options,
+    );
+    return r.results;
+  }
+
+  async decl(name: string, options: RequestOptions = {}): Promise<DeclDetail> {
+    const r = await this.call<DeclResponse>("GET", ["v1", "decl", name], undefined, options);
+    return r.decl;
+  }
+
+  private run(options: RunOptions): { version?: string; timeout?: number } {
+    const version = options.version ?? this.version;
+    return { ...(version !== undefined && { version }), ...this.timeoutOf(options) };
+  }
+
+  private timeoutOf(options: RunOptions): { timeout?: number } {
+    const timeout = options.timeout ?? this.timeout;
+    return timeout !== undefined ? { timeout } : {};
+  }
+
+  private versionQuery(options: VersionOptions): URLSearchParams {
+    const query = new URLSearchParams();
+    const version = options.version ?? this.version;
+    if (version !== undefined) query.set("version", version);
+    return query;
+  }
+
+  private env(options: SearchOptions): { env_id?: string } {
+    const envId = options.envId ?? this.envId;
+    return envId !== undefined ? { env_id: envId } : {};
+  }
+
+  private async call<T>(
+    method: string,
+    path: string[],
+    body: unknown,
+    options: RequestOptions,
+    query?: URLSearchParams,
+  ): Promise<T> {
+    const r = await this.send(method, path, body, query, options.signal);
+    return ok<T>(r, await readJson(r));
+  }
+
+  private async send(
+    method: string,
+    path: string[],
+    body: unknown,
+    query: URLSearchParams | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<Response> {
+    const search = query?.toString();
+    const url = `${this.url}/${path.map(encodeURIComponent).join("/")}${search ? `?${search}` : ""}`;
+    const headers: Record<string, string> = { ...this.headers };
+    if (body !== undefined) headers["content-type"] = "application/json";
+    try {
+      return await this.fetcher(url, {
+        method,
+        headers,
+        ...(body !== undefined && { body: JSON.stringify(body) }),
+        ...(signal !== undefined && { signal }),
+      });
+    } catch (e) {
+      if (signal?.aborted) throw new PisaError("aborted", "the request was aborted", undefined, { cause: e });
+      throw new PisaError("network", `no answer from ${url}: ${String(e)}`, undefined, { cause: e });
+    }
+  }
+}
+
+function detail(options: CheckOptions): { detail?: Detail[] } {
+  return options.detail !== undefined && options.detail.length > 0 ? { detail: options.detail } : {};
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** The body as JSON, or `undefined` if it isn't JSON. */
+async function readJson(r: Response): Promise<unknown> {
+  const text = await r.text();
+  if (text === "") return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The body of a successful response, or the error it carries. */
+function ok<T>(r: Response, body: unknown): T {
+  if (r.ok) {
+    if (body === undefined) throw new PisaError("bad_response", "the response isn't JSON", r.status);
+    return body as T;
+  }
+  const error = isObject(body) ? body["error"] : undefined;
+  if (isObject(error) && typeof error["kind"] === "string" && ERROR_KINDS.has(error["kind"])) {
+    throw new PisaError(error["kind"] as ErrorKind, String(error["message"] ?? ""), r.status);
+  }
+  throw new PisaError("bad_response", `HTTP ${r.status} ${r.statusText}`.trim(), r.status);
+}
