@@ -643,12 +643,15 @@ gh release download index-v4.35.0-da683984 -R aqora-io/pisa -p bundle.tar.zst -O
   | tar -I zstd -x -C search
 docker compose --profile search-load run --rm search-load   # into Qdrant, once
 PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
-  docker compose --profile search up --build                 # on :8000, through Traefik
+  docker compose --profile search up --build                 # on :8000 (PISA_PORT), through Traefik
+# Or export COMPOSE_PROFILES=search and PISA_SEARCH_QDRANT=http://qdrant:6333
+# (in .envrc, say) for search from a plain `docker compose up`.
 ```
 
-Bundles of releases before format 4 (search on Qdrant) have no type constants
-or field statistics: build one again from that release's `store` and `corpus`
-(below, from `pisa-search build`), and publish it.
+`load` refuses a bundle of another format (`bundle format 3 is not 4; rebuild
+it`). Build one again from its release's `store` and `corpus` with `pisa-search
+build` (below): it reads only those, so it describes and embeds nothing, and
+takes a few minutes. Then publish it.
 
 To publish an index after building it (below), from the pushed commit that built
 it:
@@ -663,7 +666,9 @@ done
 gh release create index-$ENV_ID -R aqora-io/pisa --target "$(git rev-parse main)" \
   --title "Search index $ENV_ID" --notes "$(jq -c . search/bundle/manifest.json)" \
   search/release/*.tar.zst
-# A rebuild for an env_id that already has a release replaces its assets.
+# A rebuild for an env_id that already has a release replaces the assets it
+# rebuilt (pack only those); then edit the notes' manifest and which commit
+# built what with `gh release edit index-$ENV_ID --notes-file …`.
 gh release upload index-$ENV_ID -R aqora-io/pisa --clobber search/release/*.tar.zst
 ```
 
