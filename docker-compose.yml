@@ -87,6 +87,9 @@ services:
     environment:
       PISA_DATABASE_URL: *database-url
       PISA_MAX_WAIT_SECS: 120
+      # Origins whose pages may call the API from a browser, e.g. a
+      # playground served elsewhere; none by default.
+      PISA_CORS_ORIGINS: ${PISA_CORS_ORIGINS:-}
       PISA_SEARCH_QDRANT: ${PISA_SEARCH_QDRANT:-}
       # The env_id of the loaded bundle: that of docker/lean-project.
       PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.35.0-da683984}

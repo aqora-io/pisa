@@ -274,6 +274,10 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
+Browsers may call the API from other origins only when the server allows
+them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
+takes a comma-separated list of origins, or `*`. It is empty by default.
+
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
 - `ok` is the verdict.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.

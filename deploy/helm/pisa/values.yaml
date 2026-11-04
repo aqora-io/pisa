@@ -27,6 +27,9 @@ server:
     minReplicas: 2
     maxReplicas: 6
     targetCPUUtilizationPercentage: 70
+  # Origins whose pages may call the API from a browser, e.g.
+  # https://app.example.com, or "*" for any. None by default.
+  corsOrigins: []
   # e.g. SSL_CERT_FILE for a database with a private CA.
   extraEnv: []
 

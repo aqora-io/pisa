@@ -8,11 +8,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use axum::http::{HeaderValue, Method, header};
 use pisa_db::db::Db;
 use pisa_db::queue::Queue;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub mod dispatch;
 pub mod http;
@@ -46,6 +48,39 @@ pub struct RouterConfig {
     /// sharing a database need queues of their own.
     #[arg(long, env = "PISA_QUEUE", default_value = "pisa")]
     pub queue: String,
+    /// Origins whose pages may call the API from a browser, e.g.
+    /// `https://app.example.com`, or `*` for any. Separate several with ','.
+    /// None by default.
+    #[arg(long = "cors-origin", env = "PISA_CORS_ORIGINS", value_delimiter = ',')]
+    pub cors_origins: Vec<String>,
+}
+
+/// The CORS layer for `origins`, if there are any.
+fn cors(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
+    let origins: Vec<&str> = origins
+        .iter()
+        .map(|o| o.trim())
+        .filter(|o| !o.is_empty())
+        .collect();
+    if origins.is_empty() {
+        return Ok(None);
+    }
+    let allow = if origins.contains(&"*") {
+        AllowOrigin::any()
+    } else {
+        let origins = origins
+            .iter()
+            .map(|o| HeaderValue::from_str(o))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("bad CORS origin: {e}"))?;
+        AllowOrigin::list(origins)
+    };
+    let layer = CorsLayer::new()
+        .allow_origin(allow)
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_headers([header::CONTENT_TYPE])
+        .max_age(Duration::from_secs(3600));
+    Ok(Some(layer))
 }
 
 fn parse_alias(s: &str) -> Result<(String, String), String> {
@@ -125,7 +160,10 @@ pub async fn start_with(
 
     let listener = TcpListener::bind(cfg.http).await?;
     let http_addr = listener.local_addr()?;
-    let routes = http::router(app.clone()).merge(extra(app.clone()));
+    let mut routes = http::router(app.clone()).merge(extra(app.clone()));
+    if let Some(cors) = cors(&cfg.cors_origins)? {
+        routes = routes.layer(cors);
+    }
     let (stop, mut stopping) = watch::channel(false);
     let served = tokio::spawn(async move {
         // Dropping `Running` leaves the server serving.

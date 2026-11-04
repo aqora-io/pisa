@@ -55,6 +55,9 @@ spec:
             {{- with .Values.router.aliases }}
             - { name: PISA_ALIASES, value: {{ join "," . | quote }} }
             {{- end }}
+            {{- with .Values.server.corsOrigins }}
+            - { name: PISA_CORS_ORIGINS, value: {{ join "," . | quote }} }
+            {{- end }}
             {{- if .Values.search.enabled }}
             - { name: PISA_SEARCH_QDRANT, value: {{ $qdrant | quote }} }
             - { name: PISA_SEARCH_ENV_ID, value: {{ required "search.envId is required" .Values.search.envId | quote }} }

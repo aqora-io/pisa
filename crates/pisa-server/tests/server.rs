@@ -16,6 +16,7 @@ fn config(search: SearchArgs) -> ServerConfig {
             default_version: None,
             alias: Vec::new(),
             queue: "pisa".into(),
+            cors_origins: Vec::new(),
         },
         database_url: String::new(),
         drain_timeout_secs: 1,
@@ -91,4 +92,54 @@ async fn without_qdrant_there_is_no_search() {
     );
     let (status, _) = get(&url("/nope")).await;
     assert_eq!(status, 404);
+}
+
+/// A preflight for `POST /check` from `origin`, and the origin it allows.
+async fn preflight(url: &str, origin: &str) -> Option<String> {
+    let r = reqwest::Client::new()
+        .request(reqwest::Method::OPTIONS, url)
+        .header("origin", origin)
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type")
+        .send()
+        .await
+        .unwrap();
+    r.headers()
+        .get("access-control-allow-origin")
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn browsers_may_call_only_from_the_configured_origins() {
+    let mut cfg = config(SearchArgs::default());
+    cfg.router.cors_origins = vec!["http://app.example".into(), " ".into()];
+    let server = start_on(cfg, Db::memory().await).await.unwrap();
+    let url = |path: &str| format!("http://{}{path}", server.running.http_addr);
+    assert_eq!(
+        preflight(&url("/check"), "http://app.example")
+            .await
+            .as_deref(),
+        Some("http://app.example")
+    );
+    assert_eq!(
+        preflight(&url("/check"), "http://other.example").await,
+        None
+    );
+    // Every route has it, search's and /health too.
+    let r = reqwest::Client::new()
+        .get(url("/health"))
+        .header("origin", "http://app.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.headers()["access-control-allow-origin"],
+        "http://app.example"
+    );
+
+    let server = start_on(config(SearchArgs::default()), Db::memory().await)
+        .await
+        .unwrap();
+    let url = format!("http://{}/check", server.running.http_addr);
+    assert_eq!(preflight(&url, "http://app.example").await, None);
 }
