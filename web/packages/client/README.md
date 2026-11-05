@@ -21,7 +21,10 @@ const proof = proofText(code, [{ sorry: states[0]!, tactics: ["simp"] }]);
 const base = await pisa.createSnapshot("import Mathlib\ndef double (n : Nat) := 2 * n");
 // Kept only if it keeps the statements of the entry it replaces.
 const more = "import Mathlib\ndef double (n : Nat) := 2 * n\ntheorem double_two : double 2 = 4 := rfl";
-await pisa.createSnapshot(more, { replaces: base.entry! });
+const replacement = await pisa.createSnapshot(more, { replaces: base.entry! });
+// What builds on an entry, and the creates that move it onto a replacement.
+const { entries } = await pisa.dependents(base.entry!, { labels: { project: "p" } });
+const { plan } = await pisa.rebuildPlan(base.entry!, replacement.entry!, { project: "p" });
 await pisa.check(`${base.header}\nexample : double 2 = 4 := rfl`);
 
 const { hits } = await pisa.search({ nl: "trace of a density matrix is one" });

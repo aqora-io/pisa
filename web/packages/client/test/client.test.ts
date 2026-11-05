@@ -75,6 +75,17 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("asks for dependents and rebuild plans", async () => {
+    const { client, sent } = recording(() => json({ entries: [], ok: true, changes: [], plan: [] }));
+    await client.dependents("e1", { labels: { p: "1" } });
+    await client.rebuildPlan("e1", "e2", { p: "1" }, { allowChanges: true });
+    expect(sent[0]?.url).toBe("/api/snapshots/e1/dependents?version=v1&label=p%3A1");
+    expect(sent[1]).toMatchObject({
+      url: "/api/snapshots/rebuild",
+      body: { from: "e1", to: "e2", labels: { p: "1" }, dry_run: true, version: "v1", allow_changes: true },
+    });
+  });
+
   it("pins search to its environment", async () => {
     const { client, sent } = recording(() => json({ env_id: "e", results: [{ hits: [] }] }));
     expect(await client.search({ nl: "x" }, { envId: "e" })).toEqual({ hits: [] });

@@ -243,6 +243,25 @@ def test_replaces(url):
         client.create_snapshot(fixed, replaces={"entry": old, "allow": "everything"})
 
 
+def test_rebuild_plan(url):
+    client = Client(url, timeout=5)
+    base = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := sorry")
+    above = client.create_snapshot(base["header"] + "\n\ntheorem on_top : 2 = 2 := rfl", labels={"suite": "rebuild"})
+    listed = client.dependents(base["entry"], {"suite": "rebuild"})
+    assert [e["entry"] for e in listed["entries"]] == [above["entry"]]
+
+    proof = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := rfl", replaces=base["entry"])
+    plan = client.rebuild_plan(base["entry"], proof["entry"], {"suite": "rebuild"})
+    assert plan["ok"] and plan["changes"] == []
+    [item] = plan["plan"]
+    assert item["entry"] == above["entry"] and item["level"] == 1
+    made = client.create_snapshot(item["code"], labels=item["labels"], key=item["key"])
+    assert made["snapshot"] == item["new_snapshot"]
+    with pytest.raises(PisaError) as e:
+        client.rebuild_plan(base["entry"], proof["entry"], {})
+    assert (e.value.kind, e.value.status) == ("bad_request", 400)
+
+
 def test_snapshot_labels(url):
     client = Client(url, timeout=5)
     code = "import Foo\ntheorem listed : 1 = 1 := rfl"

@@ -292,6 +292,39 @@ impl Client {
         })
     }
 
+    #[pyo3(signature = (entry, labels = None))]
+    fn dependents<'py>(
+        &self,
+        py: Python<'py>,
+        entry: String,
+        labels: Option<BTreeMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let labels = labels.unwrap_or_default();
+        call(py, async move {
+            let labels: Vec<(&str, &str)> = labels
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            self.inner.dependents(&entry, &labels).await
+        })
+    }
+
+    #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false))]
+    fn rebuild_plan<'py>(
+        &self,
+        py: Python<'py>,
+        from_entry: String,
+        to_entry: String,
+        labels: BTreeMap<String, String>,
+        allow_changes: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            self.inner
+                .rebuild_plan(&from_entry, &to_entry, &labels, allow_changes)
+                .await
+        })
+    }
+
     #[pyo3(signature = (code, *, detail = Vec::new()))]
     fn submit_check<'py>(
         &self,

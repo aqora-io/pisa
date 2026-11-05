@@ -14,10 +14,13 @@ import type {
   ListSnapshotsParams,
   Query,
   QueryResult,
+  RebuildPlan,
+  RebuildRequest,
   ResolveResponse,
   Resolution,
   SearchResponse,
   SessionId,
+  SnapshotDependents,
   SnapshotInfo,
   SnapshotList,
   SnapshotRequest,
@@ -62,6 +65,12 @@ export interface CheckOptions extends RunOptions {
 
 export interface VersionOptions extends RequestOptions {
   version?: string;
+}
+
+export interface RebuildOptions extends VersionOptions {
+  /** Plan even though `to`, created without `replaces`, changes what `from`
+   *  states. */
+  allowChanges?: boolean;
 }
 
 export interface SearchOptions extends RequestOptions {
@@ -222,6 +231,24 @@ export class PisaClient {
   }
 
   /** Removes the labels in `remove`, then sets those in `set`. */
+  /** The entries on every module that imports `entry`'s, directly or through
+   *  others, parents first: by level, then oldest first. */
+  dependents(entry: string, params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<SnapshotDependents> {
+    const query = this.versionQuery(options);
+    for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
+    return this.call("GET", ["snapshots", entry, "dependents"], undefined, options, query);
+  }
+
+  /** Plans the creates that rebuild `from`'s dependents with every label in
+   *  `labels` on `to`. It only plans: create each item's `code` with its
+   *  `labels` and `key`, a level at a time. */
+  rebuildPlan(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildPlan> {
+    const version = options.version ?? this.version;
+    const body: RebuildRequest = { from, to, labels, dry_run: true, ...(version !== undefined && { version }) };
+    if (options.allowChanges) body.allow_changes = true;
+    return this.call("POST", ["snapshots", "rebuild"], body, options);
+  }
+
   setSnapshotLabels(
     entry: string,
     change: { set?: Labels; remove?: string[] },

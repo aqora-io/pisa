@@ -122,6 +122,27 @@ class SnapshotSummary(TypedDict):
 
 class SnapshotList(TypedDict):
     entries: list[SnapshotSummary]
+
+class SnapshotDependents(TypedDict):
+    entries: list[SnapshotSummary]
+
+class RebuildItem(TypedDict):
+    level: int
+    entry: NotRequired[str]
+    snapshot: str
+    new_snapshot: str
+    new_header: str
+    code: str
+    labels: dict[str, str]
+    key: str
+    affected: NotRequired[list[str]]
+    affected_unknown: NotRequired[bool]
+
+class RebuildPlan(TypedDict):
+    ok: bool
+    changes: list[str]
+    changed_definitions: NotRequired[list[str]]
+    plan: list[RebuildItem]
     next: NotRequired[str]
 
 class SnapshotFailure(TypedDict):
@@ -230,6 +251,26 @@ class Client:
         them. A page has up to `limit` entries (1 to 1000, default 100). Keep
         passing its `next` as `after` while it has one; a full page has one,
         and the page after it may be empty."""
+    def dependents(self, entry: str, labels: dict[str, str] | None = None) -> SnapshotDependents:
+        """The entries on every module that imports `entry`'s, directly or
+        through others, parents first (by level, then oldest first): those
+        with every label in `labels`, or all of them."""
+    def rebuild_plan(
+        self,
+        from_entry: str,
+        to_entry: str,
+        labels: dict[str, str],
+        *,
+        allow_changes: bool = False,
+    ) -> RebuildPlan:
+        """Plan the creates that rebuild `from_entry`'s dependents with every
+        label in `labels` (and what links them to it) on `to_entry`: each
+        item's `code` is the old code with its imports swapped. It only plans:
+        create each item with `code`, `labels` and `key`, a level at a time;
+        the keys make running the plan again safe. Unless `to_entry` was
+        created to replace `from_entry`, a `to_entry` that changes what
+        `from_entry` states gives `ok: False` and no plan, unless
+        `allow_changes`."""
     def set_snapshot_labels(
         self,
         entry: str,

@@ -42,7 +42,7 @@ use std::time::Duration;
 
 use pisa_protocol::api::{
     BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse, LabelsRequest,
-    SessionCheckRequest, SnapshotRequest, StartRequest, TacticRequest,
+    RebuildRequest, SessionCheckRequest, SnapshotRequest, StartRequest, TacticRequest,
 };
 use pisa_protocol::search::{
     DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
@@ -53,9 +53,10 @@ use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
     Allow, CheckResult, Declaration, Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos,
-    Replaced, Replacement, Replaces, Severity, SnapshotFailure, SnapshotInfo, SnapshotList,
-    SnapshotResponse as Snapshot, SnapshotSummary, SnapshotVerified, Sorry,
-    StartResponse as Session, StateInfo, TacticInfo, TacticResponse as Step,
+    RebuildItem, RebuildPlan, Replaced, Replacement, Replaces, Severity, SnapshotDependents,
+    SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary,
+    SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
+    TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope,
@@ -585,6 +586,48 @@ impl Client {
 
     /// Removes the labels `remove` names from an entry, then sets those in
     /// `set`, and returns the entry's summary.
+    /// The entries on every module that imports `entry`'s, directly or
+    /// through others, parents first: those with every `(key, value)` label
+    /// in `labels`, or all of them.
+    pub async fn dependents(
+        &self,
+        entry: &str,
+        labels: &[(&str, &str)],
+    ) -> Result<SnapshotDependents, Error> {
+        let mut url = self.snapshot_url(entry)?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(entry.to_string()))?
+            .push("dependents");
+        for (key, value) in labels {
+            url.query_pairs_mut()
+                .append_pair("label", &format!("{key}:{value}"));
+        }
+        self.endpoint.get(url).await
+    }
+
+    /// Plans the creates that rebuild `from`'s dependents with every label
+    /// in `labels` on `to`, by level; see [`RebuildPlan`]. It only plans:
+    /// create each item's `code` with its `labels` and `key`, a level at a
+    /// time. `allow_changes` plans even though `to`, created without
+    /// `replaces`, changes what `from` states.
+    pub async fn rebuild_plan(
+        &self,
+        from: &str,
+        to: &str,
+        labels: &BTreeMap<String, String>,
+        allow_changes: bool,
+    ) -> Result<RebuildPlan, Error> {
+        let req = RebuildRequest {
+            from: from.to_string(),
+            to: to.to_string(),
+            labels: labels.clone(),
+            dry_run: true,
+            allow_changes,
+            version: self.version.clone(),
+        };
+        self.post("snapshots/rebuild", &req).await
+    }
+
     pub async fn set_snapshot_labels(
         &self,
         entry: &str,

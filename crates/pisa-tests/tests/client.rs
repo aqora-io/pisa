@@ -162,6 +162,55 @@ async fn client_replaces_entries() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn client_lists_dependents_and_plans_rebuilds() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let b = client
+        .create_snapshot("import Foo\ntheorem rb : 1 = 1 := sorry")
+        .await
+        .unwrap();
+    let old = b.entry.unwrap();
+    let labels = BTreeMap::from([("k".to_string(), "v".to_string())]);
+    let opts = SnapshotOptions {
+        labels: labels.clone(),
+        ..Default::default()
+    };
+    let code = format!("{}\n\ntheorem above : 2 = 2 := rfl", b.header.unwrap());
+    let above = client.create_snapshot_with(&code, &opts).await.unwrap();
+    let listed = client.dependents(&old, &[("k", "v")]).await.unwrap();
+    assert_eq!(listed.entries.len(), 1);
+    assert_eq!(Some(&listed.entries[0].entry), above.entry.as_ref());
+
+    let opts = SnapshotOptions {
+        replaces: Some(Replaces::Entry(old.clone())),
+        ..Default::default()
+    };
+    let new = client
+        .create_snapshot_with("import Foo\ntheorem rb : 1 = 1 := rfl", &opts)
+        .await
+        .unwrap();
+    let plan = client
+        .rebuild_plan(&old, &new.entry.unwrap(), &labels, false)
+        .await
+        .unwrap();
+    assert!(plan.ok && plan.changes.is_empty(), "{plan:?}");
+    let item = &plan.plan[0];
+    let opts = SnapshotOptions {
+        labels: item.labels.clone(),
+        key: Some(item.key.clone()),
+        ..Default::default()
+    };
+    let rebuilt = client
+        .create_snapshot_with(&item.code, &opts)
+        .await
+        .unwrap();
+    assert_eq!(
+        rebuilt.snapshot.as_deref(),
+        Some(item.new_snapshot.as_str())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_lists_and_labels_snapshots() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
