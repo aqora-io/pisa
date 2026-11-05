@@ -138,6 +138,7 @@ class RebuildItem(TypedDict):
     code: str
     labels: dict[str, str]
     key: str
+    replaces: NotRequired[Replaced]
     affected: NotRequired[list[str]]
     affected_unknown: NotRequired[bool]
 
@@ -226,8 +227,8 @@ class Client:
         `replaces` names the entry this code replaces, e.g. the skeleton a
         proof fills in. The code is kept only if it still declares everything
         that entry's module declares, with the same types and definitions'
-        values, and still builds on the snapshots that module builds on (it
-        may import more); `replaces` in the result lists what it `filled`;
+        values, and what those use from a snapshot it no longer builds on is
+        unchanged; `replaces` in the result lists what it `filled`;
         otherwise nothing is kept and `result["reasons"]` says what changed.
         `{"entry": …, "allow": "definitions"}` lets definitions change their
         value, and lists the theorems that use them as `affected`."""
@@ -269,8 +270,8 @@ class Client:
         """Plan the creates that rebuild `from_entry`'s dependents with every
         label in `labels` (and what links them to it) on `to_entry`: each
         item's `code` is the old code with its imports swapped. It only plans:
-        create each item with `code`, `labels` and `key`, a level at a time;
-        the keys make running the plan again safe. Unless `to_entry` was
+        create each item with `code`, `labels`, `key` and any `replaces`, a
+        level at a time; the keys make running the plan again safe. Unless `to_entry` was
         created to replace `from_entry`, a `to_entry` that changes what
         `from_entry` states gives `ok: False` and no plan, unless
         `allow_changes`."""

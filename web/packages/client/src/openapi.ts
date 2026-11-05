@@ -671,6 +671,13 @@ export interface components {
             new_header: string;
             /** @description The module the create makes. */
             new_snapshot: string;
+            /**
+             * @description When `to` replaces `from`, the entry it rebuilds, to create it as a
+             *     replacement of, with the same `allow`. The create then checks that
+             *     nothing its statements depend on changed, and is refused if
+             *     something did.
+             */
+            replaces?: components["schemas"]["Replaced"];
             /** @description The module it rebuilds. */
             snapshot: string;
         };
@@ -899,9 +906,11 @@ export interface components {
              * @description The entry this code replaces, e.g. the skeleton a proof fills in. The
              *     code is kept only if it still declares everything that entry's module
              *     declares, each with the same type and, for definitions, the same
-             *     value, and still builds on every snapshot that module builds on; it
-             *     may add declarations and imports. Otherwise nothing is kept and
-             *     `result.reasons` lists the changes. The new entry records the link.
+             *     value; it may add declarations and imports. If it no longer builds on
+             *     a snapshot that module does, what the module's declarations use from
+             *     there must be unchanged in what the code builds on now. Otherwise
+             *     nothing is kept and `result.reasons` lists the changes. The new entry
+             *     records the link.
              */
             replaces?: components["schemas"]["Replaces"];
             /**

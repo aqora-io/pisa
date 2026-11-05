@@ -307,7 +307,7 @@ pnpm -C web generate
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, replaces?, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, replaces?, dirty, verified, result, created, decls?}` |
 | `GET /snapshots/{entry}/dependents` | `?label=k:v` (repeated), `version?` → `{entries: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
-| `POST /snapshots/rebuild` | `{from, to, labels, dry_run: true, allow_changes?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, affected?, affected_unknown?}]}`; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/rebuild` | `{from, to, labels, dry_run: true, allow_changes?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, replaces?, affected?, affected_unknown?}]}`; see [Rebuilding](#rebuilding) |
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -461,13 +461,23 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
   `result.ok` is false and `result.reasons` says what changed, e.g.
   `statement: t has a different type`. To change a statement on purpose,
   create the code without `replaces`.
-- **Imports.** The code may import more, but must still build on every
-  snapshot the replaced entry's module builds on, directly or through others.
-  A type names the constants it uses, such as a definition from an imported
-  snapshot, without saying what they are, so swapping that snapshot for
-  another could change what a statement means while every hash stays the
-  same. To move an entry onto a new version of a snapshot it imports, create
-  it again on that version first, then replace that.
+- **Imports.** The code may import more, and may build on other snapshots
+  than the replaced entry's module does. A type names the constants it uses,
+  such as a definition from an imported snapshot, without saying what they
+  are, so swapping that snapshot could change what a statement means while
+  every hash stays the same. So for each snapshot the code no longer builds
+  on, the comparison follows what the replaced module's declarations use
+  there, through types and definitions' values, and each constant it reaches
+  must be the same, by name and hashes, in what the code builds on now, e.g.
+  `statement: foo, from PisaSnap.s3c…, has a different value` otherwise. It
+  stops at Lean's and Mathlib's constants, which the version fixes.
+- **What declarations use.** Each declaration in a check result records the
+  constants of the code and of its snapshots that its type and value use
+  (`type_refs`, `value_refs`). A module kept before they were recorded can't
+  be followed: a replacement that no longer builds on one of its snapshots is
+  refused until `POST /snapshots/{entry}/verify` records them. Private names
+  are compared without the module they were declared in, and what Lean makes
+  on demand, such as equation lemmas (`generated`), needn't stay.
 - **Definitions.** `"replaces": {"entry": "9c0e…", "allow": "definitions"}`
   lets definitions change their value but not their type, e.g. to add a
   missing hypothesis. A theorem's type only names a definition, so its
@@ -505,7 +515,7 @@ POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project
   its imports of `from`'s module, and of the other modules the plan rebuilds,
   swapped for the new ones; lines and columns stay where they were.
 - **Running it.** The plan only plans (`dry_run` must be `true`). Send each
-  item as `POST /snapshots {code, labels, key}`, a level at a time: a level's
+  item as `POST /snapshots {code, labels, key, replaces?}`, a level at a time: a level's
   items can be created together, with `Prefer: respond-async` (see
   [Async requests](#async-requests)), once the level below is done. Each
   create's `snapshot` is the item's `new_snapshot`. The keys come from the
@@ -519,13 +529,16 @@ POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project
 - **Changed definitions.** When `to` changes a definition's value (with
   `allow: "definitions"`, or `allow_changes`), `changed_definitions` lists
   them, and each item lists its theorems whose type uses one, directly or
-  through definitions here or below, as `affected`. That is read from the
-  modules' declaration exports; `affected_unknown` marks an item where one is
-  missing. Uses through private definitions, which the export leaves out,
-  aren't seen.
-- **Limits.** At most 1000 items, as the plan carries code. The new entries
-  don't record `replaces`: each builds on new snapshots, so it couldn't
-  replace its old one.
+  through definitions here or below, as `affected`. That is read from what
+  the modules' declarations use, or their declaration exports for modules
+  kept before those were recorded; `affected_unknown` marks an item where
+  neither says.
+- **Links.** When `to` replaces `from`, each item with an entry has
+  `replaces`, to send with its create: the rebuilt entry then replaces its
+  old one, with the same `allow`, which checks that nothing its statements
+  use changed through the rebuild, and the history follows it. A dependent
+  whose statements did change meaning is refused rather than kept.
+- **Limits.** At most 1000 items, as the plan carries code.
 
 **How it works.**
 - **Building.** A module is its code compiled with `lean -o` to the module

@@ -165,6 +165,8 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
             item["key"].as_str().unwrap().starts_with("rebuild:"),
             "{item}"
         );
+        // Each replaces the entry it rebuilds, as `to` replaces `from`.
+        assert_eq!(item["replaces"], json!({"entry": item["entry"]}));
         assert!(!code.contains(id(&lib.b)), "{code}");
     }
     // C, written on B, is the same code on B′.
@@ -188,6 +190,7 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
                 let opts = SnapshotOptions {
                     labels: serde_json::from_value(item["labels"].clone()).unwrap(),
                     key: Some(item["key"].as_str().unwrap().into()),
+                    replaces: serde_json::from_value(item["replaces"].clone()).unwrap(),
                     ..Default::default()
                 };
                 let code = item["code"].as_str().unwrap();
@@ -205,6 +208,10 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
         made
     };
     let made = run().await;
+    for (made, item) in made.iter().zip(plan) {
+        let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+        assert_eq!(info["replaces"], json!({"entry": item["entry"]}), "{info}");
+    }
     let top = &plan[2];
     let r = c
         .post(
@@ -329,4 +336,15 @@ async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependent
     assert_eq!((&p["ok"], &p["changes"]), (&json!(true), &json!([])), "{p}");
     assert_eq!(p["changed_definitions"], json!(["f"]));
     assert_eq!(items(&p, "affected"), [&Value::Null, &json!(["e"])], "{p}");
+
+    // Each create replaces its old entry the same way, and finds the same.
+    let mut found = Vec::new();
+    for item in p["plan"].as_array().unwrap() {
+        let body = json!({"code": item["code"], "labels": item["labels"], "key": item["key"],
+                          "replaces": item["replaces"]});
+        let r = create(&c, body).await;
+        assert_eq!(r["snapshot"], item["new_snapshot"], "{r}");
+        found.push(r["replaces"]["affected"].clone());
+    }
+    assert_eq!(found, [Value::Null, json!(["e"])]);
 }

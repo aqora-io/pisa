@@ -6,6 +6,7 @@
 mod common;
 
 use common::Cluster;
+use pisa_worker::catalog::Catalog;
 use serde_json::{Value, json};
 
 const SKELETON: &str = "import Foo\n\ntheorem t : 1 = 1 := sorry";
@@ -145,7 +146,7 @@ fn on(snapshot: &Value, body: &str) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_replacement_keeps_the_snapshots_its_statements_build_on() {
+async fn a_replacement_on_other_snapshots_keeps_what_its_statements_use() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let a = create(&c, json!({"code": "import Foo\n\ndef foo : Nat := 1"})).await;
     let skeleton = create(
@@ -155,21 +156,39 @@ async fn a_replacement_keeps_the_snapshots_its_statements_build_on() {
     .await;
     let old = entry(&skeleton).to_string();
 
-    // `thm3`'s type names `foo` the same way on another `foo`, so only the
-    // imports tell that it means something else now.
+    // `thm3`'s type names `foo` the same way on another `foo`, so the
+    // comparison follows it into the snapshot the code no longer builds on.
     let other = create(&c, json!({"code": "import Foo\n\ndef foo : Nat := 2"})).await;
-    let r = create(
-        &c,
-        json!({"code": on(&other, "theorem thm3 : foo = 1 := rfl"), "replaces": old}),
-    )
-    .await;
+    let proof = on(&other, "theorem thm3 : foo = 1 := rfl");
+    let r = create(&c, json!({"code": proof, "replaces": old})).await;
     let lost = a["snapshot"].as_str().unwrap();
     refused(
         &r,
-        &format!("statement: the code no longer builds on {lost}, which the replaced entry does"),
+        &format!("statement: foo, from {lost}, has a different value"),
+    );
+    let replaces = json!({"entry": old, "allow": "definitions"});
+    let r = create(&c, json!({"code": proof, "replaces": replaces})).await;
+    assert_eq!(r["replaces"]["changed_definitions"], json!(["foo"]), "{r}");
+    assert_eq!(r["replaces"]["affected"], json!(["thm3"]));
+
+    // A snapshot with the same `foo` and more is fine.
+    let more = create(
+        &c,
+        json!({"code": "import Foo\n\ndef foo : Nat := 1\ntheorem extra : 2 = 2 := rfl"}),
+    )
+    .await;
+    let r = create(
+        &c,
+        json!({"code": on(&more, "theorem thm3 : foo = 1 := rfl"), "replaces": old}),
+    )
+    .await;
+    assert_eq!(
+        r["replaces"],
+        json!({"entry": old, "filled": ["thm3"]}),
+        "{r}"
     );
 
-    // Building on more is fine: nothing the statements use can change.
+    // So is building on more.
     let helper = create(
         &c,
         json!({"code": "import Foo\n\ntheorem helper : 2 = 2 := rfl"}),
@@ -180,11 +199,61 @@ async fn a_replacement_keeps_the_snapshots_its_statements_build_on() {
         helper["snapshot"].as_str().unwrap()
     );
     let r = create(&c, json!({"code": both, "replaces": old})).await;
-    assert_eq!(
-        r["replaces"],
-        json!({"entry": old, "filled": ["thm3"]}),
-        "{r}"
+    assert_eq!(r["replaces"]["filled"], json!(["thm3"]), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_that_doesnt_say_what_it_uses_is_verified_to_say_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let a = create(&c, json!({"code": "import Foo\n\ndef foo : Nat := 1"})).await;
+    let skeleton = create(
+        &c,
+        json!({"code": on(&a, "theorem thm3 : foo = 1 := sorry")}),
+    )
+    .await;
+    let old = entry(&skeleton).to_string();
+    // As a module kept before records said what declarations use, verified.
+    let id = &skeleton["snapshot"].as_str().unwrap()["PisaSnap.s".len()..];
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let build = catalog
+        .module(id)
+        .await
+        .unwrap()
+        .modules
+        .last()
+        .unwrap()
+        .build
+        .clone();
+    let stripped = catalog.update_module(id, &build, |meta| {
+        meta.verified = true;
+        for d in &mut meta.result.declarations {
+            (d.type_refs, d.value_refs) = (None, None);
+        }
+    });
+    assert!(stripped.await.unwrap().is_some());
+
+    let more = create(
+        &c,
+        json!({"code": "import Foo\n\ndef foo : Nat := 1\ntheorem extra : 2 = 2 := rfl"}),
+    )
+    .await;
+    let proof = on(&more, "theorem thm3 : foo = 1 := rfl");
+    let r = create(&c, json!({"code": proof, "replaces": old})).await;
+    assert!(r["entry"].is_null(), "{r}");
+    let reasons = r["result"]["reasons"].to_string();
+    assert!(reasons.contains("verify it to record them"), "{r}");
+
+    let (status, verified) = c.post(&format!("/snapshots/{old}/verify"), json!({})).await;
+    assert_eq!(status, 200, "{verified}");
+    assert!(
+        verified["checked"]
+            .as_array()
+            .unwrap()
+            .contains(&skeleton["snapshot"]),
+        "{verified}"
     );
+    let r = create(&c, json!({"code": proof, "replaces": old})).await;
+    assert_eq!(r["replaces"]["filled"], json!(["thm3"]), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

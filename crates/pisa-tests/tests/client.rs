@@ -198,12 +198,17 @@ async fn client_lists_dependents_and_plans_rebuilds() {
     let opts = SnapshotOptions {
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
+        replaces: item.replaces.clone().map(Replaces::With),
         ..Default::default()
     };
     let rebuilt = client
         .create_snapshot_with(&item.code, &opts)
         .await
         .unwrap();
+    assert_eq!(
+        rebuilt.replaces.as_ref().map(|r| &r.entry),
+        above.entry.as_ref()
+    );
     assert_eq!(
         rebuilt.snapshot.as_deref(),
         Some(item.new_snapshot.as_str())

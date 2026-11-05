@@ -800,6 +800,10 @@
             "description": "The module the create makes.",
             "type": "string"
           },
+          "replaces": {
+            "$ref": "#/components/schemas/Replaced",
+            "description": "When `to` replaces `from`, the entry it rebuilds, to create it as a\nreplacement of, with the same `allow`. The create then checks that\nnothing its statements depend on changed, and is refused if\nsomething did."
+          },
           "snapshot": {
             "description": "The module it rebuilds.",
             "type": "string"
@@ -1283,7 +1287,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The entry this code replaces, e.g. the skeleton a proof fills in. The\ncode is kept only if it still declares everything that entry's module\ndeclares, each with the same type and, for definitions, the same\nvalue, and still builds on every snapshot that module builds on; it\nmay add declarations and imports. Otherwise nothing is kept and\n`result.reasons` lists the changes. The new entry records the link."
+            "description": "The entry this code replaces, e.g. the skeleton a proof fills in. The\ncode is kept only if it still declares everything that entry's module\ndeclares, each with the same type and, for definitions, the same\nvalue; it may add declarations and imports. If it no longer builds on\na snapshot that module does, what the module's declarations use from\nthere must be unchanged in what the code builds on now. Otherwise\nnothing is kept and `result.reasons` lists the changes. The new entry\nrecords the link."
           },
           "timeout": {
             "description": "Lean's time limit in seconds, for building the module including its\nimports.",

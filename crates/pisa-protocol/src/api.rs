@@ -489,9 +489,11 @@ pub struct SnapshotRequest {
     /// The entry this code replaces, e.g. the skeleton a proof fills in. The
     /// code is kept only if it still declares everything that entry's module
     /// declares, each with the same type and, for definitions, the same
-    /// value, and still builds on every snapshot that module builds on; it
-    /// may add declarations and imports. Otherwise nothing is kept and
-    /// `result.reasons` lists the changes. The new entry records the link.
+    /// value; it may add declarations and imports. If it no longer builds on
+    /// a snapshot that module does, what the module's declarations use from
+    /// there must be unchanged in what the code builds on now. Otherwise
+    /// nothing is kept and `result.reasons` lists the changes. The new entry
+    /// records the link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
 }
@@ -760,6 +762,12 @@ pub struct RebuildItem {
     /// keys, so running a plan again after a failure replays the creates
     /// that are done.
     pub key: String,
+    /// When `to` replaces `from`, the entry it rebuilds, to create it as a
+    /// replacement of, with the same `allow`. The create then checks that
+    /// nothing its statements depend on changed, and is refused if
+    /// something did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replaced>,
     /// The theorems of the module whose type uses a changed definition,
     /// directly or through other definitions, here or below.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
