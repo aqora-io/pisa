@@ -192,6 +192,10 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release with dependents and rebuild plans, upgrade the workers before
+clients call `GET /snapshots/{entry}/dependents` or `POST /snapshots/rebuild`:
+they run on a worker, and an older one answers them with a 500.
+
 To the release with `replaces` on snapshot creates, upgrade the workers before
 clients send `replaces`: an older worker refuses such a create, answering 500
 that it may be older than the server, rather than keeping the code unchecked.
@@ -292,6 +296,8 @@ pnpm -C web generate
 | `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, replaces?, result}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, replaces?, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, replaces?, dirty, verified, result, created, decls?}` |
+| `GET /snapshots/{entry}/dependents` | `?label=k:v` (repeated), `version?` → `{entries: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/rebuild` | `{from, to, labels, dry_run: true, allow_changes?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, affected?, affected_unknown?}]}`; see [Rebuilding](#rebuilding) |
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -463,6 +469,53 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
   and `GET /snapshots/{entry}` show. Only a create that passed the comparison
   sets it, so it can be trusted, and it stays after the replaced entry is
   deleted. A key replay returns the entry as it is, with `filled` empty.
+
+<a id="rebuilding"></a>
+**Rebuilding dependents.** A module's name is a hash of its code, imports
+included, so replacing B with B′ leaves every chunk above B importing B.
+`GET /snapshots/{entry}/dependents?label=project:foo` lists the entries on
+every module that imports the entry's module, directly or through others,
+parents first: by level (1 imports it, 2 imports a level 1, and so on, by the
+longest chain), then oldest first. With `label` filters, as in a listing, only
+the entries with every label.
+
+`POST /snapshots/rebuild` plans how to create them again on the replacement:
+
+```text
+POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project": "foo"}, "dry_run": true}
+  → {"ok": true, "changes": [], "plan": [
+       {"level": 1, "entry": "…", "snapshot": "PisaSnap.sC…", "new_snapshot": "PisaSnap.sC′…",
+        "new_header": "…", "code": "…", "labels": {…}, "key": "rebuild:…"}, …]}
+```
+
+- **What it rebuilds.** The dependents with an entry that has every label
+  (`labels` is required, so the caller chooses which projects follow the
+  edit), and any module between them and `from`, which gets an item without
+  `entry`, with the labels asked for. Each item's `code` is the old code with
+  its imports of `from`'s module, and of the other modules the plan rebuilds,
+  swapped for the new ones; lines and columns stay where they were.
+- **Running it.** The plan only plans (`dry_run` must be `true`). Send each
+  item as `POST /snapshots {code, labels, key}`, a level at a time: a level's
+  items can be created together, with `Prefer: respond-async` (see
+  [Async requests](#async-requests)), once the level below is done. Each
+  create's `snapshot` is the item's `new_snapshot`. The keys come from the
+  plan, so planning and running it again after a failure replays the creates
+  that are done. Delete the old entries afterwards, from the top down, if they
+  should go.
+- **Statements.** If `to` replaces `from` (see [Replacing](#replacing)), its
+  create compared them, so `changes` is empty. Otherwise the rebuild compares
+  them the same way and, if `to` changes what `from` states, answers `ok:
+  false` with the `changes` and no plan, unless `allow_changes` is set.
+- **Changed definitions.** When `to` changes a definition's value (with
+  `allow: "definitions"`, or `allow_changes`), `changed_definitions` lists
+  them, and each item lists its theorems whose type uses one, directly or
+  through definitions here or below, as `affected`. That is read from the
+  modules' declaration exports; `affected_unknown` marks an item where one is
+  missing. Uses through private definitions, which the export leaves out,
+  aren't seen.
+- **Limits.** At most 1000 items, as the plan carries code. The new entries
+  don't record `replaces`: each builds on new snapshots, so it couldn't
+  replace its old one.
 
 **How it works.**
 - **Building.** A module is its code compiled with `lean -o` to the module

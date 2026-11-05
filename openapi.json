@@ -733,6 +733,145 @@
         ],
         "type": "object"
       },
+      "RebuildItem": {
+        "description": "A create in a [`RebuildPlan`]: `POST /snapshots` with its `code`, `labels`\nand `key`.",
+        "properties": {
+          "affected": {
+            "description": "The theorems of the module whose type uses a changed definition,\ndirectly or through other definitions, here or below.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "affected_unknown": {
+            "description": "Which theorems use a changed definition is unknown: this module, or\none it builds on in the plan, has no declaration export to read.",
+            "type": "boolean"
+          },
+          "code": {
+            "description": "The old module's code with its imports swapped.",
+            "type": "string"
+          },
+          "entry": {
+            "description": "The entry it rebuilds. Absent for a module that only links others to\n`from`, with no entry that has the labels: it gets the labels asked\nfor.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The idempotency key to create it with. Planning again gives the same\nkeys, so running a plan again after a failure replays the creates\nthat are done.",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "level": {
+            "description": "1 for a module that imports `from`'s, 2 for one that imports that, and\nso on, by its longest chain.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "new_header": {
+            "description": "The header of code on top of the new module.",
+            "type": "string"
+          },
+          "new_snapshot": {
+            "description": "The module the create makes.",
+            "type": "string"
+          },
+          "snapshot": {
+            "description": "The module it rebuilds.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "level",
+          "snapshot",
+          "new_snapshot",
+          "new_header",
+          "code",
+          "labels",
+          "key"
+        ],
+        "type": "object"
+      },
+      "RebuildPlan": {
+        "properties": {
+          "changed_definitions": {
+            "description": "The definitions whose value `to` changed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "description": "How `to` differs from `from`, as in a refused replacement's\n`result.reasons`. Empty when `to` replaces `from`: its create\ncompared them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "description": "Whether there is a plan: false when `to` changes what `from` states\nand `allow_changes` isn't set.",
+            "type": "boolean"
+          },
+          "plan": {
+            "description": "The creates to make, by level, then oldest first. A level's items can\nbe created together once the level below is done.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildItem"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "changes",
+          "plan"
+        ],
+        "type": "object"
+      },
+      "RebuildRequest": {
+        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`SnapshotDependents`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones. It only plans: the client creates the plan's items.",
+        "properties": {
+          "allow_changes": {
+            "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](SnapshotRequest::replaces) `from`.",
+            "type": "boolean"
+          },
+          "dry_run": {
+            "description": "Must be `true`: a rebuild only plans, for now.",
+            "type": "boolean"
+          },
+          "from": {
+            "description": "The entry being replaced.",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Which dependents to rebuild: those with an entry that has every label,\nand the modules they build on above `from`. Required, so that the\ncaller chooses which projects follow the edit.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "to": {
+            "description": "Its replacement.",
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "labels"
+        ],
+        "type": "object"
+      },
       "Replaced": {
         "description": "An entry that another replaced, and how.",
         "properties": {
@@ -952,6 +1091,21 @@
           "error"
         ],
         "type": "string"
+      },
+      "SnapshotDependents": {
+        "description": "`GET /snapshots/{entry}/dependents`: the entries on every module that\nimports the entry's module, directly or through others, parents first: by\nlevel, where a module that imports it is at level 1 and one that imports\nthat at 2, by its longest chain, then oldest first. With `label=key:value`\nfilters, as in a listing, only the entries with every label.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SnapshotSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "type": "object"
       },
       "SnapshotFailure": {
         "properties": {
@@ -2487,6 +2641,98 @@
         ]
       }
     },
+    "/snapshots/rebuild": {
+      "post": {
+        "description": "The creates that make each dependent of `from` with an entry that has the labels again on `to`, by level. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. It only plans, with `dry_run: true`: the client sends the creates.",
+        "operationId": "planRebuild",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RebuildRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildPlan"
+                }
+              }
+            },
+            "description": "The plan, or the changes that stop it"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Plan to rebuild an entry's dependents on its replacement",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
     "/snapshots/{entry}": {
       "delete": {
         "description": "Its module goes too once no entry or other module refers to it: `removed` lists the modules that went.",
@@ -2792,6 +3038,120 @@
           }
         },
         "summary": "Set or remove an entry's labels",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
+    "/snapshots/{entry}/dependents": {
+      "get": {
+        "description": "The entries on every module that imports the entry's module, directly or through others, parents first: by level, then oldest first. With `label` filters, only the entries with every label.",
+        "operationId": "listDependents",
+        "parameters": [
+          {
+            "description": "The entry ID, 32 hex digits",
+            "in": "path",
+            "name": "entry",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "`key:value`, split on the first `:`; repeatable",
+            "in": "query",
+            "name": "label",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "description": "The worker version; the server's default when absent.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotDependents"
+                }
+              }
+            },
+            "description": "The entries above it"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "The entries above an entry",
         "tags": [
           "snapshots"
         ]

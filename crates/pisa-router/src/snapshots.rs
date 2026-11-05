@@ -9,15 +9,16 @@ use axum::Json;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::Response;
 use pisa_protocol::api::{
-    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, LabelsRequest, PreferAsync, SnapshotInfo,
-    SnapshotList, SnapshotRequest, SnapshotResponse, SnapshotSummary, SnapshotVerified,
-    VersionQuery,
+    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, LabelsRequest, PreferAsync, RebuildPlan,
+    RebuildRequest, SnapshotDependents, SnapshotInfo, SnapshotList, SnapshotRequest,
+    SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LABELS, MAX_LIMIT, is_cursor, parse_filter};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
-    Job, JobResult, SnapshotCreateJob, SnapshotJob, SnapshotLabelsJob, SnapshotListJob,
+    Job, JobResult, SnapshotCreateJob, SnapshotDependentsJob, SnapshotJob, SnapshotLabelsJob,
+    SnapshotListJob, SnapshotRebuildJob,
 };
 
 use crate::dispatch::{Prepared, Priority, Route};
@@ -122,20 +123,39 @@ pub async fn list(
     }
 }
 
-/// Splits the query of `GET /snapshots` into the version and the job, and
-/// checks the job's filters, at most [`MAX_LABELS`] of them, limit and
-/// cursor. Other parameters are ignored.
-fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
+/// The version and the `label` filters of a query, at most [`MAX_LABELS`]
+/// of them. Other parameters are ignored.
+fn label_query(query: &str) -> Result<(VersionQuery, Vec<(String, String)>), String> {
     let mut q = VersionQuery::default();
+    let mut labels = Vec::new();
+    for (name, value) in form_urlencoded::parse(query.as_bytes()) {
+        match &*name {
+            "version" => q.version = Some(value.into_owned()),
+            "label" => labels.push(parse_filter(&value)?),
+            _ => {}
+        }
+    }
+    if labels.len() > MAX_LABELS {
+        return Err(format!(
+            "{} label filters; a listing takes at most {MAX_LABELS}",
+            labels.len()
+        ));
+    }
+    Ok((q, labels))
+}
+
+/// Splits the query of `GET /snapshots` into the version and the job, and
+/// checks the job's filters (see [`label_query`]), limit and cursor. Other
+/// parameters are ignored.
+fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
+    let (q, labels) = label_query(query)?;
     let mut job = SnapshotListJob {
-        labels: Vec::new(),
+        labels,
         limit: DEFAULT_LIMIT,
         after: None,
     };
     for (name, value) in form_urlencoded::parse(query.as_bytes()) {
         match &*name {
-            "version" => q.version = Some(value.into_owned()),
-            "label" => job.labels.push(parse_filter(&value)?),
             "limit" => {
                 job.limit = value
                     .parse()
@@ -152,13 +172,74 @@ fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
             _ => {}
         }
     }
-    if job.labels.len() > MAX_LABELS {
-        return Err(format!(
-            "{} label filters; a listing takes at most {MAX_LABELS}",
-            job.labels.len()
+    Ok((q, job))
+}
+
+#[utoipa::path(
+    get, path = "/snapshots/{entry}/dependents", operation_id = "listDependents", tag = "snapshots",
+    summary = "The entries above an entry",
+    description = "The entries on every module that imports the entry's module, directly or \
+        through others, parents first: by level, then oldest first. With `label` filters, \
+        only the entries with every label.",
+    params(
+        ("entry" = String, Path, description = "The entry ID, 32 hex digits"),
+        ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
+        VersionQuery,
+    ),
+    responses((status = 200, description = "The entries above it", body = SnapshotDependents), ApiErrors),
+)]
+/// `GET /snapshots/{entry}/dependents`.
+pub async fn dependents(
+    State(app): State<Arc<App>>,
+    Path(entry): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<SnapshotDependents>, ApiError> {
+    let (q, labels) = label_query(query.as_deref().unwrap_or_default())
+        .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    let job = Job::SnapshotDependents(SnapshotDependentsJob { entry, labels });
+    match submit(&app, job, q, Priority::Interactive).await? {
+        JobResult::SnapshotDependents(r) => Ok(Json(r.map_err(ApiError)?)),
+        other => Err(unexpected(other)),
+    }
+}
+
+#[utoipa::path(
+    post, path = "/snapshots/rebuild", operation_id = "planRebuild", tag = "snapshots",
+    summary = "Plan to rebuild an entry's dependents on its replacement",
+    description = "The creates that make each dependent of `from` with an entry that has the \
+        labels again on `to`, by level. Unless `to` replaces `from`, `to` must not change what \
+        `from` states, or `allow_changes` be set. It only plans, with `dry_run: true`: the client \
+        sends the creates.",
+    request_body = RebuildRequest,
+    responses((status = 200, description = "The plan, or the changes that stop it", body = RebuildPlan), ApiErrors),
+)]
+/// `POST /snapshots/rebuild`.
+pub async fn rebuild(
+    State(app): State<Arc<App>>,
+    Body(req): Body<RebuildRequest>,
+) -> Result<Json<RebuildPlan>, ApiError> {
+    let bad = |m: &str| ApiError::new(ErrorKind::BadRequest, m);
+    if !req.dry_run {
+        return Err(bad(
+            "a rebuild only plans for now: send dry_run: true, then create the plan's items",
         ));
     }
-    Ok((q, job))
+    if req.labels.is_empty() {
+        return Err(bad("a rebuild takes labels: which dependents to rebuild"));
+    }
+    let job = Job::SnapshotRebuild(SnapshotRebuildJob {
+        from: req.from,
+        to: req.to,
+        labels: req.labels,
+        allow_changes: req.allow_changes,
+    });
+    let q = VersionQuery {
+        version: req.version,
+    };
+    match submit(&app, job, q, Priority::Interactive).await? {
+        JobResult::SnapshotRebuild(r) => Ok(Json(r.map_err(ApiError)?)),
+        other => Err(unexpected(other)),
+    }
 }
 
 #[utoipa::path(

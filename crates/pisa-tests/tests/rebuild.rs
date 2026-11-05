@@ -1,0 +1,332 @@
+//! Rebuilding what builds on an entry: its dependents, and the plan to create
+//! them again on a replacement. The library is a diamond: B under C and D,
+//! both under E, in project `p:1`, with a module of project `p:2` on B too.
+
+mod common;
+
+use common::Cluster;
+use pisa_client::{Client, SnapshotOptions};
+use pisa_protocol::snapshot;
+use serde_json::{Value, json};
+
+async fn create(c: &Cluster, body: Value) -> Value {
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    assert!(r["entry"].is_string(), "{r}");
+    r
+}
+
+fn entry(r: &Value) -> &str {
+    r["entry"].as_str().unwrap()
+}
+
+fn module(r: &Value) -> &str {
+    r["snapshot"].as_str().unwrap()
+}
+
+/// `header`, a blank line, then `body`.
+fn on(snapshot: &Value, body: &str) -> String {
+    format!("{}\n\n{body}", snapshot["header"].as_str().unwrap())
+}
+
+async fn get(c: &Cluster, path: &str) -> (u16, Value) {
+    let r = c.client.get(c.url(path)).send().await.unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+struct Library {
+    b: Value,
+    c: Value,
+    d: Value,
+    e: Value,
+    other: Value,
+}
+
+async fn library(c: &Cluster) -> Library {
+    let p1 = json!({"p": "1"});
+    let b = create(
+        c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry", "labels": p1}),
+    )
+    .await;
+    let c_ = create(
+        c,
+        json!({"code": on(&b, "theorem c : 2 = 2 := rfl\nneeds b"), "labels": p1}),
+    )
+    .await;
+    let d = create(
+        c,
+        json!({"code": on(&b, "theorem d : 3 = 3 := rfl"), "labels": p1}),
+    )
+    .await;
+    let merged = format!(
+        "import Foo\nimport {}\nimport {}\n\ntheorem e : 4 = 4 := rfl\nneeds c\nneeds d",
+        module(&c_),
+        module(&d)
+    );
+    let e = create(c, json!({"code": merged, "labels": p1})).await;
+    let other = create(
+        c,
+        json!({"code": on(&b, "theorem other : 5 = 5 := rfl"), "labels": {"p": "2"}}),
+    )
+    .await;
+    Library {
+        b,
+        c: c_,
+        d,
+        e,
+        other,
+    }
+}
+
+fn entries(list: &Value) -> Vec<&str> {
+    let entries = list["entries"].as_array().unwrap();
+    entries
+        .iter()
+        .map(|e| e["entry"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dependents_come_parents_first() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let lib = library(&c).await;
+    let (status, all) = get(&c, &format!("/snapshots/{}/dependents", entry(&lib.b))).await;
+    assert_eq!(status, 200, "{all}");
+    assert_eq!(
+        entries(&all),
+        [
+            entry(&lib.c),
+            entry(&lib.d),
+            entry(&lib.other),
+            entry(&lib.e)
+        ]
+    );
+    assert_eq!(all["entries"][3]["header"], lib.e["header"]);
+
+    let path = format!("/snapshots/{}/dependents?label=p:1", entry(&lib.b));
+    let (_, p1) = get(&c, &path).await;
+    assert_eq!(entries(&p1), [entry(&lib.c), entry(&lib.d), entry(&lib.e)]);
+    let (_, above_e) = get(&c, &format!("/snapshots/{}/dependents", entry(&lib.e))).await;
+    assert!(entries(&above_e).is_empty());
+
+    let (status, r) = get(&c, &format!("/snapshots/{}/dependents", "0".repeat(32))).await;
+    assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
+    let path = format!("/snapshots/{}/dependents?label=nocolon", entry(&lib.b));
+    let (status, _) = get(&c, &path).await;
+    assert_eq!(status, 400);
+}
+
+async fn plan(c: &Cluster, body: Value) -> (u16, Value) {
+    c.post("/snapshots/rebuild", body).await
+}
+
+/// B with its `sorry` proved and a helper, replacing B.
+async fn proved(c: &Cluster, lib: &Library) -> Value {
+    let code = "import Foo\n\ntheorem b : 1 = 1 := rfl\ntheorem b2 : 6 = 6 := rfl";
+    let r = create(
+        c,
+        json!({"code": code, "replaces": entry(&lib.b), "labels": {"p": "1"}}),
+    )
+    .await;
+    assert!(r["replaces"].is_object(), "{r}");
+    r
+}
+
+fn items<'a>(plan: &'a Value, field: &str) -> Vec<&'a Value> {
+    let items = plan["plan"].as_array().unwrap();
+    items.iter().map(|i| &i[field]).collect()
+}
+
+fn id(snapshot: &Value) -> &str {
+    &module(snapshot)["PisaSnap.s".len()..]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_rebuilds_the_project_on_the_replacement() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let lib = library(&c).await;
+    let b2 = proved(&c, &lib).await;
+    let body =
+        json!({"from": entry(&lib.b), "to": entry(&b2), "labels": {"p": "1"}, "dry_run": true});
+    let (status, p) = plan(&c, body).await;
+    assert_eq!(status, 200, "{p}");
+    assert_eq!((&p["ok"], &p["changes"]), (&json!(true), &json!([])), "{p}");
+    assert_eq!(items(&p, "level"), [&json!(1), &json!(1), &json!(2)]);
+    let old = [&lib.c, &lib.d, &lib.e];
+    assert_eq!(items(&p, "entry"), old.map(|e| &e["entry"]));
+    assert_eq!(items(&p, "snapshot"), old.map(|e| &e["snapshot"]));
+    let plan = p["plan"].as_array().unwrap();
+    for item in plan {
+        let code = item["code"].as_str().unwrap();
+        assert_eq!(item["new_snapshot"], snapshot::module(&snapshot::id(code)));
+        assert_eq!(item["labels"], json!({"p": "1"}));
+        assert!(
+            item["key"].as_str().unwrap().starts_with("rebuild:"),
+            "{item}"
+        );
+        assert!(!code.contains(id(&lib.b)), "{code}");
+    }
+    // C, written on B, is the same code on B′.
+    let c_code = on(&b2, "theorem c : 2 = 2 := rfl\nneeds b");
+    assert_eq!(plan[0]["code"], c_code);
+    let e_code = plan[2]["code"].as_str().unwrap();
+    for new in [&plan[0], &plan[1]] {
+        assert!(
+            e_code.contains(new["new_snapshot"].as_str().unwrap()),
+            "{e_code}"
+        );
+    }
+
+    // A client runs it level by level, through jobs.
+    let client = Client::new(&c.url("/")).unwrap();
+    let run = || async {
+        let mut made = Vec::new();
+        for level in [1, 2] {
+            let mut jobs = Vec::new();
+            for item in plan.iter().filter(|i| i["level"] == level) {
+                let opts = SnapshotOptions {
+                    labels: serde_json::from_value(item["labels"].clone()).unwrap(),
+                    key: Some(item["key"].as_str().unwrap().into()),
+                    ..Default::default()
+                };
+                let code = item["code"].as_str().unwrap();
+                jobs.push((
+                    item,
+                    client.submit_snapshot_with(code, &opts).await.unwrap(),
+                ));
+            }
+            for (item, job) in jobs {
+                let made_one = client.wait_job(&job).await.unwrap();
+                assert_eq!(made_one.snapshot.as_deref(), item["new_snapshot"].as_str());
+                made.push(made_one.entry.unwrap());
+            }
+        }
+        made
+    };
+    let made = run().await;
+    let top = &plan[2];
+    let r = c
+        .post(
+            "/check",
+            json!({"code": format!("{}\n\nneeds b2\nneeds c\nneeds e", top["new_header"].as_str().unwrap())}),
+        )
+        .await;
+    assert_eq!(r.1["ok"], true, "{}", r.1);
+    // Again, the keys replay what is done.
+    assert_eq!(run().await, made);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plan_takes_labels_a_dry_run_and_a_replacement_beside_from() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let lib = library(&c).await;
+    let b2 = proved(&c, &lib).await;
+    let ok =
+        json!({"from": entry(&lib.b), "to": entry(&b2), "labels": {"p": "1"}, "dry_run": true});
+    let with = |field: &str, value: Value| {
+        let mut body = ok.clone();
+        body[field] = value;
+        body
+    };
+    let again = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    for (body, status) in [
+        (with("labels", json!({})), 400),
+        (with("dry_run", json!(false)), 400),
+        (with("to", json!(entry(&lib.c))), 400),
+        (with("to", json!(entry(&again))), 400),
+        (with("to", json!("nope")), 400),
+        (with("from", json!("0".repeat(32))), 404),
+    ] {
+        let (got, r) = plan(&c, body.clone()).await;
+        assert_eq!(got, status, "{body}: {r}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_to_that_changes_statements_needs_allow_changes() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let lib = library(&c).await;
+    let other = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
+    )
+    .await;
+    let body =
+        json!({"from": entry(&lib.b), "to": entry(&other), "labels": {"p": "1"}, "dry_run": true});
+    let (status, p) = plan(&c, body.clone()).await;
+    assert_eq!(status, 200, "{p}");
+    assert_eq!(p["ok"], false);
+    assert_eq!(p["changes"], json!(["statement: b is missing"]));
+    assert_eq!(p["plan"], json!([]));
+    let mut allowed = body;
+    allowed["allow_changes"] = json!(true);
+    let (_, p) = plan(&c, allowed).await;
+    assert_eq!(
+        (&p["ok"], &p["changes"]),
+        (&json!(true), &json!(["statement: b is missing"]))
+    );
+    assert_eq!(p["plan"].as_array().unwrap().len(), 3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_that_links_the_labelled_ones_is_rebuilt_with_the_labels() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    let m = create(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
+    let n = create(
+        &c,
+        json!({"code": on(&m, "theorem n : 3 = 3 := rfl"), "labels": {"p": "1"}}),
+    )
+    .await;
+    let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
+    let b2 = create(&c, json!({"code": code, "replaces": entry(&b)})).await;
+    let body = json!({"from": entry(&b), "to": entry(&b2), "labels": {"p": "1"}, "dry_run": true});
+    let (_, p) = plan(&c, body).await;
+    assert_eq!(items(&p, "entry"), [&Value::Null, &n["entry"]], "{p}");
+    assert_eq!(items(&p, "snapshot"), [&m["snapshot"], &n["snapshot"]]);
+    assert_eq!(p["plan"][0]["labels"], json!({"p": "1"}));
+    let key = format!("rebuild:{}:{}:{}", id(&b), id(&b2), id(&m));
+    assert_eq!(p["plan"][0]["key"], key);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependents() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ndef f : Nat := 1\ntheorem b : f = f := sorry", "labels": p1}),
+    )
+    .await;
+    let c_ = create(
+        &c,
+        json!({"code": on(&b, "def g : Nat := f\ntheorem c : 2 = 2 := rfl"), "labels": p1}),
+    )
+    .await;
+    create(
+        &c,
+        json!({"code": on(&c_, "theorem e : g = g := rfl"), "labels": p1}),
+    )
+    .await;
+    let fixed = "import Foo\n\ndef f : Nat := 2\ntheorem b : f = f := rfl";
+    let replaces = json!({"entry": entry(&b), "allow": "definitions"});
+    let b2 = create(
+        &c,
+        json!({"code": fixed, "replaces": replaces, "labels": p1}),
+    )
+    .await;
+    let body = json!({"from": entry(&b), "to": entry(&b2), "labels": p1, "dry_run": true});
+    let (_, p) = plan(&c, body).await;
+    assert_eq!((&p["ok"], &p["changes"]), (&json!(true), &json!([])), "{p}");
+    assert_eq!(p["changed_definitions"], json!(["f"]));
+    assert_eq!(items(&p, "affected"), [&Value::Null, &json!(["e"])], "{p}");
+}

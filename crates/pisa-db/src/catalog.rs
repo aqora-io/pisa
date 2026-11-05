@@ -332,6 +332,23 @@ pub(crate) fn now_micros() -> u64 {
         .map_or(0, |d| d.as_micros() as u64)
 }
 
+/// `labels` with each key once, or `None` if they give a key two values,
+/// which no entry matches: an entry has one value per key.
+fn wanted(labels: &[(String, String)]) -> Option<Vec<(String, String)>> {
+    let mut wanted: BTreeMap<&str, &str> = BTreeMap::new();
+    for (k, value) in labels {
+        if wanted.insert(k, value).is_some_and(|old| old != value) {
+            return None;
+        }
+    }
+    Some(
+        wanted
+            .into_iter()
+            .map(|(k, value)| (k.to_string(), value.to_string()))
+            .collect(),
+    )
+}
+
 /// The creation time and id of the entry at listing cursor `after` (see
 /// [`is_cursor`](pisa_protocol::labels::is_cursor)).
 fn parse_cursor(after: &str) -> Result<(i64, &str), Error> {
@@ -427,17 +444,9 @@ impl Catalog {
         limit: usize,
         after: Option<&str>,
     ) -> Result<(Vec<(String, EntryMeta)>, Option<String>), Error> {
-        let mut wanted: BTreeMap<&str, &str> = BTreeMap::new();
-        for (k, value) in labels {
-            // An entry has one value per key.
-            if wanted.insert(k, value).is_some_and(|old| old != value) {
-                return Ok((Vec::new(), None));
-            }
-        }
-        let wanted: Vec<(String, String)> = wanted
-            .into_iter()
-            .map(|(k, value)| (k.to_string(), value.to_string()))
-            .collect();
+        let Some(wanted) = wanted(labels) else {
+            return Ok((Vec::new(), None));
+        };
         let after = after.map(parse_cursor).transpose()?;
         let limit_rows = i64::try_from(limit).unwrap_or(i64::MAX);
         let entries: Vec<(String, EntryMeta)> =
@@ -447,6 +456,25 @@ impl Catalog {
             _ => None,
         };
         Ok((entries, next))
+    }
+
+    /// Each module that imports module `m`, directly or through others, with
+    /// those of its imports that are `m` or such modules.
+    pub async fn dependents(&self, m: &str) -> Result<BTreeMap<String, Vec<String>>, Error> {
+        dispatch!(&self.db, dependents(&self.version, m))
+    }
+
+    /// The entries on `modules` that have every `(key, value)` in `labels`,
+    /// oldest first.
+    pub async fn entries_on(
+        &self,
+        modules: &[String],
+        labels: &[(String, String)],
+    ) -> Result<Vec<(String, EntryMeta)>, Error> {
+        let Some(wanted) = wanted(labels) else {
+            return Ok(Vec::new());
+        };
+        dispatch!(&self.db, entries_on(&self.version, modules, &wanted))
     }
 
     /// Removes the labels `remove` names from entry `e`, then sets those in
@@ -711,6 +739,55 @@ mod tests {
                 assert_eq!(found.1.replaces, replaces);
             }
             assert_eq!(catalog.entry(&old).await.unwrap().replaces, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn dependents_are_every_module_above_with_their_imports() {
+        for catalog in catalogs().await {
+            // b under c and d, both under e; x on its own.
+            let b = meta("b");
+            let (c, d) = (child("c", &b), child("d", &b));
+            let mut e = child("e", &c);
+            e.imports.push("d".into());
+            e.modules.insert(2, d.modules[1].clone());
+            let p1 = || labelled(&[("p", "1")]);
+            for (id, m, entry) in [
+                ("b", &b, no_labels()),
+                ("c", &c, p1()),
+                ("d", &d, labelled(&[("p", "2")])),
+                ("e", &e, p1()),
+                ("x", &meta("x"), p1()),
+            ] {
+                catalog.commit(id, m, None, entry).await.unwrap();
+            }
+            let above = catalog.dependents("b").await.unwrap();
+            let edges: Vec<(&str, Vec<&str>)> = above
+                .iter()
+                .map(|(m, i)| {
+                    let mut i: Vec<&str> = i.iter().map(String::as_str).collect();
+                    i.sort();
+                    (m.as_str(), i)
+                })
+                .collect();
+            assert_eq!(
+                edges,
+                [("c", vec!["b"]), ("d", vec!["b"]), ("e", vec!["c", "d"])]
+            );
+            assert!(catalog.dependents("e").await.unwrap().is_empty());
+
+            let modules: Vec<String> = above.keys().cloned().collect();
+            let on = |labels: Vec<(String, String)>| {
+                let (catalog, modules) = (catalog.clone(), modules.clone());
+                async move {
+                    let found = catalog.entries_on(&modules, &labels).await.unwrap();
+                    found.into_iter().map(|(_, m)| m.module).collect::<Vec<_>>()
+                }
+            };
+            assert_eq!(on(vec![]).await, ["c", "d", "e"]);
+            let p = |v: &str| ("p".to_string(), v.to_string());
+            assert_eq!(on(vec![p("1")]).await, ["c", "e"]);
+            assert!(on(vec![p("1"), p("2")]).await.is_empty());
         }
     }
 

@@ -25,7 +25,7 @@
 //! that uses macros or asks for it, and later on request. A module's record
 //! is rewritten once it passes.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -33,9 +33,9 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    Allow, CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, Replaced, Replacement,
-    Replaces, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse, SnapshotSummary,
-    SnapshotVerified,
+    Allow, CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, RebuildItem,
+    RebuildPlan, Replaced, Replacement, Replaces, SnapshotDependents, SnapshotFailure,
+    SnapshotInfo, SnapshotList, SnapshotResponse, SnapshotSummary, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
@@ -44,7 +44,7 @@ use pisa_protocol::labels::{
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{Change, Verification, statement_changes};
-use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
+use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{
@@ -209,27 +209,52 @@ fn replaced(done: &mut SnapshotResponse, replacement: Option<Replacement>) {
 /// The theorems among `exported` whose type uses a definition in `changed`,
 /// directly or through the types and values of other declarations.
 fn affected(changed: &[String], exported: &[SnapshotDecl]) -> Vec<String> {
-    let mut used: std::collections::HashSet<&str> = changed.iter().map(String::as_str).collect();
+    uses(&changed.iter().cloned().collect(), exported).1
+}
+
+/// What among `exported` uses a name in `used`, directly or through each
+/// other: the declarations other than theorems whose type or value does,
+/// which then count as used too, and the theorems whose type does.
+fn uses(used: &HashSet<String>, exported: &[SnapshotDecl]) -> (Vec<String>, Vec<String>) {
+    let mut users: Vec<String> = Vec::new();
+    let is_used = |r: &String, users: &[String]| used.contains(r) || users.contains(r);
     loop {
-        let before = used.len();
+        let before = users.len();
         for d in exported.iter().filter(|d| d.kind != "theorem") {
-            if d.type_refs
-                .iter()
-                .chain(&d.value_refs)
-                .any(|r| used.contains(r.as_str()))
-            {
-                used.insert(&d.name);
+            let uses = d.type_refs.iter().chain(&d.value_refs);
+            if !is_used(&d.name, &users) && uses.clone().any(|r| is_used(r, &users)) {
+                users.push(d.name.clone());
             }
         }
-        if used.len() == before {
+        if users.len() == before {
             break;
         }
     }
-    exported
+    let theorems = exported
         .iter()
-        .filter(|d| d.kind == "theorem" && d.type_refs.iter().any(|r| used.contains(r.as_str())))
+        .filter(|d| d.kind == "theorem" && d.type_refs.iter().any(|r| is_used(r, &users)))
         .map(|d| d.name.clone())
-        .collect()
+        .collect();
+    (users, theorems)
+}
+
+/// The modules of `above` (see [`Catalog::dependents`]) to rebuild for
+/// `matching`: those, and the ones among `above` they import, directly or
+/// through others.
+fn needed(
+    above: &BTreeMap<String, Vec<String>>,
+    matching: impl IntoIterator<Item = String>,
+) -> BTreeSet<String> {
+    let mut needed = BTreeSet::new();
+    let mut todo: Vec<String> = matching.into_iter().collect();
+    while let Some(m) = todo.pop() {
+        if let Some(imports) = above.get(&m)
+            && needed.insert(m)
+        {
+            todo.extend(imports.iter().cloned());
+        }
+    }
+    needed
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -294,6 +319,30 @@ fn modules(parents: &[ModuleMeta], own: Module) -> Vec<Module> {
     }
     modules.push(own);
     modules
+}
+
+/// The level of each module in `above` (see [`Catalog::dependents`]) over
+/// `root`, which is 0: one more than the highest of its imports among them.
+fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashMap<String, usize> {
+    let mut levels = HashMap::from([(root.to_string(), 0)]);
+    while levels.len() <= above.len() {
+        let before = levels.len();
+        for (m, imports) in above {
+            if levels.contains_key(m) {
+                continue;
+            }
+            let known: Option<Vec<usize>> =
+                imports.iter().map(|i| levels.get(i).copied()).collect();
+            if let Some(known) = known {
+                levels.insert(m.clone(), 1 + known.into_iter().max().unwrap_or(0));
+            }
+        }
+        // Imports always lead down to `root`, so each pass places some.
+        if levels.len() == before {
+            break;
+        }
+    }
+    levels
 }
 
 /// The ids of `modules`.
@@ -1310,6 +1359,204 @@ impl Snapshots {
         Ok(SnapshotList { entries, next })
     }
 
+    /// The entries above `entry`'s module, parents first; see
+    /// [`SnapshotDependents`].
+    pub async fn dependents(
+        &self,
+        entry: &str,
+        labels: &[(String, String)],
+    ) -> Result<SnapshotDependents, Error> {
+        let entry = parse_entry(entry)?;
+        if labels.len() > MAX_LABELS {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!("{} label filters; at most {MAX_LABELS}", labels.len()),
+            ));
+        }
+        let root = self.catalog.entry(entry).await?.module;
+        let above = self.catalog.dependents(&root).await?;
+        let levels = levels(&above, &root);
+        let modules: Vec<String> = above.keys().cloned().collect();
+        let mut found = self.catalog.entries_on(&modules, labels).await?;
+        // Stable, so each level stays oldest first.
+        found.sort_by_key(|(_, e)| levels.get(&e.module).copied().unwrap_or(usize::MAX));
+        let mut metas: HashMap<String, Option<ModuleMeta>> = HashMap::new();
+        let mut entries = Vec::new();
+        for (entry, entry_meta) in found {
+            let id = entry_meta.module.clone();
+            if !metas.contains_key(&id) {
+                let meta = match self.catalog.module(&id).await {
+                    Ok(meta) => Some(meta),
+                    // Deleted since it was found.
+                    Err(e) if e.kind == ErrorKind::NotFound => None,
+                    Err(e) => return Err(e),
+                };
+                metas.insert(id.clone(), meta);
+            }
+            if let Some(meta) = &metas[&id] {
+                entries.push(summary(entry, entry_meta, meta));
+            }
+        }
+        Ok(SnapshotDependents { entries })
+    }
+
+    /// Plans the creates that rebuild `job.from`'s dependents on `job.to`;
+    /// see [`RebuildPlan`].
+    pub async fn rebuild_plan(&self, job: &SnapshotRebuildJob) -> Result<RebuildPlan, Error> {
+        let bad = |m: &str| Error::new(ErrorKind::BadRequest, m);
+        let (from, to) = (parse_entry(&job.from)?, parse_entry(&job.to)?);
+        if job.labels.is_empty() {
+            return Err(bad("a rebuild takes labels: which dependents to rebuild"));
+        }
+        check_labels(&job.labels).map_err(|e| bad(&e))?;
+        let to_entry = self.catalog.entry(to).await?;
+        let (old, new) = (self.catalog.entry(from).await?.module, to_entry.module);
+        if old == new {
+            return Err(bad(
+                "from and to are on the same module: there is nothing to rebuild",
+            ));
+        }
+        let (old_meta, new_meta) = (
+            self.catalog.module(&old).await?,
+            self.catalog.module(&new).await?,
+        );
+        if ids(&new_meta.modules).any(|m| *m == old) {
+            return Err(bad(
+                "to builds on from's module, so it can't take its place",
+            ));
+        }
+
+        let now = &new_meta.result.declarations;
+        let changed_definitions: Vec<String> =
+            statement_changes(&old_meta.result.declarations, now)
+                .into_iter()
+                .filter(|c| c.change == Change::Value)
+                .map(|c| c.name)
+                .collect();
+        // A replacement's create compared them already.
+        let replaced = to_entry.replaces.is_some_and(|r| r.entry == from);
+        let changes = if replaced {
+            Vec::new()
+        } else {
+            let replacing = Replacing {
+                replaced: Replaced {
+                    entry: from.to_string(),
+                    allow: None,
+                },
+                declarations: old_meta.result.declarations.clone(),
+                needs: ids(&old_meta.modules)
+                    .filter(|m| **m != old)
+                    .cloned()
+                    .collect(),
+            };
+            let needs: Vec<String> = ids(&new_meta.modules).cloned().collect();
+            compare(&replacing, now, &needs, None)
+                .err()
+                .unwrap_or_default()
+        };
+        if !changes.is_empty() && !job.allow_changes {
+            return Ok(RebuildPlan {
+                ok: false,
+                changes,
+                changed_definitions,
+                plan: Vec::new(),
+            });
+        }
+
+        let above = self.catalog.dependents(&old).await?;
+        let levels = levels(&above, &old);
+        let filter: Vec<(String, String)> = job.labels.clone().into_iter().collect();
+        let modules: Vec<String> = above.keys().cloned().collect();
+        let mut matching: HashMap<String, Vec<(String, EntryMeta)>> = HashMap::new();
+        for (e, entry_meta) in self.catalog.entries_on(&modules, &filter).await? {
+            matching
+                .entry(entry_meta.module.clone())
+                .or_default()
+                .push((e, entry_meta));
+        }
+        let mut order: Vec<String> = needed(&above, matching.keys().cloned())
+            .into_iter()
+            .collect();
+        order.sort_by_key(|m| levels.get(m).copied().unwrap_or(usize::MAX));
+        let items: usize = order
+            .iter()
+            .map(|m| matching.get(m).map_or(1, Vec::len))
+            .sum();
+        if items > MAX_LIMIT {
+            return Err(bad(&format!(
+                "the rebuild would create {items} entries, more than {MAX_LIMIT}: narrow its labels"
+            )));
+        }
+
+        // Which theorems use a changed definition, read from the modules'
+        // exports level by level: what uses one below is used here.
+        let mut used: HashSet<String> = changed_definitions.iter().cloned().collect();
+        let mut unknown: HashSet<String> = HashSet::new();
+        if !changed_definitions.is_empty() {
+            match self.catalog.decls(&new).await? {
+                Some(decls) => used.extend(uses(&used, &decls.decls).0),
+                None => {
+                    unknown.insert(old.clone());
+                }
+            }
+        }
+
+        let mut renamed = BTreeMap::from([(old.clone(), new.clone())]);
+        let mut plan: Vec<(u64, RebuildItem)> = Vec::new();
+        for m in order {
+            let level = levels.get(&m).copied().unwrap_or_default();
+            let meta = self.catalog.module(&m).await?;
+            let code = snapshot::rewrite_imports(&meta.code, &renamed);
+            let id = snapshot::id(&code);
+            let header = snapshot::next_header(&split_header(&code).header, &id);
+            renamed.insert(m.clone(), id.clone());
+            let (affected, affected_unknown) = if changed_definitions.is_empty() {
+                (Vec::new(), false)
+            } else if above[&m].iter().any(|i| unknown.contains(i)) {
+                unknown.insert(m.clone());
+                (Vec::new(), true)
+            } else {
+                match self.catalog.decls(&m).await? {
+                    Some(decls) => {
+                        let (users, theorems) = uses(&used, &decls.decls);
+                        used.extend(users);
+                        (theorems, false)
+                    }
+                    None => {
+                        unknown.insert(m.clone());
+                        (Vec::new(), true)
+                    }
+                }
+            };
+            let item = |entry: Option<String>, labels: BTreeMap<String, String>| RebuildItem {
+                level,
+                key: format!("rebuild:{old}:{new}:{}", entry.as_deref().unwrap_or(&m)),
+                entry,
+                snapshot: snapshot::module(&m),
+                new_snapshot: snapshot::module(&id),
+                new_header: header.clone(),
+                code: code.clone(),
+                labels,
+                affected: affected.clone(),
+                affected_unknown,
+            };
+            match matching.remove(&m) {
+                Some(entries) => plan.extend(entries.into_iter().map(|(e, entry_meta)| {
+                    (entry_meta.created_micros, item(Some(e), entry_meta.labels))
+                })),
+                // It only links what has the labels to `from`.
+                None => plan.push((meta.created * 1_000_000, item(None, job.labels.clone()))),
+            }
+        }
+        plan.sort_by_key(|(created, item)| (item.level, *created));
+        Ok(RebuildPlan {
+            ok: true,
+            changes,
+            changed_definitions,
+            plan: plan.into_iter().map(|(_, item)| item).collect(),
+        })
+    }
+
     /// Edits an entry's labels; see [`Catalog::set_labels`].
     pub async fn set_labels(
         &self,
@@ -1463,6 +1710,69 @@ mod tests {
             )])
         );
         assert!(compare(&replacing(old.clone(), None), &old, &["a".into()], None).is_ok());
+    }
+
+    #[test]
+    fn a_level_is_one_more_than_the_highest_import() {
+        // b under c and d, e on c and d, and f on b and e.
+        let above = BTreeMap::from(
+            [
+                ("c", vec!["b"]),
+                ("d", vec!["b"]),
+                ("e", vec!["c", "d"]),
+                ("f", vec!["b", "e"]),
+            ]
+            .map(|(m, i)| (m.to_string(), i.into_iter().map(String::from).collect())),
+        );
+        let levels = levels(&above, "b");
+        let level = |m: &str| levels[m];
+        assert_eq!(
+            [level("b"), level("c"), level("d"), level("e"), level("f")],
+            [0, 1, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn a_rebuild_needs_what_has_the_labels_and_what_links_it_to_the_root() {
+        // b under c and d, e on c, f on d; x on b links y to it.
+        let above = BTreeMap::from(
+            [
+                ("c", vec!["b"]),
+                ("d", vec!["b"]),
+                ("e", vec!["c"]),
+                ("f", vec!["d"]),
+                ("x", vec!["b"]),
+                ("y", vec!["x"]),
+            ]
+            .map(|(m, i)| (m.to_string(), i.into_iter().map(String::from).collect())),
+        );
+        let needed = |matching: &[&str]| -> Vec<String> {
+            needed(&above, matching.iter().map(|m| m.to_string()))
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(needed(&["e"]), ["c", "e"]);
+        assert_eq!(needed(&["e", "y"]), ["c", "e", "x", "y"]);
+        assert!(
+            needed(&["b", "nothing"]).is_empty(),
+            "the root isn't rebuilt"
+        );
+    }
+
+    #[test]
+    fn uses_say_what_comes_to_use_a_name() {
+        let exported = [
+            exported("g", "def", &["Nat"], &["f"]),
+            exported("h", "def", &["Nat"], &["g"]),
+            exported("t", "theorem", &["h"], &["f"]),
+            exported("u", "theorem", &["Nat"], &["f"]),
+        ];
+        let used = HashSet::from(["f".to_string()]);
+        let (users, theorems) = uses(&used, &exported);
+        assert_eq!(
+            (users, theorems),
+            (vec!["g".into(), "h".into()], vec!["t".into()])
+        );
     }
 
     #[test]

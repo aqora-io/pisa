@@ -157,6 +157,12 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
                 .set_labels(&j.entry, &j.set, &j.remove)
                 .await,
         ),
+        Job::SnapshotDependents(j) => {
+            JobResult::SnapshotDependents(pool.snapshots().dependents(&j.entry, &j.labels).await)
+        }
+        Job::SnapshotRebuild(j) => {
+            JobResult::SnapshotRebuild(pool.snapshots().rebuild_plan(&j).await)
+        }
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the server".into(),
         },

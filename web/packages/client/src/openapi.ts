@@ -152,6 +152,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots/rebuild": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Plan to rebuild an entry's dependents on its replacement
+         * @description The creates that make each dependent of `from` with an entry that has the labels again on `to`, by level. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. It only plans, with `dry_run: true`: the client sends the creates.
+         */
+        post: operations["planRebuild"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots/{entry}": {
         parameters: {
             query?: never;
@@ -172,6 +192,26 @@ export interface paths {
         head?: never;
         /** Set or remove an entry's labels */
         patch: operations["setSnapshotLabels"];
+        trace?: never;
+    };
+    "/snapshots/{entry}/dependents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The entries above an entry
+         * @description The entries on every module that imports the entry's module, directly or through others, parents first: by level, then oldest first. With `label` filters, only the entries with every label.
+         */
+        get: operations["listDependents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/snapshots/{entry}/verify": {
@@ -570,6 +610,98 @@ export interface components {
             /** @description What made this result worse than usual, e.g. a lane that failed. */
             warnings?: string[];
         };
+        /**
+         * @description A create in a [`RebuildPlan`]: `POST /snapshots` with its `code`, `labels`
+         *     and `key`.
+         */
+        RebuildItem: {
+            /**
+             * @description The theorems of the module whose type uses a changed definition,
+             *     directly or through other definitions, here or below.
+             */
+            affected?: string[];
+            /**
+             * @description Which theorems use a changed definition is unknown: this module, or
+             *     one it builds on in the plan, has no declaration export to read.
+             */
+            affected_unknown?: boolean;
+            /** @description The old module's code with its imports swapped. */
+            code: string;
+            /**
+             * @description The entry it rebuilds. Absent for a module that only links others to
+             *     `from`, with no entry that has the labels: it gets the labels asked
+             *     for.
+             */
+            entry?: string;
+            /**
+             * @description The idempotency key to create it with. Planning again gives the same
+             *     keys, so running a plan again after a failure replays the creates
+             *     that are done.
+             */
+            key: string;
+            labels: {
+                [key: string]: string;
+            };
+            /**
+             * @description 1 for a module that imports `from`'s, 2 for one that imports that, and
+             *     so on, by its longest chain.
+             */
+            level: number;
+            /** @description The header of code on top of the new module. */
+            new_header: string;
+            /** @description The module the create makes. */
+            new_snapshot: string;
+            /** @description The module it rebuilds. */
+            snapshot: string;
+        };
+        RebuildPlan: {
+            /** @description The definitions whose value `to` changed. */
+            changed_definitions?: string[];
+            /**
+             * @description How `to` differs from `from`, as in a refused replacement's
+             *     `result.reasons`. Empty when `to` replaces `from`: its create
+             *     compared them.
+             */
+            changes: string[];
+            /**
+             * @description Whether there is a plan: false when `to` changes what `from` states
+             *     and `allow_changes` isn't set.
+             */
+            ok: boolean;
+            /**
+             * @description The creates to make, by level, then oldest first. A level's items can
+             *     be created together once the level below is done.
+             */
+            plan: components["schemas"]["RebuildItem"][];
+        };
+        /**
+         * @description `POST /snapshots/rebuild`: plans how to create the dependents of `from`
+         *     (see [`SnapshotDependents`]) again on `to`, each with its imports of
+         *     `from`'s module, and of the other modules it rebuilds, swapped for the new
+         *     ones. It only plans: the client creates the plan's items.
+         */
+        RebuildRequest: {
+            /**
+             * @description Plan even though `to` changes what `from` states, when `to` wasn't
+             *     created to [`replace`](SnapshotRequest::replaces) `from`.
+             */
+            allow_changes?: boolean;
+            /** @description Must be `true`: a rebuild only plans, for now. */
+            dry_run?: boolean;
+            /** @description The entry being replaced. */
+            from: string;
+            /**
+             * @description Which dependents to rebuild: those with an entry that has every label,
+             *     and the modules they build on above `from`. Required, so that the
+             *     caller chooses which projects follow the edit.
+             */
+            labels: {
+                [key: string]: string;
+            };
+            /** @description Its replacement. */
+            to: string;
+            version?: string;
+        };
         /** @description An entry that another replaced, and how. */
         Replaced: {
             allow?: components["schemas"]["Allow"];
@@ -649,6 +781,16 @@ export interface components {
         };
         /** @enum {string} */
         Severity: "trace" | "info" | "warning" | "error";
+        /**
+         * @description `GET /snapshots/{entry}/dependents`: the entries on every module that
+         *     imports the entry's module, directly or through others, parents first: by
+         *     level, where a module that imports it is at level 1 and one that imports
+         *     that at 2, by its longest chain, then oldest first. With `label=key:value`
+         *     filters, as in a listing, only the entries with every label.
+         */
+        SnapshotDependents: {
+            entries: components["schemas"]["SnapshotSummary"][];
+        };
         SnapshotFailure: {
             /** @description Why the re-check failed, e.g. the kernel's error or a timeout. */
             reason: string;
@@ -960,6 +1102,9 @@ export type ModuleDecl = components['schemas']['ModuleDecl'];
 export type Pos = components['schemas']['Pos'];
 export type Query = components['schemas']['Query'];
 export type QueryResult = components['schemas']['QueryResult'];
+export type RebuildItem = components['schemas']['RebuildItem'];
+export type RebuildPlan = components['schemas']['RebuildPlan'];
+export type RebuildRequest = components['schemas']['RebuildRequest'];
 export type Replaced = components['schemas']['Replaced'];
 export type Replacement = components['schemas']['Replacement'];
 export type Replaces = components['schemas']['Replaces'];
@@ -971,6 +1116,7 @@ export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
 export type SessionCheckRequest = components['schemas']['SessionCheckRequest'];
 export type Severity = components['schemas']['Severity'];
+export type SnapshotDependents = components['schemas']['SnapshotDependents'];
 export type SnapshotFailure = components['schemas']['SnapshotFailure'];
 export type SnapshotHit = components['schemas']['SnapshotHit'];
 export type SnapshotInfo = components['schemas']['SnapshotInfo'];
@@ -1788,6 +1934,90 @@ export interface operations {
             };
         };
     };
+    planRebuild: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RebuildRequest"];
+            };
+        };
+        responses: {
+            /** @description The plan, or the changes that stop it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RebuildPlan"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     getSnapshot: {
         parameters: {
             query?: {
@@ -1986,6 +2216,94 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SnapshotSummary"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listDependents: {
+        parameters: {
+            query?: {
+                /** @description `key:value`, split on the first `:`; repeatable */
+                label?: string[];
+                /** @description The worker version; the server's default when absent. */
+                version?: string;
+            };
+            header?: never;
+            path: {
+                /** @description The entry ID, 32 hex digits */
+                entry: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries above it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotDependents"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

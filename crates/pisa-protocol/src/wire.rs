@@ -26,6 +26,8 @@ pub enum Job {
     SnapshotVerify(SnapshotJob),
     SnapshotList(SnapshotListJob),
     SnapshotLabels(SnapshotLabelsJob),
+    SnapshotDependents(SnapshotDependentsJob),
+    SnapshotRebuild(SnapshotRebuildJob),
     /// A job kind this worker doesn't know, from a newer server. It is
     /// answered with [`JobResult::Failed`].
     #[serde(other)]
@@ -96,6 +98,27 @@ pub struct SnapshotListJob {
     pub after: Option<String>,
 }
 
+/// `GET /snapshots/{entry}/dependents`, its filters parsed and checked by
+/// the router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotDependentsJob {
+    /// The entry id.
+    pub entry: String,
+    /// `(key, value)` pairs that an entry must all have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<(String, String)>,
+}
+
+/// `POST /snapshots/rebuild`, as a plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotRebuildJob {
+    pub from: String,
+    pub to: String,
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub allow_changes: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotLabelsJob {
     /// The entry id.
@@ -120,6 +143,8 @@ pub enum JobResult {
     SnapshotVerified(Result<api::SnapshotVerified, api::Error>),
     SnapshotList(Result<api::SnapshotList, api::Error>),
     SnapshotLabels(Result<api::SnapshotSummary, api::Error>),
+    SnapshotDependents(Result<api::SnapshotDependents, api::Error>),
+    SnapshotRebuild(Result<api::RebuildPlan, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,

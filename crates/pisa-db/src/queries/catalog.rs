@@ -380,6 +380,64 @@ pub(crate) async fn list(
         .collect::<Result<_, _>>()?)
 }
 
+/// Each module that imports `m`, directly or through others, with those of
+/// its imports that are `m` or such modules: one query per level.
+pub(crate) async fn dependents(
+    db: &Handle,
+    v: &str,
+    m: &str,
+) -> Result<BTreeMap<String, Vec<String>>, Error> {
+    let found = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let mut above: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            let mut frontier = vec![m.to_string()];
+            while !frontier.is_empty() {
+                let edges: Vec<(String, String)> = module_imports::table
+                    .filter(module_imports::version.eq(v))
+                    .filter(module_imports::parent.eq_any(&frontier))
+                    .select((module_imports::module, module_imports::parent))
+                    .load(conn)
+                    .await?;
+                frontier.clear();
+                for (module, parent) in edges {
+                    if !above.contains_key(&module) {
+                        frontier.push(module.clone());
+                    }
+                    above.entry(module).or_default().push(parent);
+                }
+            }
+            Ok(above)
+        })
+    })
+    .await?;
+    Ok(found)
+}
+
+/// The entries on `modules` with every label in `labels`, oldest first.
+pub(crate) async fn entries_on(
+    db: &Handle,
+    v: &str,
+    modules: &[String],
+    labels: &[(String, String)],
+) -> Result<Vec<(String, EntryMeta)>, Error> {
+    let query = entries::table
+        .filter(entries::version.eq(v))
+        .filter(entries::module.eq_any(modules.to_vec()))
+        .into_boxed();
+    let rows = label_filter(query, labels)
+        .order((entries::created_micros, entries::id))
+        .select(ENTRY)
+        .load::<EntryRow>(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(entry_from_row)
+        .collect::<Result<_, _>>()?)
+}
+
 pub(crate) async fn set_labels(
     db: &Handle,
     v: &str,

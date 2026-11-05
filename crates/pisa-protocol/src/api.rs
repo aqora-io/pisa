@@ -16,6 +16,8 @@
 //! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
 //! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`SnapshotList`] |
 //! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
+//! | `GET /snapshots/{entry}/dependents` | `?label=key:value` → [`SnapshotDependents`] |
+//! | `POST /snapshots/rebuild` | [`RebuildRequest`] → [`RebuildPlan`] |
 //! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
 //! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
 //! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
@@ -675,6 +677,97 @@ pub struct SnapshotList {
     /// may be empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
+}
+
+/// `GET /snapshots/{entry}/dependents`: the entries on every module that
+/// imports the entry's module, directly or through others, parents first: by
+/// level, where a module that imports it is at level 1 and one that imports
+/// that at 2, by its longest chain, then oldest first. With `label=key:value`
+/// filters, as in a listing, only the entries with every label.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotDependents {
+    pub entries: Vec<SnapshotSummary>,
+}
+
+/// `POST /snapshots/rebuild`: plans how to create the dependents of `from`
+/// (see [`SnapshotDependents`]) again on `to`, each with its imports of
+/// `from`'s module, and of the other modules it rebuilds, swapped for the new
+/// ones. It only plans: the client creates the plan's items.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RebuildRequest {
+    /// The entry being replaced.
+    pub from: String,
+    /// Its replacement.
+    pub to: String,
+    /// Which dependents to rebuild: those with an entry that has every label,
+    /// and the modules they build on above `from`. Required, so that the
+    /// caller chooses which projects follow the edit.
+    pub labels: BTreeMap<String, String>,
+    /// Must be `true`: a rebuild only plans, for now.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Plan even though `to` changes what `from` states, when `to` wasn't
+    /// created to [`replace`](SnapshotRequest::replaces) `from`.
+    #[serde(default)]
+    pub allow_changes: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RebuildPlan {
+    /// Whether there is a plan: false when `to` changes what `from` states
+    /// and `allow_changes` isn't set.
+    pub ok: bool,
+    /// How `to` differs from `from`, as in a refused replacement's
+    /// `result.reasons`. Empty when `to` replaces `from`: its create
+    /// compared them.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub changes: Vec<String>,
+    /// The definitions whose value `to` changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_definitions: Vec<String>,
+    /// The creates to make, by level, then oldest first. A level's items can
+    /// be created together once the level below is done.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub plan: Vec<RebuildItem>,
+}
+
+/// A create in a [`RebuildPlan`]: `POST /snapshots` with its `code`, `labels`
+/// and `key`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RebuildItem {
+    /// 1 for a module that imports `from`'s, 2 for one that imports that, and
+    /// so on, by its longest chain.
+    pub level: usize,
+    /// The entry it rebuilds. Absent for a module that only links others to
+    /// `from`, with no entry that has the labels: it gets the labels asked
+    /// for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    /// The module it rebuilds.
+    pub snapshot: String,
+    /// The module the create makes.
+    pub new_snapshot: String,
+    /// The header of code on top of the new module.
+    pub new_header: String,
+    /// The old module's code with its imports swapped.
+    pub code: String,
+    pub labels: BTreeMap<String, String>,
+    /// The idempotency key to create it with. Planning again gives the same
+    /// keys, so running a plan again after a failure replays the creates
+    /// that are done.
+    pub key: String,
+    /// The theorems of the module whose type uses a changed definition,
+    /// directly or through other definitions, here or below.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected: Vec<String>,
+    /// Which theorems use a changed definition is unknown: this module, or
+    /// one it builds on in the plan, has no declaration export to read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub affected_unknown: bool,
 }
 
 /// `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets

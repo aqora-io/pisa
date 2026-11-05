@@ -2,9 +2,11 @@
 //! code imports. A snapshot's module name comes from a hash of its code, so
 //! the same code is the same snapshot on every worker of a version.
 
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 
-use crate::header::import_parts;
+use crate::header::{import_parts, split_header};
 
 /// The root of every snapshot module name.
 pub const ROOT: &str = "PisaSnap";
@@ -96,6 +98,30 @@ pub fn next_header(header: &str, id: &str) -> String {
     lines.join("\n")
 }
 
+/// `code` with each snapshot its imports name that `map` has (old id → new
+/// id) swapped for the new one. Only the import lines change, and an id is
+/// always 32 hex digits, so lines and columns stay where they were.
+pub fn rewrite_imports(code: &str, map: &BTreeMap<String, String>) -> String {
+    let header_lines = split_header(code).header_lines as usize;
+    let lines = code.split('\n').enumerate().map(|(i, line)| {
+        let import = line.split("--").next().unwrap_or(line);
+        let swapped = match import_parts(import) {
+            Some((_, modules)) if i < header_lines => modules
+                .iter()
+                .filter_map(|m| parse_module(m).ok().flatten())
+                .filter_map(|id| Some((id.clone(), map.get(&id)?)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        swapped
+            .into_iter()
+            .fold(line.to_string(), |line, (old, new)| {
+                line.replace(&format!("s{old}"), &format!("s{new}"))
+            })
+    });
+    lines.collect::<Vec<_>>().join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +178,35 @@ mod tests {
         // Code that starts with it has exactly that header.
         let split = split_header(&format!("{next}\n\ntheorem t : True := trivial"));
         assert_eq!(split.header, next);
+    }
+
+    #[test]
+    fn rewrite_imports_swaps_only_the_imports_it_is_given() {
+        const C: &str = "00000000000000000000000000000000";
+        const N: &str = "11111111111111111111111111111111";
+        let code = format!(
+            "module\npublic import Mathlib\nimport all PisaSnap.s{A} PisaSnap.s{B} -- s{A}\n\
+             import «PisaSnap».«s{C}»\n\n-- PisaSnap.s{A} stays here\ntheorem t : True := trivial"
+        );
+        let map = BTreeMap::from([
+            (A.to_string(), N.to_string()),
+            (C.to_string(), B.to_string()),
+        ]);
+        let rewritten = rewrite_imports(&code, &map);
+        assert_eq!(
+            rewritten,
+            format!(
+                "module\npublic import Mathlib\nimport all PisaSnap.s{N} PisaSnap.s{B} -- s{N}\n\
+                 import «PisaSnap».«s{B}»\n\n-- PisaSnap.s{A} stays here\ntheorem t : True := trivial"
+            )
+        );
+        let lengths = |c: &str| c.lines().map(str::len).collect::<Vec<_>>();
+        assert_eq!(lengths(&rewritten), lengths(&code));
+        assert_eq!(
+            imports(&split_header(&rewritten).header),
+            Ok(vec![N.to_string(), B.to_string()])
+        );
+        assert_eq!(rewrite_imports(&code, &BTreeMap::new()), code);
     }
 
     #[test]
