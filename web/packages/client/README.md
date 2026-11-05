@@ -24,6 +24,8 @@ const more = "import Mathlib\ndef double (n : Nat) := 2 * n\ntheorem double_two 
 const replacement = await pisa.createSnapshot(more, { replaces: base.entry! });
 // What builds on an entry, and the creates that move it onto a replacement.
 const { entries } = await pisa.dependents(base.entry!, { labels: { project: "p" } });
+// What the project rests on: declarations by status, assumptions and what uses them.
+const { summary, assumptions } = await pisa.audit({ labels: { project: "p" } });
 const { plan } = await pisa.rebuildPlan(base.entry!, replacement.entry!, { project: "p" });
 // Or let the server run it, retiring the old entries; as a job, since it can take minutes.
 const done = await pisa.waitJob(await pisa.submitRebuild(base.entry!, replacement.entry!, { project: "p" }, { retire: true }));

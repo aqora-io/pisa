@@ -719,6 +719,7 @@ let opts = pisa_client::SnapshotOptions { replaces, ..Default::default() };
 let lemma = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl";
 let extended = client.create_snapshot_with(lemma, &opts).await?;
 let above = client.dependents(&entry, &[("run", "7")]).await?; // parents first
+let audit = client.audit(&[("run", "7")]).await?; // statuses, assumptions, what isn't proved
 let labels = std::collections::BTreeMap::from([("run".to_string(), "7".to_string())]);
 let plan = client.rebuild_plan(&entry, extended.entry.as_deref().unwrap(), &labels, false).await?;
 let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old entries after
@@ -748,6 +749,7 @@ client.verify_snapshot(base["entry"])["verified"]
 more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl"
 extended = client.create_snapshot(more, replaces=base["entry"])   # or {"entry": …, "allow": "definitions"}
 client.dependents(base["entry"], {"run": "7"})   # parents first
+client.audit({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
 plan = client.rebuild_plan(base["entry"], extended["entry"], {"run": "7"})   # create each item, a level at a time
 done = client.wait_job(client.submit_rebuild(base["entry"], extended["entry"], {"run": "7"}))   # retire=True deletes the old entries
 client.delete_snapshot(base["entry"])   # the modules that went with it

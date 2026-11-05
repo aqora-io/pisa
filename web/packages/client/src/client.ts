@@ -20,6 +20,7 @@ import type {
   Resolution,
   SearchResponse,
   SessionId,
+  SnapshotAudit,
   SnapshotDependents,
   SnapshotInfo,
   SnapshotList,
@@ -236,6 +237,15 @@ export class PisaClient {
   }
 
   /** Removes the labels in `remove`, then sets those in `set`. */
+  /** What the entries with every label rest on: their declarations by
+   *  `status`, each assumption (an axiom declared in snapshot code) with what
+   *  uses it, and what isn't proved. */
+  audit(params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<SnapshotAudit> {
+    const query = this.versionQuery(options);
+    for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
+    return this.call("GET", ["snapshots", "audit"], undefined, options, query);
+  }
+
   /** The entries on every module that imports `entry`'s, directly or through
    *  others, parents first: by level, then oldest first. */
   dependents(entry: string, params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<SnapshotDependents> {

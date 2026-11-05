@@ -52,8 +52,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    Allow, CheckResult, Declaration, Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos,
-    RebuildItem, RebuildResponse, Replaced, Replacement, Replaces, Severity, SnapshotDependents,
+    Allow, AuditAssumption, AuditSummary, AuditUnproved, CheckResult, Declaration, Detail,
+    ErrorKind, JobKind, JobState, JobStatus, Message, Pos, ProofStatus, RebuildItem,
+    RebuildResponse, Replaced, Replacement, Replaces, Severity, SnapshotAudit, SnapshotDependents,
     SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary,
     SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
     TacticResponse as Step,
@@ -597,8 +598,6 @@ impl Client {
         self.endpoint.get(url).await
     }
 
-    /// Removes the labels `remove` names from an entry, then sets those in
-    /// `set`, and returns the entry's summary.
     /// The entries on every module that imports `entry`'s, directly or
     /// through others, parents first: those with every `(key, value)` label
     /// in `labels`, or all of them.
@@ -690,6 +689,25 @@ impl Client {
         }
     }
 
+    /// What the entries with every `(key, value)` label in `labels` rest on:
+    /// their declarations by status, each assumption with what uses it, and
+    /// what isn't proved; see [`SnapshotAudit`].
+    pub async fn audit(&self, labels: &[(&str, &str)]) -> Result<SnapshotAudit, Error> {
+        let mut url = self.endpoint.url("snapshots/audit")?;
+        {
+            let mut query = url.query_pairs_mut();
+            for (key, value) in labels {
+                query.append_pair("label", &format!("{key}:{value}"));
+            }
+            if let Some(v) = &self.version {
+                query.append_pair("version", v);
+            }
+        }
+        self.endpoint.get(url).await
+    }
+
+    /// Removes the labels `remove` names from an entry, then sets those in
+    /// `set`, and returns the entry's summary.
     pub async fn set_snapshot_labels(
         &self,
         entry: &str,

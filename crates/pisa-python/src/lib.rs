@@ -292,6 +292,22 @@ impl Client {
         })
     }
 
+    #[pyo3(signature = (labels = None))]
+    fn audit<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Option<BTreeMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let labels = labels.unwrap_or_default();
+        call(py, async move {
+            let labels: Vec<(&str, &str)> = labels
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            self.inner.audit(&labels).await
+        })
+    }
+
     #[pyo3(signature = (entry, labels = None))]
     fn dependents<'py>(
         &self,

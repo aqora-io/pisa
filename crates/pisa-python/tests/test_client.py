@@ -266,6 +266,17 @@ def test_rebuild_plan(url):
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
 
+def test_audit(url):
+    client = Client(url, timeout=5)
+    a = client.create_snapshot("import Foo\naxiom py_assumed : 1 = 1")
+    b = client.create_snapshot(a["header"] + "\n\ntheorem py_uses : 1 = 1 := py_assumed", labels={"suite": "audit"})
+    assert b["status"] == "conditional"
+    audit = client.audit({"suite": "audit"})
+    assert audit["summary"]["conditional"] == 1
+    assert [x["name"] for x in audit["assumptions"]] == ["py_assumed"]
+    assert audit["assumptions"][0]["used_by"] == ["py_uses"]
+
+
 def test_snapshot_labels(url):
     client = Client(url, timeout=5)
     code = "import Foo\ntheorem listed : 1 = 1 := rfl"

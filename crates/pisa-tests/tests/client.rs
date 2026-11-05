@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, RebuildOptions, Replaces,
-    SnapshotList, SnapshotOptions,
+    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, ProofStatus, RebuildOptions,
+    Replaces, SnapshotList, SnapshotOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -226,6 +226,28 @@ async fn client_lists_dependents_and_plans_rebuilds() {
         rebuilt.snapshot.as_deref(),
         Some(item.new_snapshot.as_str())
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_audits_a_project() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let a = client
+        .create_snapshot("import Foo\naxiom kunneth : 1 = 1")
+        .await
+        .unwrap();
+    let opts = SnapshotOptions {
+        labels: BTreeMap::from([("audit".to_string(), "1".to_string())]),
+        ..Default::default()
+    };
+    let code = format!("{}\n\ntheorem thm3 : 1 = 1 := kunneth", a.header.unwrap());
+    let b = client.create_snapshot_with(&code, &opts).await.unwrap();
+    assert_eq!(b.status, Some(ProofStatus::Conditional));
+    let audit = client.audit(&[("audit", "1")]).await.unwrap();
+    assert_eq!(audit.summary.conditional, 1);
+    assert_eq!(audit.assumptions[0].name, "kunneth");
+    assert_eq!(audit.assumptions[0].used_by, ["thm3"]);
+    assert!(audit.not_proved.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

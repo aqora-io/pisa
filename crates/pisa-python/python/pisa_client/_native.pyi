@@ -306,6 +306,11 @@ class Client:
         them. A page has up to `limit` entries (1 to 1000, default 100). Keep
         passing its `next` as `after` while it has one; a full page has one,
         and the page after it may be empty."""
+    def audit(self, labels: dict[str, str] | None = None) -> SnapshotAudit:
+        """What the entries with every label in `labels` rest on: their
+        declarations by `status` (`proved`, `conditional` on assumptions,
+        `sorry`, `rejected`), each assumption (an axiom declared in snapshot
+        code) with what uses it, and what isn't proved."""
     def dependents(self, entry: str, labels: dict[str, str] | None = None) -> SnapshotDependents:
         """The entries on every module that imports `entry`'s, directly or
         through others, parents first (by level, then oldest first): those

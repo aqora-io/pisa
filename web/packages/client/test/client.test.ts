@@ -78,9 +78,11 @@ describe("PisaClient", () => {
   it("asks for dependents and rebuild plans", async () => {
     const { client, sent } = recording(() => json({ entries: [], ok: true, changes: [], plan: [] }));
     await client.dependents("e1", { labels: { p: "1" } });
+    await client.audit({ labels: { p: "1" } });
     await client.rebuildPlan("e1", "e2", { p: "1" }, { allowChanges: true });
     expect(sent[0]?.url).toBe("/api/snapshots/e1/dependents?version=v1&label=p%3A1");
-    expect(sent[1]).toMatchObject({
+    expect(sent[1]?.url).toBe("/api/snapshots/audit?version=v1&label=p%3A1");
+    expect(sent[2]).toMatchObject({
       url: "/api/snapshots/rebuild",
       body: { from: "e1", to: "e2", labels: { p: "1" }, dry_run: true, version: "v1", allow_changes: true },
     });
