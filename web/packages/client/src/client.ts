@@ -1,4 +1,4 @@
-import { PisaError } from "./errors.ts";
+import { PisaError, isPisaError } from "./errors.ts";
 import type {
   BatchItem,
   BatchResponse,
@@ -9,6 +9,7 @@ import type {
   Detail,
   ErrorKind,
   Health,
+  JobStatus,
   Labels,
   ListSnapshotsParams,
   Query,
@@ -75,6 +76,25 @@ export interface DeclOptions extends RequestOptions {
 export type CreateSnapshotOptions = RunOptions &
   Pick<SnapshotRequest, "verify" | "labels" | "key">;
 
+/** A request sent with `Prefer: respond-async`: its job, whose answer is a
+ *  `T`. Anyone with its id can read the answer or cancel it, so keep it
+ *  secret; the server keeps the answer for an hour after the job is done. */
+export interface Job<T> extends JobStatus {
+  /** The answer's type; never set. */
+  readonly answer?: T;
+}
+
+/** Where a job stands: done with its request's answer, or not yet. */
+export type JobPoll<T> = { done: true; answer: T } | { done: false; status: JobStatus };
+
+export interface JobOptions extends RequestOptions {
+  /** Seconds to wait for the job to finish, at most 60; by default none. */
+  wait?: number;
+}
+
+/** How long each look of `waitJob` waits: the server's longest. */
+const JOB_WAIT = 60;
+
 const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
   "timeout",
   "out_of_memory",
@@ -123,6 +143,12 @@ export class PisaClient {
     return this.call("POST", ["check"], { code, ...this.run(options), ...detail(options) }, options);
   }
 
+  /** `check` as a job, which outlives the request and its proxies: wait for
+   *  it with `waitJob`. */
+  submitCheck(code: string, options: CheckOptions = {}): Promise<Job<CheckResult>> {
+    return this.submit(["check"], { code, ...this.run(options), ...detail(options) }, options);
+  }
+
   /** Checks several pieces of code; every item gets a result, in order. */
   async checkBatch(items: BatchItem[], options: CheckOptions = {}): Promise<CheckResult[]> {
     const body = { items, ...this.run(options), ...detail(options) };
@@ -133,6 +159,11 @@ export class PisaClient {
   /** Starts a session on code with `sorry`s, each of which becomes a state. */
   startSession(code: string, options: RunOptions = {}): Promise<StartResponse> {
     return this.call("POST", ["sessions"], { code, ...this.run(options) }, options);
+  }
+
+  /** `startSession` as a job. */
+  submitSession(code: string, options: RunOptions = {}): Promise<Job<StartResponse>> {
+    return this.submit(["sessions"], { code, ...this.run(options) }, options);
   }
 
   /** Applies a tactic to a state; the state stays valid, so this can branch.
@@ -146,6 +177,11 @@ export class PisaClient {
     );
   }
 
+  /** `tactic` as a job. */
+  submitTactic(state: StateKey, tactic: string, options: RunOptions = {}): Promise<Job<TacticResponse>> {
+    return this.submit(["states", state, "tactic"], { tactic, ...this.timeoutOf(options) }, options);
+  }
+
   /** Checks the completed code of a session from scratch. */
   checkSession(session: SessionId, code: string, options: RunOptions = {}): Promise<CheckResult> {
     return this.call(
@@ -156,14 +192,20 @@ export class PisaClient {
     );
   }
 
+  /** `checkSession` as a job. */
+  submitSessionCheck(session: SessionId, code: string, options: RunOptions = {}): Promise<Job<CheckResult>> {
+    return this.submit(["sessions", session, "check"], { code, ...this.timeoutOf(options) }, options);
+  }
+
   /** Checks code and keeps it as a snapshot that later code can import
    *  through `header`. Failures are in `result.error`. */
   createSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<SnapshotResponse> {
-    const body: SnapshotRequest = { code, ...this.run(options) };
-    if (options.verify !== undefined) body.verify = options.verify;
-    if (options.labels !== undefined) body.labels = options.labels;
-    if (options.key !== undefined) body.key = options.key;
-    return this.call("POST", ["snapshots"], body, options);
+    return this.call("POST", ["snapshots"], this.snapshotRequest(code, options), options);
+  }
+
+  /** `createSnapshot` as a job. */
+  submitSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<Job<SnapshotResponse>> {
+    return this.submit(["snapshots"], this.snapshotRequest(code, options), options);
   }
 
   getSnapshot(entry: string, options: VersionOptions = {}): Promise<SnapshotInfo> {
@@ -205,6 +247,47 @@ export class PisaClient {
     );
   }
 
+  /** `verifySnapshot` as a job. */
+  submitVerify(entry: string, options: VersionOptions = {}): Promise<Job<SnapshotVerified>> {
+    return this.submit(["snapshots", entry, "verify"], undefined, options, this.versionQuery(options));
+  }
+
+  /** Where `job` stands, after waiting up to `wait` seconds for it to
+   *  finish. Done, the answer is what its request would have returned, and
+   *  an error is thrown as it would have been. */
+  async pollJob<T>(job: Job<T>, options: JobOptions = {}): Promise<JobPoll<T>> {
+    const query = new URLSearchParams();
+    if (options.wait !== undefined) query.set("wait", String(options.wait));
+    const r = await this.send("GET", ["jobs", job.job], undefined, query, options.signal);
+    const body = await readJson(r);
+    if (r.status === 202) return { done: false, status: body as JobStatus };
+    return { done: true, answer: ok<T>(r, body) };
+  }
+
+  /** Waits for `job` to finish, however long it takes, and returns what its
+   *  request would have, or throws what it would have thrown. A few network
+   *  failures in a row are tried again. */
+  async waitJob<T>(job: Job<T>, options: RequestOptions = {}): Promise<T> {
+    let dropped = 0;
+    for (;;) {
+      try {
+        const polled = await this.pollJob(job, { ...options, wait: JOB_WAIT });
+        if (polled.done) return polled.answer;
+        dropped = 0;
+      } catch (e) {
+        if (!isPisaError(e, "network") || dropped >= 3) throw e;
+        dropped += 1;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+  }
+
+  /** Withdraws `job` if no worker has started it (`cancelled`); one that is
+   *  `running` or `done` stays as it is. */
+  cancelJob(job: JobStatus, options: RequestOptions = {}): Promise<JobStatus> {
+    return this.call("DELETE", ["jobs", job.job], undefined, options);
+  }
+
   async search(query: Query, options: SearchOptions = {}): Promise<QueryResult> {
     const [result] = await this.searchBatch([query], options);
     if (result === undefined) throw new PisaError("bad_response", "the search returned no result");
@@ -237,6 +320,24 @@ export class PisaClient {
     const query = options.module === undefined ? undefined : new URLSearchParams({ module: options.module });
     const r = await this.call<DeclResponse>("GET", ["v1", "decl", name], undefined, options, query);
     return r.decl;
+  }
+
+  private snapshotRequest(code: string, options: CreateSnapshotOptions): SnapshotRequest {
+    const body: SnapshotRequest = { code, ...this.run(options) };
+    if (options.verify !== undefined) body.verify = options.verify;
+    if (options.labels !== undefined) body.labels = options.labels;
+    if (options.key !== undefined) body.key = options.key;
+    return body;
+  }
+
+  /** POSTs with `Prefer: respond-async`: the job the server queued. */
+  private async submit<T>(path: string[], body: unknown, options: RequestOptions, query?: URLSearchParams): Promise<Job<T>> {
+    const r = await this.send("POST", path, body, query, options.signal, { prefer: "respond-async" });
+    const answer = ok<Job<T>>(r, await readJson(r));
+    if (r.status !== 202) {
+      throw new PisaError("bad_response", "the server answered at once: it doesn't queue requests", r.status);
+    }
+    return answer;
   }
 
   private run(options: RunOptions): { version?: string; timeout?: number } {
@@ -278,10 +379,11 @@ export class PisaClient {
     body: unknown,
     query: URLSearchParams | undefined,
     signal: AbortSignal | undefined,
+    extra: Record<string, string> = {},
   ): Promise<Response> {
     const search = query?.toString();
     const url = `${this.url}/${path.map(encodeURIComponent).join("/")}${search ? `?${search}` : ""}`;
-    const headers: Record<string, string> = { ...this.headers };
+    const headers: Record<string, string> = { ...this.headers, ...extra };
     if (body !== undefined) headers["content-type"] = "application/json";
     try {
       return await this.fetcher(url, {

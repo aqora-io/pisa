@@ -30,6 +30,16 @@ const { hits } = await pisa.search({ nl: "trace of a density matrix is one" });
   kinds.
 - **Cancelling.** Every method takes a `signal`. Aborting gives the job up only
   if no worker has claimed it yet.
+- **Long requests.** Behind a proxy that cuts requests off, `submitCheck`,
+  `submitSession`, `submitTactic`, `submitSessionCheck`, `submitSnapshot` and
+  `submitVerify` ask for an async request and return its `Job` at once.
+  `waitJob(job)` then returns what the call would have, or throws what it would
+  have thrown; `pollJob(job, { wait })` looks once, and `cancelJob(job)`
+  withdraws a job no worker has started. A job's answer is kept for an hour.
+  ```ts
+  const job = await pisa.submitCheck("import Mathlib\nexample : 2 + 2 = 4 := by norm_num");
+  (await pisa.waitJob(job)).ok;
+  ```
 - **Options.** `version`, `timeout` and `envId` can be set per call, or for the
   whole client.
 - **Positions.** Lean's columns count code points. `posMapper(code)` converts

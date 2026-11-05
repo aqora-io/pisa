@@ -128,4 +128,45 @@ describe("the server", () => {
     });
     expect(preflight.headers.get("access-control-allow-origin")).toBe("http://app.example");
   });
+
+  it("lets it ask for a job, and read the job's id", async () => {
+    const preflight = await fetch(`${url}/check`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://app.example",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "content-type, prefer",
+      },
+    });
+    expect(preflight.headers.get("access-control-allow-headers")).toContain("prefer");
+    const r = await fetch(`${url}/check`, {
+      method: "POST",
+      headers: { origin: "http://app.example", "content-type": "application/json", prefer: "respond-async" },
+      body: JSON.stringify({ code: "#check Nat" }),
+    });
+    expect(r.status).toBe(202);
+    expect(r.headers.get("access-control-expose-headers")).toContain("location");
+  });
+});
+
+describe("jobs", () => {
+  it("answers later as the request would have", async () => {
+    const job = await client.submitCheck("#check Nat");
+    expect(job).toMatchObject({ kind: "check", status: "queued" });
+    expect((await client.waitJob(job)).ok).toBe(true);
+
+    const session = await client.waitJob(await client.submitSession("theorem t : 1 = 1 := by sorry"));
+    const state = session.states[0]?.state ?? "";
+    expect((await client.waitJob(await client.submitTactic(state, "rfl"))).complete).toBe(true);
+    const failed = await client.waitJob(await client.submitTactic(state, "fail")).catch((e: unknown) => e);
+    expect(isPisaError(failed, "lean")).toBe(true);
+    const proved = await client.submitSessionCheck(session.session, "theorem t : 1 = 1 := by rfl");
+    expect((await client.waitJob(proved)).ok).toBe(true);
+
+    const made = await client.waitJob(await client.submitSnapshot("def jobbed := 1"));
+    const verified = await client.waitJob(await client.submitVerify(made.entry ?? ""));
+    expect(verified.verified).toBe(true);
+    // Done: it stays as it is.
+    expect((await client.cancelJob(job)).status).toBe("done");
+  });
 });

@@ -111,4 +111,43 @@ describe("PisaClient", () => {
     reply = new Response("Service Unavailable", { status: 503 });
     expect(await client.health().catch((e: unknown) => e)).toMatchObject({ kind: "bad_response", status: 503 });
   });
+
+  it("submits a request as a job, and waits for its answer", async () => {
+    const job = { job: "a".repeat(32), kind: "check", status: "queued" };
+    let looks = 0;
+    const { client, sent } = recording((s) => {
+      if (s.method === "POST") return json(job, 202);
+      if (s.method === "DELETE") return json({ ...job, status: "cancelled" });
+      looks += 1;
+      return looks < 3 ? json({ ...job, status: "running" }, 202) : json({ ok: true });
+    });
+    const submitted = await client.submitCheck("#check Nat", { detail: ["tactics"] });
+    expect(submitted).toEqual(job);
+    expect(sent[0]?.headers["prefer"]).toBe("respond-async");
+    expect(sent[0]?.body).toEqual({ code: "#check Nat", version: "v1", detail: ["tactics"] });
+
+    expect(await client.pollJob(submitted)).toEqual({ done: false, status: { ...job, status: "running" } });
+    expect((await client.waitJob(submitted)).ok).toBe(true);
+    expect(sent.slice(1).map((s) => s.url)).toEqual([
+      `/api/jobs/${job.job}`,
+      `/api/jobs/${job.job}?wait=60`,
+      `/api/jobs/${job.job}?wait=60`,
+    ]);
+    expect((await client.cancelJob(submitted)).status).toBe("cancelled");
+  });
+
+  it("throws a job's error as its request would have, and a server that won't queue it", async () => {
+    const job = { job: "b".repeat(32), kind: "tactic", status: "queued" };
+    const { client } = recording((s) =>
+      s.method === "POST" ? json(job, 202) : json({ error: { kind: "lean", message: "no" } }, 422),
+    );
+    const submitted = await client.submitTactic("v~h~s", "fail");
+    const thrown = await client.waitJob(submitted).catch((e: unknown) => e);
+    expect(isPisaError(thrown, "lean")).toBe(true);
+
+    const { client: old } = recording(() => json({ ok: true }));
+    const refused = await old.submitCheck("#check Nat").catch((e: unknown) => e);
+    expect(isPisaError(refused, "bad_response")).toBe(true);
+  });
 });
+
