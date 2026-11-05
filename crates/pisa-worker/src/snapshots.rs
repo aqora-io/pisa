@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    CheckResult, Declaration, Deleted, Error, ErrorKind, SnapshotFailure, SnapshotInfo,
+    CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, SnapshotFailure, SnapshotInfo,
     SnapshotList, SnapshotResponse, SnapshotSummary, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
@@ -1003,6 +1003,7 @@ impl Snapshots {
         let entry = parse_entry(entry)?;
         let entry_meta = self.catalog.entry(entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
+        let decls = self.decls(&entry_meta.module).await?;
         Ok(SnapshotInfo {
             entry: entry.to_string(),
             snapshot: snapshot::module(&entry_meta.module),
@@ -1014,7 +1015,28 @@ impl Snapshots {
             verified: meta.verified,
             result: meta.result,
             created: entry_meta.created_micros / 1_000_000,
+            decls,
         })
+    }
+
+    /// Module `m`'s declarations, each with the description search's leader
+    /// has recorded for it, if any.
+    async fn decls(&self, m: &str) -> Result<Vec<ModuleDecl>, Error> {
+        let Some(decls) = self.catalog.decls(m).await? else {
+            return Ok(Vec::new());
+        };
+        let mut described: HashMap<String, serde_json::Value> =
+            self.catalog.described(m).await?.into_iter().collect();
+        let decls = decls.decls.into_iter().map(|d| ModuleDecl {
+            informal: described
+                .remove(&d.name)
+                .and_then(|r| serde_json::from_value(r.get("informal")?.clone()).ok()),
+            name: d.name,
+            kind: d.kind,
+            signature: d.signature,
+            docstring: d.docstring,
+        });
+        Ok(decls.collect())
     }
 
     /// The entries, newest first, that have every label in `labels`, at most

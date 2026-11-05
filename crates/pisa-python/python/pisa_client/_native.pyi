@@ -87,6 +87,14 @@ class SnapshotInfo(TypedDict):
     verified: bool
     result: CheckResult
     created: int
+    decls: NotRequired[list[ModuleDecl]]
+
+class ModuleDecl(TypedDict):
+    name: str
+    kind: str
+    signature: str
+    docstring: NotRequired[str]
+    informal: NotRequired[Informal]
 
 class SnapshotSummary(TypedDict):
     entry: str

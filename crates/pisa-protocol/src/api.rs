@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::repl;
+use crate::search::Informal;
 pub use crate::verify::Declaration;
 
 fn default_timeout() -> u64 {
@@ -388,6 +389,23 @@ pub struct SnapshotInfo {
     pub result: CheckResult,
     /// When the entry was created, in seconds since the Unix epoch.
     pub created: u64,
+    /// The module's declarations, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decls: Vec<ModuleDecl>,
+}
+
+/// A declaration of a snapshot module, with its description once search has
+/// written one (with `PISA_SEARCH_DESCRIBE_MODEL`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleDecl {
+    pub name: String,
+    pub kind: String,
+    /// The declaration's signature, with notation.
+    pub signature: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docstring: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub informal: Option<Informal>,
 }
 
 /// An entry in a listing: as [`SnapshotInfo`], without the code and the check

@@ -246,6 +246,19 @@ export interface SnapshotInfo {
   result: CheckResult;
   /** Seconds since the Unix epoch. */
   created: number;
+  /** The module's declarations, in order. */
+  decls?: ModuleDecl[];
+}
+
+/** A declaration of a snapshot module, with its description once search has
+ *  written one (with `PISA_SEARCH_DESCRIBE_MODEL`). */
+export interface ModuleDecl {
+  name: string;
+  kind: string;
+  /** With notation. */
+  signature: string;
+  docstring?: string;
+  informal?: Informal;
 }
 
 /** An entry as a listing has it; `labels` is `{}` when it has none. */

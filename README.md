@@ -271,7 +271,7 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
 | `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, result}`; see [Snapshots](#snapshots) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
-| `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, dirty, verified, result, created}` |
+| `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, dirty, verified, result, created, decls?}` |
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -343,6 +343,11 @@ that is already kept but fails the re-check: the response then has its
 `snapshot` and `header` with the error, as new code that fails the re-check
 isn't kept.
 
+`GET /snapshots/{entry}` lists the module's declarations in `decls`, each
+`{name, kind, signature, docstring?, informal?}`. `informal` is the description
+that search writes when it has a describe model (`PISA_SEARCH_DESCRIBE_MODEL`;
+see [Snapshot search](#snapshot-search)), a little after the create.
+
 <a id="labels"></a>
 **Labels.** An entry's labels are string key/value pairs, at most 64 of them. A
 key is 1–128 bytes of letters, digits, `.`, `_`, `/` and `-`; a value is up to
@@ -358,10 +363,10 @@ which then changes nothing.
   every entry of the version. There is no OR or prefix matching. Two values for
   the same key match nothing, as an entry has one value per key.
 - **Order and pages.** Entries come newest first, as summaries: what
-  `GET /snapshots/{entry}` returns without `code` and `result`. `limit` is 1–1000
-  (default 100), and a listing takes up to 64 `label`s. Keep requesting while a
-  page has `next`, an opaque cursor, passing it as `after`: a full page has
-  `next`, and the page after it may be empty. A cursor is a position, so it
+  `GET /snapshots/{entry}` returns without `code`, `result` and `decls`.
+  `limit` is 1–1000 (default 100), and a listing takes up to 64 `label`s. Keep
+  requesting while a page has `next`, an opaque cursor, passing it as `after`:
+  a full page has `next`, and the page after it may be empty. A cursor is a position, so it
   keeps working when its entry is deleted.
 - **Speed.** On PostgreSQL, labels are matched through an index (GIN), so the
   order of the `label`s doesn't matter.

@@ -277,6 +277,24 @@ const snapshotResponseFull = {
 const snapshotInfoFull = {
   "code": "def x := 1",
   "created": 1,
+  "decls": [
+    {
+      "docstring": "The x.",
+      "informal": {
+        "informal_name": "x",
+        "source": "llm",
+        "statement_nl": "x"
+      },
+      "kind": "def",
+      "name": "x",
+      "signature": "x : Nat"
+    },
+    {
+      "kind": "theorem",
+      "name": "y",
+      "signature": "y : x = 1"
+    }
+  ],
   "dirty": false,
   "entry": "e",
   "header": "import PisaSnap.s0",

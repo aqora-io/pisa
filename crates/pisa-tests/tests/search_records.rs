@@ -58,6 +58,44 @@ async fn a_create_records_declarations_and_a_change() {
     );
 }
 
+/// `GET /snapshots/{entry}`.
+async fn info(c: &Cluster, entry: &str) -> Value {
+    let r = c.client.get(c.url(&format!("/snapshots/{entry}"))).send();
+    r.await.unwrap().json().await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_entry_lists_its_declarations_with_their_descriptions() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let r = create(&c, CODE, json!({})).await;
+    // As search's leader records a description.
+    let informal = json!({
+        "informal_name": "One is one",
+        "statement_nl": "One equals one.",
+        "source": "test",
+    });
+    let record = json!({"informal": informal, "view": "v"});
+    catalog
+        .put_described(&module(&r), &[("one".into(), record)])
+        .await
+        .unwrap();
+
+    let decls = &info(&c, r["entry"].as_str().unwrap()).await["decls"];
+    assert_eq!(
+        decls[0],
+        json!({
+            "name": "one",
+            "kind": "theorem",
+            "signature": "one : 1 = 1",
+            "docstring": "One is one.",
+            "informal": informal,
+        })
+    );
+    assert_eq!(decls[1]["name"], "two");
+    assert!(decls[1].get("informal").is_none(), "{decls}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sorry_is_flagged() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;

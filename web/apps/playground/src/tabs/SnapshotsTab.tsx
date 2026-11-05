@@ -1,4 +1,4 @@
-import type { Labels } from "@aqora/pisa-client";
+import type { Labels, ModuleDecl } from "@aqora/pisa-client";
 import {
   useCreateSnapshot,
   useDeleteSnapshot,
@@ -45,6 +45,40 @@ function Header({ header, onUse }: { header: string; onUse: (header: string) => 
         <CopyButton text={header} />
         <SubtleButton onClick={() => onUse(header)}>Build on it in Check</SubtleButton>
       </div>
+    </div>
+  );
+}
+
+/** A module's declarations, described once search has written descriptions. */
+function Decls({ decls, onRefresh }: { decls: ModuleDecl[]; onRefresh: () => void }) {
+  const undescribed = decls.some((d) => d.informal === undefined);
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <p className="text-xs font-medium text-slate-600">Declarations</p>
+        {undescribed && (
+          <button type="button" className="text-xs text-indigo-600 hover:underline" onClick={onRefresh}>
+            Refresh
+          </button>
+        )}
+      </div>
+      <ul className="divide-y divide-slate-100">
+        {decls.map((d) => (
+          <li key={d.name} className="space-y-1 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs font-medium text-slate-900">{d.name}</span>
+              <Badge>{d.kind}</Badge>
+              {d.informal !== undefined && <span className="text-sm font-medium text-slate-700">{d.informal.informal_name}</span>}
+            </div>
+            <pre className="whitespace-pre-wrap font-mono text-xs text-slate-700">{d.signature}</pre>
+            {d.informal !== undefined ? (
+              <p className="text-sm text-slate-600">{d.informal.statement_nl}</p>
+            ) : (
+              d.docstring !== undefined && <p className="text-sm text-slate-500">{d.docstring}</p>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -168,6 +202,7 @@ function Detail({ entry, version, onUse, onGone }: { entry: string; version: str
         </div>
         {e.imports.length > 0 && <p className="font-mono text-xs text-slate-600">imports {e.imports.join(", ")}</p>}
         <Header header={e.header} onUse={onUse} />
+        {e.decls !== undefined && e.decls.length > 0 && <Decls decls={e.decls} onRefresh={() => void info.refetch()} />}
         <LeanEditor value={e.code} readOnly className="h-40" />
       </div>
     </Panel>

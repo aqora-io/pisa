@@ -13,8 +13,8 @@ use std::fmt::Write;
 
 use pisa_protocol::api::{
     BatchItem, BatchRequest, BatchResponse, CheckRequest, CheckResult, Deleted, Detail, Error,
-    ErrorKind, ErrorResponse, LabelsRequest, Message, Pos, SessionCheckRequest, Severity,
-    SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotRequest, SnapshotResponse,
+    ErrorKind, ErrorResponse, LabelsRequest, Message, ModuleDecl, Pos, SessionCheckRequest,
+    Severity, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotRequest, SnapshotResponse,
     SnapshotSummary, SnapshotVerified, Sorry, StartRequest, StartResponse, StateInfo, TacticInfo,
     TacticRequest, TacticResponse,
 };
@@ -284,6 +284,33 @@ fn fixtures() -> Vec<(String, &'static str, serde_json::Value)> {
                 verified: true,
                 result: check_result(full),
                 created: 1,
+                // One with every field, one with none.
+                decls: if full {
+                    vec![
+                        ModuleDecl {
+                            name: s("x"),
+                            kind: s("def"),
+                            signature: s("x : Nat"),
+                            docstring: Some(s("The x.")),
+                            informal: Some(Informal {
+                                informal_name: s("x"),
+                                statement_nl: s("x"),
+                                statement_latex: None,
+                                aliases: vec![],
+                                source: s("llm"),
+                            }),
+                        },
+                        ModuleDecl {
+                            name: s("y"),
+                            kind: s("theorem"),
+                            signature: s("y : x = 1"),
+                            docstring: None,
+                            informal: None,
+                        },
+                    ]
+                } else {
+                    vec![]
+                },
             },
         );
         add(
