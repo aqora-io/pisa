@@ -21,7 +21,9 @@ fn default_k() -> usize {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SearchRequest {
+    /// At most 64.
     pub queries: Vec<Query>,
+    /// Fails with `not_found` unless the server has this environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_id: Option<String>,
 }
@@ -130,6 +132,7 @@ pub struct QueryResult {
 pub struct Hit {
     pub name: String,
     pub kind: String,
+    /// `PisaSnap` for a snapshot's declaration.
     pub library: String,
     pub module: String,
     /// The declaration's signature, with notation.
@@ -187,6 +190,7 @@ pub struct Flags {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ResolveRequest {
+    /// At most 64.
     pub names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_id: Option<String>,

@@ -15,6 +15,7 @@ pub struct Verification {
     pub declarations: Vec<Declaration>,
 }
 
+/// A new declaration and the axioms it depends on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Declaration {
     pub name: String,

@@ -8,6 +8,11 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "test:integration": "pnpm -r test:integration",
-    "dev": "pnpm --filter playground dev"
+    "dev": "pnpm --filter playground dev",
+    "generate": "openapi-typescript ../openapi.json --root-types --root-types-no-schema-prefix -o packages/client/src/openapi.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
   }
 }

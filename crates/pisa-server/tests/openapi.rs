@@ -1,4 +1,5 @@
-//! The committed `openapi.json` is the server's OpenAPI document.
+//! The committed `openapi.json` is the server's OpenAPI document, which
+//! `@aqora/pisa-client`'s types are generated from.
 
 const FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../openapi.json");
 
@@ -12,6 +13,7 @@ fn the_committed_spec_is_current() {
     let committed = std::fs::read_to_string(FILE).unwrap_or_default();
     assert!(
         committed == spec,
-        "openapi.json is out of date: run PISA_UPDATE_OPENAPI=1 cargo test -p pisa-server --test openapi"
+        "openapi.json is out of date: run PISA_UPDATE_OPENAPI=1 cargo test -p pisa-server --test openapi, \
+         then pnpm -C web generate"
     );
 }

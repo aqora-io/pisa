@@ -264,10 +264,12 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 
 The server describes its API and search as OpenAPI 3.1 at `GET /openapi.json`,
 also committed as `openapi.json`. Its schemas are derived from the Rust types,
-so after changing the API, regenerate the file (a test fails until you do):
+so after changing the API, regenerate the file and the TypeScript types made
+from it (tests fail until you do):
 
 ```sh
 PISA_UPDATE_OPENAPI=1 cargo test -p pisa-server --test openapi
+pnpm -C web generate
 ```
 
 | Endpoint | Request → response |
@@ -582,9 +584,9 @@ cd web && pnpm typecheck && pnpm test
 cargo build -p pisa-server -p pisa-worker -p pisa-tests && pnpm test:integration
 ```
 
-The TypeScript types are written by hand; `cargo test -p pisa-protocol --test
-ts_fixtures` checks them against the Rust ones (`PISA_UPDATE_FIXTURES=1`
-rewrites the fixtures after a change to the API).
+The TypeScript types are generated from `openapi.json` (see [API](#api)) into
+`web/packages/client/src/openapi.ts` by `pnpm -C web generate`; a test fails
+until they are regenerated after the spec changes.
 
 ## Search
 

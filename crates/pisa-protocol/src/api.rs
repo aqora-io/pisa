@@ -140,6 +140,7 @@ pub enum ApiErrors {
 /// `GET /health`: 200, or 503 once the server is stopping.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Health {
+    /// `draining`, with a 503, once the server is stopping.
     pub status: HealthStatus,
     /// The live workers on the queue; `null` if it can't be read.
     #[schema(required = true)]
@@ -157,6 +158,8 @@ pub enum HealthStatus {
     Draining,
 }
 
+/// A position in the submitted code: lines count from 1, and columns from 0
+/// in Unicode code points, not UTF-16 units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Pos {
     pub line: u64,
@@ -274,6 +277,7 @@ pub struct CheckResult {
     pub tactics: Vec<TacticInfo>,
 }
 
+/// One run of a tactic, with the goals before and after it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct TacticInfo {
     /// The tactic's source text.
@@ -290,6 +294,7 @@ pub struct TacticInfo {
 /// proof state that tactics can be applied to.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartRequest {
+    /// Code with `sorry`s, each of which becomes a state.
     pub code: String,
     #[serde(default)]
     pub version: Option<String>,
@@ -311,6 +316,7 @@ pub struct StartResponse {
 pub struct StateInfo {
     pub state: String,
     pub goal: String,
+    /// Where the `sorry` is in the code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos: Option<Pos>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -230,6 +230,7 @@
         "type": "object"
       },
       "Declaration": {
+        "description": "A new declaration and the axioms it depends on.",
         "properties": {
           "axioms": {
             "items": {
@@ -368,7 +369,8 @@
             ]
           },
           "status": {
-            "$ref": "#/components/schemas/HealthStatus"
+            "$ref": "#/components/schemas/HealthStatus",
+            "description": "`draining`, with a 503, once the server is stopping."
           },
           "workers": {
             "description": "The live workers on the queue; `null` if it can't be read.",
@@ -406,6 +408,7 @@
             "type": "string"
           },
           "library": {
+            "description": "`PisaSnap` for a snapshot's declaration.",
             "type": "string"
           },
           "module": {
@@ -552,6 +555,7 @@
         "type": "object"
       },
       "Pos": {
+        "description": "A position in the submitted code: lines count from 1, and columns from 0\nin Unicode code points, not UTF-16 units.",
         "properties": {
           "column": {
             "format": "int64",
@@ -692,6 +696,7 @@
             "type": "string"
           },
           "names": {
+            "description": "At most 64.",
             "items": {
               "type": "string"
             },
@@ -755,9 +760,11 @@
       "SearchRequest": {
         "properties": {
           "env_id": {
+            "description": "Fails with `not_found` unless the server has this environment.",
             "type": "string"
           },
           "queries": {
+            "description": "At most 64.",
             "items": {
               "$ref": "#/components/schemas/Query"
             },
@@ -1183,6 +1190,7 @@
         "description": "`POST /sessions`: runs code containing `sorry`; each `sorry` becomes a\nproof state that tactics can be applied to.",
         "properties": {
           "code": {
+            "description": "Code with `sorry`s, each of which becomes a state.",
             "type": "string"
           },
           "timeout": {
@@ -1234,7 +1242,8 @@
             "type": "string"
           },
           "pos": {
-            "$ref": "#/components/schemas/Pos"
+            "$ref": "#/components/schemas/Pos",
+            "description": "Where the `sorry` is in the code."
           },
           "state": {
             "type": "string"
@@ -1266,6 +1275,7 @@
         "type": "object"
       },
       "TacticInfo": {
+        "description": "One run of a tactic, with the goals before and after it.",
         "properties": {
           "end_pos": {
             "$ref": "#/components/schemas/Pos"

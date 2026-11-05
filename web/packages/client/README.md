@@ -42,6 +42,8 @@ const { hits } = await pisa.search({ nl: "trace of a density matrix is one" });
 - `pnpm test:integration` runs against a real server and a fake-repl worker,
   after `cargo build -p pisa-server -p pisa-worker -p pisa-tests -p pisa-search`;
   set `PISA_TEST_QDRANT_URL` to include search.
-- `test/wire.fixtures.ts` is written by a Rust test from the server's own types,
-  and `pnpm typecheck` checks it against `src/types.ts`. After changing the API,
-  run `PISA_UPDATE_FIXTURES=1 cargo test -p pisa-protocol --test ts_fixtures`.
+- The types in `src/openapi.ts` are generated from the server's OpenAPI
+  document, `openapi.json` at the repository's root, and `src/types.ts` names
+  them. After changing the API, run
+  `PISA_UPDATE_OPENAPI=1 cargo test -p pisa-server --test openapi`, then
+  `pnpm -C web generate`; `pnpm test` fails until the types are current.
