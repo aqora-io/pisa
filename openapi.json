@@ -518,12 +518,13 @@
           "tactic",
           "check_session",
           "create_snapshot",
-          "verify_snapshot"
+          "verify_snapshot",
+          "rebuild_snapshots"
         ],
         "type": "string"
       },
       "JobOutcome": {
-        "description": "What `GET /jobs/{job}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `StartResponse`, `tactic` a `TacticResponse`,\n`create_snapshot` a `SnapshotResponse` and `verify_snapshot` a\n`SnapshotVerified`. An error is the request's own, with its status.",
+        "description": "What `GET /jobs/{job}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `StartResponse`, `tactic` a `TacticResponse`,\n`create_snapshot` a `SnapshotResponse`, `verify_snapshot` a\n`SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error\nis the request's own, with its status.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/CheckResult"
@@ -539,6 +540,9 @@
           },
           {
             "$ref": "#/components/schemas/SnapshotVerified"
+          },
+          {
+            "$ref": "#/components/schemas/RebuildResponse"
           }
         ]
       },
@@ -752,8 +756,51 @@
         ],
         "type": "object"
       },
+      "RebuildCreated": {
+        "description": "A [`RebuildItem`] created.",
+        "properties": {
+          "entry": {
+            "type": "string"
+          },
+          "new_entry": {
+            "type": "string"
+          },
+          "new_snapshot": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot",
+          "new_entry",
+          "new_snapshot"
+        ],
+        "type": "object"
+      },
+      "RebuildFailed": {
+        "description": "A [`RebuildItem`] whose create kept nothing.",
+        "properties": {
+          "entry": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/CheckResult",
+            "description": "The create's check: Lean's errors, a refused replacement's\n`reasons`, or the `error` that stopped it."
+          },
+          "snapshot": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot",
+          "result"
+        ],
+        "type": "object"
+      },
       "RebuildItem": {
-        "description": "A create in a [`RebuildPlan`]: `POST /snapshots` with its `code`, `labels`\nand `key`.",
+        "description": "A create in a [`RebuildResponse`]: `POST /snapshots` with its `code`, `labels`\nand `key`.",
         "properties": {
           "affected": {
             "description": "The theorems of the module whose type uses a changed definition,\ndirectly or through other definitions, here or below.",
@@ -820,50 +867,15 @@
         ],
         "type": "object"
       },
-      "RebuildPlan": {
-        "properties": {
-          "changed_definitions": {
-            "description": "The definitions whose value `to` changed.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "changes": {
-            "description": "How `to` differs from `from`, as in a refused replacement's\n`result.reasons`. Empty when `to` replaces `from`: its create\ncompared them.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "ok": {
-            "description": "Whether there is a plan: false when `to` changes what `from` states\nand `allow_changes` isn't set.",
-            "type": "boolean"
-          },
-          "plan": {
-            "description": "The creates to make, by level, then oldest first. A level's items can\nbe created together once the level below is done.",
-            "items": {
-              "$ref": "#/components/schemas/RebuildItem"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "ok",
-          "changes",
-          "plan"
-        ],
-        "type": "object"
-      },
       "RebuildRequest": {
-        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`SnapshotDependents`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones. It only plans: the client creates the plan's items.",
+        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`SnapshotDependents`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones, and unless `dry_run` creates them: a level at a time, a level's\ncreates side by side once the level below is done.",
         "properties": {
           "allow_changes": {
             "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](SnapshotRequest::replaces) `from`.",
             "type": "boolean"
           },
           "dry_run": {
-            "description": "Must be `true`: a rebuild only plans, for now.",
+            "description": "Only plan: the client creates the plan's items.",
             "type": "boolean"
           },
           "from": {
@@ -880,9 +892,23 @@
             },
             "type": "object"
           },
+          "retire": {
+            "description": "Once every item is created, delete the old entries, from the top\ndown, then `from`, and with them the old modules nothing else needs.",
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "As [`SnapshotRequest::timeout`], for each create.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "to": {
             "description": "Its replacement.",
             "type": "string"
+          },
+          "verify": {
+            "description": "As [`SnapshotRequest::verify`], for each create.",
+            "type": "boolean"
           },
           "version": {
             "type": "string"
@@ -892,6 +918,85 @@
           "from",
           "to",
           "labels"
+        ],
+        "type": "object"
+      },
+      "RebuildResponse": {
+        "description": "What a rebuild planned and, unless it was a dry run, did. Sending the same\nrebuild again plans the same items with the same keys, so the creates that\nare done replay their entries, and the rest run.",
+        "properties": {
+          "changed_definitions": {
+            "description": "The definitions whose value `to` changed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "description": "How `to` differs from `from`, as in a refused replacement's\n`result.reasons`. Empty when `to` replaces `from`: its create\ncompared them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "created": {
+            "description": "For a run, the items created, in plan order.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildCreated"
+            },
+            "type": "array"
+          },
+          "failed": {
+            "description": "For a run, the items whose create kept nothing.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildFailed"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "description": "For a plan, whether there is one: false when `to` changes what `from`\nstates and `allow_changes` isn't set. For a run, whether every item\nwas created, and retired if asked.",
+            "type": "boolean"
+          },
+          "plan": {
+            "description": "The creates to make, by level, then oldest first. A level's items can\nbe created together once the level below is done.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildItem"
+            },
+            "type": "array"
+          },
+          "retired": {
+            "description": "With `retire`, the old entries deleted, top down, `from` last.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "skipped": {
+            "description": "For a run, the items not created because they build on one that\nfailed or was skipped. Other branches go on.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildSkipped"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ok",
+          "changes",
+          "plan"
+        ],
+        "type": "object"
+      },
+      "RebuildSkipped": {
+        "description": "A [`RebuildItem`] not created, because it builds on one that wasn't.",
+        "properties": {
+          "entry": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot"
         ],
         "type": "object"
       },
@@ -2666,8 +2771,19 @@
     },
     "/snapshots/rebuild": {
       "post": {
-        "description": "The creates that make each dependent of `from` with an entry that has the labels again on `to`, by level. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. It only plans, with `dry_run: true`: the client sends the creates.",
-        "operationId": "planRebuild",
+        "description": "Plans the creates that make each dependent of `from` with an entry that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old entries and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
+        "operationId": "rebuildSnapshots",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -2683,11 +2799,35 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RebuildPlan"
+                  "$ref": "#/components/schemas/RebuildResponse"
                 }
               }
             },
-            "description": "The plan, or the changes that stop it"
+            "description": "The plan, and what the run did"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -2750,7 +2890,7 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "Plan to rebuild an entry's dependents on its replacement",
+        "summary": "Rebuild an entry's dependents on its replacement",
         "tags": [
           "snapshots"
         ]

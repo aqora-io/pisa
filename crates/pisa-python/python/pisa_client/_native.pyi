@@ -125,6 +125,7 @@ class SnapshotSummary(TypedDict):
 
 class SnapshotList(TypedDict):
     entries: list[SnapshotSummary]
+    next: NotRequired[str]
 
 class SnapshotDependents(TypedDict):
     entries: list[SnapshotSummary]
@@ -142,12 +143,30 @@ class RebuildItem(TypedDict):
     affected: NotRequired[list[str]]
     affected_unknown: NotRequired[bool]
 
-class RebuildPlan(TypedDict):
+class RebuildCreated(TypedDict):
+    entry: NotRequired[str]
+    snapshot: str
+    new_entry: str
+    new_snapshot: str
+
+class RebuildFailed(TypedDict):
+    entry: NotRequired[str]
+    snapshot: str
+    result: CheckResult
+
+class RebuildSkipped(TypedDict):
+    entry: NotRequired[str]
+    snapshot: str
+
+class RebuildResponse(TypedDict):
     ok: bool
     changes: list[str]
     changed_definitions: NotRequired[list[str]]
     plan: list[RebuildItem]
-    next: NotRequired[str]
+    created: NotRequired[list[RebuildCreated]]
+    failed: NotRequired[list[RebuildFailed]]
+    skipped: NotRequired[list[RebuildSkipped]]
+    retired: NotRequired[list[str]]
 
 class SnapshotFailure(TypedDict):
     snapshot: str
@@ -266,7 +285,7 @@ class Client:
         labels: dict[str, str],
         *,
         allow_changes: bool = False,
-    ) -> RebuildPlan:
+    ) -> RebuildResponse:
         """Plan the creates that rebuild `from_entry`'s dependents with every
         label in `labels` (and what links them to it) on `to_entry`: each
         item's `code` is the old code with its imports swapped. It only plans:

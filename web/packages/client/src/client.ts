@@ -14,7 +14,7 @@ import type {
   ListSnapshotsParams,
   Query,
   QueryResult,
-  RebuildPlan,
+  RebuildResponse,
   RebuildRequest,
   ResolveResponse,
   Resolution,
@@ -242,7 +242,7 @@ export class PisaClient {
   /** Plans the creates that rebuild `from`'s dependents with every label in
    *  `labels` on `to`. It only plans: create each item's `code` with its
    *  `labels` and `key`, a level at a time. */
-  rebuildPlan(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildPlan> {
+  rebuildPlan(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildResponse> {
     const version = options.version ?? this.version;
     const body: RebuildRequest = { from, to, labels, dry_run: true, ...(version !== undefined && { version }) };
     if (options.allowChanges) body.allow_changes = true;

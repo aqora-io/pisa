@@ -17,7 +17,7 @@
 //! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`SnapshotList`] |
 //! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
 //! | `GET /snapshots/{entry}/dependents` | `?label=key:value` → [`SnapshotDependents`] |
-//! | `POST /snapshots/rebuild` | [`RebuildRequest`] → [`RebuildPlan`] |
+//! | `POST /snapshots/rebuild` | [`RebuildRequest`] → [`RebuildResponse`] |
 //! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
 //! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
 //! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
@@ -195,6 +195,8 @@ pub enum JobKind {
     CreateSnapshot,
     /// `POST /snapshots/{entry}/verify`
     VerifySnapshot,
+    /// `POST /snapshots/rebuild`, run rather than planned
+    RebuildSnapshots,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -223,8 +225,9 @@ pub struct JobWait {
 /// What `GET /jobs/{job}` answers once the job is done: what its request
 /// would have. By `kind`: `check` and `check_session` a `CheckResult`,
 /// `start_session` a `StartResponse`, `tactic` a `TacticResponse`,
-/// `create_snapshot` a `SnapshotResponse` and `verify_snapshot` a
-/// `SnapshotVerified`. An error is the request's own, with its status.
+/// `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
+/// `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
+/// is the request's own, with its status.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum JobOutcome {
@@ -233,6 +236,7 @@ pub enum JobOutcome {
     Tactic(TacticResponse),
     Snapshot(Box<SnapshotResponse>),
     Verified(SnapshotVerified),
+    Rebuild(Box<RebuildResponse>),
 }
 
 /// `GET /health`: 200, or 503 once the server is stopping.
@@ -694,7 +698,8 @@ pub struct SnapshotDependents {
 /// `POST /snapshots/rebuild`: plans how to create the dependents of `from`
 /// (see [`SnapshotDependents`]) again on `to`, each with its imports of
 /// `from`'s module, and of the other modules it rebuilds, swapped for the new
-/// ones. It only plans: the client creates the plan's items.
+/// ones, and unless `dry_run` creates them: a level at a time, a level's
+/// creates side by side once the level below is done.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildRequest {
     /// The entry being replaced.
@@ -705,21 +710,35 @@ pub struct RebuildRequest {
     /// and the modules they build on above `from`. Required, so that the
     /// caller chooses which projects follow the edit.
     pub labels: BTreeMap<String, String>,
-    /// Must be `true`: a rebuild only plans, for now.
+    /// Only plan: the client creates the plan's items.
     #[serde(default)]
     pub dry_run: bool,
     /// Plan even though `to` changes what `from` states, when `to` wasn't
     /// created to [`replace`](SnapshotRequest::replaces) `from`.
     #[serde(default)]
     pub allow_changes: bool,
+    /// Once every item is created, delete the old entries, from the top
+    /// down, then `from`, and with them the old modules nothing else needs.
+    #[serde(default)]
+    pub retire: bool,
+    /// As [`SnapshotRequest::verify`], for each create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<bool>,
+    /// As [`SnapshotRequest::timeout`], for each create.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
     #[serde(default)]
     pub version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RebuildPlan {
-    /// Whether there is a plan: false when `to` changes what `from` states
-    /// and `allow_changes` isn't set.
+/// What a rebuild planned and, unless it was a dry run, did. Sending the same
+/// rebuild again plans the same items with the same keys, so the creates that
+/// are done replay their entries, and the rest run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct RebuildResponse {
+    /// For a plan, whether there is one: false when `to` changes what `from`
+    /// states and `allow_changes` isn't set. For a run, whether every item
+    /// was created, and retired if asked.
     pub ok: bool,
     /// How `to` differs from `from`, as in a refused replacement's
     /// `result.reasons`. Empty when `to` replaces `from`: its create
@@ -735,9 +754,51 @@ pub struct RebuildPlan {
     #[schema(required = true)]
     #[serde(default)]
     pub plan: Vec<RebuildItem>,
+    /// For a run, the items created, in plan order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<RebuildCreated>,
+    /// For a run, the items whose create kept nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<RebuildFailed>,
+    /// For a run, the items not created because they build on one that
+    /// failed or was skipped. Other branches go on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<RebuildSkipped>,
+    /// With `retire`, the old entries deleted, top down, `from` last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
 }
 
-/// A create in a [`RebuildPlan`]: `POST /snapshots` with its `code`, `labels`
+/// A [`RebuildItem`] created.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RebuildCreated {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    pub snapshot: String,
+    pub new_entry: String,
+    pub new_snapshot: String,
+}
+
+/// A [`RebuildItem`] whose create kept nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RebuildFailed {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    pub snapshot: String,
+    /// The create's check: Lean's errors, a refused replacement's
+    /// `reasons`, or the `error` that stopped it.
+    pub result: CheckResult,
+}
+
+/// A [`RebuildItem`] not created, because it builds on one that wasn't.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RebuildSkipped {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    pub snapshot: String,
+}
+
+/// A create in a [`RebuildResponse`]: `POST /snapshots` with its `code`, `labels`
 /// and `key`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildItem {

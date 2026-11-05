@@ -19,6 +19,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 pub mod dispatch;
 pub mod http;
 pub mod jobs;
+mod rebuild;
 pub mod sessions;
 pub mod snapshots;
 
@@ -144,6 +145,7 @@ pub async fn start_with(
         DispatchConfig {
             max_wait: Duration::from_secs(cfg.max_wait_secs),
             max_retries: cfg.max_retries,
+            ..Default::default()
         },
     )
     .await;

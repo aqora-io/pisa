@@ -62,27 +62,26 @@ impl App {
             return respond(kind, self.dispatcher.submit(p).await);
         }
         match self.dispatcher.submit_async(kind, p).await {
-            Ok(job) => {
-                let location = format!("/jobs/{job}");
-                let status = JobStatus {
-                    job,
-                    kind,
-                    status: JobState::Queued,
-                };
-                let mut response = no_store((StatusCode::ACCEPTED, Json(status)));
-                let headers = response.headers_mut();
-                if let Ok(location) = HeaderValue::from_str(&location) {
-                    headers.insert(LOCATION, location);
-                }
-                headers.insert(
-                    PREFERENCE_APPLIED,
-                    HeaderValue::from_static("respond-async"),
-                );
-                response
-            }
+            Ok(job) => accepted(job, kind, JobState::Queued),
             Err(e) => ApiError::from(e).into_response(),
         }
     }
+}
+
+/// The 202 to a request that prefers `respond-async`: its job.
+pub(crate) fn accepted(job: String, kind: JobKind, status: JobState) -> Response {
+    let location = format!("/jobs/{job}");
+    let status = JobStatus { job, kind, status };
+    let mut response = no_store((StatusCode::ACCEPTED, Json(status)));
+    let headers = response.headers_mut();
+    if let Ok(location) = HeaderValue::from_str(&location) {
+        headers.insert(LOCATION, location);
+    }
+    headers.insert(
+        PREFERENCE_APPLIED,
+        HeaderValue::from_static("respond-async"),
+    );
+    response
 }
 
 /// What a request of `kind` answers, given its job's outcome.
@@ -95,6 +94,7 @@ pub(crate) fn respond(kind: JobKind, outcome: Result<JobResult, DispatchError>) 
         JobKind::CheckSession => answer(outcome.and_then(sessions::checked)),
         JobKind::CreateSnapshot => answer(outcome.and_then(snapshots::created)),
         JobKind::VerifySnapshot => answer(outcome.and_then(snapshots::verified)),
+        JobKind::RebuildSnapshots => answer(outcome.and_then(snapshots::rebuilt)),
     }
 }
 

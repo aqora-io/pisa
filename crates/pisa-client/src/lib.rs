@@ -53,7 +53,7 @@ use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
     Allow, CheckResult, Declaration, Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos,
-    RebuildItem, RebuildPlan, Replaced, Replacement, Replaces, Severity, SnapshotDependents,
+    RebuildItem, RebuildResponse, Replaced, Replacement, Replaces, Severity, SnapshotDependents,
     SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary,
     SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
     TacticResponse as Step,
@@ -606,7 +606,7 @@ impl Client {
     }
 
     /// Plans the creates that rebuild `from`'s dependents with every label
-    /// in `labels` on `to`, by level; see [`RebuildPlan`]. It only plans:
+    /// in `labels` on `to`, by level; see [`RebuildResponse`]. It only plans:
     /// create each item's `code` with its `labels` and `key`, a level at a
     /// time. `allow_changes` plans even though `to`, created without
     /// `replaces`, changes what `from` states.
@@ -616,13 +616,16 @@ impl Client {
         to: &str,
         labels: &BTreeMap<String, String>,
         allow_changes: bool,
-    ) -> Result<RebuildPlan, Error> {
+    ) -> Result<RebuildResponse, Error> {
         let req = RebuildRequest {
             from: from.to_string(),
             to: to.to_string(),
             labels: labels.clone(),
             dry_run: true,
             allow_changes,
+            retire: false,
+            verify: None,
+            timeout: self.timeout,
             version: self.version.clone(),
         };
         self.post("snapshots/rebuild", &req).await

@@ -34,7 +34,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
     Allow, CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, RebuildItem,
-    RebuildPlan, Replaced, Replacement, Replaces, SnapshotDependents, SnapshotFailure,
+    RebuildResponse, Replaced, Replacement, Replaces, SnapshotDependents, SnapshotFailure,
     SnapshotInfo, SnapshotList, SnapshotResponse, SnapshotSummary, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
@@ -1689,8 +1689,8 @@ impl Snapshots {
     }
 
     /// Plans the creates that rebuild `job.from`'s dependents on `job.to`;
-    /// see [`RebuildPlan`].
-    pub async fn rebuild_plan(&self, job: &SnapshotRebuildJob) -> Result<RebuildPlan, Error> {
+    /// see [`RebuildResponse`].
+    pub async fn rebuild_plan(&self, job: &SnapshotRebuildJob) -> Result<RebuildResponse, Error> {
         let bad = |m: &str| Error::new(ErrorKind::BadRequest, m);
         let (from, to) = (parse_entry(&job.from)?, parse_entry(&job.to)?);
         if job.labels.is_empty() {
@@ -1749,11 +1749,11 @@ impl Snapshots {
                 .collect(),
         };
         if !changes.is_empty() && !job.allow_changes {
-            return Ok(RebuildPlan {
+            return Ok(RebuildResponse {
                 ok: false,
                 changes,
                 changed_definitions,
-                plan: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -1849,11 +1849,12 @@ impl Snapshots {
             }
         }
         plan.sort_by_key(|(created, item)| (item.level, *created));
-        Ok(RebuildPlan {
+        Ok(RebuildResponse {
             ok: true,
             changes,
             changed_definitions,
             plan: plan.into_iter().map(|(_, item)| item).collect(),
+            ..Default::default()
         })
     }
 

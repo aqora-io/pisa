@@ -204,7 +204,8 @@ To the release whose declaration reports record what each declaration uses:
 
 To the release with dependents and rebuild plans, upgrade the workers before
 clients call `GET /snapshots/{entry}/dependents` or `POST /snapshots/rebuild`:
-they run on a worker, and an older one answers them with a 500.
+they run on a worker, and an older one answers them with a 500. A rebuild
+the server runs needs only the servers upgraded.
 
 To the release with `replaces` on snapshot creates, upgrade the workers before
 clients send `replaces`: an older worker refuses such a create, answering 500
@@ -307,7 +308,7 @@ pnpm -C web generate
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, replaces?, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, replaces?, dirty, verified, result, created, decls?}` |
 | `GET /snapshots/{entry}/dependents` | `?label=k:v` (repeated), `version?` → `{entries: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
-| `POST /snapshots/rebuild` | `{from, to, labels, dry_run: true, allow_changes?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, replaces?, affected?, affected_unknown?}]}`; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, replaces?, affected?, affected_unknown?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -320,8 +321,8 @@ them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
 takes a comma-separated list of origins, or `*`. It is empty by default.
 
 <a id="async-requests"></a>
-**Async requests.** A check, a session's start, tactic or check, and a
-snapshot's create or verify can take minutes: a wait for a worker, loading the
+**Async requests.** A check, a session's start, tactic or check, a
+snapshot's create or verify, and a rebuild can take minutes: a wait for a worker, loading the
 imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
 requests off at 60 s, or over a network that drops, send them with
 `Prefer: respond-async`. The server then answers `202 {job, kind, status:
@@ -499,7 +500,8 @@ parents first: by level (1 imports it, 2 imports a level 1, and so on, by the
 longest chain), then oldest first. With `label` filters, as in a listing, only
 the entries with every label.
 
-`POST /snapshots/rebuild` plans how to create them again on the replacement:
+`POST /snapshots/rebuild` creates them again on the replacement, or with
+`"dry_run": true` only plans how:
 
 ```text
 POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project": "foo"}, "dry_run": true}
@@ -514,14 +516,31 @@ POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project
   `entry`, with the labels asked for. Each item's `code` is the old code with
   its imports of `from`'s module, and of the other modules the plan rebuilds,
   swapped for the new ones; lines and columns stay where they were.
-- **Running it.** The plan only plans (`dry_run` must be `true`). Send each
-  item as `POST /snapshots {code, labels, key, replaces?}`, a level at a time: a level's
-  items can be created together, with `Prefer: respond-async` (see
-  [Async requests](#async-requests)), once the level below is done. Each
-  create's `snapshot` is the item's `new_snapshot`. The keys come from the
-  plan, so planning and running it again after a failure replays the creates
-  that are done. Delete the old entries afterwards, from the top down, if they
-  should go.
+- **Running it.** Without `dry_run`, the server runs the plan: a level at a
+  time, up to 8 of a level's creates side by side once the level below is
+  done, each with the item's `code`, `labels`, `key` and `replaces`, and the
+  request's `verify` and `timeout`. A create no worker takes in time is sent
+  again, up to 5 times. The response adds what it did: `created` (each old
+  `entry` and `snapshot` with its `new_entry` and `new_snapshot`), `failed`
+  (with the create's `result`), and `skipped`, the items that build on one
+  that failed or was skipped; other branches go on, and `ok` says whether
+  every item was created.
+- **Retiring.** With `"retire": true`, once every item is created, the server
+  deletes the old entries from the top down, then `from`, and with them the
+  old modules nothing else needs; `retired` lists them.
+- **Sending it again.** The keys come from the plan, so sending the same
+  rebuild again, after a failure, a timeout or a lost server, replays the
+  creates that are done and runs the rest.
+- **Async.** A run can take minutes, so it takes `Prefer: respond-async` (see
+  [Async requests](#async-requests)): the 202's job, of kind
+  `rebuild_snapshots`, is run by the server that answered, and
+  `GET /jobs/{job}` on any server answers with the response once it is done.
+  If that server stops first, the job reads as lost (503): send the rebuild
+  again. `DELETE /jobs/{job}` leaves a running rebuild running. A dry run
+  answers at once.
+- **Running it yourself.** Or take the plan and send each item as
+  `POST /snapshots {code, labels, key, replaces?}`, a level at a time, the
+  same way; each create's `snapshot` is the item's `new_snapshot`.
 - **Statements.** If `to` replaces `from` (see [Replacing](#replacing)), its
   create compared them, so `changes` is empty. Otherwise the rebuild compares
   them the same way and, if `to` changes what `from` states, answers `ok:

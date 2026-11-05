@@ -144,7 +144,7 @@ pub enum JobResult {
     SnapshotList(Result<api::SnapshotList, api::Error>),
     SnapshotLabels(Result<api::SnapshotSummary, api::Error>),
     SnapshotDependents(Result<api::SnapshotDependents, api::Error>),
-    SnapshotRebuild(Result<api::RebuildPlan, api::Error>),
+    SnapshotRebuild(Result<api::RebuildResponse, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,

@@ -225,7 +225,7 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_plan_takes_labels_a_dry_run_and_a_replacement_beside_from() {
+async fn a_plan_takes_labels_and_a_replacement_beside_from() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let lib = library(&c).await;
     let b2 = proved(&c, &lib).await;
@@ -243,7 +243,6 @@ async fn a_plan_takes_labels_a_dry_run_and_a_replacement_beside_from() {
     .await;
     for (body, status) in [
         (with("labels", json!({})), 400),
-        (with("dry_run", json!(false)), 400),
         (with("to", json!(entry(&lib.c))), 400),
         (with("to", json!(entry(&again))), 400),
         (with("to", json!("nope")), 400),
@@ -347,4 +346,187 @@ async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependent
         found.push(r["replaces"]["affected"].clone());
     }
     assert_eq!(found, [Value::Null, json!(["e"])]);
+}
+
+/// Runs a rebuild of `from` on `to` for project `p:1`, with `extra` fields.
+async fn rebuild(c: &Cluster, from: &Value, to: &Value, extra: Value) -> Value {
+    let mut body = json!({"from": entry(from), "to": entry(to), "labels": {"p": "1"}});
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let (status, r) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!(status, 200, "{r}");
+    r
+}
+
+fn new_entries(r: &Value) -> Vec<&Value> {
+    r["created"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["new_entry"])
+        .collect()
+}
+
+async fn listed(c: &Cluster, label: &str) -> Vec<String> {
+    let (_, r) = get(c, &format!("/snapshots?label={label}")).await;
+    entries(&r).into_iter().map(String::from).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_runs_its_plan_and_replays_it_when_sent_again() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let lib = library(&c).await;
+    let b2 = proved(&c, &lib).await;
+    let r = rebuild(&c, &lib.b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    let plan = r["plan"].as_array().unwrap();
+    let created = r["created"].as_array().unwrap();
+    assert_eq!(created.len(), 3, "{r}");
+    for (made, item) in created.iter().zip(plan) {
+        assert_eq!(
+            (&made["entry"], &made["new_snapshot"]),
+            (&item["entry"], &item["new_snapshot"])
+        );
+        let (_, info) = get(
+            &c,
+            &format!("/snapshots/{}", made["new_entry"].as_str().unwrap()),
+        )
+        .await;
+        assert_eq!(info["replaces"], json!({"entry": item["entry"]}), "{info}");
+    }
+    let top = format!(
+        "{}\n\nneeds b2\nneeds e",
+        plan[2]["new_header"].as_str().unwrap()
+    );
+    let (_, checked) = c.post("/check", json!({"code": top})).await;
+    assert_eq!(checked["ok"], true, "{checked}");
+
+    // Again: what is done replays, and nothing is added.
+    let before = listed(&c, "p:1").await;
+    let again = rebuild(&c, &lib.b, &b2, json!({})).await;
+    assert_eq!(new_entries(&again), new_entries(&r));
+    assert_eq!(listed(&c, "p:1").await, before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_chunk_skips_only_what_builds_on_it() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let lib = library(&c).await;
+    // No `b`, which C needs; D doesn't, and E builds on both.
+    let other = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
+    )
+    .await;
+    let r = rebuild(&c, &lib.b, &other, json!({"allow_changes": true})).await;
+    assert_eq!(r["ok"], false, "{r}");
+    let of = |list: &str| -> Vec<Value> {
+        r[list].as_array().map_or(Vec::new(), |l| {
+            l.iter().map(|i| i["entry"].clone()).collect()
+        })
+    };
+    assert_eq!(of("created"), [lib.d["entry"].clone()]);
+    assert_eq!(of("failed"), [lib.c["entry"].clone()]);
+    assert_eq!(of("skipped"), [lib.e["entry"].clone()]);
+    assert_eq!(r["failed"][0]["result"]["ok"], false);
+    assert!(r.get("retired").is_none());
+
+    let again = rebuild(&c, &lib.b, &other, json!({"allow_changes": true})).await;
+    assert_eq!(new_entries(&again), new_entries(&r), "D replays");
+    assert_eq!(again["failed"][0]["entry"], lib.c["entry"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retire_deletes_the_old_entries_and_from() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let lib = library(&c).await;
+    let b2 = proved(&c, &lib).await;
+    let r = rebuild(&c, &lib.b, &b2, json!({"retire": true})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    let old = [&lib.e, &lib.d, &lib.c, &lib.b].map(|e| e["entry"].clone());
+    assert_eq!(r["retired"], json!(old));
+    for e in &old {
+        let (status, _) = get(&c, &format!("/snapshots/{}", e.as_str().unwrap())).await;
+        assert_eq!(status, 404, "{e}");
+    }
+    let mut now = listed(&c, "p:1").await;
+    now.sort();
+    let mut expected: Vec<String> = new_entries(&r)
+        .iter()
+        .map(|e| e.as_str().unwrap().into())
+        .collect();
+    expected.push(entry(&b2).into());
+    expected.sort();
+    assert_eq!(now, expected);
+    // The other project keeps its entry, and with it B's module.
+    assert_eq!(listed(&c, "p:2").await, [entry(&lib.other)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let other_server = c.start_server().await;
+    let lib = library(&c).await;
+    let b2 = proved(&c, &lib).await;
+    // A slow chunk on top, so the job is still running when first read.
+    let slow = create(
+        &c,
+        json!({"code": on(&lib.e, "theorem slow : 6 = 6 := rfl\nSLEEP 800"), "labels": {"p": "1"}}),
+    )
+    .await;
+    assert!(slow["entry"].is_string());
+    let body = json!({"from": entry(&lib.b), "to": entry(&b2), "labels": {"p": "1"}});
+    let r = c
+        .client
+        .post(c.url("/snapshots/rebuild"))
+        .header("prefer", "respond-async")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let accepted: Value = r.json().await.unwrap();
+    assert_eq!(
+        (&accepted["kind"], &accepted["status"]),
+        (&json!("rebuild_snapshots"), &json!("running"))
+    );
+    let job = accepted["job"].as_str().unwrap();
+
+    let look = |wait: &str| {
+        let url = common::url_of(&other_server, &format!("/jobs/{job}?wait={wait}"));
+        let client = c.client.clone();
+        async move {
+            let r = client.get(url).send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+    let (status, running) = look("0").await;
+    assert_eq!(
+        (status, &running["status"]),
+        (202, &json!("running")),
+        "{running}"
+    );
+    let (status, done) = look("30").await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(
+        (
+            done["ok"].clone(),
+            done["created"].as_array().unwrap().len()
+        ),
+        (json!(true), 4)
+    );
+
+    // A dry run answers at once, preferred async or not.
+    let mut dry = body;
+    dry["dry_run"] = json!(true);
+    let r = c
+        .client
+        .post(c.url("/snapshots/rebuild"))
+        .header("prefer", "respond-async")
+        .json(&dry)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
 }

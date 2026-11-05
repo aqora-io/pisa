@@ -77,6 +77,9 @@ pub struct DispatchConfig {
     pub max_wait: Duration,
     /// How many more workers may run a job after its worker is lost.
     pub max_retries: u32,
+    /// How long the claim on a job this server runs itself lasts, renewed
+    /// three times as often; see [`Held`].
+    pub held_lease: Duration,
 }
 
 impl Default for DispatchConfig {
@@ -84,6 +87,7 @@ impl Default for DispatchConfig {
         DispatchConfig {
             max_wait: Duration::from_secs(60),
             max_retries: 2,
+            held_lease: Duration::from_secs(30),
         }
     }
 }
@@ -92,6 +96,41 @@ pub struct Dispatcher {
     queue: Queue,
     cfg: DispatchConfig,
     waiters: Arc<Waiters>,
+    /// The name this process holds the jobs it runs itself under.
+    holder: String,
+}
+
+/// The version of the jobs a server runs itself: no worker has it, so none
+/// is offered them.
+const HELD: &str = "(run by a server)";
+
+/// An async job this server runs itself, such as a rebuild, which sends
+/// workers jobs of its own. Its row holds the server's claim, renewed while
+/// it runs, and then its answer, so `/jobs/{job}` reads it from any server.
+/// If the server stops first, the claim lapses and the job reads as lost.
+pub struct Held {
+    pub token: String,
+    id: i64,
+    queue: Queue,
+    holder: String,
+    renewing: tokio::task::JoinHandle<()>,
+}
+
+impl Held {
+    /// Stores the job's answer.
+    pub async fn finish(self, result: &JobResult) -> Result<(), DispatchError> {
+        self.renewing.abort();
+        let result = serde_json::to_value(result)
+            .map_err(|e| DispatchError::Unavailable(format!("encoding the answer: {e}")))?;
+        self.queue.complete(&self.holder, self.id, &result).await?;
+        Ok(())
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.renewing.abort();
+    }
 }
 
 /// This process's requests waiting for their jobs, woken by the queue's
@@ -199,7 +238,52 @@ impl Dispatcher {
             queue,
             cfg,
             waiters,
+            holder: format!("server-{}", uuid::Uuid::new_v4().simple()),
         }
+    }
+
+    /// Queues `job` as an async job of `kind` that this server runs itself,
+    /// and claims it; see [`Held`].
+    pub async fn hold(&self, kind: JobKind, job: &Job) -> Result<Held, DispatchError> {
+        let new = NewJob {
+            version: Some(HELD.into()),
+            priority: Priority::Batch as i16,
+            header_key: None,
+            header: None,
+            state: None,
+            job: serde_json::to_value(job)
+                .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?,
+            max_wait: self.cfg.max_wait,
+            max_attempts: 1,
+        };
+        let (id, token) = self.queue.enqueue_async(&new, &kind_name(kind)).await?;
+        let lease = self.cfg.held_lease;
+        if self
+            .queue
+            .claim(&self.holder, &[id], lease)
+            .await?
+            .is_empty()
+        {
+            return Err(DispatchError::Unavailable(
+                "the job couldn't be claimed as it was queued".into(),
+            ));
+        }
+        let (queue, holder) = (self.queue.clone(), self.holder.clone());
+        let renewing = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(lease / 3).await;
+                if let Err(e) = queue.heartbeat(&holder, 0, lease).await {
+                    tracing::warn!("renewing held jobs failed: {e}");
+                }
+            }
+        });
+        Ok(Held {
+            token,
+            id,
+            queue: self.queue.clone(),
+            holder: self.holder.clone(),
+            renewing,
+        })
     }
 
     pub fn queue(&self) -> &Queue {
@@ -376,6 +460,58 @@ fn decode(result: serde_json::Value) -> JobResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pisa_db::db::Db;
+    use pisa_protocol::wire::SnapshotJob;
+
+    #[tokio::test]
+    async fn a_held_job_is_no_workers_and_reads_lost_once_its_server_stops() {
+        let queue = Queue::new(Db::memory().await, "q");
+        let cfg = DispatchConfig {
+            held_lease: Duration::from_millis(300),
+            ..Default::default()
+        };
+        let d = Dispatcher::start(queue.clone(), cfg).await;
+        let job = Job::SnapshotGet(SnapshotJob { entry: "e".into() });
+        let looked = |token: String| {
+            let d = &d;
+            async move { d.look(&token, Duration::ZERO).await.unwrap().unwrap().state }
+        };
+
+        let held = d.hold(JobKind::RebuildSnapshots, &job).await.unwrap();
+        let token = held.token.clone();
+        assert!(
+            queue.candidates("v", 10).await.unwrap().is_empty(),
+            "no worker is offered it"
+        );
+        // Renewed, it stays running past its lease.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(matches!(
+            looked(token.clone()).await,
+            Looking::Pending(JobState::Running)
+        ));
+        held.finish(&JobResult::Failed {
+            error: "done".into(),
+        })
+        .await
+        .unwrap();
+        let Looking::Done(done) = looked(token).await else {
+            panic!("not done")
+        };
+        assert!(matches!(*done, Ok(JobResult::Failed { .. })));
+
+        // Its server stops renewing it: it is lost.
+        let held = d.hold(JobKind::RebuildSnapshots, &job).await.unwrap();
+        let token = held.token.clone();
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let Looking::Done(done) = looked(token).await else {
+            panic!("not done")
+        };
+        assert!(
+            matches!(*done, Err(DispatchError::WorkerLost(1))),
+            "{done:?}"
+        );
+    }
 
     #[tokio::test]
     async fn every_waiter_on_a_job_is_woken_and_leaves_alone() {

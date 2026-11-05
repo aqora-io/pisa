@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, RawQuery, State};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, LabelsRequest, PreferAsync, RebuildPlan,
-    RebuildRequest, SnapshotDependents, SnapshotInfo, SnapshotList, SnapshotRequest,
-    SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
+    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, JobState, LabelsRequest, PreferAsync,
+    RebuildRequest, RebuildResponse, SnapshotDependents, SnapshotInfo, SnapshotList,
+    SnapshotRequest, SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LABELS, MAX_LIMIT, is_cursor, parse_filter};
@@ -21,9 +21,10 @@ use pisa_protocol::wire::{
     SnapshotListJob, SnapshotRebuildJob,
 };
 
-use crate::dispatch::{Prepared, Priority, Route};
+use crate::dispatch::{DispatchError, Prepared, Priority, Route};
 use crate::http::{ApiError, App, Body};
-use crate::jobs::Prefer;
+use crate::jobs::{Prefer, accepted, respond};
+use crate::rebuild;
 use crate::sessions::unexpected;
 
 #[utoipa::path(
@@ -41,6 +42,13 @@ pub async fn create(
     prefer: Prefer,
     Body(req): Body<SnapshotRequest>,
 ) -> Response {
+    let p = prepare_create(&app, req);
+    app.answer(prefer, JobKind::CreateSnapshot, p).await
+}
+
+/// A create's job, routed to the worker that will serve code on top of the
+/// snapshot, which builds it.
+pub(crate) fn prepare_create(app: &App, req: SnapshotRequest) -> Prepared {
     let split = split_header(&req.code);
     let next = snapshot::next_header(&split.header, &snapshot::id(&req.code));
     let route = Route {
@@ -63,12 +71,11 @@ pub async fn create(
     } else {
         Job::SnapshotCreate(create)
     };
-    let p = Prepared {
+    Prepared {
         job,
         route,
         priority: Priority::Batch,
-    };
-    app.answer(prefer, JobKind::CreateSnapshot, p).await
+    }
 }
 
 pub(crate) fn created(done: JobResult) -> Result<SnapshotResponse, ApiError> {
@@ -204,40 +211,76 @@ pub async fn dependents(
 }
 
 #[utoipa::path(
-    post, path = "/snapshots/rebuild", operation_id = "planRebuild", tag = "snapshots",
-    summary = "Plan to rebuild an entry's dependents on its replacement",
-    description = "The creates that make each dependent of `from` with an entry that has the \
-        labels again on `to`, by level. Unless `to` replaces `from`, `to` must not change what \
-        `from` states, or `allow_changes` be set. It only plans, with `dry_run: true`: the client \
-        sends the creates.",
+    post, path = "/snapshots/rebuild", operation_id = "rebuildSnapshots", tag = "snapshots",
+    summary = "Rebuild an entry's dependents on its replacement",
+    description = "Plans the creates that make each dependent of `from` with an entry that has \
+        the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a \
+        failed chunk skipping only what builds on it, then with `retire` deleting the old \
+        entries and `from`. Unless `to` replaces `from`, `to` must not change what `from` \
+        states, or `allow_changes` be set. Sending the same rebuild again replays the creates \
+        that are done. A run can be async; a dry run answers at once.",
+    params(PreferAsync),
     request_body = RebuildRequest,
-    responses((status = 200, description = "The plan, or the changes that stop it", body = RebuildPlan), ApiErrors),
+    responses((status = 200, description = "The plan, and what the run did", body = RebuildResponse), Accepted, ApiErrors),
 )]
 /// `POST /snapshots/rebuild`.
 pub async fn rebuild(
     State(app): State<Arc<App>>,
+    prefer: Prefer,
     Body(req): Body<RebuildRequest>,
-) -> Result<Json<RebuildPlan>, ApiError> {
-    let bad = |m: &str| ApiError::new(ErrorKind::BadRequest, m);
-    if !req.dry_run {
-        return Err(bad(
-            "a rebuild only plans for now: send dry_run: true, then create the plan's items",
-        ));
-    }
+) -> Response {
     if req.labels.is_empty() {
-        return Err(bad("a rebuild takes labels: which dependents to rebuild"));
+        let e = ApiError::new(
+            ErrorKind::BadRequest,
+            "a rebuild takes labels: which dependents to rebuild",
+        );
+        return e.into_response();
     }
-    let job = Job::SnapshotRebuild(SnapshotRebuildJob {
-        from: req.from,
-        to: req.to,
-        labels: req.labels,
+    if req.dry_run {
+        let job = Job::SnapshotRebuild(SnapshotRebuildJob {
+            from: req.from,
+            to: req.to,
+            labels: req.labels,
+            allow_changes: req.allow_changes,
+        });
+        let q = VersionQuery {
+            version: req.version,
+        };
+        return respond(JobKind::RebuildSnapshots, submit_job(&app, job, q).await);
+    }
+    if !prefer.respond_async {
+        return match rebuild::run(&app, &req).await {
+            Ok(r) => Json(r).into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
+    let record = Job::SnapshotRebuild(SnapshotRebuildJob {
+        from: req.from.clone(),
+        to: req.to.clone(),
+        labels: req.labels.clone(),
         allow_changes: req.allow_changes,
     });
-    let q = VersionQuery {
-        version: req.version,
+    let held = match app
+        .dispatcher
+        .hold(JobKind::RebuildSnapshots, &record)
+        .await
+    {
+        Ok(held) => held,
+        Err(e) => return ApiError::from(e).into_response(),
     };
-    match submit(&app, job, q, Priority::Interactive).await? {
-        JobResult::SnapshotRebuild(r) => Ok(Json(r.map_err(ApiError)?)),
+    let job = held.token.clone();
+    tokio::spawn(async move {
+        let outcome = rebuild::run(&app, &req).await.map_err(|e| e.0);
+        if let Err(e) = held.finish(&JobResult::SnapshotRebuild(outcome)).await {
+            tracing::warn!("storing a rebuild's answer failed: {e}");
+        }
+    });
+    accepted(job, JobKind::RebuildSnapshots, JobState::Running)
+}
+
+pub(crate) fn rebuilt(done: JobResult) -> Result<RebuildResponse, ApiError> {
+    match done {
+        JobResult::SnapshotRebuild(r) => r.map_err(ApiError),
         other => Err(unexpected(other)),
     }
 }
@@ -325,7 +368,14 @@ fn prepare(app: &App, job: Job, q: VersionQuery, priority: Priority) -> Prepared
     }
 }
 
-async fn submit(
+/// Runs a catalog job on a worker of the version, as an interactive one.
+async fn submit_job(app: &App, job: Job, q: VersionQuery) -> Result<JobResult, DispatchError> {
+    app.dispatcher
+        .submit(prepare(app, job, q, Priority::Interactive))
+        .await
+}
+
+pub(crate) async fn submit(
     app: &App,
     job: Job,
     q: VersionQuery,

@@ -162,10 +162,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Plan to rebuild an entry's dependents on its replacement
-         * @description The creates that make each dependent of `from` with an entry that has the labels again on `to`, by level. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. It only plans, with `dry_run: true`: the client sends the creates.
+         * Rebuild an entry's dependents on its replacement
+         * @description Plans the creates that make each dependent of `from` with an entry that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old entries and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
          */
-        post: operations["planRebuild"];
+        post: operations["rebuildSnapshots"];
         delete?: never;
         options?: never;
         head?: never;
@@ -528,15 +528,16 @@ export interface components {
          * @description The endpoint an async request ran.
          * @enum {string}
          */
-        JobKind: "check" | "start_session" | "tactic" | "check_session" | "create_snapshot" | "verify_snapshot";
+        JobKind: "check" | "start_session" | "tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots";
         /**
          * @description What `GET /jobs/{job}` answers once the job is done: what its request
          *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
          *     `start_session` a `StartResponse`, `tactic` a `TacticResponse`,
-         *     `create_snapshot` a `SnapshotResponse` and `verify_snapshot` a
-         *     `SnapshotVerified`. An error is the request's own, with its status.
+         *     `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
+         *     `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
+         *     is the request's own, with its status.
          */
-        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["StartResponse"] | components["schemas"]["TacticResponse"] | components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotVerified"];
+        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["StartResponse"] | components["schemas"]["TacticResponse"] | components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotVerified"] | components["schemas"]["RebuildResponse"];
         /** @enum {string} */
         JobState: "queued" | "running" | "done" | "cancelled";
         /** @description An async request, as `/jobs/{job}` reports it until it is done. */
@@ -630,8 +631,25 @@ export interface components {
             /** @description What made this result worse than usual, e.g. a lane that failed. */
             warnings?: string[];
         };
+        /** @description A [`RebuildItem`] created. */
+        RebuildCreated: {
+            entry?: string;
+            new_entry: string;
+            new_snapshot: string;
+            snapshot: string;
+        };
+        /** @description A [`RebuildItem`] whose create kept nothing. */
+        RebuildFailed: {
+            entry?: string;
+            /**
+             * @description The create's check: Lean's errors, a refused replacement's
+             *     `reasons`, or the `error` that stopped it.
+             */
+            result: components["schemas"]["CheckResult"];
+            snapshot: string;
+        };
         /**
-         * @description A create in a [`RebuildPlan`]: `POST /snapshots` with its `code`, `labels`
+         * @description A create in a [`RebuildResponse`]: `POST /snapshots` with its `code`, `labels`
          *     and `key`.
          */
         RebuildItem: {
@@ -681,31 +699,12 @@ export interface components {
             /** @description The module it rebuilds. */
             snapshot: string;
         };
-        RebuildPlan: {
-            /** @description The definitions whose value `to` changed. */
-            changed_definitions?: string[];
-            /**
-             * @description How `to` differs from `from`, as in a refused replacement's
-             *     `result.reasons`. Empty when `to` replaces `from`: its create
-             *     compared them.
-             */
-            changes: string[];
-            /**
-             * @description Whether there is a plan: false when `to` changes what `from` states
-             *     and `allow_changes` isn't set.
-             */
-            ok: boolean;
-            /**
-             * @description The creates to make, by level, then oldest first. A level's items can
-             *     be created together once the level below is done.
-             */
-            plan: components["schemas"]["RebuildItem"][];
-        };
         /**
          * @description `POST /snapshots/rebuild`: plans how to create the dependents of `from`
          *     (see [`SnapshotDependents`]) again on `to`, each with its imports of
          *     `from`'s module, and of the other modules it rebuilds, swapped for the new
-         *     ones. It only plans: the client creates the plan's items.
+         *     ones, and unless `dry_run` creates them: a level at a time, a level's
+         *     creates side by side once the level below is done.
          */
         RebuildRequest: {
             /**
@@ -713,7 +712,7 @@ export interface components {
              *     created to [`replace`](SnapshotRequest::replaces) `from`.
              */
             allow_changes?: boolean;
-            /** @description Must be `true`: a rebuild only plans, for now. */
+            /** @description Only plan: the client creates the plan's items. */
             dry_run?: boolean;
             /** @description The entry being replaced. */
             from: string;
@@ -725,9 +724,63 @@ export interface components {
             labels: {
                 [key: string]: string;
             };
+            /**
+             * @description Once every item is created, delete the old entries, from the top
+             *     down, then `from`, and with them the old modules nothing else needs.
+             */
+            retire?: boolean;
+            /**
+             * Format: int64
+             * @description As [`SnapshotRequest::timeout`], for each create.
+             */
+            timeout?: number;
             /** @description Its replacement. */
             to: string;
+            /** @description As [`SnapshotRequest::verify`], for each create. */
+            verify?: boolean;
             version?: string;
+        };
+        /**
+         * @description What a rebuild planned and, unless it was a dry run, did. Sending the same
+         *     rebuild again plans the same items with the same keys, so the creates that
+         *     are done replay their entries, and the rest run.
+         */
+        RebuildResponse: {
+            /** @description The definitions whose value `to` changed. */
+            changed_definitions?: string[];
+            /**
+             * @description How `to` differs from `from`, as in a refused replacement's
+             *     `result.reasons`. Empty when `to` replaces `from`: its create
+             *     compared them.
+             */
+            changes: string[];
+            /** @description For a run, the items created, in plan order. */
+            created?: components["schemas"]["RebuildCreated"][];
+            /** @description For a run, the items whose create kept nothing. */
+            failed?: components["schemas"]["RebuildFailed"][];
+            /**
+             * @description For a plan, whether there is one: false when `to` changes what `from`
+             *     states and `allow_changes` isn't set. For a run, whether every item
+             *     was created, and retired if asked.
+             */
+            ok: boolean;
+            /**
+             * @description The creates to make, by level, then oldest first. A level's items can
+             *     be created together once the level below is done.
+             */
+            plan: components["schemas"]["RebuildItem"][];
+            /** @description With `retire`, the old entries deleted, top down, `from` last. */
+            retired?: string[];
+            /**
+             * @description For a run, the items not created because they build on one that
+             *     failed or was skipped. Other branches go on.
+             */
+            skipped?: components["schemas"]["RebuildSkipped"][];
+        };
+        /** @description A [`RebuildItem`] not created, because it builds on one that wasn't. */
+        RebuildSkipped: {
+            entry?: string;
+            snapshot: string;
         };
         /** @description An entry that another replaced, and how. */
         Replaced: {
@@ -1131,9 +1184,12 @@ export type ModuleDecl = components['schemas']['ModuleDecl'];
 export type Pos = components['schemas']['Pos'];
 export type Query = components['schemas']['Query'];
 export type QueryResult = components['schemas']['QueryResult'];
+export type RebuildCreated = components['schemas']['RebuildCreated'];
+export type RebuildFailed = components['schemas']['RebuildFailed'];
 export type RebuildItem = components['schemas']['RebuildItem'];
-export type RebuildPlan = components['schemas']['RebuildPlan'];
 export type RebuildRequest = components['schemas']['RebuildRequest'];
+export type RebuildResponse = components['schemas']['RebuildResponse'];
+export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type Replaced = components['schemas']['Replaced'];
 export type Replacement = components['schemas']['Replacement'];
 export type Replaces = components['schemas']['Replaces'];
@@ -1963,10 +2019,16 @@ export interface operations {
             };
         };
     };
-    planRebuild: {
+    rebuildSnapshots: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1976,13 +2038,26 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The plan, or the changes that stop it */
+            /** @description The plan, and what the run did */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RebuildPlan"];
+                    "application/json": components["schemas"]["RebuildResponse"];
+                };
+            };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
