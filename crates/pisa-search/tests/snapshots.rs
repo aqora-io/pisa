@@ -341,6 +341,7 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         key: None,
+        replaces: None,
     }
 }
 

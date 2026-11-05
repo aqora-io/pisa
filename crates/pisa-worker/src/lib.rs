@@ -135,7 +135,7 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
         Job::SessionStart(j) => JobResult::SessionStarted(sessions.start(pool, j).await),
         Job::SessionTactic(j) => JobResult::TacticApplied(sessions.tactic(pool, j).await),
         Job::SessionCheck(j) => JobResult::SessionChecked(sessions.check(pool, j).await),
-        Job::SnapshotCreate(j) => {
+        Job::SnapshotCreate(j) | Job::SnapshotReplace(j) => {
             JobResult::SnapshotCreated(Box::new(pool.snapshots().create(pool, j).await))
         }
         Job::SnapshotGet(j) => {

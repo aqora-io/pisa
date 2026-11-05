@@ -26,6 +26,8 @@ diesel::table! {
         labels -> Jsonb,
         idempotency_key -> Nullable<Text>,
         created_micros -> BigInt,
+        replaces -> Nullable<Text>,
+        replaces_allow -> Nullable<Text>,
     }
 }
 

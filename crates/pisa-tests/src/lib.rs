@@ -124,9 +124,10 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// with `theorem`, `def` or `axiom`. Theorems depend on `sorryAx` if the code
 /// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, and on any
 /// axiom it declares. A "type hash" is the statement text between the name
-/// and `:=`.
+/// and `:=`, and a `def`'s "value hash" the text after it.
 /// The worker's declaration export for `code`: each `theorem`, `def` and
-/// `axiom`, with its statement as the signature and a `/-- … -/` on the line
+/// `axiom`, with its statement as the signature, the words of its statement
+/// and of its value as the constants they use, and a `/-- … -/` on the line
 /// before as its docstring.
 pub fn exports(code: &str) -> String {
     let mut decls = Vec::new();
@@ -143,18 +144,32 @@ pub fn exports(code: &str) -> String {
             doc = None;
             continue;
         };
-        let statement = line
-            .split_once(name)
-            .map_or("", |(_, rest)| rest.split(":=").next().unwrap_or("").trim());
+        let (statement, value) = statement_and_value(line, name);
         decls.push(json!({
             "name": name,
             "kind": kind,
             "signature": format!("{name} {statement}"),
             "type_pp_full": statement,
+            "type_refs": names_in(&statement),
+            "value_refs": names_in(&value),
             "docstring": doc.take(),
         }));
     }
     Value::Array(decls).to_string()
+}
+
+/// The text of a declaration line between `name` and `:=`, and after `:=`.
+fn statement_and_value(line: &str, name: &str) -> (String, String) {
+    let rest = line.split_once(name).map_or("", |(_, rest)| rest);
+    let (statement, value) = rest.split_once(":=").unwrap_or((rest, ""));
+    (statement.trim().to_string(), value.trim().to_string())
+}
+
+/// The names `text` mentions, as the constants it would use.
+fn names_in(text: &str) -> Vec<&str> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '\''))
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 pub fn declarations(code: &str) -> String {
@@ -172,9 +187,7 @@ pub fn declarations(code: &str) -> String {
         let (Some(keyword), Some(name)) = (words.next(), words.next()) else {
             continue;
         };
-        let statement = line
-            .split_once(name)
-            .map_or("", |(_, rest)| rest.split(":=").next().unwrap_or("").trim());
+        let (statement, value) = statement_and_value(line, name);
         let (kind, axioms) = match keyword {
             "axiom" => {
                 used.push(name.to_string());
@@ -184,17 +197,19 @@ pub fn declarations(code: &str) -> String {
             "theorem" => ("theorem", Vec::new()),
             _ => continue,
         };
-        decls.push((kind, name.to_string(), axioms, statement.to_string()));
+        decls.push((kind, name.to_string(), axioms, statement, value));
     }
     let decls: Vec<Value> = decls
         .into_iter()
-        .map(|(kind, name, axioms, statement)| {
+        .map(|(kind, name, axioms, statement, value)| {
             let axioms = if kind == "theorem" {
                 used.clone()
             } else {
                 axioms
             };
-            json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement})
+            let value_hash = (kind == "def").then_some(value);
+            json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement,
+                   "value_hash": value_hash})
         })
         .collect();
     Value::Array(decls).to_string()

@@ -484,6 +484,78 @@ pub struct SnapshotRequest {
     /// for the rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The entry this code replaces, e.g. the skeleton a proof fills in. The
+    /// code is kept only if it still declares everything that entry's module
+    /// declares, each with the same type and, for definitions, the same
+    /// value, and still builds on every snapshot that module builds on; it
+    /// may add declarations and imports. Otherwise nothing is kept and
+    /// `result.reasons` lists the changes. The new entry records the link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replaces>,
+}
+
+/// [`SnapshotRequest::replaces`]: an entry, or an entry and what may change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum Replaces {
+    Entry(String),
+    With(Replaced),
+}
+
+impl Replaces {
+    pub fn entry(&self) -> &str {
+        match self {
+            Replaces::Entry(entry) => entry,
+            Replaces::With(r) => &r.entry,
+        }
+    }
+
+    pub fn allow(&self) -> Option<Allow> {
+        match self {
+            Replaces::Entry(_) => None,
+            Replaces::With(r) => r.allow,
+        }
+    }
+}
+
+/// What a replacement may change besides adding declarations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Allow {
+    /// Definitions' values, e.g. to add a missing hypothesis; their types and
+    /// theorems' types stay the same. A theorem's type only names a
+    /// definition, so its meaning can change: the response lists the
+    /// theorems that use a changed definition.
+    Definitions,
+}
+
+/// An entry that another replaced, and how.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Replaced {
+    pub entry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Allow>,
+}
+
+/// [`SnapshotResponse::replaces`]: the entry the create replaced, and what
+/// the replacement changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Replacement {
+    pub entry: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Allow>,
+    /// The replaced module's declarations that used `sorry` and no longer
+    /// do. Empty on a key replay, which doesn't compare again.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub filled: Vec<String>,
+    /// With `allow: "definitions"`, the definitions whose value changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_definitions: Vec<String>,
+    /// The theorems whose type uses a changed definition, directly or
+    /// through another definition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -491,9 +563,10 @@ pub struct SnapshotResponse {
     /// The entry, which the other snapshot endpoints take: the one this create
     /// added, or on a [`key`](SnapshotRequest::key) replay the one the key is
     /// on. It keeps the module until it is deleted. Absent when nothing new
-    /// was kept: the code was not kept, or `verify: true` found it kept but
-    /// failing the re-check, in which case `snapshot` and `header` are set and
-    /// `result` has the error.
+    /// was kept: the code was not kept, it changed what the entry it
+    /// [`replaces`](SnapshotRequest::replaces) states (`result.reasons` says
+    /// how), or `verify: true` found it kept but failing the re-check. For
+    /// code that was already kept, `snapshot` and `header` are then set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
     /// The module to import, e.g. `PisaSnap.s1a2b…`, shared by every entry on
@@ -517,6 +590,9 @@ pub struct SnapshotResponse {
     /// The entry's labels.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// The entry it replaces, if the request named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replacement>,
     /// The check, as for `/check`. It has no `sorries`, and `time` includes
     /// importing the module's imports.
     pub result: CheckResult,
@@ -538,6 +614,9 @@ pub struct SnapshotInfo {
     /// The entry's labels.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// The entry this one replaced, if it was created to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replaced>,
     pub dirty: bool,
     /// As in [`SnapshotResponse::verified`].
     pub verified: bool,
@@ -575,6 +654,9 @@ pub struct SnapshotSummary {
     /// As in [`SnapshotResponse::header`].
     pub header: String,
     pub labels: BTreeMap<String, String>,
+    /// As in [`SnapshotInfo::replaces`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replaced>,
     pub dirty: bool,
     /// As in [`SnapshotResponse::verified`].
     pub verified: bool,

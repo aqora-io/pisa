@@ -13,7 +13,8 @@ use pisa_protocol::snapshot;
 use serde_json::Value;
 
 use crate::catalog::{
-    EntryMeta, EntryRow, Fail, Logged, ModuleMeta, NewEntry, SnapshotDecls, entry_from_row,
+    EntryMeta, EntryRow, Fail, Logged, ModuleMeta, NewEntry, SnapshotDecls, allow_column,
+    entry_from_row,
     now_micros, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
@@ -25,12 +26,16 @@ const ENTRY: (
     entries::labels,
     entries::idempotency_key,
     entries::created_micros,
+    entries::replaces,
+    entries::replaces_allow,
 ) = (
     entries::id,
     entries::module,
     entries::labels,
     entries::idempotency_key,
     entries::created_micros,
+    entries::replaces,
+    entries::replaces_allow,
 );
 
 async fn module_in(conn: &mut Conn, v: &str, m: &str) -> Result<Option<ModuleMeta>, Fail> {
@@ -104,7 +109,9 @@ async fn add(
         labels: entry.labels.clone(),
         key: entry.key.clone(),
         created_micros: now_micros(),
+        replaces: entry.replaces.clone(),
     };
+    let allow = meta.replaces.as_ref().map(allow_column).transpose()?;
     diesel::insert_into(entries::table)
         .values((
             entries::version.eq(v),
@@ -113,6 +120,8 @@ async fn add(
             entries::labels.eq(to_record(&meta.labels)?),
             entries::idempotency_key.eq(meta.key.as_deref()),
             entries::created_micros.eq(meta.created_micros as i64),
+            entries::replaces.eq(meta.replaces.as_ref().map(|r| r.entry.as_str())),
+            entries::replaces_allow.eq(allow.flatten()),
         ))
         .execute(conn)
         .await?;

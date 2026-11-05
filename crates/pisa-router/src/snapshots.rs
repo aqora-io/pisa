@@ -48,13 +48,20 @@ pub async fn create(
         header: None,
         state: None,
     };
-    let job = Job::SnapshotCreate(SnapshotCreateJob {
+    let replace = req.replaces.is_some();
+    let create = SnapshotCreateJob {
         code: req.code,
         timeout_secs: req.timeout,
         verify: req.verify,
         labels: req.labels,
         key: req.key,
-    });
+        replaces: req.replaces,
+    };
+    let job = if replace {
+        Job::SnapshotReplace(create)
+    } else {
+        Job::SnapshotCreate(create)
+    };
     let p = Prepared {
         job,
         route,

@@ -467,6 +467,7 @@ impl Client {
             verify: opts.verify,
             labels: opts.labels.clone(),
             key: opts.key.clone(),
+            replaces: None,
         }
     }
 

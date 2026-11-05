@@ -17,6 +17,10 @@ pub enum Job {
     SessionTactic(SessionTacticJob),
     SessionCheck(SessionCheckJob),
     SnapshotCreate(SnapshotCreateJob),
+    /// A create with [`replaces`](SnapshotCreateJob::replaces) set. It has a
+    /// kind of its own so that a worker that doesn't know the field refuses
+    /// it as [`Job::Unsupported`], rather than keeping the code unchecked.
+    SnapshotReplace(SnapshotCreateJob),
     SnapshotGet(SnapshotJob),
     SnapshotDelete(SnapshotJob),
     SnapshotVerify(SnapshotJob),
@@ -68,6 +72,8 @@ pub struct SnapshotCreateJob {
     /// The request's idempotency key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<api::Replaces>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,6 +181,25 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(job, Job::Unsupported));
+    }
+
+    #[test]
+    fn a_create_that_replaces_has_a_kind_of_its_own() {
+        let create = SnapshotCreateJob {
+            code: "x".into(),
+            timeout_secs: 1,
+            verify: None,
+            labels: BTreeMap::new(),
+            key: None,
+            replaces: Some(api::Replaces::Entry("e".into())),
+        };
+        let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();
+        assert_eq!(job["kind"], "snapshot_replace");
+        assert_eq!(job["replaces"], "e");
+        let Ok(Job::SnapshotReplace(back)) = serde_json::from_value(job) else {
+            panic!("not a replace")
+        };
+        assert_eq!(back.replaces.unwrap().entry(), "e");
     }
 
     #[test]

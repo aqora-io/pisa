@@ -7,7 +7,7 @@ use std::time::Duration;
 use pisa_protocol::api::{self, Error, ErrorKind, Key, StartResponse, StateInfo, TacticResponse};
 use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{ReplCommand, ReplResponse};
-use pisa_protocol::verify::Declaration;
+use pisa_protocol::verify::statement_changes;
 use pisa_protocol::wire::{
     CheckJob, CheckOutcome, SessionCheckJob, SessionChecked, SessionStartJob, SessionTacticJob,
 };
@@ -235,7 +235,10 @@ impl Sessions {
             .as_ref()
             .map(|v| v.declarations.as_slice())
             .unwrap_or_default();
-        let mut statement_reasons = statement_changes(&session.declarations, now);
+        let mut statement_reasons: Vec<String> = statement_changes(&session.declarations, now)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         if !same_imports {
             statement_reasons.push("statement: the imports differ from the session's".into());
         }
@@ -323,61 +326,5 @@ impl Sessions {
         };
         slot.remember(key.id.clone(), resident.clone());
         Ok(resident)
-    }
-}
-
-/// Every declaration of the original code must still exist with the same
-/// type, and definitions with the same value.
-pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<String> {
-    original
-        .iter()
-        .filter_map(|d| match now.iter().find(|n| n.name == d.name) {
-            None => Some(format!("statement: {} is missing", d.name)),
-            Some(n) if n.type_hash != d.type_hash => {
-                Some(format!("statement: {} has a different type", d.name))
-            }
-            Some(n) if n.value_hash != d.value_hash => {
-                Some(format!("statement: {} has a different value", d.name))
-            }
-            Some(_) => None,
-        })
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn decl(name: &str, ty: &str, value: Option<&str>) -> Declaration {
-        Declaration {
-            name: name.into(),
-            kind: if value.is_some() { "def" } else { "theorem" }.into(),
-            axioms: vec![],
-            type_hash: ty.into(),
-            value_hash: value.map(Into::into),
-        }
-    }
-
-    #[test]
-    fn statement_changes_catch_missing_retyped_and_redefined() {
-        let original = [decl("t", "1", None), decl("f", "2", Some("3"))];
-        assert!(statement_changes(&original, &original).is_empty());
-        let mut extra = original.to_vec();
-        extra.push(decl("helper", "9", None));
-        assert!(statement_changes(&original, &extra).is_empty());
-        assert_eq!(
-            statement_changes(
-                &original,
-                &[decl("t", "X", None), decl("f", "2", Some("4"))]
-            ),
-            [
-                "statement: t has a different type",
-                "statement: f has a different value"
-            ]
-        );
-        assert_eq!(
-            statement_changes(&original, &[decl("f", "2", Some("3"))]),
-            ["statement: t is missing"]
-        );
     }
 }

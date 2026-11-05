@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use pisa_protocol::api::{CheckResult, Error, ErrorKind};
+use pisa_protocol::api::{CheckResult, Error, ErrorKind, Replaced};
 use pisa_protocol::snapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -81,6 +81,9 @@ pub struct EntryMeta {
     pub key: Option<String>,
     /// Microseconds since the Unix epoch.
     pub created_micros: u64,
+    /// The entry its create replaced, once it checked the statements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replaced>,
 }
 
 impl EntryMeta {
@@ -176,6 +179,8 @@ pub const LOG_RETENTION: Duration = Duration::from_secs(24 * 3600);
 pub struct NewEntry {
     pub labels: BTreeMap<String, String>,
     pub key: Option<String>,
+    /// The entry it replaces, which the caller has compared it with.
+    pub replaces: Option<Replaced>,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -265,18 +270,48 @@ fn has_nul(value: &Value) -> bool {
     }
 }
 
-/// An entry's id, module, labels, key and creation time, as selected.
-pub(crate) type EntryRow = (String, String, Value, Option<String>, i64);
+/// An entry's id, module, labels, key, creation time, and the entry it
+/// replaces with what it allowed, as selected.
+pub(crate) type EntryRow = (
+    String,
+    String,
+    Value,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+);
 
 pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail> {
-    let (e, module, labels, key, created) = row;
+    let (e, module, labels, key, created, replaces, allow) = row;
+    let replaces = match replaces {
+        Some(entry) => Some(Replaced {
+            entry,
+            allow: allow
+                .map(Value::String)
+                .map(serde_json::from_value)
+                .transpose()?,
+        }),
+        None => None,
+    };
     let meta = EntryMeta {
         module,
         labels: serde_json::from_value(labels)?,
         key,
         created_micros: created as u64,
+        replaces,
     };
     Ok((e, meta))
+}
+
+/// What the `replaces_allow` column holds for `replaced`.
+pub(crate) fn allow_column(replaced: &Replaced) -> Result<Option<String>, Fail> {
+    Ok(
+        match replaced.allow.map(serde_json::to_value).transpose()? {
+            Some(Value::String(s)) => Some(s),
+            _ => None,
+        },
+    )
 }
 
 /// The error for a module that isn't kept.
@@ -563,6 +598,7 @@ mod tests {
         NewEntry {
             labels: BTreeMap::new(),
             key: None,
+            replaces: None,
         }
     }
 
@@ -573,6 +609,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             key: None,
+            replaces: None,
         }
     }
 
@@ -580,6 +617,7 @@ mod tests {
         NewEntry {
             labels: BTreeMap::new(),
             key: Some(k.into()),
+            replaces: None,
         }
     }
 
@@ -645,6 +683,34 @@ mod tests {
             let other = catalog.update_module("x", "c", |meta| meta.dirty = false);
             assert!(other.await.unwrap().is_none());
             assert!(catalog.module("x").await.unwrap().dirty);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entry_keeps_the_link_to_the_entry_it_replaced() {
+        use pisa_protocol::api::Allow;
+        for catalog in catalogs().await {
+            let (old, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            for allow in [None, Some(Allow::Definitions)] {
+                let replaces = Some(Replaced {
+                    entry: old.clone(),
+                    allow,
+                });
+                let entry = NewEntry {
+                    replaces: replaces.clone(),
+                    ..no_labels()
+                };
+                let (e, added) = catalog.add_entry("x", entry).await.unwrap().unwrap();
+                assert_eq!(added.replaces, replaces);
+                assert_eq!(catalog.entry(&e).await.unwrap().replaces, replaces);
+                let (listed, _) = catalog.list(&[], 10, None).await.unwrap();
+                let found = listed.iter().find(|(id, _)| *id == e).unwrap();
+                assert_eq!(found.1.replaces, replaces);
+            }
+            assert_eq!(catalog.entry(&old).await.unwrap().replaces, None);
         }
     }
 

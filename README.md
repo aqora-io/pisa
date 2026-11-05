@@ -192,6 +192,11 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release with `replaces` on snapshot creates, upgrade the workers before
+clients send `replaces`: an older worker refuses such a create, answering 500
+that it may be older than the server, rather than keeping the code unchecked.
+Snapshot entries gain two columns, which each process adds as it starts.
+
 To the release with async requests, upgrade every server before clients send
 `Prefer: respond-async`: older servers answer such requests at once, don't
 know `/jobs`, and sweep async jobs' answers after 10 minutes. The job queue
@@ -284,9 +289,9 @@ pnpm -C web generate
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, result}`; see [Snapshots](#snapshots) |
-| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
-| `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, dirty, verified, result, created, decls?}` |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, replaces?, result}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
+| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, replaces?, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
+| `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, replaces?, dirty, verified, result, created, decls?}` |
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -422,6 +427,42 @@ in `result.error`), so that a retry is safe:
 - A create that keeps nothing, e.g. when Lean reports errors or a `verify: true`
   re-check fails, doesn't use the key up, so a later create can.
 - Deleting an entry frees its key.
+
+<a id="replacing"></a>
+**Replacing an entry.** A create can name the entry it `replaces`, e.g. the
+skeleton with `sorry`s that a proof fills in. The code is kept only if it
+still declares everything the replaced entry's module declares, each with the
+same type and, for definitions, the same value; it may add declarations, such
+as helper lemmas, and may still use `sorry`. So filling a `sorry` can't
+quietly change what is proved:
+
+```text
+POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
+  → {"entry": "4b7a…", …, "replaces": {"entry": "9c0e…", "filled": ["t"]}}
+```
+
+- **Refused.** Code that changes a statement is not kept, and has no `entry`:
+  `result.ok` is false and `result.reasons` says what changed, e.g.
+  `statement: t has a different type`. To change a statement on purpose,
+  create the code without `replaces`.
+- **Imports.** The code may import more, but must still build on every
+  snapshot the replaced entry's module builds on, directly or through others.
+  A type names the constants it uses, such as a definition from an imported
+  snapshot, without saying what they are, so swapping that snapshot for
+  another could change what a statement means while every hash stays the
+  same. To move an entry onto a new version of a snapshot it imports, create
+  it again on that version first, then replace that.
+- **Definitions.** `"replaces": {"entry": "9c0e…", "allow": "definitions"}`
+  lets definitions change their value but not their type, e.g. to add a
+  missing hypothesis. A theorem's type only names a definition, so its
+  meaning can change while its type matches: `replaces` in the response lists
+  the `changed_definitions` and the theorems of the new module whose type uses
+  one, directly or through another definition (`affected`).
+- **The link.** `filled` lists the declarations that used `sorry` and no
+  longer do. The new entry records `replaces: {entry, allow?}`, which listings
+  and `GET /snapshots/{entry}` show. Only a create that passed the comparison
+  sets it, so it can be trusted, and it stays after the replaced entry is
+  deleted. A key replay returns the entry as it is, with `filled` empty.
 
 **How it works.**
 - **Building.** A module is its code compiled with `lean -o` to the module

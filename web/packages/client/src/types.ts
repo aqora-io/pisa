@@ -7,6 +7,7 @@
 import type { ErrorKind } from "./openapi.ts";
 
 export type {
+  Allow,
   BatchItem,
   BatchRequest,
   BatchResponse,
@@ -34,6 +35,9 @@ export type {
   Pos,
   Query,
   QueryResult,
+  Replaced,
+  Replacement,
+  Replaces,
   Resolution,
   ResolveRequest,
   ResolveResponse,

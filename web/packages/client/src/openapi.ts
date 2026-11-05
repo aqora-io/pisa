@@ -278,6 +278,11 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description What a replacement may change besides adding declarations.
+         * @enum {string}
+         */
+        Allow: "definitions";
         BatchItem: {
             code: string;
             id: string;
@@ -565,6 +570,33 @@ export interface components {
             /** @description What made this result worse than usual, e.g. a lane that failed. */
             warnings?: string[];
         };
+        /** @description An entry that another replaced, and how. */
+        Replaced: {
+            allow?: components["schemas"]["Allow"];
+            entry: string;
+        };
+        /**
+         * @description [`SnapshotResponse::replaces`]: the entry the create replaced, and what
+         *     the replacement changed.
+         */
+        Replacement: {
+            /**
+             * @description The theorems whose type uses a changed definition, directly or
+             *     through another definition.
+             */
+            affected?: string[];
+            allow?: components["schemas"]["Allow"];
+            /** @description With `allow: "definitions"`, the definitions whose value changed. */
+            changed_definitions?: string[];
+            entry: string;
+            /**
+             * @description The replaced module's declarations that used `sorry` and no longer
+             *     do. Empty on a key replay, which doesn't compare again.
+             */
+            filled: string[];
+        };
+        /** @description [`SnapshotRequest::replaces`]: an entry, or an entry and what may change. */
+        Replaces: string | components["schemas"]["Replaced"];
         Resolution: {
             /** @description For a deprecated name, its replacement. */
             deprecated_to?: string;
@@ -653,6 +685,8 @@ export interface components {
             labels?: {
                 [key: string]: string;
             };
+            /** @description The entry this one replaced, if it was created to. */
+            replaces?: components["schemas"]["Replaced"];
             result: components["schemas"]["CheckResult"];
             /** @description The entry's module. */
             snapshot: string;
@@ -700,6 +734,15 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description The entry this code replaces, e.g. the skeleton a proof fills in. The
+             *     code is kept only if it still declares everything that entry's module
+             *     declares, each with the same type and, for definitions, the same
+             *     value, and still builds on every snapshot that module builds on; it
+             *     may add declarations and imports. Otherwise nothing is kept and
+             *     `result.reasons` lists the changes. The new entry records the link.
+             */
+            replaces?: components["schemas"]["Replaces"];
+            /**
              * Format: int64
              * @description Lean's time limit in seconds, for building the module including its
              *     imports.
@@ -725,9 +768,10 @@ export interface components {
              * @description The entry, which the other snapshot endpoints take: the one this create
              *     added, or on a [`key`](SnapshotRequest::key) replay the one the key is
              *     on. It keeps the module until it is deleted. Absent when nothing new
-             *     was kept: the code was not kept, or `verify: true` found it kept but
-             *     failing the re-check, in which case `snapshot` and `header` are set and
-             *     `result` has the error.
+             *     was kept: the code was not kept, it changed what the entry it
+             *     [`replaces`](SnapshotRequest::replaces) states (`result.reasons` says
+             *     how), or `verify: true` found it kept but failing the re-check. For
+             *     code that was already kept, `snapshot` and `header` are then set.
              */
             entry?: string;
             /**
@@ -740,6 +784,8 @@ export interface components {
             labels?: {
                 [key: string]: string;
             };
+            /** @description The entry it replaces, if the request named one. */
+            replaces?: components["schemas"]["Replacement"];
             /**
              * @description The check, as for `/check`. It has no `sorries`, and `time` includes
              *     importing the module's imports.
@@ -787,6 +833,8 @@ export interface components {
             labels: {
                 [key: string]: string;
             };
+            /** @description As in [`SnapshotInfo::replaces`]. */
+            replaces?: components["schemas"]["Replaced"];
             /** @description The entry's module. */
             snapshot: string;
             /** @description As in [`SnapshotResponse::verified`]. */
@@ -883,6 +931,7 @@ export interface components {
     headers: never;
     pathItems: never;
 }
+export type Allow = components['schemas']['Allow'];
 export type BatchItem = components['schemas']['BatchItem'];
 export type BatchRequest = components['schemas']['BatchRequest'];
 export type BatchResponse = components['schemas']['BatchResponse'];
@@ -911,6 +960,9 @@ export type ModuleDecl = components['schemas']['ModuleDecl'];
 export type Pos = components['schemas']['Pos'];
 export type Query = components['schemas']['Query'];
 export type QueryResult = components['schemas']['QueryResult'];
+export type Replaced = components['schemas']['Replaced'];
+export type Replacement = components['schemas']['Replacement'];
+export type Replaces = components['schemas']['Replaces'];
 export type Resolution = components['schemas']['Resolution'];
 export type ResolveRequest = components['schemas']['ResolveRequest'];
 export type ResolveResponse = components['schemas']['ResolveResponse'];

@@ -33,8 +33,9 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, SnapshotFailure, SnapshotInfo,
-    SnapshotList, SnapshotResponse, SnapshotSummary, SnapshotVerified,
+    Allow, CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, Replaced, Replacement,
+    Replaces, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse, SnapshotSummary,
+    SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
@@ -42,7 +43,7 @@ use pisa_protocol::labels::{
 };
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::Verification;
+use pisa_protocol::verify::{Change, Verification, statement_changes};
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
 use sha2::{Digest, Sha256};
 
@@ -102,10 +103,133 @@ fn summary(entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> SnapshotS
         imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
         header: meta.header.clone(),
         labels: entry_meta.labels,
+        replaces: entry_meta.replaces,
         dirty: meta.dirty,
         verified: meta.verified,
         created: entry_meta.created_micros / 1_000_000,
     }
+}
+
+/// The entry a create replaces, as it was found before the build.
+struct Replacing {
+    replaced: Replaced,
+    /// The declarations of the replaced entry's module.
+    declarations: Vec<Declaration>,
+    /// The snapshot modules it needs, other than its own.
+    needs: Vec<String>,
+}
+
+/// Compares a replacement's declarations, `now`, with those of the module it
+/// replaces: what it filled and changed, or why it can't replace it. `needs`
+/// are the snapshot modules the replacement needs, and `exported` is its
+/// declaration export, which says which theorems use a changed definition.
+///
+/// The declarations are compared by their hashes, and a hash names the
+/// constants a type or value uses without saying what they are. So the
+/// replacement must still need every snapshot the replaced module needs:
+/// then each constant from those is the same, as Lean refuses an import that
+/// declares a name again, and Mathlib's are fixed by the version.
+fn compare(
+    replacing: &Replacing,
+    now: &[Declaration],
+    needs: &[String],
+    exported: Option<&[SnapshotDecl]>,
+) -> Result<Replacement, Vec<String>> {
+    let allow = replacing.replaced.allow;
+    let (values, changed): (Vec<_>, Vec<_>) = statement_changes(&replacing.declarations, now)
+        .into_iter()
+        .partition(|c| c.change == Change::Value && allow == Some(Allow::Definitions));
+    let lost = replacing.needs.iter().filter(|m| !needs.contains(m));
+    let refused: Vec<String> = lost
+        .map(|m| {
+            format!(
+                "statement: the code no longer builds on {}, which the replaced entry does",
+                snapshot::module(m)
+            )
+        })
+        .chain(changed.iter().map(ToString::to_string))
+        .collect();
+    if !refused.is_empty() {
+        return Err(refused);
+    }
+    let changed_definitions: Vec<String> = values.into_iter().map(|c| c.name).collect();
+    let affected = match exported {
+        _ if changed_definitions.is_empty() => Vec::new(),
+        Some(exported) => affected(&changed_definitions, exported),
+        None => {
+            return Err(vec![
+                "statement: the theorems that use the changed definitions are unknown, as the \
+                 module's declarations could not be exported"
+                    .into(),
+            ]);
+        }
+    };
+    let uses_sorry = |d: &Declaration| d.axioms.iter().any(|a| a == "sorryAx");
+    let filled = replacing
+        .declarations
+        .iter()
+        .filter(|d| uses_sorry(d) && now.iter().any(|n| n.name == d.name && !uses_sorry(n)))
+        .map(|d| d.name.clone())
+        .collect();
+    Ok(Replacement {
+        entry: replacing.replaced.entry.clone(),
+        allow,
+        filled,
+        changed_definitions,
+        affected,
+    })
+}
+
+/// What [`Snapshots::build`] kept: the module's record, the new entry, and
+/// what the replacement changed.
+type Built = Option<(ModuleMeta, (String, EntryMeta), Option<Replacement>)>;
+
+/// The link a new entry records for `replacement`.
+fn link(replacement: &Replacement) -> Replaced {
+    Replaced {
+        entry: replacement.entry.clone(),
+        allow: replacement.allow,
+    }
+}
+
+/// Puts what a create's comparison found into its response, if the entry
+/// the response has records that comparison: a create that lost a race on
+/// its key gets the other create's entry.
+fn replaced(done: &mut SnapshotResponse, replacement: Option<Replacement>) {
+    if let Some(r) = replacement
+        && done
+            .replaces
+            .as_ref()
+            .is_some_and(|d| d.entry == r.entry && d.allow == r.allow)
+    {
+        done.replaces = Some(r);
+    }
+}
+
+/// The theorems among `exported` whose type uses a definition in `changed`,
+/// directly or through the types and values of other declarations.
+fn affected(changed: &[String], exported: &[SnapshotDecl]) -> Vec<String> {
+    let mut used: std::collections::HashSet<&str> = changed.iter().map(String::as_str).collect();
+    loop {
+        let before = used.len();
+        for d in exported.iter().filter(|d| d.kind != "theorem") {
+            if d.type_refs
+                .iter()
+                .chain(&d.value_refs)
+                .any(|r| used.contains(r.as_str()))
+            {
+                used.insert(&d.name);
+            }
+        }
+        if used.len() == before {
+            break;
+        }
+    }
+    exported
+        .iter()
+        .filter(|d| d.kind == "theorem" && d.type_refs.iter().any(|r| used.contains(r.as_str())))
+        .map(|d| d.name.clone())
+        .collect()
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -170,6 +294,11 @@ fn modules(parents: &[ModuleMeta], own: Module) -> Vec<Module> {
     }
     modules.push(own);
     modules
+}
+
+/// The ids of `modules`.
+fn ids(modules: &[Module]) -> impl Iterator<Item = &String> {
+    modules.iter().map(|m| &m.id)
 }
 
 /// The error for a create that asked to verify an import or existing snapshot
@@ -402,8 +531,9 @@ impl Snapshots {
         meta: ModuleMeta,
         entry: Option<(String, EntryMeta)>,
     ) -> SnapshotResponse {
-        let (entry, labels) =
-            entry.map_or((None, Default::default()), |(e, m)| (Some(e), m.labels));
+        let (entry, labels, replaced) = entry.map_or((None, Default::default(), None), |(e, m)| {
+            (Some(e), m.labels, m.replaces)
+        });
         SnapshotResponse {
             entry,
             snapshot: Some(snapshot::module(id)),
@@ -412,6 +542,14 @@ impl Snapshots {
             dirty: meta.dirty,
             verified: meta.verified,
             labels,
+            // A key replay doesn't compare again.
+            replaces: replaced.map(|r| Replacement {
+                entry: r.entry,
+                allow: r.allow,
+                filled: Vec::new(),
+                changed_definitions: Vec::new(),
+                affected: Vec::new(),
+            }),
             result: meta.result,
         }
     }
@@ -429,6 +567,7 @@ impl Snapshots {
             dirty: false,
             verified: false,
             labels: Default::default(),
+            replaces: None,
             result: CheckResult::default(),
         };
         let valid =
@@ -460,10 +599,23 @@ impl Snapshots {
                 }
             }
         }
+        let replacing = match &job.replaces {
+            Some(r) => match self.replacing(r).await {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    response.result.error = Some(e);
+                    return response;
+                }
+            },
+            None => None,
+        };
         // A kept module removed before its new entry was added is built
         // again, once.
         for _ in 0..2 {
-            if let Some(done) = self.create_once(pool, &job, &split, response.clone()).await {
+            let done = self
+                .create_once(pool, &job, &split, replacing.as_ref(), response.clone())
+                .await;
+            if let Some(done) = done {
                 return done;
             }
         }
@@ -471,6 +623,24 @@ impl Snapshots {
             "the snapshot was deleted twice while it was being created",
         ));
         response
+    }
+
+    /// The entry `r` names, with its module's declarations.
+    async fn replacing(&self, r: &Replaces) -> Result<Replacing, Error> {
+        let entry = parse_entry(r.entry())?;
+        let entry_meta = self.catalog.entry(entry).await?;
+        let meta = self.catalog.module(&entry_meta.module).await?;
+        Ok(Replacing {
+            replaced: Replaced {
+                entry: entry.to_string(),
+                allow: r.allow(),
+            },
+            declarations: meta.result.declarations,
+            needs: ids(&meta.modules)
+                .filter(|m| **m != entry_meta.module)
+                .cloned()
+                .collect(),
+        })
     }
 
     /// The response to a create whose idempotency key an entry already has:
@@ -495,6 +665,7 @@ impl Snapshots {
         pool: &Arc<Pool>,
         job: &SnapshotCreateJob,
         split: &Split,
+        replacing: Option<&Replacing>,
         mut response: SnapshotResponse,
     ) -> Option<SnapshotResponse> {
         let id = snapshot::id(&job.code);
@@ -503,7 +674,9 @@ impl Snapshots {
         match self.catalog.module(&id).await {
             Ok(meta) => {
                 drop(building);
-                return self.add_to_kept(pool, &id, meta, job, response).await;
+                return self
+                    .add_to_kept(pool, &id, meta, job, replacing, response)
+                    .await;
             }
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => {
@@ -524,10 +697,16 @@ impl Snapshots {
         }
         let header = snapshot::next_header(&split.header, &id);
         let mut slot = pool.acquire(&header_key(&header), None).await;
-        let built = self.build(&mut slot, job, split, &id, &header).await;
+        let built = self
+            .build(&mut slot, job, split, replacing, &id, &header)
+            .await;
         slot.finish_job();
         Some(match built {
-            Ok(Some((meta, entry))) => self.response(&id, meta, Some(entry)),
+            Ok(Some((meta, entry, replacement))) => {
+                let mut done = self.response(&id, meta, Some(entry));
+                replaced(&mut done, replacement);
+                done
+            }
             Ok(None) => response,
             Err(outcome) => {
                 response.result = (*outcome).into();
@@ -548,6 +727,7 @@ impl Snapshots {
         id: &str,
         meta: ModuleMeta,
         job: &SnapshotCreateJob,
+        replacing: Option<&Replacing>,
         mut response: SnapshotResponse,
     ) -> Option<SnapshotResponse> {
         let meta = if job.verify == Some(true) && !meta.verified {
@@ -578,9 +758,35 @@ impl Snapshots {
         } else {
             meta
         };
+        let replacement = match replacing {
+            Some(r) => {
+                let exported = match r.replaced.allow {
+                    Some(_) => match self.catalog.decls(id).await {
+                        Ok(decls) => decls.map(|d| d.decls),
+                        Err(e) => {
+                            response.result.error = Some(e);
+                            return Some(response);
+                        }
+                    },
+                    None => None,
+                };
+                let needs: Vec<String> = ids(&meta.modules).cloned().collect();
+                match compare(r, &meta.result.declarations, &needs, exported.as_deref()) {
+                    Ok(replacement) => Some(replacement),
+                    Err(reasons) => {
+                        let mut refused = self.response(id, meta, None);
+                        refused.result.ok = false;
+                        refused.result.reasons.extend(reasons);
+                        return Some(refused);
+                    }
+                }
+            }
+            None => None,
+        };
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
+            replaces: replacement.as_ref().map(link),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -595,20 +801,25 @@ impl Snapshots {
             response.result.error = Some(key_in_use());
             return Some(response);
         }
-        Some(self.response(id, meta, Some(added)))
+        let mut done = self.response(id, meta, Some(added));
+        replaced(&mut done, replacement);
+        Some(done)
     }
 
-    /// Compiles, judges and stores the snapshot with a new entry. Returns its
-    /// record and the entry, `None` if nothing could be checked (the cause is
-    /// in the result), or the outcome of a check that failed.
+    /// Compiles, judges and stores the snapshot with a new entry, once it
+    /// compares well with the entry it replaces, if any. Returns its record,
+    /// the entry and what the replacement changed, `None` if nothing could be
+    /// checked (the cause is in the result), or the outcome of a check that
+    /// failed.
     async fn build(
         &self,
         slot: &mut Lease,
         job: &SnapshotCreateJob,
         split: &Split,
+        replacing: Option<&Replacing>,
         id: &str,
         header: &str,
-    ) -> Result<Option<(ModuleMeta, (String, EntryMeta))>, Box<CheckOutcome>> {
+    ) -> Result<Built, Box<CheckOutcome>> {
         let mut outcome = CheckOutcome {
             time: 0.0,
             error: None,
@@ -739,8 +950,22 @@ impl Snapshots {
             .await
             .inspect_err(|e| tracing::warn!(module = %id, "exporting declarations failed: {e}"))
             .ok();
-        let verification = slot.policy().judge_decls(false, Some(decls));
+        let mut verification = slot.policy().judge_decls(false, Some(decls));
         let dirty = !verification.ok;
+        let needs: Vec<String> = ids(&modules(&parents, own.clone())).cloned().collect();
+        let replacement = match replacing {
+            Some(r) => match compare(r, &verification.declarations, &needs, exported.as_deref()) {
+                Ok(replacement) => Some(replacement),
+                Err(reasons) => {
+                    self.unbuild(slot, id);
+                    verification.ok = false;
+                    verification.reasons.extend(reasons);
+                    outcome.verification = Some(verification);
+                    return Err(Box::new(outcome));
+                }
+            },
+            None => None,
+        };
         outcome.verification = Some(verification);
 
         let meta = ModuleMeta {
@@ -768,12 +993,13 @@ impl Snapshots {
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
+            replaces: replacement.as_ref().map(link),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)
             .await
         {
-            Ok(stored) => Ok(Some(stored)),
+            Ok((meta, entry)) => Ok(Some((meta, entry, replacement))),
             Err(e) => {
                 self.unbuild(slot, id);
                 fail(outcome, e)
@@ -1011,6 +1237,7 @@ impl Snapshots {
             header: meta.header,
             code: meta.code,
             labels: entry_meta.labels,
+            replaces: entry_meta.replaces,
             dirty: meta.dirty,
             verified: meta.verified,
             result: meta.result,
@@ -1134,6 +1361,124 @@ mod tests {
     use super::*;
     use object_store::memory::InMemory;
 
+    fn decl(name: &str, ty: &str, value: Option<&str>, axioms: &[&str]) -> Declaration {
+        Declaration {
+            name: name.into(),
+            kind: if value.is_some() { "def" } else { "theorem" }.into(),
+            axioms: axioms.iter().map(|a| a.to_string()).collect(),
+            type_hash: ty.into(),
+            value_hash: value.map(Into::into),
+        }
+    }
+
+    fn exported(name: &str, kind: &str, type_refs: &[&str], value_refs: &[&str]) -> SnapshotDecl {
+        SnapshotDecl {
+            name: name.into(),
+            kind: kind.into(),
+            signature: String::new(),
+            type_pp_full: String::new(),
+            type_refs: type_refs.iter().map(|r| r.to_string()).collect(),
+            value_refs: value_refs.iter().map(|r| r.to_string()).collect(),
+            docstring: None,
+            deprecated_to: None,
+            uses_sorry: false,
+        }
+    }
+
+    fn replacing(old: Vec<Declaration>, allow: Option<Allow>) -> Replacing {
+        Replacing {
+            replaced: Replaced {
+                entry: "e".into(),
+                allow,
+            },
+            declarations: old,
+            needs: vec!["a".into()],
+        }
+    }
+
+    #[test]
+    fn a_replacement_keeps_statements_and_says_what_it_filled() {
+        let old = vec![
+            decl("t", "1", None, &["sorryAx"]),
+            decl("u", "2", None, &["sorryAx"]),
+            decl("f", "3", Some("4"), &[]),
+        ];
+        let now = [
+            decl("t", "1", None, &["propext"]),
+            decl("u", "2", None, &["sorryAx"]),
+            decl("f", "3", Some("4"), &[]),
+            decl("helper", "9", None, &[]),
+        ];
+        // It may build on more snapshots than the replaced module does.
+        let needs = ["a".to_string(), "b".to_string()];
+        let r = compare(&replacing(old.clone(), None), &now, &needs, None).unwrap();
+        assert_eq!((r.entry.as_str(), r.filled), ("e", vec!["t".to_string()]));
+        assert!(r.changed_definitions.is_empty() && r.affected.is_empty());
+
+        let retyped = [decl("t", "X", None, &[]), now[1].clone(), now[2].clone()];
+        assert_eq!(
+            compare(&replacing(old.clone(), None), &retyped, &needs, None),
+            Err(vec!["statement: t has a different type".to_string()])
+        );
+        // A definition's value changes only when that is allowed, and never
+        // its type.
+        let redefined = [
+            now[0].clone(),
+            now[1].clone(),
+            decl("f", "3", Some("5"), &[]),
+        ];
+        assert_eq!(
+            compare(&replacing(old.clone(), None), &redefined, &needs, Some(&[])),
+            Err(vec!["statement: f has a different value".to_string()])
+        );
+        let allowed = replacing(old.clone(), Some(Allow::Definitions));
+        let r = compare(&allowed, &redefined, &needs, Some(&[])).unwrap();
+        assert_eq!(r.changed_definitions, ["f"]);
+        assert_eq!(
+            compare(&allowed, &retyped, &needs, Some(&[]))
+                .unwrap_err()
+                .len(),
+            1
+        );
+        // Without the export, which theorems use it is unknown.
+        assert_eq!(
+            compare(&allowed, &redefined, &needs, None)
+                .unwrap_err()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_replacement_keeps_the_snapshots_the_replaced_module_builds_on() {
+        // A constant from a snapshot that is no longer imported could mean
+        // something else under the same name, however equal the hashes are.
+        let old = vec![decl("t", "1", None, &[])];
+        let swapped = ["a2".to_string()];
+        assert_eq!(
+            compare(&replacing(old.clone(), None), &old, &swapped, None),
+            Err(vec![format!(
+                "statement: the code no longer builds on {}, which the replaced entry does",
+                snapshot::module("a")
+            )])
+        );
+        assert!(compare(&replacing(old.clone(), None), &old, &["a".into()], None).is_ok());
+    }
+
+    #[test]
+    fn affected_theorems_use_a_changed_definition_directly_or_through_others() {
+        let exported = [
+            exported("f", "def", &["Nat"], &["Nat.add"]),
+            exported("g", "abbrev", &["Nat"], &["f"]),
+            exported("h", "def", &["Nat"], &["Nat.mul"]),
+            exported("direct", "theorem", &["f", "Eq"], &[]),
+            exported("through", "theorem", &["g"], &[]),
+            exported("unrelated", "theorem", &["h"], &["f"]),
+        ];
+        assert_eq!(affected(&["f".into()], &exported), ["direct", "through"]);
+        assert!(affected(&["nothing".into()], &exported).is_empty());
+    }
+
     /// A worker's snapshots over `db`, with its local cache in `dir`.
     fn snapshots(db: Db, dir: &Path) -> Arc<Snapshots> {
         std::fs::create_dir_all(dir.join(snapshot::ROOT)).unwrap();
@@ -1169,6 +1514,7 @@ mod tests {
         NewEntry {
             labels: Default::default(),
             key: None,
+            replaces: None,
         }
     }
 
