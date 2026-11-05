@@ -691,8 +691,7 @@ mod tests {
                         name: "b".into(),
                         kind: "theorem".into(),
                         axioms: vec!["sorryAx".into()],
-                        type_hash: String::new(),
-                        value_hash: None,
+                        ..Default::default()
                     }];
                 })
                 .await

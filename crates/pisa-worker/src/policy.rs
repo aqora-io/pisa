@@ -82,10 +82,60 @@ pub fn header_with_report_import(header: &str) -> String {
 const MARKER: &str = "PISA_DECLS ";
 
 /// Lists every declaration added after the imports with the axioms it depends
-/// on, a hash of its type and, for definitions, of its value. Names are rooted so user declarations can't
-/// shadow them.
+/// on, a hash of its type and, for definitions, of its value, and the
+/// constants of this code and of snapshots that its type and value use
+/// (`type_refs`, `value_refs`; an inductive's "value" is its constructors and
+/// recursor). Names are rooted so user declarations can't shadow them.
+///
+/// Internal auxiliaries, such as the `f._unary` holding the body of a
+/// well-founded definition, aren't listed: what uses one has its hashes fold
+/// in theirs, and its refs go through to what they use. Private names are
+/// hashed without their module, which differs between a module and its
+/// replacement. `generated` marks what Lean makes on demand, such as equation
+/// lemmas, which a replacement needn't have. The kernel verifier
+/// (`docker/verifier/PisaVerify.lean`) computes the same.
 pub const AXIOM_REPORT: &str = r#"run_cmd do
   let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
+  let tracked : _root_.Lean.Name → Bool := fun m =>
+    match env.getModuleIdxFor? m with
+    | some i => (`PisaSnap).isPrefixOf (env.header.moduleNames[i.toNat]!)
+    | none => true
+  let hidden : _root_.Lean.Name → Bool := fun m => m.isInternal && !(_root_.Lean.isPrivateName m)
+  let norm : _root_.Lean.Name → _root_.Lean.Name := fun m =>
+    match _root_.Lean.privateToUserName? m with
+    | some u => `_private ++ u
+    | none => m
+  let hashOf : _root_.Lean.Expr → UInt64 := fun e =>
+    hash (e.replace fun x => match x with
+      | .const m ls => if _root_.Lean.isPrivateName m then some (.const (norm m) ls) else none
+      | _ => none)
+  let deep : _root_.Lean.Name → _root_.Lean.Expr → UInt64 × List _root_.Lean.Name := fun self e => Id.run do
+    let mut seen : _root_.Lean.NameSet := {}
+    let mut refs : _root_.Lean.NameSet := {}
+    let mut reached : Array _root_.Lean.Name := #[]
+    let mut todo : List _root_.Lean.Name := e.getUsedConstants.toList
+    repeat
+      match todo with
+      | [] => break
+      | m :: rest =>
+        todo := rest
+        if seen.contains m || !tracked m then continue
+        seen := seen.insert m
+        if hidden m then
+          reached := reached.push m
+          if let some ci := env.find? m then
+            todo := ci.type.getUsedConstants.toList ++ todo
+            if let .defnInfo d := ci then
+              todo := d.value.getUsedConstants.toList ++ todo
+        else if m != self then
+          refs := refs.insert m
+    let mut h := hashOf e
+    for m in reached.qsort (fun a b => a.toString < b.toString) do
+      if let some ci := env.find? m then
+        h := mixHash h (mixHash (hash (norm m)) (hashOf ci.type))
+        if let .defnInfo d := ci then
+          h := mixHash h (hashOf d.value)
+    return (h, refs.toList)
   let mut out : Array _root_.Lean.Json := #[]
   for (n, ci) in env.constants.map₂.toList do
     if n.isInternal && !(_root_.Lean.isPrivateName n) then continue
@@ -99,14 +149,22 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
       | .ctorInfo _ => "constructor"
       | .recInfo _ => "recursor"
     let axioms ← _root_.Lean.collectAxioms n
+    let (typeHash, typeRefs) := deep n ci.type
+    let (valueHash, valueRefs) : _root_.Lean.Json × List _root_.Lean.Name := match ci with
+      | .defnInfo d => let (h, refs) := deep n d.value; (_root_.Lean.ToJson.toJson (toString h), refs)
+      | .inductInfo i => (_root_.Lean.Json.null, i.ctors ++ [_root_.Lean.mkRecName i.name])
+      | _ => (_root_.Lean.Json.null, [])
+    let generated := _root_.Lean.isReservedName env n ||
+      ((_root_.Lean.privateToUserName? n).map (·.isInternal)).getD false
     out := out.push (_root_.Lean.Json.mkObj [
       ("name", _root_.Lean.ToJson.toJson n),
       ("kind", _root_.Lean.ToJson.toJson kind),
       ("axioms", _root_.Lean.ToJson.toJson axioms),
-      ("type_hash", _root_.Lean.ToJson.toJson (toString (hash ci.type))),
-      ("value_hash", match ci with
-        | .defnInfo d => _root_.Lean.ToJson.toJson (toString (hash d.value))
-        | _ => _root_.Lean.Json.null)])
+      ("type_hash", _root_.Lean.ToJson.toJson (toString typeHash)),
+      ("value_hash", valueHash),
+      ("type_refs", _root_.Lean.ToJson.toJson typeRefs),
+      ("value_refs", _root_.Lean.ToJson.toJson valueRefs),
+      ("generated", _root_.Lean.ToJson.toJson generated)])
   _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
     (_root_.Std.Format.text ("PISA_DECLS " ++ (_root_.Lean.Json.arr out).compress)))"#;
 

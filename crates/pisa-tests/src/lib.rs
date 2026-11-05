@@ -124,7 +124,8 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// with `theorem`, `def` or `axiom`. Theorems depend on `sorryAx` if the code
 /// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, and on any
 /// axiom it declares. A "type hash" is the statement text between the name
-/// and `:=`, and a `def`'s "value hash" the text after it.
+/// and `:=`, and a `def`'s "value hash" the text after it. Its refs are the
+/// words of each that the code or a snapshot it imports declares.
 /// The worker's declaration export for `code`: each `theorem`, `def` and
 /// `axiom`, with its statement as the signature, the words of its statement
 /// and of its value as the constants they use, and a `/-- … -/` on the line
@@ -173,6 +174,7 @@ fn names_in(text: &str) -> Vec<&str> {
 }
 
 pub fn declarations(code: &str) -> String {
+    let imported = imported_code(code).unwrap_or_default();
     let mut used = vec!["propext".to_string()];
     if code.contains("sorry") {
         used.push("sorryAx".into());
@@ -207,9 +209,19 @@ pub fn declarations(code: &str) -> String {
             } else {
                 axioms
             };
-            let value_hash = (kind == "def").then_some(value);
+            let value_hash = (kind == "def").then_some(&value);
+            let refs = |text: &str| -> Vec<String> {
+                let mut refs: Vec<String> = names_in(text)
+                    .into_iter()
+                    .filter(|n| *n != name && declares(&imported, code, n))
+                    .map(String::from)
+                    .collect();
+                refs.dedup();
+                refs
+            };
+            let value_refs = if kind == "def" { refs(&value) } else { Vec::new() };
             json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement,
-                   "value_hash": value_hash})
+                   "value_hash": value_hash, "type_refs": refs(&statement), "value_refs": value_refs})
         })
         .collect();
     Value::Array(decls).to_string()

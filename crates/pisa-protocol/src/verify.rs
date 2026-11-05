@@ -2,6 +2,8 @@
 //! Declarations are parsed from the worker's Lean report, so their field
 //! names must match the JSON it prints.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -16,16 +18,55 @@ pub struct Verification {
 }
 
 /// A new declaration and the axioms it depends on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Declaration {
     pub name: String,
     pub kind: String,
     pub axioms: Vec<String>,
+    /// A hash of its type, with private names taken without their module,
+    /// and with the internal auxiliaries it uses folded in.
     pub type_hash: String,
-    /// For definitions, a hash of the value, so a proof can't change what a
-    /// statement means by redefining something it mentions.
+    /// For definitions, a hash of the value, as of the type, so a proof can't
+    /// change what a statement means by redefining something it mentions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_hash: Option<String>,
+    /// The constants of this code and of the snapshots it builds on that its
+    /// type uses, through internal auxiliaries. Absent in records from before
+    /// they were reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_refs: Option<Vec<String>>,
+    /// The same for a definition's value, or an inductive's constructors and
+    /// recursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_refs: Option<Vec<String>>,
+    /// Made by Lean on demand, such as an equation lemma: code with the same
+    /// statements needn't have it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub generated: bool,
+}
+
+/// `name` as it is across modules: a private name without the module it was
+/// declared in, which differs between a module and its replacement, e.g.
+/// `_private.PisaSnap.s1a2b.0.helper` as `_private.helper`.
+pub fn normalised(name: &str) -> Cow<'_, str> {
+    let Some(rest) = name.strip_prefix("_private.") else {
+        return Cow::Borrowed(name);
+    };
+    // The module's components, then a number, then the name as written.
+    let mut parts = rest.split('.');
+    let mut user = None;
+    let mut offset = 0;
+    for part in parts.by_ref() {
+        offset += part.len() + 1;
+        if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+            user = rest.get(offset..);
+            break;
+        }
+    }
+    match user {
+        Some(user) if !user.is_empty() => Cow::Owned(format!("_private.{user}")),
+        _ => Cow::Borrowed(name),
+    }
 }
 
 /// How a declaration of the original code changed.
@@ -57,12 +98,16 @@ impl std::fmt::Display for StatementChange {
 }
 
 /// Every declaration of the original code must still exist with the same
-/// type, and definitions with the same value. New declarations may be added.
+/// type, and definitions with the same value. New declarations may be added,
+/// and what Lean generated needn't stay. Names are matched across modules (see
+/// [`normalised`]).
 pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<StatementChange> {
     original
         .iter()
+        .filter(|d| !d.generated)
         .filter_map(|d| {
-            let change = match now.iter().find(|n| n.name == d.name) {
+            let name = normalised(&d.name);
+            let change = match now.iter().find(|n| normalised(&n.name) == name) {
                 None => Change::Missing,
                 Some(n) if n.type_hash != d.type_hash => Change::Type,
                 Some(n) if n.value_hash != d.value_hash => Change::Value,
@@ -84,10 +129,44 @@ mod tests {
         Declaration {
             name: name.into(),
             kind: if value.is_some() { "def" } else { "theorem" }.into(),
-            axioms: vec![],
             type_hash: ty.into(),
             value_hash: value.map(Into::into),
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn private_names_lose_their_module() {
+        assert_eq!(
+            normalised("_private.PisaSnap.s1a2b.0.helper"),
+            "_private.helper"
+        );
+        assert_eq!(
+            normalised("_private.PisaSnap.s1a2b.0.ack.match_1.eq_1"),
+            "_private.ack.match_1.eq_1"
+        );
+        assert_eq!(normalised("_private.Main.12.x"), "_private.x");
+        for kept in ["helper", "_private", "_private.Mod.x", "_private.Mod.0."] {
+            assert_eq!(normalised(kept), kept);
+        }
+    }
+
+    #[test]
+    fn private_and_generated_declarations_compare_as_written() {
+        let private = |module: &str, value: &str| Declaration {
+            value_hash: Some(value.into()),
+            ..decl(&format!("_private.PisaSnap.{module}.0.helper"), "1", None)
+        };
+        let generated = Declaration {
+            generated: true,
+            ..decl("f.eq_def", "2", None)
+        };
+        let original = [private("sA", "3"), generated];
+        assert!(statement_changes(&original, &[private("sB", "3")]).is_empty());
+        assert_eq!(
+            reasons(statement_changes(&original, &[private("sB", "4")])),
+            ["statement: _private.PisaSnap.sA.0.helper has a different value"]
+        );
     }
 
     fn reasons(changes: Vec<StatementChange>) -> Vec<String> {

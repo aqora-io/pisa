@@ -345,6 +345,28 @@ fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashMap<String, 
     levels
 }
 
+/// Marks what `reported`, the axiom report of the same module, marks as
+/// generated in `decls`, from the kernel verifier: the verifier's environment
+/// lacks what tells some of Lean's generated names apart.
+fn keep_generated(decls: &mut [Declaration], reported: &[Declaration]) {
+    let generated: HashSet<&str> = reported
+        .iter()
+        .filter(|d| d.generated)
+        .map(|d| d.name.as_str())
+        .collect();
+    for d in decls {
+        d.generated |= generated.contains(d.name.as_str());
+    }
+}
+
+/// Whether `meta`'s declarations record what they use.
+fn records_refs(meta: &ModuleMeta) -> bool {
+    meta.result
+        .declarations
+        .iter()
+        .all(|d| d.type_refs.is_some())
+}
+
 /// The ids of `modules`.
 fn ids(modules: &[Module]) -> impl Iterator<Item = &String> {
     modules.iter().map(|m| &m.id)
@@ -984,15 +1006,19 @@ impl Snapshots {
                 return fail(outcome, header_error(f, slot.import_timeout()));
             }
         };
+        let reported = match report_module(slot, id, env).await {
+            Ok(decls) => decls,
+            Err(e) => {
+                self.unbuild(slot, id);
+                return fail(outcome, e);
+            }
+        };
         let decls = match rechecked {
-            Some(decls) => decls,
-            None => match report_module(slot, id, env).await {
-                Ok(decls) => decls,
-                Err(e) => {
-                    self.unbuild(slot, id);
-                    return fail(outcome, e);
-                }
-            },
+            Some(mut decls) => {
+                keep_generated(&mut decls, &reported);
+                decls
+            }
+            None => reported,
         };
         // For search only, so a failure just leaves the module out of it.
         let exported = export_module(slot, id, env)
@@ -1191,7 +1217,10 @@ impl Snapshots {
             return Ok(Some(Recheck::Changed));
         }
         self.fetch(module).await?;
-        Ok(meta.verified.then_some(Recheck::AlreadyVerified))
+        // A record from before declarations recorded what they use is
+        // checked again, to record it.
+        let done = meta.verified && records_refs(&meta);
+        Ok(done.then_some(Recheck::AlreadyVerified))
     }
 
     /// Records that a module build passed the re-check, with what it found.
@@ -1209,7 +1238,9 @@ impl Snapshots {
                 meta.dirty = !verification.ok;
                 meta.result.ok = verification.ok;
                 meta.result.reasons = verification.reasons.clone();
-                meta.result.declarations = verification.declarations.clone();
+                let mut decls = verification.declarations.clone();
+                keep_generated(&mut decls, &meta.result.declarations);
+                meta.result.declarations = decls;
             })
             .await?;
         Ok(match updated {
@@ -1615,6 +1646,7 @@ mod tests {
             axioms: axioms.iter().map(|a| a.to_string()).collect(),
             type_hash: ty.into(),
             value_hash: value.map(Into::into),
+            ..Default::default()
         }
     }
 
@@ -1710,6 +1742,26 @@ mod tests {
             )])
         );
         assert!(compare(&replacing(old.clone(), None), &old, &["a".into()], None).is_ok());
+    }
+
+    #[test]
+    fn the_verifiers_declarations_keep_what_the_report_marks_generated() {
+        let mut verified = vec![
+            decl("f.match_1.eq_1", "1", None, &[]),
+            decl("t", "2", None, &[]),
+        ];
+        let reported = [
+            Declaration {
+                generated: true,
+                ..decl("f.match_1.eq_1", "1", None, &[])
+            },
+            decl("t", "2", None, &[]),
+        ];
+        keep_generated(&mut verified, &reported);
+        assert_eq!(
+            verified.iter().map(|d| d.generated).collect::<Vec<_>>(),
+            [true, false]
+        );
     }
 
     #[test]

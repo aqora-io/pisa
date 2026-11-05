@@ -30,6 +30,9 @@ class Declaration(TypedDict):
     axioms: list[str]
     type_hash: str
     value_hash: NotRequired[str]
+    type_refs: NotRequired[list[str]]
+    value_refs: NotRequired[list[str]]
+    generated: NotRequired[bool]
 
 class Tactic(TypedDict):
     tactic: str

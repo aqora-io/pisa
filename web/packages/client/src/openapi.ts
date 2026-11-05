@@ -407,14 +407,34 @@ export interface components {
         /** @description A new declaration and the axioms it depends on. */
         Declaration: {
             axioms: string[];
+            /**
+             * @description Made by Lean on demand, such as an equation lemma: code with the same
+             *     statements needn't have it.
+             */
+            generated?: boolean;
             kind: string;
             name: string;
+            /**
+             * @description A hash of its type, with private names taken without their module,
+             *     and with the internal auxiliaries it uses folded in.
+             */
             type_hash: string;
             /**
-             * @description For definitions, a hash of the value, so a proof can't change what a
-             *     statement means by redefining something it mentions.
+             * @description The constants of this code and of the snapshots it builds on that its
+             *     type uses, through internal auxiliaries. Absent in records from before
+             *     they were reported.
+             */
+            type_refs?: string[];
+            /**
+             * @description For definitions, a hash of the value, as of the type, so a proof can't
+             *     change what a statement means by redefining something it mentions.
              */
             value_hash?: string;
+            /**
+             * @description The same for a definition's value, or an inductive's constructors and
+             *     recursor.
+             */
+            value_refs?: string[];
         };
         /**
          * @description `DELETE /snapshots/{entry}`: deletes the entry. Its module goes too once

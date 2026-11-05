@@ -14,9 +14,13 @@ by walking the re-checked constants, not from any precomputed extension state a
 build could have forged.
 
 It prints one line, `PISA_VERIFY <json>`:
-  {"ok": true, "declarations": [{"name","kind","axioms","type_hash","value_hash"?}]}
+  {"ok": true, "declarations": [{"name","kind","axioms","type_hash","value_hash"?,
+                                 "type_refs","value_refs","generated"}]}
 or `{"ok": false, "reason": "..."}` when the kernel rejects the module. It imports
 only `Lean`, so it runs as a script without compiling Mathlib.
+
+The declarations are as the worker's axiom report (`policy.rs`) gives them, and
+must stay so: the same refs and hashes, computed the same way.
 -/
 import Lean
 open Lean Core
@@ -45,15 +49,72 @@ def kindOf : ConstantInfo → String
   | .ctorInfo _ => "constructor"
   | .recInfo _ => "recursor"
 
+/-- What the report follows: constants of this module or of a snapshot. Lean's
+and Mathlib's are fixed by the version. -/
+def tracked (env : Environment) (m : Name) : Bool :=
+  match env.getModuleIdxFor? m with
+  | some i => (`PisaSnap).isPrefixOf (env.header.moduleNames[i.toNat]!)
+  | none => true
+
+/-- Auxiliaries the report leaves out; what uses one carries what it is. -/
+def hidden (m : Name) : Bool := m.isInternal && !isPrivateName m
+
+/-- A private name without its module, which differs between a module and its
+replacement. -/
+def norm (m : Name) : Name :=
+  match privateToUserName? m with
+  | some u => `_private ++ u
+  | none => m
+
+def hashOf (e : Expr) : UInt64 :=
+  hash (e.replace fun x => match x with
+    | .const m ls => if isPrivateName m then some (.const (norm m) ls) else none
+    | _ => none)
+
+/-- The tracked constants `e` uses, seeing through hidden ones, and its hash
+with the hidden ones it reaches folded in. -/
+def deep (env : Environment) (self : Name) (e : Expr) : UInt64 × List Name := Id.run do
+  let mut seen : NameSet := {}
+  let mut refs : NameSet := {}
+  let mut reached : Array Name := #[]
+  let mut todo : List Name := e.getUsedConstants.toList
+  repeat
+    match todo with
+    | [] => break
+    | m :: rest =>
+      todo := rest
+      if seen.contains m || !tracked env m then continue
+      seen := seen.insert m
+      if hidden m then
+        reached := reached.push m
+        if let some ci := env.find? m then
+          todo := ci.type.getUsedConstants.toList ++ todo
+          if let .defnInfo d := ci then
+            todo := d.value.getUsedConstants.toList ++ todo
+      else if m != self then
+        refs := refs.insert m
+  let mut h := hashOf e
+  for m in reached.qsort (fun a b => a.toString < b.toString) do
+    if let some ci := env.find? m then
+      h := mixHash h (mixHash (hash (norm m)) (hashOf ci.type))
+      if let .defnInfo d := ci then
+        h := mixHash h (hashOf d.value)
+  return (h, refs.toList)
+
 def declJson (n : Name) (ci : ConstantInfo) : CoreM Json := do
+  let env ← getEnv
   let axioms ← collectAxioms n
-  let valueHash := match ci with
-    | .defnInfo d => Json.str (toString (hash d.value))
-    | _ => Json.null
+  let (typeHash, typeRefs) := deep env n ci.type
+  let (valueHash, valueRefs) : Json × List Name := match ci with
+    | .defnInfo d => let (h, refs) := deep env n d.value; (Json.str (toString h), refs)
+    | .inductInfo i => (Json.null, i.ctors ++ [mkRecName i.name])
+    | _ => (Json.null, [])
+  let generated := isReservedName env n || ((privateToUserName? n).map (·.isInternal)).getD false
   return Json.mkObj [
     ("name", toJson n), ("kind", toJson (kindOf ci)),
-    ("axioms", toJson axioms), ("type_hash", Json.str (toString (hash ci.type))),
-    ("value_hash", valueHash)]
+    ("axioms", toJson axioms), ("type_hash", Json.str (toString typeHash)),
+    ("value_hash", valueHash), ("type_refs", toJson typeRefs),
+    ("value_refs", toJson valueRefs), ("generated", toJson generated)]
 
 unsafe def main (args : List String) : IO UInt32 := do
   let some target := args.head?.map String.toName

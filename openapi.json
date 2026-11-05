@@ -245,6 +245,10 @@
             },
             "type": "array"
           },
+          "generated": {
+            "description": "Made by Lean on demand, such as an equation lemma: code with the same\nstatements needn't have it.",
+            "type": "boolean"
+          },
           "kind": {
             "type": "string"
           },
@@ -252,11 +256,26 @@
             "type": "string"
           },
           "type_hash": {
+            "description": "A hash of its type, with private names taken without their module,\nand with the internal auxiliaries it uses folded in.",
             "type": "string"
           },
+          "type_refs": {
+            "description": "The constants of this code and of the snapshots it builds on that its\ntype uses, through internal auxiliaries. Absent in records from before\nthey were reported.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "value_hash": {
-            "description": "For definitions, a hash of the value, so a proof can't change what a\nstatement means by redefining something it mentions.",
+            "description": "For definitions, a hash of the value, as of the type, so a proof can't\nchange what a statement means by redefining something it mentions.",
             "type": "string"
+          },
+          "value_refs": {
+            "description": "The same for a definition's value, or an inductive's constructors and\nrecursor.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [

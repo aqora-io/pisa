@@ -192,6 +192,16 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release whose declaration reports record what each declaration uses:
+- A declaration's `type_hash` and `value_hash` now leave the module out of
+  private names and fold in the internal auxiliaries it uses, such as the
+  `f._unary` that holds a well-founded definition's body. Only declarations
+  that use a private or an internal constant hash differently. For those, a
+  session started before the upgrade, or an entry kept before it, compares
+  unequal: `POST /snapshots/{entry}/verify` records such an entry again.
+- The kernel verifier changed too, so rebuild the worker image, not just the
+  binary, and upgrade the workers before the servers.
+
 To the release with dependents and rebuild plans, upgrade the workers before
 clients call `GET /snapshots/{entry}/dependents` or `POST /snapshots/rebuild`:
 they run on a worker, and an older one answers them with a 500.
@@ -579,6 +589,9 @@ and `dirty` belong to modules, so every entry on a module shows the result.
   and not `verified`. Delete its entries if you don't want it.
 - `dirty` and `result` are updated from the re-check, whose axioms don't depend
   on the build being honest.
+- A module kept before declarations recorded what they use (`type_refs`,
+  `value_refs`) is re-checked even if it is `verified`, to record them; see
+  [Replacing](#replacing).
 
 Check results don't say whether the snapshots they import are verified: look
 at the snapshot, or verify it, when that matters.
