@@ -262,6 +262,14 @@ All fields are snake_case. The request and response types are in
 `crates/pisa-protocol/src/api.rs`. Code is a Lean file: plain, or
 module-system (a `module` header with `public`, `meta` and `all` imports).
 
+The server describes its API and search as OpenAPI 3.1 at `GET /openapi.json`,
+also committed as `openapi.json`. Its schemas are derived from the Rust types,
+so after changing the API, regenerate the file (a test fails until you do):
+
+```sh
+PISA_UPDATE_OPENAPI=1 cargo test -p pisa-server --test openapi
+```
+
 | Endpoint | Request → response |
 | --- | --- |
 | `POST /check` | `{code, version?, timeout?, detail?}` → check result |

@@ -3,8 +3,9 @@
 //! names must match the JSON it prints.
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Verification {
     /// True when the code elaborated without errors and passed every policy check.
     pub ok: bool,
@@ -14,7 +15,7 @@ pub struct Verification {
     pub declarations: Vec<Declaration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Declaration {
     pub name: String,
     pub kind: String,

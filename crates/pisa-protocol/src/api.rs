@@ -26,6 +26,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, IntoResponses, ToSchema};
 
 use crate::repl;
 use crate::search::Informal;
@@ -35,7 +36,7 @@ fn default_timeout() -> u64 {
     60
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     /// Lean ran past the request's time limit.
@@ -77,7 +78,7 @@ impl ErrorKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
@@ -106,18 +107,63 @@ impl std::fmt::Display for Error {
 }
 
 /// The body of every non-2xx response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ErrorResponse {
     pub error: Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The errors an endpoint may answer with, each an [`ErrorResponse`] whose
+/// `kind` gives its status ([`ErrorKind::status`]).
+#[derive(IntoResponses)]
+pub enum ApiErrors {
+    /// `bad_request`: the request breaks the API's rules.
+    #[response(status = 400)]
+    BadRequest(ErrorResponse),
+    /// `not_found`: an unknown or expired state, session, entry or declaration.
+    #[response(status = 404)]
+    NotFound(ErrorResponse),
+    /// `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+    /// limit was hit.
+    #[response(status = 422)]
+    Unprocessable(ErrorResponse),
+    /// `capacity`: no worker took the job in time; retry later.
+    #[response(status = 429)]
+    Capacity(ErrorResponse),
+    /// `internal`.
+    #[response(status = 500)]
+    Internal(ErrorResponse),
+    /// `unavailable`: e.g. search isn't ready; retry later.
+    #[response(status = 503)]
+    Unavailable(ErrorResponse),
+}
+
+/// `GET /health`: 200, or 503 once the server is stopping.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Health {
+    pub status: HealthStatus,
+    /// The live workers on the queue; `null` if it can't be read.
+    #[schema(required = true)]
+    pub workers: Option<u64>,
+    /// Search's state; `null` if the server doesn't search.
+    #[schema(required = true)]
+    pub search: Option<crate::search::SearchHealth>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Ok,
+    /// Stopping: load balancers should stop sending requests.
+    Draining,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Pos {
     pub line: u64,
     pub column: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Trace,
@@ -126,7 +172,7 @@ pub enum Severity {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Message {
     pub severity: Severity,
     pub pos: Pos,
@@ -135,7 +181,7 @@ pub struct Message {
     pub data: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Sorry {
     pub goal: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,7 +191,7 @@ pub struct Sorry {
 }
 
 /// Extra detail a check can return, requested in `detail`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Detail {
     /// Every tactic Lean ran, with the goals before it: [`CheckResult::tactics`].
@@ -153,7 +199,7 @@ pub enum Detail {
 }
 
 /// `POST /check`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CheckRequest {
     pub code: String,
     /// Worker pool label or alias; defaults to the server's default.
@@ -167,7 +213,7 @@ pub struct CheckRequest {
 }
 
 /// `POST /check/batch`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BatchRequest {
     pub items: Vec<BatchItem>,
     #[serde(default)]
@@ -179,19 +225,19 @@ pub struct BatchRequest {
     pub detail: Vec<Detail>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BatchItem {
     pub id: String,
     pub code: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BatchResponse {
     /// In request order.
     pub results: Vec<CheckResult>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct CheckResult {
     /// The item's id, in batch results.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,14 +252,18 @@ pub struct CheckResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
     /// Lean's messages, with positions in the submitted code.
+    #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
+    #[schema(required = true)]
     #[serde(default)]
     pub sorries: Vec<Sorry>,
     /// Why `ok` is false, e.g. "axiom: t uses sorryAx".
+    #[schema(required = true)]
     #[serde(default)]
     pub reasons: Vec<String>,
     /// Declarations the code added, with the axioms each depends on.
+    #[schema(required = true)]
     #[serde(default)]
     pub declarations: Vec<Declaration>,
     /// With `detail: ["tactics"]`, one entry each time a tactic in the code
@@ -224,7 +274,7 @@ pub struct CheckResult {
     pub tactics: Vec<TacticInfo>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct TacticInfo {
     /// The tactic's source text.
     pub tactic: String,
@@ -238,7 +288,7 @@ pub struct TacticInfo {
 
 /// `POST /sessions`: runs code containing `sorry`; each `sorry` becomes a
 /// proof state that tactics can be applied to.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartRequest {
     pub code: String,
     #[serde(default)]
@@ -247,16 +297,17 @@ pub struct StartRequest {
     pub timeout: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartResponse {
     pub session: String,
     /// One per `sorry`, in source order.
     pub states: Vec<StateInfo>,
+    #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StateInfo {
     pub state: String,
     pub goal: String,
@@ -267,14 +318,14 @@ pub struct StateInfo {
 }
 
 /// `POST /states/{state}/tactic`. A failing tactic is a 422 with kind `lean`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TacticRequest {
     pub tactic: String,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TacticResponse {
     /// The new state. Earlier states stay valid, so a session is a tree.
     pub state: String,
@@ -282,6 +333,7 @@ pub struct TacticResponse {
     /// No goals remain for this state's `sorry`. This says nothing about the
     /// rest of the proof; check the assembled proof with the session check.
     pub complete: bool,
+    #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
 }
@@ -289,7 +341,7 @@ pub struct TacticResponse {
 /// `POST /sessions/{session}/check`: re-checks completed code from scratch
 /// and confirms it proves the statements the session started from, with the
 /// same imports.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SessionCheckRequest {
     pub code: String,
     #[serde(default = "default_timeout")]
@@ -300,7 +352,7 @@ pub struct SessionCheckRequest {
 /// keeps it as a module that later code can import, with a new entry that
 /// holds the module. Code that is already kept gets a new entry on its
 /// module without being built again.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotRequest {
     pub code: String,
     #[serde(default)]
@@ -332,7 +384,7 @@ pub struct SnapshotRequest {
     pub key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotResponse {
     /// The entry, which the other snapshot endpoints take: the one this create
     /// added, or on a [`key`](SnapshotRequest::key) replay the one the key is
@@ -369,8 +421,9 @@ pub struct SnapshotResponse {
 }
 
 /// `GET /snapshots/{entry}`: an entry and its module.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotInfo {
+    #[schema(required = true)]
     #[serde(default)]
     pub entry: String,
     /// The entry's module.
@@ -396,7 +449,7 @@ pub struct SnapshotInfo {
 
 /// A declaration of a snapshot module, with its description once search has
 /// written one (with `PISA_SEARCH_DESCRIBE_MODEL`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ModuleDecl {
     pub name: String,
     pub kind: String,
@@ -410,7 +463,7 @@ pub struct ModuleDecl {
 
 /// An entry in a listing: as [`SnapshotInfo`], without the code and the check
 /// result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotSummary {
     pub entry: String,
     /// The entry's module.
@@ -431,7 +484,7 @@ pub struct SnapshotSummary {
 /// label the query names as `label=key:value` (split on the first `:`; up to
 /// 64 filters), at most `limit` of them (1 to 1000, default 100). Keep
 /// requesting with `next` as `after` while a page has it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotList {
     pub entries: Vec<SnapshotSummary>,
     /// Where the next page starts, if this page is full. The page after it
@@ -443,7 +496,7 @@ pub struct SnapshotList {
 /// `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets
 /// those in `set`. The labels that result must follow the rules of
 /// [`check_labels`](crate::labels::check_labels).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct LabelsRequest {
     #[serde(default)]
     pub set: BTreeMap<String, String>,
@@ -456,8 +509,9 @@ pub struct LabelsRequest {
 /// already passed. A module that fails stops the run and stays usable, marked
 /// as not verified. `verified` and `dirty` belong to the module, so every
 /// entry on it shows the result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotVerified {
+    #[schema(required = true)]
     #[serde(default)]
     pub entry: String,
     /// The entry's module.
@@ -473,7 +527,7 @@ pub struct SnapshotVerified {
     pub failure: Option<SnapshotFailure>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotFailure {
     pub snapshot: String,
     /// Why the re-check failed, e.g. the kernel's error or a timeout.
@@ -483,17 +537,21 @@ pub struct SnapshotFailure {
 /// `DELETE /snapshots/{entry}`: deletes the entry. Its module goes too once
 /// no entry and no kept module needs it, and then so do the modules it
 /// imports, on the same terms.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Deleted {
+    #[schema(required = true)]
     #[serde(default)]
     pub entry: String,
     /// The modules removed, the entry's own first.
+    #[schema(required = true)]
     #[serde(default)]
     pub removed: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct VersionQuery {
+    /// The worker version; the server's default when absent.
     #[serde(default)]
     pub version: Option<String>,
 }

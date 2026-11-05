@@ -10,13 +10,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use pisa_protocol::api::{Error, ErrorKind, ErrorResponse};
+use pisa_protocol::api::{ApiErrors, Error, ErrorKind, ErrorResponse};
 use pisa_protocol::search::{
-    DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
+    DeclResponse, ResolveRequest, ResolveResponse, SearchHealth, SearchRequest, SearchResponse,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use utoipa::IntoParams;
 
 use crate::dense::Embedder;
 use crate::engine::Lanes;
@@ -220,22 +221,30 @@ impl Search {
     }
 
     /// Search's state, for a server's `/health`, and whether it can serve.
-    pub async fn health(&self) -> (bool, serde_json::Value) {
+    pub async fn health(&self) -> (bool, SearchHealth) {
         let qdrant = self.q.healthy().await;
         let engine = self.engine.get();
         let ready = engine.is_some() && qdrant;
-        let mut body = json!({
-            "ready": ready,
-            "env_id": self.env_id,
-            "qdrant": qdrant,
-            "leader": engine.is_some_and(|e| e.leader.load(std::sync::atomic::Ordering::Acquire)),
-        });
-        if engine.is_none() {
-            body["error"] = self.waiting.lock().unwrap().clone().into();
-        }
-        (ready, body)
+        let health = SearchHealth {
+            ready,
+            env_id: self.env_id.clone(),
+            qdrant,
+            leader: engine.is_some_and(|e| e.leader.load(std::sync::atomic::Ordering::Acquire)),
+            error: engine
+                .is_none()
+                .then(|| self.waiting.lock().unwrap().clone()),
+        };
+        (ready, health)
     }
 }
+
+/// Search's OpenAPI document.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    components(schemas(ErrorResponse)),
+    paths(search_handler, resolve, decl)
+)]
+pub struct ApiDoc;
 
 /// Search's routes, to serve next to others.
 pub fn routes(search: Arc<Search>) -> Router {
@@ -311,7 +320,8 @@ fn check_batch(n: usize) -> Result<(), ApiError> {
 }
 
 async fn health(State(search): State<Arc<Search>>) -> (StatusCode, Json<serde_json::Value>) {
-    let (ready, mut body) = search.health().await;
+    let (ready, health) = search.health().await;
+    let mut body = json!(health);
     let status = if ready {
         StatusCode::OK
     } else {
@@ -329,6 +339,15 @@ fn unavailable(e: impl std::fmt::Display) -> ApiError {
     )
 }
 
+#[utoipa::path(
+    post, path = "/v1/search", operation_id = "search", tag = "search",
+    summary = "Search declarations",
+    description = "Finds Mathlib and Physlib declarations, and snapshot declarations when asked \
+        for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. \
+        At most 64 queries; each gets a result, in order. A 404 on a server without search.",
+    request_body = SearchRequest,
+    responses((status = 200, description = "A result per query, in order", body = SearchResponse), ApiErrors),
+)]
 async fn search_handler(
     State(search): State<Arc<Search>>,
     Body(mut req): Body<SearchRequest>,
@@ -350,6 +369,13 @@ async fn search_handler(
     Ok(Json(SearchResponse { env_id, results }))
 }
 
+#[utoipa::path(
+    post, path = "/v1/resolve", operation_id = "resolve", tag = "search",
+    summary = "Check names exist",
+    description = "Whether each name exists, with close names for one that doesn't.",
+    request_body = ResolveRequest,
+    responses((status = 200, description = "A resolution per name, in order", body = ResolveResponse), ApiErrors),
+)]
 async fn resolve(
     State(search): State<Arc<Search>>,
     Body(req): Body<ResolveRequest>,
@@ -363,12 +389,21 @@ async fn resolve(
 }
 
 /// `GET /v1/decl/{name}`'s query.
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct DeclQuery {
     /// A snapshot module to look in first.
     module: Option<String>,
 }
 
+#[utoipa::path(
+    get, path = "/v1/decl/{name}", operation_id = "decl", tag = "search",
+    summary = "A declaration's details",
+    description = "Its signature, description, flags, dependencies and users: a snapshot's \
+        declaration with a snapshot hit's `module`, else the bundle's.",
+    params(("name" = String, Path, description = "The full name"), DeclQuery),
+    responses((status = 200, description = "The declaration", body = DeclResponse), ApiErrors),
+)]
 async fn decl(
     State(search): State<Arc<Search>>,
     Path(name): Path<String>,

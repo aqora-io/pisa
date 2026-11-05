@@ -13,12 +13,13 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 fn default_k() -> usize {
     5
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SearchRequest {
     pub queries: Vec<Query>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -27,7 +28,7 @@ pub struct SearchRequest {
 
 /// One search. Fill as many fields as you can: each feeds different lanes,
 /// and more fields mean better fusion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Query {
     /// Free text from a person; classified as natural language, LaTeX, Lean or a name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,7 +70,7 @@ pub struct Query {
 
 /// Which snapshot modules a query searches: `"none"`, `"all"`, or
 /// `{"labels": {"k": "v"}}`, the modules of the entries that have every label.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotScope {
     #[default]
@@ -103,14 +104,14 @@ impl Default for Query {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct SearchResponse {
     pub env_id: String,
     /// One per query, in order.
     pub results: Vec<QueryResult>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct QueryResult {
     pub hits: Vec<Hit>,
     /// Set when `verify` was asked for, e.g. "unavailable".
@@ -125,7 +126,7 @@ pub struct QueryResult {
     pub dense_pending: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Hit {
     pub name: String,
     pub kind: String,
@@ -138,6 +139,7 @@ pub struct Hit {
     /// One or two sentences describing it, when a description exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[schema(required = true)]
     #[serde(default)]
     pub flags: Flags,
     /// Fused score; only comparable within one query.
@@ -152,7 +154,7 @@ pub struct Hit {
     pub snapshot: Option<SnapshotHit>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotHit {
     /// The query's entries on the module, newest first, at most 10.
     pub entries: Vec<String>,
@@ -163,7 +165,7 @@ pub struct SnapshotHit {
     pub verified: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Flags {
     /// Depends on `sorry`: not usable as a proof step.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -183,20 +185,35 @@ pub struct Flags {
     pub imports: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ResolveRequest {
     pub names: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Search's state in a server's `GET /health`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SearchHealth {
+    /// The index is open and Qdrant answers, so searches can be served.
+    pub ready: bool,
+    pub env_id: String,
+    /// Qdrant answers.
+    pub qdrant: bool,
+    /// This replica leads the snapshot index.
+    pub leader: bool,
+    /// Why the index isn't open yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResolveResponse {
     pub env_id: String,
     pub results: Vec<Resolution>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Resolution {
     pub name: String,
     pub exists: bool,
@@ -208,20 +225,20 @@ pub struct Resolution {
     pub suggestions: Vec<Suggestion>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Suggestion {
     pub name: String,
     pub kind: String,
     pub signature: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DeclResponse {
     pub env_id: String,
     pub decl: DeclDetail,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DeclDetail {
     pub name: String,
     pub kind: String,
@@ -234,6 +251,7 @@ pub struct DeclDetail {
     pub docstring: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub informal: Option<Informal>,
+    #[schema(required = true)]
     #[serde(default)]
     pub flags: Flags,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,7 +263,7 @@ pub struct DeclDetail {
 }
 
 /// A natural-language description of a declaration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Informal {
     pub informal_name: String,
     pub statement_nl: String,

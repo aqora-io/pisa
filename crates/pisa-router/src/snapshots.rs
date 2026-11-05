@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, RawQuery, State};
 use pisa_protocol::api::{
-    Deleted, ErrorKind, LabelsRequest, SnapshotInfo, SnapshotList, SnapshotRequest,
+    ApiErrors, Deleted, ErrorKind, LabelsRequest, SnapshotInfo, SnapshotList, SnapshotRequest,
     SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
@@ -22,6 +22,15 @@ use crate::dispatch::{Priority, Route};
 use crate::http::{ApiError, App, Body};
 use crate::sessions::unexpected;
 
+#[utoipa::path(
+    post, path = "/snapshots", operation_id = "createSnapshot", tag = "snapshots",
+    summary = "Keep code as a snapshot",
+    description = "Checks code like `/check` and, if Lean accepts it, keeps it as a module that \
+        later code can import, with a new entry on it. Code that is already kept gets a new \
+        entry on its module.",
+    request_body = SnapshotRequest,
+    responses((status = 200, description = "The entry, or why nothing was kept", body = SnapshotResponse), ApiErrors),
+)]
 pub async fn create(
     State(app): State<Arc<App>>,
     Body(req): Body<SnapshotRequest>,
@@ -48,6 +57,12 @@ pub async fn create(
     Ok(Json(*r))
 }
 
+#[utoipa::path(
+    get, path = "/snapshots/{entry}", operation_id = "getSnapshot", tag = "snapshots",
+    summary = "An entry and its module",
+    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
+    responses((status = 200, description = "The entry and its module", body = SnapshotInfo), ApiErrors),
+)]
 pub async fn get(
     State(app): State<Arc<App>>,
     Path(entry): Path<String>,
@@ -60,6 +75,19 @@ pub async fn get(
     }
 }
 
+#[utoipa::path(
+    get, path = "/snapshots", operation_id = "listSnapshots", tag = "snapshots",
+    summary = "List entries",
+    description = "Newest first, with every label given. A full page has `next`: pass it as \
+        `after` for the next one.",
+    params(
+        ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
+        ("limit" = Option<usize>, Query, description = "1–1000, by default 100"),
+        ("after" = Option<String>, Query, description = "The previous page's `next`"),
+        VersionQuery,
+    ),
+    responses((status = 200, description = "A page of entries", body = SnapshotList), ApiErrors),
+)]
 /// `GET /snapshots`. The query is parsed here rather than by
 /// [`Query`], which can't collect the repeated `label`.
 pub async fn list(
@@ -113,6 +141,13 @@ fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
     Ok((q, job))
 }
 
+#[utoipa::path(
+    patch, path = "/snapshots/{entry}", operation_id = "setSnapshotLabels", tag = "snapshots",
+    summary = "Set or remove an entry's labels",
+    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
+    request_body = LabelsRequest,
+    responses((status = 200, description = "The entry, with its labels", body = SnapshotSummary), ApiErrors),
+)]
 /// `PATCH /snapshots/{entry}`.
 pub async fn labels(
     State(app): State<Arc<App>>,
@@ -131,6 +166,14 @@ pub async fn labels(
     }
 }
 
+#[utoipa::path(
+    delete, path = "/snapshots/{entry}", operation_id = "deleteSnapshot", tag = "snapshots",
+    summary = "Delete an entry",
+    description = "Its module goes too once no entry or other module refers to it: `removed` \
+        lists the modules that went.",
+    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
+    responses((status = 200, description = "What went", body = Deleted), ApiErrors),
+)]
 pub async fn delete(
     State(app): State<Arc<App>>,
     Path(entry): Path<String>,
@@ -143,6 +186,14 @@ pub async fn delete(
     }
 }
 
+#[utoipa::path(
+    post, path = "/snapshots/{entry}/verify", operation_id = "verifySnapshot", tag = "snapshots",
+    summary = "Re-check an entry's module with the kernel",
+    description = "Re-checks the module and the modules it imports; `failure` says which one \
+        failed and why.",
+    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
+    responses((status = 200, description = "Whether the module passed", body = SnapshotVerified), ApiErrors),
+)]
 pub async fn verify(
     State(app): State<Arc<App>>,
     Path(entry): Path<String>,

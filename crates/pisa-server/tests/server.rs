@@ -92,6 +92,9 @@ async fn without_qdrant_there_is_no_search() {
     );
     let (status, _) = get(&url("/nope")).await;
     assert_eq!(status, 404);
+    // The spec covers search all the same.
+    let (status, spec) = get(&url("/openapi.json")).await;
+    assert_eq!((status, spec), (200, pisa_server::openapi()));
 }
 
 /// A preflight for `POST /check` from `origin`, and the origin it allows.

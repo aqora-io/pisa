@@ -8,8 +8,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, State};
 use pisa_protocol::api::{
-    CheckResult, ErrorKind, Key, SessionCheckRequest, StartRequest, StartResponse, TacticRequest,
-    TacticResponse,
+    ApiErrors, CheckResult, ErrorKind, Key, SessionCheckRequest, StartRequest, StartResponse,
+    TacticRequest, TacticResponse,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{Job, JobResult, SessionCheckJob, SessionStartJob, SessionTacticJob};
@@ -29,6 +29,13 @@ pub(crate) fn unexpected(result: JobResult) -> ApiError {
     ApiError::new(ErrorKind::Internal, message)
 }
 
+#[utoipa::path(
+    post, path = "/sessions", operation_id = "startSession", tag = "sessions",
+    summary = "Start a proof session",
+    description = "Checks code with `sorry`s and returns a state for each, to apply tactics to.",
+    request_body = StartRequest,
+    responses((status = 200, description = "The session, with a state for each `sorry`", body = StartResponse), ApiErrors),
+)]
 pub async fn start(
     State(app): State<Arc<App>>,
     Body(req): Body<StartRequest>,
@@ -54,6 +61,16 @@ pub async fn start(
     Ok(Json(result.map_err(ApiError)?))
 }
 
+#[utoipa::path(
+    post, path = "/states/{id}/tactic", operation_id = "tactic", tag = "sessions",
+    summary = "Apply a tactic to a state",
+    description = "Returns the new state. Earlier states stay valid, so a session is a tree. \
+        A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an \
+        unknown identifier, is in `messages`.",
+    params(("id" = String, Path, description = "A state key, from a session or an earlier tactic")),
+    request_body = TacticRequest,
+    responses((status = 200, description = "The new state", body = TacticResponse), ApiErrors),
+)]
 pub async fn tactic(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -81,6 +98,16 @@ pub async fn tactic(
     Ok(Json(result.map_err(ApiError)?))
 }
 
+#[utoipa::path(
+    post, path = "/sessions/{id}/check", operation_id = "checkSession", tag = "sessions",
+    summary = "Check a session's finished proof",
+    description = "Re-checks the completed code from scratch and confirms it proves the \
+        statements the session started from, with the same imports. Failures are in-band, \
+        as for `/check`, with statement changes in `reasons`.",
+    params(("id" = String, Path, description = "The session ID")),
+    request_body = SessionCheckRequest,
+    responses((status = 200, description = "The verdict", body = CheckResult), ApiErrors),
+)]
 /// The completed proof's check result, with statement changes added to
 /// `reasons`. A bad or unknown session ID is an HTTP error; everything else
 /// is in-band, as for `/check`.

@@ -12,13 +12,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::join_all;
 use pisa_protocol::api::{
-    self, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail, ErrorKind, ErrorResponse,
+    self, ApiErrors, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail, ErrorKind,
+    ErrorResponse, Health, HealthStatus,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckJob, Job, JobResult};
 use serde::de::DeserializeOwned;
-use serde_json::json;
 
 use crate::dispatch::{DispatchError, Dispatcher, Priority, Route};
 use crate::{sessions, snapshots};
@@ -46,6 +46,27 @@ impl Versions {
         Some(self.aliases.get(&v).cloned().unwrap_or(v))
     }
 }
+
+/// The API's OpenAPI document, without `/health`, which whoever serves the
+/// API adds.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    components(schemas(ErrorResponse)),
+    paths(
+        check,
+        check_batch,
+        sessions::start,
+        sessions::tactic,
+        sessions::check,
+        snapshots::create,
+        snapshots::list,
+        snapshots::get,
+        snapshots::labels,
+        snapshots::delete,
+        snapshots::verify,
+    )
+)]
+pub struct ApiDoc;
 
 /// The API's routes, without `/health`, which whoever serves them adds.
 pub fn router(app: Arc<App>) -> Router {
@@ -114,7 +135,7 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     }
 }
 
-pub async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<serde_json::Value>) {
+pub async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<Health>) {
     let (status, body) = app.health().await;
     (status, Json(body))
 }
@@ -122,19 +143,30 @@ pub async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<serde_json
 impl App {
     /// The API's health: up, or 503 once draining, with the number of live
     /// workers on the queue, `null` if the queue can't be read.
-    pub async fn health(&self) -> (StatusCode, serde_json::Value) {
+    pub async fn health(&self) -> (StatusCode, Health) {
         let workers = self.dispatcher.workers().await;
-        if self.draining.load(Ordering::Acquire) {
-            let body = json!({ "status": "draining", "workers": workers });
-            return (StatusCode::SERVICE_UNAVAILABLE, body);
-        }
-        (
-            StatusCode::OK,
-            json!({ "status": "ok", "workers": workers }),
-        )
+        let (code, status) = if self.draining.load(Ordering::Acquire) {
+            (StatusCode::SERVICE_UNAVAILABLE, HealthStatus::Draining)
+        } else {
+            (StatusCode::OK, HealthStatus::Ok)
+        };
+        let health = Health {
+            status,
+            workers,
+            search: None,
+        };
+        (code, health)
     }
 }
 
+#[utoipa::path(
+    post, path = "/check", operation_id = "check", tag = "checks",
+    summary = "Check Lean code",
+    description = "Checks code against the version's Lean and imports. The verdict is `ok`; \
+        what Lean, the policy or a limit reported is in-band, in `error`, `messages` and `reasons`.",
+    request_body = CheckRequest,
+    responses((status = 200, description = "The verdict", body = CheckResult), ApiErrors),
+)]
 async fn check(
     State(app): State<Arc<App>>,
     Body(req): Body<CheckRequest>,
@@ -145,6 +177,13 @@ async fn check(
     ))
 }
 
+#[utoipa::path(
+    post, path = "/check/batch", operation_id = "checkBatch", tag = "checks",
+    summary = "Check several pieces of code",
+    description = "Each item gets a result, as from `/check`, with its own failure in `error`.",
+    request_body = BatchRequest,
+    responses((status = 200, description = "A result per item, in order", body = BatchResponse), ApiErrors),
+)]
 /// Every item gets a result; failures, including running out of capacity,
 /// are reported in that item's `error`.
 async fn check_batch(
