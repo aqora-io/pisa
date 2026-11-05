@@ -278,3 +278,39 @@ async fn the_link_outlives_the_replaced_entry() {
         .unwrap();
     assert_eq!(r.status(), 404);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replacement_cant_assume_what_it_should_prove() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let skeleton = "import Foo\n\ntheorem lem2 : 1 = 1 := sorry";
+    let old = entry(&create(&c, json!({"code": skeleton})).await).to_string();
+
+    // The theorem itself, assumed: same name, same type.
+    let r = create(
+        &c,
+        json!({"code": "import Foo\n\naxiom lem2 : 1 = 1", "replaces": old}),
+    )
+    .await;
+    refused(&r, "statement: lem2 is a different kind of declaration");
+    refused(&r, "statement: the code adds the assumption lem2");
+    // An assumption of its own.
+    let own = "import Foo\n\naxiom helper : 1 = 1\ntheorem lem2 : 1 = 1 := helper";
+    let r = create(&c, json!({"code": own, "replaces": old})).await;
+    refused(&r, "statement: the code adds the assumption helper");
+    // Or of a fresh snapshot it now builds on.
+    let fresh = create(&c, json!({"code": "import Foo\n\naxiom helper2 : 1 = 1"})).await;
+    let code = on(&fresh, "theorem lem2 : 1 = 1 := helper2");
+    let r = create(&c, json!({"code": code, "replaces": old})).await;
+    refused(&r, "statement: the code adds the assumption helper2");
+
+    // A skeleton's own assumptions may stay, as they were.
+    let with = "import Foo\n\naxiom kun : 1 = 1\ntheorem t : 1 = 1 := sorry";
+    let old = entry(&create(&c, json!({"code": with})).await).to_string();
+    let proof = "import Foo\n\naxiom kun : 1 = 1\ntheorem t : 1 = 1 := kun";
+    let r = create(&c, json!({"code": proof, "replaces": old})).await;
+    assert_eq!(r["replaces"]["filled"], json!(["t"]), "{r}");
+    assert_eq!(r["status"], "conditional");
+    let stronger = "import Foo\n\naxiom kun : 2 = 2\ntheorem t : 1 = 1 := kun";
+    let r = create(&c, json!({"code": stronger, "replaces": old})).await;
+    refused(&r, "statement: kun has a different type");
+}

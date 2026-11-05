@@ -133,7 +133,6 @@ struct Replacing {
 /// The snapshot modules a replacement swaps: those the replaced module builds
 /// on and the replacement doesn't (`lost`), and those the replacement builds
 /// on and the replaced module doesn't (`gained`), each with its declarations.
-/// Both are empty when it loses none.
 #[derive(Default)]
 struct Swapped {
     lost: Vec<(String, Vec<Declaration>)>,
@@ -172,6 +171,7 @@ fn compare(
             refused.push(reached.to_string());
         }
     }
+    refused.extend(added_assumptions(replacing, now, swapped));
     if !refused.is_empty() {
         return Err(refused);
     }
@@ -218,6 +218,52 @@ fn compare(
     })
 }
 
+/// Whether Lean made `name` rather than the code, such as the axiom
+/// `native_decide` declares: an internal name.
+fn lean_made(name: &str) -> bool {
+    let name = normalised(name);
+    let user = name.strip_prefix("_private.").unwrap_or(&name);
+    user.split('.').any(|part| part.starts_with('_'))
+}
+
+/// The assumptions `decls` declare: their `axiom`s other than Lean's, by
+/// name across modules, with their type hash.
+fn declared_assumptions<'a>(
+    decls: impl IntoIterator<Item = &'a Declaration>,
+) -> HashMap<String, &'a str> {
+    decls
+        .into_iter()
+        .filter(|d| d.kind == "axiom" && !lean_made(&d.name))
+        .map(|d| (normalised(&d.name).into_owned(), d.type_hash.as_str()))
+        .collect()
+}
+
+/// A replacement keeps the replaced module's assumptions but adds none: each
+/// assumption that it, or a snapshot it builds on and the replaced module
+/// doesn't, declares must be declared by the replaced module or a snapshot
+/// it no longer builds on, with the same statement. The snapshots both build
+/// on are the same. Otherwise a `sorry` could be "filled" by assuming it.
+fn added_assumptions(replacing: &Replacing, now: &[Declaration], swapped: &Swapped) -> Vec<String> {
+    let lost = swapped.lost.iter().flat_map(|(_, d)| d);
+    let before = declared_assumptions(replacing.declarations.iter().chain(lost));
+    // The replaced module's own are compared as its statements.
+    let own = declared_assumptions(&replacing.declarations);
+    let gained = swapped.gained.iter().flat_map(|(_, d)| d);
+    let mut reasons: Vec<String> = declared_assumptions(now.iter().chain(gained))
+        .into_iter()
+        .filter_map(|(name, statement)| match before.get(&name) {
+            Some(was) if *was == statement => None,
+            Some(_) if own.contains_key(&name) => None,
+            Some(_) => Some(format!(
+                "statement: the assumption {name} has a different statement"
+            )),
+            None => Some(format!("statement: the code adds the assumption {name}")),
+        })
+        .collect();
+    reasons.sort();
+    reasons
+}
+
 /// A constant of a snapshot that a replacement no longer builds on, reached
 /// from what the replaced module's declarations use, that the replacement
 /// doesn't keep as it was.
@@ -230,12 +276,8 @@ struct Reached {
 
 impl std::fmt::Display for Reached {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let what = match self.change {
-            Change::Missing => "is missing",
-            Change::Type => "has a different type",
-            Change::Value => "has a different value",
-        };
         let module = snapshot::module(&self.module);
+        let what = self.change.says();
         write!(f, "statement: {}, from {module}, {what}", self.name)
     }
 }
@@ -320,6 +362,7 @@ fn walk(
                 ));
                 None
             }
+            Some(Some(n)) if n.kind != c.kind => Some(Change::Kind),
             Some(Some(n)) if n.type_hash != c.type_hash => Some(Change::Type),
             Some(Some(n)) if n.value_hash != c.value_hash => Some(Change::Value),
             Some(Some(_)) => None,
@@ -954,9 +997,6 @@ impl Snapshots {
             .iter()
             .filter(|m| !needs.contains(m))
             .collect();
-        if lost.is_empty() {
-            return Ok(Swapped::default());
-        }
         let gained = needs
             .iter()
             .filter(|m| *m != own && !replacing.needs.contains(m));
@@ -2231,6 +2271,68 @@ mod tests {
             compare(&replacing(old.clone(), None), &old, &swapped, None),
             Err(vec![reason])
         );
+    }
+
+    #[test]
+    fn a_replacement_cant_assume_what_it_should_prove() {
+        let axiom = |name: &str, ty: &str| Declaration {
+            kind: "axiom".into(),
+            ..using(decl(name, ty, None, &[]), &[], &[])
+        };
+        let old = vec![using(decl("lem2", "1", None, &["sorryAx"]), &[], &[])];
+        let skeleton = || replacing(old.clone(), None);
+        let none = Swapped::default();
+        // The theorem itself, assumed.
+        let err = compare(&skeleton(), &[axiom("lem2", "1")], &none, None).unwrap_err();
+        assert_eq!(
+            err,
+            [
+                "statement: lem2 is a different kind of declaration",
+                "statement: the code adds the assumption lem2"
+            ]
+        );
+        // An assumption of its own, or of a snapshot it now builds on.
+        let proof = using(decl("lem2", "1", None, &["helper"]), &[], &[]);
+        let err = compare(
+            &skeleton(),
+            &[axiom("helper", "1"), proof.clone()],
+            &none,
+            None,
+        );
+        assert_eq!(
+            err.unwrap_err(),
+            ["statement: the code adds the assumption helper"]
+        );
+        let gained = Swapped {
+            lost: Vec::new(),
+            gained: vec![("x".into(), vec![axiom("helper", "1")])],
+        };
+        let err = compare(&skeleton(), std::slice::from_ref(&proof), &gained, None).unwrap_err();
+        assert_eq!(err, ["statement: the code adds the assumption helper"]);
+
+        // Assumptions it already had are kept, with their statements.
+        let assumed = vec![axiom("kunneth", "5"), old[0].clone()];
+        let with = replacing(assumed.clone(), None);
+        let kept = [
+            axiom("kunneth", "5"),
+            using(decl("lem2", "1", None, &["kunneth"]), &[], &[]),
+        ];
+        assert!(compare(&with, &kept, &none, None).is_ok());
+        let moved = Swapped {
+            lost: vec![("a".into(), vec![axiom("other", "6")])],
+            gained: vec![("b".into(), vec![axiom("other", "7")])],
+        };
+        let err = compare(&with, &kept, &moved, None).unwrap_err();
+        assert!(
+            err.contains(&"statement: the assumption other has a different statement".to_string()),
+            "{err:?}"
+        );
+        // What Lean declares, such as `native_decide`'s axiom, isn't one.
+        let native = [
+            axiom("lem2._native.native_decide.ax_1_1", "8"),
+            old[0].clone(),
+        ];
+        assert!(compare(&skeleton(), &native, &none, None).is_ok());
     }
 
     #[test]

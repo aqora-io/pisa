@@ -453,16 +453,23 @@ in `result.error`), so that a retry is safe:
 <a id="replacing"></a>
 **Replacing an entry.** A create can name the entry it `replaces`, e.g. the
 skeleton with `sorry`s that a proof fills in. The code is kept only if it
-still declares everything the replaced entry's module declares, each with the
-same type and, for definitions, the same value; it may add declarations, such
-as helper lemmas, and may still use `sorry`. So filling a `sorry` can't
-quietly change what is proved:
+still declares everything the replaced entry's module declares, each the same
+kind of declaration with the same type and, for definitions, the same value;
+it may add declarations, such as helper lemmas, and may still use `sorry`. So
+filling a `sorry` can't quietly change what is proved:
 
 ```text
 POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
   → {"entry": "4b7a…", …, "replaces": {"entry": "9c0e…", "filled": ["t"]}}
 ```
 
+- **No new assumptions.** A replacement can't fill a `sorry` by assuming it:
+  a theorem stays a theorem, and every `axiom` the code declares, or that a
+  snapshot it builds on and the replaced module doesn't declares, must already
+  be declared, with the same statement, by the replaced module or a snapshot
+  it no longer builds on (`statement: the code adds the assumption helper`).
+  The replaced module's own assumptions may stay. To add one on purpose,
+  create the code without `replaces`.
 - **Refused.** Code that changes a statement is not kept, and has no `entry`:
   `result.ok` is false and `result.reasons` says what changed, e.g.
   `statement: t has a different type`. To change a statement on purpose,

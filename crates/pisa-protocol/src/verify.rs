@@ -99,9 +99,23 @@ pub fn normalised(name: &str) -> Cow<'_, str> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
     Missing,
+    /// What it is, e.g. an `axiom` where it was a `theorem`.
+    Kind,
     Type,
     /// A definition's value; its type is the same.
     Value,
+}
+
+impl Change {
+    /// How a reason says it, e.g. `has a different type`.
+    pub fn says(self) -> &'static str {
+        match self {
+            Change::Missing => "is missing",
+            Change::Kind => "is a different kind of declaration",
+            Change::Type => "has a different type",
+            Change::Value => "has a different value",
+        }
+    }
 }
 
 /// A declaration of the original code that the new code doesn't keep as it
@@ -114,18 +128,14 @@ pub struct StatementChange {
 
 impl std::fmt::Display for StatementChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let what = match self.change {
-            Change::Missing => "is missing",
-            Change::Type => "has a different type",
-            Change::Value => "has a different value",
-        };
-        write!(f, "statement: {} {what}", self.name)
+        write!(f, "statement: {} {}", self.name, self.change.says())
     }
 }
 
-/// Every declaration of the original code must still exist with the same
-/// type, and definitions with the same value. New declarations may be added,
-/// and what Lean generated needn't stay. Names are matched across modules (see
+/// Every declaration of the original code must still exist as the same kind
+/// of declaration, so a theorem can't become an axiom, with the same type,
+/// and definitions with the same value. New declarations may be added, and
+/// what Lean generated needn't stay. Names are matched across modules (see
 /// [`normalised`]).
 pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<StatementChange> {
     original
@@ -135,6 +145,7 @@ pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<S
             let name = normalised(&d.name);
             let change = match now.iter().find(|n| normalised(&n.name) == name) {
                 None => Change::Missing,
+                Some(n) if n.kind != d.kind => Change::Kind,
                 Some(n) if n.type_hash != d.type_hash => Change::Type,
                 Some(n) if n.value_hash != d.value_hash => Change::Value,
                 Some(_) => return None,
@@ -219,6 +230,18 @@ mod tests {
         assert_eq!(
             reasons(statement_changes(&original, &[decl("f", "2", Some("3"))])),
             ["statement: t is missing"]
+        );
+        // A theorem assumed instead of proved: same name, same type.
+        let assumed = Declaration {
+            kind: "axiom".into(),
+            ..decl("t", "1", None)
+        };
+        assert_eq!(
+            reasons(statement_changes(
+                &original,
+                &[assumed, original[1].clone()]
+            )),
+            ["statement: t is a different kind of declaration"]
         );
     }
 }

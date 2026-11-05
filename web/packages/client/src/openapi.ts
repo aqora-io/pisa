@@ -1052,8 +1052,10 @@ export interface components {
             /**
              * @description The entry this code replaces, e.g. the skeleton a proof fills in. The
              *     code is kept only if it still declares everything that entry's module
-             *     declares, each with the same type and, for definitions, the same
-             *     value; it may add declarations and imports. If it no longer builds on
+             *     declares, each the same kind of declaration with the same type and,
+             *     for definitions, the same value, and adds no assumptions (`axiom`s,
+             *     its own or a newly imported snapshot's); it may add other declarations
+             *     and imports. If it no longer builds on
              *     a snapshot that module does, what the module's declarations use from
              *     there must be unchanged in what the code builds on now. Otherwise
              *     nothing is kept and `result.reasons` lists the changes. The new entry

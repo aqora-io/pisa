@@ -1543,7 +1543,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The entry this code replaces, e.g. the skeleton a proof fills in. The\ncode is kept only if it still declares everything that entry's module\ndeclares, each with the same type and, for definitions, the same\nvalue; it may add declarations and imports. If it no longer builds on\na snapshot that module does, what the module's declarations use from\nthere must be unchanged in what the code builds on now. Otherwise\nnothing is kept and `result.reasons` lists the changes. The new entry\nrecords the link."
+            "description": "The entry this code replaces, e.g. the skeleton a proof fills in. The\ncode is kept only if it still declares everything that entry's module\ndeclares, each the same kind of declaration with the same type and,\nfor definitions, the same value, and adds no assumptions (`axiom`s,\nits own or a newly imported snapshot's); it may add other declarations\nand imports. If it no longer builds on\na snapshot that module does, what the module's declarations use from\nthere must be unchanged in what the code builds on now. Otherwise\nnothing is kept and `result.reasons` lists the changes. The new entry\nrecords the link."
           },
           "timeout": {
             "description": "Lean's time limit in seconds, for building the module including its\nimports.",
