@@ -7,8 +7,9 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::OnceLock;
+use std::time::Duration;
 
-use pisa_client::Error;
+use pisa_client::{Error, Job, JobPoll, JobState, JobStatus};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
@@ -126,6 +127,22 @@ fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             obj.get_type().name()?
         )));
     })
+}
+
+/// A submitted job as Python sees it: the status a submit returned.
+fn queued<T>(job: Job<T>) -> JobStatus {
+    JobStatus {
+        job: job.id,
+        kind: job.kind,
+        status: JobState::Queued,
+    }
+}
+
+/// The job a status dict, as a submit returned it, names.
+fn job_of(status: &Bound<'_, PyAny>) -> PyResult<Job<Value>> {
+    let status: JobStatus = serde_json::from_value(from_py(status)?)
+        .map_err(|e| PyValueError::new_err(format!("not a job a submit returned: {e}")))?;
+    Ok(Job::new(status.job, status.kind))
 }
 
 fn parse_detail(detail: Vec<String>) -> PyResult<Vec<pisa_client::Detail>> {
@@ -262,6 +279,112 @@ impl Client {
                 .list_snapshots(&labels, limit, after.as_deref())
                 .await
         })
+    }
+
+    #[pyo3(signature = (code, *, detail = Vec::new()))]
+    fn submit_check<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let detail = parse_detail(detail)?;
+        call(py, async move {
+            let job = self.inner.submit_check_with_detail(&code, &detail).await?;
+            Ok(queued(job))
+        })
+    }
+
+    fn submit_session<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            Ok(queued(self.inner.submit_session(&code).await?))
+        })
+    }
+
+    fn submit_tactic<'py>(
+        &self,
+        py: Python<'py>,
+        state: String,
+        tactic: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            Ok(queued(self.inner.submit_tactic(&state, &tactic).await?))
+        })
+    }
+
+    fn submit_session_check<'py>(
+        &self,
+        py: Python<'py>,
+        session: String,
+        code: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            Ok(queued(
+                self.inner.submit_session_check(&session, &code).await?,
+            ))
+        })
+    }
+
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None))]
+    fn submit_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+        verify: Option<bool>,
+        labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::SnapshotOptions {
+            verify,
+            labels: labels.unwrap_or_default(),
+            key,
+        };
+        call(py, async move {
+            Ok(queued(self.inner.submit_snapshot_with(&code, &opts).await?))
+        })
+    }
+
+    fn submit_verify<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            Ok(queued(self.inner.submit_verify(&entry).await?))
+        })
+    }
+
+    /// The job's answer if it is done, after waiting up to `wait` seconds;
+    /// `None` if it isn't yet.
+    #[pyo3(signature = (job, *, wait = 0))]
+    fn poll_job<'py>(
+        &self,
+        py: Python<'py>,
+        job: &Bound<'py, PyAny>,
+        wait: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let job = job_of(job)?;
+        call(py, async move {
+            let wait = Duration::from_secs(wait);
+            Ok(match self.inner.poll_job(&job, wait).await? {
+                JobPoll::Done(answer) => answer,
+                JobPoll::Pending(_) => Value::Null,
+            })
+        })
+    }
+
+    fn wait_job<'py>(
+        &self,
+        py: Python<'py>,
+        job: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let job = job_of(job)?;
+        call(py, async move { self.inner.wait_job(&job).await })
+    }
+
+    fn cancel_job<'py>(
+        &self,
+        py: Python<'py>,
+        job: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let job = job_of(job)?;
+        call(py, async move { self.inner.cancel_job(&job).await })
     }
 
     #[pyo3(signature = (entry, *, set = None, remove = None))]

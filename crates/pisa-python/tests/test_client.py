@@ -120,6 +120,33 @@ def test_session(url):
     assert weaker["reasons"] == ["statement: t has a different type"]
 
 
+def test_jobs(url):
+    client = Client(url, timeout=5)
+    job = client.submit_check("#check Nat")
+    assert (job["kind"], job["status"]) == ("check", "queued")
+    assert client.wait_job(job)["ok"]
+
+    session = client.wait_job(client.submit_session("theorem t : 1 = 1 := by sorry"))
+    state = session["states"][0]["state"]
+    assert client.wait_job(client.submit_tactic(state, "rfl"))["complete"]
+    # The answer raises what the request would have.
+    with pytest.raises(LeanError):
+        client.wait_job(client.submit_tactic(state, "fail"))
+    verdict = client.submit_session_check(session["session"], "theorem t : 1 = 1 := by rfl")
+    assert client.wait_job(verdict)["ok"]
+
+    made = client.wait_job(client.submit_snapshot("def jobbed := 1", labels={"run": "jobs"}))
+    assert made["labels"] == {"run": "jobs"}
+    assert client.wait_job(client.submit_verify(made["entry"]))["verified"]
+
+    slow = client.submit_check("SLEEP 1000\n#check Nat")
+    assert client.poll_job(slow) is None
+    assert client.poll_job(slow, wait=10)["ok"]
+    assert client.cancel_job(slow)["status"] == "done"
+    with pytest.raises(ValueError):
+        client.wait_job({"job": "x"})
+
+
 def test_errors(url):
     with pytest.raises(PisaError) as e:
         Client(url).tactic("not-a-key", "rfl")

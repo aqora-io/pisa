@@ -535,6 +535,9 @@ let done = std::collections::BTreeMap::from([("stage".to_string(), "done".to_str
 let summary = client.set_snapshot_labels(&entry, &done, &[]).await?;
 let verified = client.verify_snapshot(&entry).await?;
 let removed = client.delete_snapshot(&entry).await?; // the modules that went with it
+// A long request as a job (see Async requests), answered however long it takes.
+let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
+let result = client.wait_job(&job).await?; // what check would have returned
 ```
 
 Python (`pisa_client`), built from `crates/pisa-python` with `maturin build` or `maturin develop`:
@@ -553,6 +556,8 @@ page = client.list_snapshots({"run": "7"}, limit=50)   # newest first; pass page
 client.set_snapshot_labels(base["entry"], set={"stage": "done"}, remove=["run"])
 client.verify_snapshot(base["entry"])["verified"]
 client.delete_snapshot(base["entry"])   # the modules that went with it
+job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
+client.wait_job(job)["ok"]   # what check would have returned, or raised
 ```
 
 Calls are synchronous. They release the GIL, so one `Client` can be shared

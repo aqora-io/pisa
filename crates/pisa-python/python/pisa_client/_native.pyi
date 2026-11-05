@@ -122,6 +122,14 @@ class SnapshotVerified(TypedDict):
     checked: list[str]
     failure: NotRequired[SnapshotFailure]
 
+class JobStatus(TypedDict):
+    """An async request's job, as a `submit_*` returns it. Keep it to wait for
+    the answer later, also from another process; keep it secret too, as anyone
+    who has it can read the answer or cancel the job."""
+    job: str
+    kind: Literal["check", "start_session", "tactic", "check_session", "create_snapshot", "verify_snapshot"]
+    status: Literal["queued", "running", "done", "cancelled"]
+
 class Client:
     """A client for one pisa server. Safe to share between threads; calls
     release the GIL while waiting."""
@@ -208,6 +216,39 @@ class Client:
         """Remove the labels `remove` names from an entry, then set those in
         `set`; returns the entry's summary. Labels that break the rules raise a
         `bad_request` PisaError, and NotFoundError means an unknown entry."""
+    def submit_check(self, code: str, *, detail: list[Literal["tactics"]] = []) -> JobStatus:
+        """Like `check`, as a job the server runs without the request waiting
+        for it, which outlives proxies' time limits: see `wait_job`."""
+    def submit_session(self, code: str) -> JobStatus:
+        """Like `start_session`, as a job."""
+    def submit_tactic(self, state: str, tactic: str) -> JobStatus:
+        """Like `tactic`, as a job."""
+    def submit_session_check(self, session: str, code: str) -> JobStatus:
+        """Like `check_session`, as a job."""
+    def submit_snapshot(
+        self,
+        code: str,
+        *,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+    ) -> JobStatus:
+        """Like `create_snapshot`, as a job."""
+    def submit_verify(self, entry: str) -> JobStatus:
+        """Like `verify_snapshot`, as a job."""
+    def poll_job(
+        self, job: JobStatus, *, wait: int = 0
+    ) -> CheckResult | Session | Step | Snapshot | SnapshotVerified | None:
+        """The job's answer, after waiting up to `wait` seconds (at most 60) for
+        it to finish, or None if it hasn't yet. The answer is what the request
+        would have returned, and raises what it would have raised."""
+    def wait_job(self, job: JobStatus) -> CheckResult | Session | Step | Snapshot | SnapshotVerified:
+        """Wait for the job to finish, however long it takes, and return what
+        its request would have returned (or raise what it would have raised).
+        The server keeps the answer for an hour after the job is done."""
+    def cancel_job(self, job: JobStatus) -> JobStatus:
+        """Withdraw the job if no worker has started it (`status` is then
+        `cancelled`); one that is `running` or `done` stays as it is."""
 
 class Query(TypedDict, total=False):
     """One search; fill as many fields as you can, each feeds different lanes."""

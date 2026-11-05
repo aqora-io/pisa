@@ -23,6 +23,11 @@
 //! // The entry keeps the module; deleting it lets the module go.
 //! client.delete_snapshot(&base.entry.expect("kept")).await?;
 //!
+//! // A long check as a job, which outlives the request and its proxies.
+//! let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
+//! let result = client.wait_job(&job).await?;
+//! assert!(result.ok);
+//!
 //! let search = pisa_client::SearchClient::new("http://localhost:8000")?;
 //! let hits = search
 //!     .search(&pisa_client::Query { nl: Some("trace of a density matrix is one".into()), ..Default::default() })
@@ -32,6 +37,8 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
+use std::time::Duration;
 
 use pisa_protocol::api::{
     BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse, LabelsRequest,
@@ -45,9 +52,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    CheckResult, Declaration, Detail, ErrorKind, Message, Pos, Severity, SnapshotFailure,
-    SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary, SnapshotVerified,
-    Sorry, StartResponse as Session, StateInfo, TacticInfo, TacticResponse as Step,
+    CheckResult, Declaration, Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos,
+    Severity, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot,
+    SnapshotSummary, SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
+    TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope,
@@ -55,6 +63,45 @@ pub use pisa_protocol::search::{
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;
+
+/// How long each look at a job waits for it: the server's longest.
+const JOB_WAIT: Duration = Duration::from_secs(60);
+
+/// A request sent with `Prefer: respond-async`: its job, whose answer is a
+/// `T`. Anyone with its id can read the answer or cancel it, so keep it
+/// secret; the server keeps the answer for an hour after the job is done.
+#[derive(Debug)]
+pub struct Job<T> {
+    pub id: String,
+    pub kind: JobKind,
+    answer: PhantomData<fn() -> T>,
+}
+
+impl<T> Job<T> {
+    /// A job submitted earlier, e.g. by another process, by its id and kind.
+    pub fn new(id: impl Into<String>, kind: JobKind) -> Self {
+        Job {
+            id: id.into(),
+            kind,
+            answer: PhantomData,
+        }
+    }
+}
+
+impl<T> Clone for Job<T> {
+    fn clone(&self) -> Self {
+        Job::new(self.id.clone(), self.kind)
+    }
+}
+
+/// Where a job stands.
+#[derive(Debug, Clone)]
+pub enum JobPoll<T> {
+    /// Queued or running.
+    Pending(JobStatus),
+    /// Done: what its request would have answered.
+    Done(T),
+}
 
 /// Options for [`Client::create_snapshot_with`].
 #[derive(Debug, Clone, Default)]
@@ -146,6 +193,17 @@ impl Endpoint {
         Ok(server_error(r).await?.json().await?)
     }
 
+    /// POSTs `body`, if any, with `Prefer: respond-async`; returns the job
+    /// the server queued.
+    async fn submit<B: Serialize, T>(&self, url: Url, body: Option<&B>) -> Result<Job<T>, Error> {
+        let mut req = self.http.post(url).header("prefer", "respond-async");
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        let status: JobStatus = server_error(req.send().await?).await?.json().await?;
+        Ok(Job::new(status.job, status.kind))
+    }
+
     async fn post_url<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
         let r = self.http.post(url).send().await?;
         Ok(server_error(r).await?.json().await?)
@@ -207,13 +265,33 @@ impl Client {
         code: &str,
         detail: &[Detail],
     ) -> Result<CheckResult, Error> {
-        let req = CheckRequest {
+        self.post("check", &self.check_request(code, detail)).await
+    }
+
+    /// Like [`Client::check`], as a job: see [`Client::wait_job`].
+    pub async fn submit_check(&self, code: &str) -> Result<Job<CheckResult>, Error> {
+        self.submit_check_with_detail(code, &[]).await
+    }
+
+    /// Like [`Client::check_with_detail`], as a job.
+    pub async fn submit_check_with_detail(
+        &self,
+        code: &str,
+        detail: &[Detail],
+    ) -> Result<Job<CheckResult>, Error> {
+        let req = self.check_request(code, detail);
+        self.endpoint
+            .submit(self.endpoint.url("check")?, Some(&req))
+            .await
+    }
+
+    fn check_request(&self, code: &str, detail: &[Detail]) -> CheckRequest {
+        CheckRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
             detail: detail.to_vec(),
-        };
-        self.post("check", &req).await
+        }
     }
 
     /// Checks `(id, code)` pairs in one request. Results come back in order;
@@ -257,32 +335,72 @@ impl Client {
 
     /// Runs code containing `sorry` and returns one proof state per `sorry`.
     pub async fn start_session(&self, code: &str) -> Result<Session, Error> {
-        let req = StartRequest {
+        self.post("sessions", &self.start_request(code)).await
+    }
+
+    /// Like [`Client::start_session`], as a job.
+    pub async fn submit_session(&self, code: &str) -> Result<Job<Session>, Error> {
+        let req = self.start_request(code);
+        self.endpoint
+            .submit(self.endpoint.url("sessions")?, Some(&req))
+            .await
+    }
+
+    fn start_request(&self, code: &str) -> StartRequest {
+        StartRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
-        };
-        self.post("sessions", &req).await
+        }
     }
 
     /// Applies one tactic to a proof state. A tactic Lean rejects is an
     /// [`Error::Server`] of kind [`ErrorKind::Lean`].
     pub async fn tactic(&self, state: &str, tactic: &str) -> Result<Step, Error> {
-        let req = TacticRequest {
+        self.post(
+            &format!("states/{state}/tactic"),
+            &self.tactic_request(tactic),
+        )
+        .await
+    }
+
+    /// Like [`Client::tactic`], as a job.
+    pub async fn submit_tactic(&self, state: &str, tactic: &str) -> Result<Job<Step>, Error> {
+        let url = self.endpoint.url(&format!("states/{state}/tactic"))?;
+        let req = self.tactic_request(tactic);
+        self.endpoint.submit(url, Some(&req)).await
+    }
+
+    fn tactic_request(&self, tactic: &str) -> TacticRequest {
+        TacticRequest {
             tactic: tactic.to_string(),
             timeout: self.timeout,
-        };
-        self.post(&format!("states/{state}/tactic"), &req).await
+        }
     }
 
     /// Re-checks a completed proof from scratch and confirms it proves the
     /// statements the session started from.
     pub async fn check_session(&self, session: &str, code: &str) -> Result<CheckResult, Error> {
-        let req = SessionCheckRequest {
+        let req = self.session_check_request(code);
+        self.post(&format!("sessions/{session}/check"), &req).await
+    }
+
+    /// Like [`Client::check_session`], as a job.
+    pub async fn submit_session_check(
+        &self,
+        session: &str,
+        code: &str,
+    ) -> Result<Job<CheckResult>, Error> {
+        let url = self.endpoint.url(&format!("sessions/{session}/check"))?;
+        let req = self.session_check_request(code);
+        self.endpoint.submit(url, Some(&req)).await
+    }
+
+    fn session_check_request(&self, code: &str) -> SessionCheckRequest {
+        SessionCheckRequest {
             code: code.to_string(),
             timeout: self.timeout,
-        };
-        self.post(&format!("sessions/{session}/check"), &req).await
+        }
     }
 
     /// Checks code like [`check`](Self::check) and, unless Lean reports
@@ -319,26 +437,109 @@ impl Client {
         code: &str,
         opts: &SnapshotOptions,
     ) -> Result<Snapshot, Error> {
-        let req = SnapshotRequest {
+        self.post("snapshots", &self.snapshot_request(code, opts))
+            .await
+    }
+
+    /// Like [`Client::create_snapshot`], as a job.
+    pub async fn submit_snapshot(&self, code: &str) -> Result<Job<Snapshot>, Error> {
+        self.submit_snapshot_with(code, &SnapshotOptions::default())
+            .await
+    }
+
+    /// Like [`Client::create_snapshot_with`], as a job.
+    pub async fn submit_snapshot_with(
+        &self,
+        code: &str,
+        opts: &SnapshotOptions,
+    ) -> Result<Job<Snapshot>, Error> {
+        let req = self.snapshot_request(code, opts);
+        self.endpoint
+            .submit(self.endpoint.url("snapshots")?, Some(&req))
+            .await
+    }
+
+    fn snapshot_request(&self, code: &str, opts: &SnapshotOptions) -> SnapshotRequest {
+        SnapshotRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
             verify: opts.verify,
             labels: opts.labels.clone(),
             key: opts.key.clone(),
-        };
-        self.post("snapshots", &req).await
+        }
     }
 
     /// Re-checks an entry's module and everything it imports through the
     /// kernel, imports first, skipping what already passed. A module the
     /// kernel rejects is reported in `failure`, not as an error.
     pub async fn verify_snapshot(&self, entry: &str) -> Result<SnapshotVerified, Error> {
+        self.endpoint.post_url(self.verify_url(entry)?).await
+    }
+
+    /// Like [`Client::verify_snapshot`], as a job.
+    pub async fn submit_verify(&self, entry: &str) -> Result<Job<SnapshotVerified>, Error> {
+        self.endpoint
+            .submit(self.verify_url(entry)?, None::<&()>)
+            .await
+    }
+
+    fn verify_url(&self, entry: &str) -> Result<Url, Error> {
         let mut url = self.snapshot_url(entry)?;
         url.path_segments_mut()
             .map_err(|_| Error::Url(entry.to_string()))?
             .push("verify");
-        self.endpoint.post_url(url).await
+        Ok(url)
+    }
+
+    /// Where `job` stands, after waiting up to `wait` (at most 60 s) for it
+    /// to finish. Done, it is what its request would have answered, errors
+    /// included.
+    pub async fn poll_job<T: DeserializeOwned>(
+        &self,
+        job: &Job<T>,
+        wait: Duration,
+    ) -> Result<JobPoll<T>, Error> {
+        let mut url = self.job_url(&job.id)?;
+        url.query_pairs_mut()
+            .append_pair("wait", &wait.as_secs().to_string());
+        let r = self.endpoint.http.get(url).send().await?;
+        if r.status() == reqwest::StatusCode::ACCEPTED {
+            return Ok(JobPoll::Pending(r.json().await?));
+        }
+        Ok(JobPoll::Done(server_error(r).await?.json().await?))
+    }
+
+    /// Waits for `job` to finish, however long it takes, and returns what
+    /// its request would have answered. A few dropped connections in a row
+    /// are tried again.
+    pub async fn wait_job<T: DeserializeOwned>(&self, job: &Job<T>) -> Result<T, Error> {
+        let mut dropped = 0;
+        loop {
+            match self.poll_job(job, JOB_WAIT).await {
+                Ok(JobPoll::Done(answer)) => return Ok(answer),
+                Ok(JobPoll::Pending(_)) => dropped = 0,
+                Err(Error::Http(e)) if dropped < 3 && !e.is_decode() && !e.is_status() => {
+                    dropped += 1;
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Withdraws `job` if no worker has started it. A job that is running
+    /// or done stays as it is; the status says which.
+    pub async fn cancel_job<T>(&self, job: &Job<T>) -> Result<JobStatus, Error> {
+        self.endpoint.delete(self.job_url(&job.id)?).await
+    }
+
+    fn job_url(&self, id: &str) -> Result<Url, Error> {
+        let mut url = self.endpoint.url("jobs")?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(id.to_string()))?
+            .push(id);
+        Ok(url)
     }
 
     /// An entry with its labels, and its module's code, imports and check

@@ -3,9 +3,12 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use common::Cluster;
-use pisa_client::{Client, Error, ErrorKind, SnapshotList, SnapshotOptions};
+use pisa_client::{
+    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, SnapshotList, SnapshotOptions,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_covers_checks_and_sessions() {
@@ -208,4 +211,56 @@ async fn missing_version_is_out_of_capacity() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_submits_and_waits_for_jobs() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_timeout(5);
+
+    let job = client.submit_check("#check Nat").await.unwrap();
+    assert_eq!(job.kind, JobKind::Check);
+    assert!(client.wait_job(&job).await.unwrap().ok);
+
+    let job = client
+        .submit_session("theorem t : 1 = 1 := by sorry")
+        .await
+        .unwrap();
+    let s = client.wait_job(&job).await.unwrap();
+    let job = client
+        .submit_tactic(&s.states[0].state, "rfl")
+        .await
+        .unwrap();
+    assert!(client.wait_job(&job).await.unwrap().complete);
+    // An error is the request's own.
+    let job = client
+        .submit_tactic(&s.states[0].state, "fail")
+        .await
+        .unwrap();
+    let err = client.wait_job(&job).await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::Lean));
+    let job = client
+        .submit_session_check(&s.session, "theorem t : 1 = 1 := by rfl")
+        .await
+        .unwrap();
+    assert!(client.wait_job(&job).await.unwrap().ok);
+
+    let job = client.submit_snapshot("def jobbed := 1").await.unwrap();
+    let made = client.wait_job(&job).await.unwrap();
+    let entry = made.entry.expect("kept");
+    let job = client.submit_verify(&entry).await.unwrap();
+    assert!(client.wait_job(&job).await.unwrap().verified);
+
+    // A job resumed by its id; a slow one is pending, and once a worker
+    // holds it, it can't be cancelled.
+    let slow = client.submit_check("SLEEP 1000\n#check Nat").await.unwrap();
+    let resumed: Job<pisa_client::CheckResult> = Job::new(slow.id.clone(), slow.kind);
+    let pending = client.poll_job(&resumed, Duration::ZERO).await.unwrap();
+    assert!(matches!(pending, JobPoll::Pending(_)));
+    let queued = client.submit_check("#check Nat").await.unwrap();
+    assert_eq!(
+        client.cancel_job(&queued).await.unwrap().status,
+        JobState::Cancelled
+    );
+    assert!(client.wait_job(&resumed).await.unwrap().ok);
 }
