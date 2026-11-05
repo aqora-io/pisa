@@ -192,6 +192,10 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release with statuses and the audit, upgrade the workers before the
+servers, and rebuild the worker image: the kernel verifier reports
+assumptions too. An older worker answers `GET /snapshots/audit` with a 500.
+
 To the release whose declaration reports record what each declaration uses:
 - A declaration's `type_hash` and `value_hash` now leave the module out of
   private names and fold in the internal auxiliaries it uses, such as the
@@ -309,6 +313,7 @@ pnpm -C web generate
 | `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, replaces?, dirty, verified, result, created, decls?}` |
 | `GET /snapshots/{entry}/dependents` | `?label=k:v` (repeated), `version?` → `{entries: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, replaces?, affected?, affected_unknown?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, entry?, verified, used_by}], not_proved: [{name, entry, status, axioms}]}`; see [Statuses](#statuses) |
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
@@ -490,6 +495,41 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
   and `GET /snapshots/{entry}` show. Only a create that passed the comparison
   sets it, so it can be trusted, and it stays after the replaced entry is
   deleted. A key replay returns the entry as it is, with `filled` empty.
+
+<a id="statuses"></a>
+**Statuses and assumptions.** An `axiom` declared in snapshot code, or in the
+code being checked, is an assumption: a statement taken as given, such as a
+lemma from the literature. Each declaration in a check result has a `status`,
+and `assumes` lists the assumptions it uses:
+
+| `status` | Axioms it uses besides the allowed ones (`propext`, `Classical.choice`, `Quot.sound`) |
+| --- | --- |
+| `proved` | None |
+| `conditional` | Assumptions only |
+| `sorry` | `sorryAx`, with or without assumptions |
+| `rejected` | Any other: the one `native_decide` declares, `Lean.trustCompiler`, a library's |
+
+A snapshot's `status`, on creates, listings and `GET /snapshots/{entry}`, is
+the worst of its declarations', in that order. `dirty` and `ok` mean what they
+did: true, and false, for anything not `proved`.
+
+`GET /snapshots/audit?label=project:foo` says what the entries with the labels
+rest on, from their records, without running Lean:
+- `summary` counts their declarations by status, each module's once, without
+  the assumptions themselves and what Lean generates, and `unverified_modules`
+  counts the modules not yet re-checked by the kernel, whose statuses come
+  from the build's report.
+- `assumptions` lists each assumption they use, wherever it is declared, with
+  its `signature`, an `entry` on its module, whether it is `verified`, and
+  `used_by`.
+- `not_proved` lists the declarations that are `sorry` or `rejected`, with
+  their axioms.
+
+A trusted audit has no `rejected` or `sorry` and no `unverified_modules`.
+Whether each assumption is reasonable is for review: `axiom oops : False`
+makes everything above it `conditional`. A module kept before declarations
+recorded `assumes` reads its declared axioms as `rejected` until
+`POST /snapshots/{entry}/verify` records them again.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports

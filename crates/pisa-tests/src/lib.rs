@@ -122,8 +122,9 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 
 /// The worker's axiom report for `code`: one declaration per line starting
 /// with `theorem`, `def` or `axiom`. Theorems depend on `sorryAx` if the code
-/// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, and on any
-/// axiom it declares. A "type hash" is the statement text between the name
+/// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, on any
+/// axiom it declares, and on the axioms of imported snapshots its line names;
+/// those it declares or imports are its `assumes`. A "type hash" is the statement text between the name
 /// and `:=`, and a `def`'s "value hash" the text after it. Its refs are the
 /// words of each that the code or a snapshot it imports declares.
 /// The worker's declaration export for `code`: each `theorem`, `def` and
@@ -175,6 +176,15 @@ fn names_in(text: &str) -> Vec<&str> {
 
 pub fn declarations(code: &str) -> String {
     let imported = imported_code(code).unwrap_or_default();
+    let axioms_of = |code: &str| -> Vec<String> {
+        code.lines()
+            .filter_map(|l| {
+                let mut words = l.strip_prefix("public ").unwrap_or(l).split_whitespace();
+                (words.next()? == "axiom").then(|| words.next().map(String::from))?
+            })
+            .collect()
+    };
+    let (own_axioms, imported_axioms) = (axioms_of(code), axioms_of(&imported));
     let mut used = vec!["propext".to_string()];
     if code.contains("sorry") {
         used.push("sorryAx".into());
@@ -205,10 +215,22 @@ pub fn declarations(code: &str) -> String {
         .into_iter()
         .map(|(kind, name, axioms, statement, value)| {
             let axioms = if kind == "theorem" {
-                used.clone()
+                // And the imported axioms it names.
+                let mut axioms = used.clone();
+                let named = names_in(&statement).into_iter().chain(names_in(&value));
+                for n in named.filter(|n| imported_axioms.iter().any(|a| a == n)) {
+                    if !axioms.iter().any(|a| a == n) {
+                        axioms.push(n.to_string());
+                    }
+                }
+                axioms
             } else {
                 axioms
             };
+            let assumes: Vec<&String> = axioms
+                .iter()
+                .filter(|a| own_axioms.contains(a) || imported_axioms.contains(a))
+                .collect();
             let value_hash = (kind == "def").then_some(&value);
             let refs = |text: &str| -> Vec<String> {
                 let mut refs: Vec<String> = names_in(text)
@@ -220,7 +242,7 @@ pub fn declarations(code: &str) -> String {
                 refs
             };
             let value_refs = if kind == "def" { refs(&value) } else { Vec::new() };
-            json!({"name": name, "kind": kind, "axioms": axioms, "type_hash": statement,
+            json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes, "type_hash": statement,
                    "value_hash": value_hash, "type_refs": refs(&statement), "value_refs": value_refs})
         })
         .collect();

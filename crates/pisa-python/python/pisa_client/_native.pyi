@@ -24,10 +24,14 @@ class Sorry(TypedDict):
     pos: NotRequired[Pos]
     end_pos: NotRequired[Pos]
 
+ProofStatus = Literal["proved", "conditional", "sorry", "rejected"]
+
 class Declaration(TypedDict):
     name: str
     kind: str
     axioms: list[str]
+    assumes: NotRequired[list[str]]
+    status: NotRequired[ProofStatus]
     type_hash: str
     value_hash: NotRequired[str]
     type_refs: NotRequired[list[str]]
@@ -75,6 +79,7 @@ class Snapshot(TypedDict):
     header: NotRequired[str]
     version: str
     dirty: bool
+    status: NotRequired[ProofStatus]
     verified: bool
     labels: NotRequired[dict[str, str]]
     replaces: NotRequired[Replacement]
@@ -100,6 +105,7 @@ class SnapshotInfo(TypedDict):
     labels: NotRequired[dict[str, str]]
     replaces: NotRequired[Replaced]
     dirty: bool
+    status: NotRequired[ProofStatus]
     verified: bool
     result: CheckResult
     created: int
@@ -120,12 +126,38 @@ class SnapshotSummary(TypedDict):
     labels: dict[str, str]
     replaces: NotRequired[Replaced]
     dirty: bool
+    status: NotRequired[ProofStatus]
     verified: bool
     created: int
 
 class SnapshotList(TypedDict):
     entries: list[SnapshotSummary]
     next: NotRequired[str]
+
+class AuditSummary(TypedDict):
+    proved: int
+    conditional: int
+    sorry: int
+    rejected: int
+    unverified_modules: int
+
+class AuditAssumption(TypedDict):
+    name: str
+    signature: NotRequired[str]
+    entry: NotRequired[str]
+    verified: bool
+    used_by: list[str]
+
+class AuditUnproved(TypedDict):
+    name: str
+    entry: str
+    status: ProofStatus
+    axioms: list[str]
+
+class SnapshotAudit(TypedDict):
+    summary: AuditSummary
+    assumptions: list[AuditAssumption]
+    not_proved: list[AuditUnproved]
 
 class SnapshotDependents(TypedDict):
     entries: list[SnapshotSummary]

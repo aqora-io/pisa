@@ -7,7 +7,7 @@
 
 use pisa_protocol::header::import_parts;
 use pisa_protocol::repl::{CommandResponse, Severity};
-use pisa_protocol::verify::{Declaration, Verification};
+use pisa_protocol::verify::{Declaration, ProofStatus, Verification};
 
 use crate::catalog::SnapshotDecl;
 
@@ -149,6 +149,8 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
       | .ctorInfo _ => "constructor"
       | .recInfo _ => "recursor"
     let axioms ← _root_.Lean.collectAxioms n
+    let assumes := axioms.filter fun a => tracked a && !hidden a &&
+      (match env.find? a with | some (.axiomInfo _) => true | _ => false)
     let (typeHash, typeRefs) := deep n ci.type
     let (valueHash, valueRefs) : _root_.Lean.Json × List _root_.Lean.Name := match ci with
       | .defnInfo d => let (h, refs) := deep n d.value; (_root_.Lean.ToJson.toJson (toString h), refs)
@@ -160,6 +162,7 @@ pub const AXIOM_REPORT: &str = r#"run_cmd do
       ("name", _root_.Lean.ToJson.toJson n),
       ("kind", _root_.Lean.ToJson.toJson kind),
       ("axioms", _root_.Lean.ToJson.toJson axioms),
+      ("assumes", _root_.Lean.ToJson.toJson assumes),
       ("type_hash", _root_.Lean.ToJson.toJson (toString typeHash)),
       ("value_hash", valueHash),
       ("type_refs", _root_.Lean.ToJson.toJson typeRefs),
@@ -345,6 +348,9 @@ impl Policy {
             None if errors => {}
             None => v.reasons.push("error: axiom report unavailable".into()),
         }
+        for d in &mut v.declarations {
+            d.status = Some(self.status(d));
+        }
         for d in &v.declarations {
             for ax in d.axioms.iter().filter(|a| !self.allowed_axioms.contains(a)) {
                 v.reasons.push(format!("axiom: {} uses {ax}", d.name));
@@ -352,6 +358,29 @@ impl Policy {
         }
         v.ok = v.reasons.is_empty();
         v
+    }
+}
+
+impl Policy {
+    /// What `d`'s axioms make it: besides the allowed ones, none is
+    /// `proved`; only assumptions (`d.assumes`) `conditional`; `sorryAx`,
+    /// with or without assumptions, `sorry`; anything else `rejected`.
+    pub fn status(&self, d: &Declaration) -> ProofStatus {
+        let assumes = d.assumes.as_deref().unwrap_or_default();
+        let each = d
+            .axioms
+            .iter()
+            .filter(|a| !self.allowed_axioms.contains(a))
+            .map(|a| {
+                if assumes.contains(a) {
+                    ProofStatus::Conditional
+                } else if a == "sorryAx" {
+                    ProofStatus::Sorry
+                } else {
+                    ProofStatus::Rejected
+                }
+            });
+        each.max().unwrap_or(ProofStatus::Proved)
     }
 }
 
@@ -437,6 +466,53 @@ mod tests {
             allowed_options: DEFAULT_OPTIONS.split(',').map(String::from).collect(),
             allow_metaprogramming: false,
         }
+    }
+
+    #[test]
+    fn a_status_tells_assumptions_from_sorry_and_the_rest() {
+        let p = policy();
+        let decl = |axioms: &[&str], assumes: Option<&[&str]>| Declaration {
+            name: "t".into(),
+            axioms: axioms.iter().map(|a| a.to_string()).collect(),
+            assumes: assumes.map(|a| a.iter().map(|a| a.to_string()).collect()),
+            ..Default::default()
+        };
+        let none: Option<&[&str]> = Some(&[]);
+        for (axioms, assumes, status) in [
+            (&["propext"][..], none, ProofStatus::Proved),
+            (
+                &["propext", "kunneth"],
+                Some(&["kunneth"][..]),
+                ProofStatus::Conditional,
+            ),
+            (&["sorryAx"], none, ProofStatus::Sorry),
+            (
+                &["sorryAx", "kunneth"],
+                Some(&["kunneth"]),
+                ProofStatus::Sorry,
+            ),
+            (
+                &["t._native.native_decide.ax_1_1"],
+                none,
+                ProofStatus::Rejected,
+            ),
+            (
+                &["sorryAx", "Lean.trustCompiler", "kunneth"],
+                Some(&["kunneth"]),
+                ProofStatus::Rejected,
+            ),
+            // A record from before assumptions were reported.
+            (&["kunneth"], None, ProofStatus::Rejected),
+        ] {
+            assert_eq!(p.status(&decl(axioms, assumes)), status, "{axioms:?}");
+        }
+        assert!(ProofStatus::Rejected > ProofStatus::Sorry);
+        assert!(ProofStatus::Sorry > ProofStatus::Conditional);
+        assert!(ProofStatus::Conditional > ProofStatus::Proved);
+        // Judging sets each declaration's status, and `ok` stays as it was.
+        let v = p.judge_decls(false, Some(vec![decl(&["kunneth"], Some(&["kunneth"]))]));
+        assert_eq!(v.declarations[0].status, Some(ProofStatus::Conditional));
+        assert!(!v.ok);
     }
 
     #[test]

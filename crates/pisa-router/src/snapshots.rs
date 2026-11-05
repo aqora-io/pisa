@@ -10,15 +10,15 @@ use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     Accepted, ApiErrors, Deleted, ErrorKind, JobKind, JobState, LabelsRequest, PreferAsync,
-    RebuildRequest, RebuildResponse, SnapshotDependents, SnapshotInfo, SnapshotList,
+    RebuildRequest, RebuildResponse, SnapshotAudit, SnapshotDependents, SnapshotInfo, SnapshotList,
     SnapshotRequest, SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LABELS, MAX_LIMIT, is_cursor, parse_filter};
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
-    Job, JobResult, SnapshotCreateJob, SnapshotDependentsJob, SnapshotJob, SnapshotLabelsJob,
-    SnapshotListJob, SnapshotRebuildJob,
+    Job, JobResult, SnapshotAuditJob, SnapshotCreateJob, SnapshotDependentsJob, SnapshotJob,
+    SnapshotLabelsJob, SnapshotListJob, SnapshotRebuildJob,
 };
 
 use crate::dispatch::{DispatchError, Prepared, Priority, Route};
@@ -180,6 +180,32 @@ fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
         }
     }
     Ok((q, job))
+}
+
+#[utoipa::path(
+    get, path = "/snapshots/audit", operation_id = "auditSnapshots", tag = "snapshots",
+    summary = "What a project rests on",
+    description = "For the entries with every label: their declarations by status, each \
+        assumption (an axiom declared in snapshot code) with what uses it, wherever it is \
+        declared, and the declarations that are `sorry` or `rejected`. It reads records only.",
+    params(
+        ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
+        VersionQuery,
+    ),
+    responses((status = 200, description = "The audit", body = SnapshotAudit), ApiErrors),
+)]
+/// `GET /snapshots/audit`.
+pub async fn audit(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<SnapshotAudit>, ApiError> {
+    let (q, labels) = label_query(query.as_deref().unwrap_or_default())
+        .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    let job = Job::SnapshotAudit(SnapshotAuditJob { labels });
+    match submit(&app, job, q, Priority::Interactive).await? {
+        JobResult::SnapshotAudit(r) => Ok(Json(r.map_err(ApiError)?)),
+        other => Err(unexpected(other)),
+    }
 }
 
 #[utoipa::path(

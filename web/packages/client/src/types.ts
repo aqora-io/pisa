@@ -8,6 +8,9 @@ import type { ErrorKind } from "./openapi.ts";
 
 export type {
   Allow,
+  AuditAssumption,
+  AuditSummary,
+  AuditUnproved,
   BatchItem,
   BatchRequest,
   BatchResponse,
@@ -33,6 +36,7 @@ export type {
   Message,
   ModuleDecl,
   Pos,
+  ProofStatus,
   Query,
   QueryResult,
   RebuildCreated,
@@ -53,6 +57,7 @@ export type {
   SessionCheckRequest,
   Severity,
   SnapshotFailure,
+  SnapshotAudit,
   SnapshotDependents,
   SnapshotHit,
   SnapshotInfo,

@@ -152,6 +152,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What a project rests on
+         * @description For the entries with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.
+         */
+        get: operations["auditSnapshots"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots/rebuild": {
         parameters: {
             query?: never;
@@ -323,6 +343,47 @@ export interface components {
          * @enum {string}
          */
         Allow: "definitions";
+        AuditAssumption: {
+            /**
+             * @description An entry on the module that declares it: one with the labels if there
+             *     is one.
+             */
+            entry?: string;
+            name: string;
+            /** @description As written, from its module's declaration export. */
+            signature?: string;
+            /** @description The entries' declarations that rest on it. */
+            used_by: string[];
+            /** @description Its module has passed the kernel re-check. */
+            verified: boolean;
+        };
+        /**
+         * @description The entries' declarations by status, each module's once, without the
+         *     assumptions themselves and what Lean generated.
+         */
+        AuditSummary: {
+            /** Format: int64 */
+            conditional: number;
+            /** Format: int64 */
+            proved: number;
+            /** Format: int64 */
+            rejected: number;
+            /** Format: int64 */
+            sorry: number;
+            /**
+             * Format: int64
+             * @description The entries' modules that haven't passed the kernel re-check, so
+             *     whose statuses come from the build's report.
+             */
+            unverified_modules: number;
+        };
+        AuditUnproved: {
+            /** @description Its axioms outside the allowed list. */
+            axioms: string[];
+            entry: string;
+            name: string;
+            status: components["schemas"]["ProofStatus"];
+        };
         BatchItem: {
             code: string;
             id: string;
@@ -406,6 +467,12 @@ export interface components {
         };
         /** @description A new declaration and the axioms it depends on. */
         Declaration: {
+            /**
+             * @description Its axioms that are assumptions: declared as `axiom` in this code or
+             *     in a snapshot it builds on. Absent in records from before they were
+             *     reported.
+             */
+            assumes?: string[];
             axioms: string[];
             /**
              * @description Made by Lean on demand, such as an equation lemma: code with the same
@@ -414,6 +481,8 @@ export interface components {
             generated?: boolean;
             kind: string;
             name: string;
+            /** @description What its axioms make it, by [`ProofStatus`]. */
+            status?: components["schemas"]["ProofStatus"];
             /**
              * @description A hash of its type, with private names taken without their module,
              *     and with the internal auxiliaries it uses folded in.
@@ -589,6 +658,12 @@ export interface components {
             /** Format: int64 */
             line: number;
         };
+        /**
+         * @description What a declaration's axioms make it, besides the allowed ones (by default
+         *     `propext`, `Classical.choice` and `Quot.sound`), worst last.
+         * @enum {string}
+         */
+        ProofStatus: "proved" | "conditional" | "sorry" | "rejected";
         /**
          * @description One search. Fill as many fields as you can: each feeds different lanes,
          *     and more fields mean better fusion.
@@ -862,6 +937,23 @@ export interface components {
         /** @enum {string} */
         Severity: "trace" | "info" | "warning" | "error";
         /**
+         * @description `GET /snapshots/audit`: what the entries that have every label the query
+         *     names (as in a listing) rest on. Statuses come from the same axiom lists
+         *     as `dirty`: the build's report, or the kernel re-check once a module is
+         *     verified, so a trusted audit has no `rejected` or `sorry` and
+         *     `unverified_modules` 0. Whether an assumption is reasonable is for review.
+         */
+        SnapshotAudit: {
+            /**
+             * @description The assumptions what the entries declare uses, by name, wherever they
+             *     are declared.
+             */
+            assumptions: components["schemas"]["AuditAssumption"][];
+            /** @description The declarations that are `sorry` or `rejected`. */
+            not_proved: components["schemas"]["AuditUnproved"][];
+            summary: components["schemas"]["AuditSummary"];
+        };
+        /**
          * @description `GET /snapshots/{entry}/dependents`: the entries on every module that
          *     imports the entry's module, directly or through others, parents first: by
          *     level, where a module that imports it is at level 1 and one that imports
@@ -912,6 +1004,8 @@ export interface components {
             result: components["schemas"]["CheckResult"];
             /** @description The entry's module. */
             snapshot: string;
+            /** @description As in [`SnapshotResponse::status`]. */
+            status?: components["schemas"]["ProofStatus"];
             /** @description As in [`SnapshotResponse::verified`]. */
             verified: boolean;
         };
@@ -1022,6 +1116,11 @@ export interface components {
              */
             snapshot?: string;
             /**
+             * @description The worst status among the module's declarations: `dirty` unless
+             *     `proved`.
+             */
+            status?: components["schemas"]["ProofStatus"];
+            /**
              * @description This snapshot and everything it imports have passed the kernel
              *     re-check.
              */
@@ -1061,6 +1160,8 @@ export interface components {
             replaces?: components["schemas"]["Replaced"];
             /** @description The entry's module. */
             snapshot: string;
+            /** @description As in [`SnapshotResponse::status`]. */
+            status?: components["schemas"]["ProofStatus"];
             /** @description As in [`SnapshotResponse::verified`]. */
             verified: boolean;
         };
@@ -1156,6 +1257,9 @@ export interface components {
     pathItems: never;
 }
 export type Allow = components['schemas']['Allow'];
+export type AuditAssumption = components['schemas']['AuditAssumption'];
+export type AuditSummary = components['schemas']['AuditSummary'];
+export type AuditUnproved = components['schemas']['AuditUnproved'];
 export type BatchItem = components['schemas']['BatchItem'];
 export type BatchRequest = components['schemas']['BatchRequest'];
 export type BatchResponse = components['schemas']['BatchResponse'];
@@ -1182,6 +1286,7 @@ export type LabelsRequest = components['schemas']['LabelsRequest'];
 export type Message = components['schemas']['Message'];
 export type ModuleDecl = components['schemas']['ModuleDecl'];
 export type Pos = components['schemas']['Pos'];
+export type ProofStatus = components['schemas']['ProofStatus'];
 export type Query = components['schemas']['Query'];
 export type QueryResult = components['schemas']['QueryResult'];
 export type RebuildCreated = components['schemas']['RebuildCreated'];
@@ -1201,6 +1306,7 @@ export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
 export type SessionCheckRequest = components['schemas']['SessionCheckRequest'];
 export type Severity = components['schemas']['Severity'];
+export type SnapshotAudit = components['schemas']['SnapshotAudit'];
 export type SnapshotDependents = components['schemas']['SnapshotDependents'];
 export type SnapshotFailure = components['schemas']['SnapshotFailure'];
 export type SnapshotHit = components['schemas']['SnapshotHit'];
@@ -1955,6 +2061,91 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobStatus"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    auditSnapshots: {
+        parameters: {
+            query?: {
+                /** @description `key:value`, split on the first `:`; repeatable */
+                label?: string[];
+                /** @description The worker version; the server's default when absent. */
+                version?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The audit */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SnapshotAudit"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

@@ -14,7 +14,7 @@ by walking the re-checked constants, not from any precomputed extension state a
 build could have forged.
 
 It prints one line, `PISA_VERIFY <json>`:
-  {"ok": true, "declarations": [{"name","kind","axioms","type_hash","value_hash"?,
+  {"ok": true, "declarations": [{"name","kind","axioms","assumes","type_hash","value_hash"?,
                                  "type_refs","value_refs","generated"}]}
 or `{"ok": false, "reason": "..."}` when the kernel rejects the module. It imports
 only `Lean`, so it runs as a script without compiling Mathlib.
@@ -104,6 +104,10 @@ def deep (env : Environment) (self : Name) (e : Expr) : UInt64 × List Name := I
 def declJson (n : Name) (ci : ConstantInfo) : CoreM Json := do
   let env ← getEnv
   let axioms ← collectAxioms n
+  -- Declared as `axiom` here or in a snapshot. Lean's own, and the ones it
+  -- makes, such as `native_decide`'s (internal names), aren't assumptions.
+  let assumes := axioms.filter fun a => tracked env a && !hidden a &&
+    (match env.find? a with | some (.axiomInfo _) => true | _ => false)
   let (typeHash, typeRefs) := deep env n ci.type
   let (valueHash, valueRefs) : Json × List Name := match ci with
     | .defnInfo d => let (h, refs) := deep env n d.value; (Json.str (toString h), refs)
@@ -112,7 +116,8 @@ def declJson (n : Name) (ci : ConstantInfo) : CoreM Json := do
   let generated := isReservedName env n || ((privateToUserName? n).map (·.isInternal)).getD false
   return Json.mkObj [
     ("name", toJson n), ("kind", toJson (kindOf ci)),
-    ("axioms", toJson axioms), ("type_hash", Json.str (toString typeHash)),
+    ("axioms", toJson axioms), ("assumes", toJson assumes),
+    ("type_hash", Json.str (toString typeHash)),
     ("value_hash", valueHash), ("type_refs", toJson typeRefs),
     ("value_refs", toJson valueRefs), ("generated", toJson generated)]
 

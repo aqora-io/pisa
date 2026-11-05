@@ -23,6 +23,14 @@ pub struct Declaration {
     pub name: String,
     pub kind: String,
     pub axioms: Vec<String>,
+    /// Its axioms that are assumptions: declared as `axiom` in this code or
+    /// in a snapshot it builds on. Absent in records from before they were
+    /// reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assumes: Option<Vec<String>>,
+    /// What its axioms make it, by [`ProofStatus`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProofStatus>,
     /// A hash of its type, with private names taken without their module,
     /// and with the internal auxiliaries it uses folded in.
     pub type_hash: String,
@@ -43,6 +51,24 @@ pub struct Declaration {
     /// statements needn't have it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
+}
+
+/// What a declaration's axioms make it, besides the allowed ones (by default
+/// `propext`, `Classical.choice` and `Quot.sound`), worst last.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProofStatus {
+    /// None.
+    Proved,
+    /// Assumptions only: axioms declared in this code or in a snapshot.
+    Conditional,
+    /// `sorryAx`, with or without assumptions.
+    Sorry,
+    /// Any other, such as the one `native_decide` declares, or
+    /// `Lean.trustCompiler`.
+    Rejected,
 }
 
 /// `name` as it is across modules: a private name without the module it was

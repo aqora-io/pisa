@@ -28,6 +28,7 @@ pub enum Job {
     SnapshotLabels(SnapshotLabelsJob),
     SnapshotDependents(SnapshotDependentsJob),
     SnapshotRebuild(SnapshotRebuildJob),
+    SnapshotAudit(SnapshotAuditJob),
     /// A job kind this worker doesn't know, from a newer server. It is
     /// answered with [`JobResult::Failed`].
     #[serde(other)]
@@ -109,6 +110,13 @@ pub struct SnapshotDependentsJob {
     pub labels: Vec<(String, String)>,
 }
 
+/// `GET /snapshots/audit`, its filters parsed and checked by the router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotAuditJob {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<(String, String)>,
+}
+
 /// `POST /snapshots/rebuild`, as a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRebuildJob {
@@ -145,6 +153,7 @@ pub enum JobResult {
     SnapshotLabels(Result<api::SnapshotSummary, api::Error>),
     SnapshotDependents(Result<api::SnapshotDependents, api::Error>),
     SnapshotRebuild(Result<api::RebuildResponse, api::Error>),
+    SnapshotAudit(Result<api::SnapshotAudit, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,

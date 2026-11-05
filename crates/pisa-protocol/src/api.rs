@@ -18,6 +18,7 @@
 //! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
 //! | `GET /snapshots/{entry}/dependents` | `?label=key:value` → [`SnapshotDependents`] |
 //! | `POST /snapshots/rebuild` | [`RebuildRequest`] → [`RebuildResponse`] |
+//! | `GET /snapshots/audit` | `?label=key:value` → [`SnapshotAudit`] |
 //! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
 //! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
 //! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
@@ -37,7 +38,7 @@ use utoipa::{IntoParams, IntoResponses, ToSchema};
 
 use crate::repl;
 use crate::search::Informal;
-pub use crate::verify::Declaration;
+pub use crate::verify::{Declaration, ProofStatus};
 
 fn default_timeout() -> u64 {
     60
@@ -592,6 +593,10 @@ pub struct SnapshotResponse {
     /// Kept although a declaration uses `sorry` or another axiom outside the
     /// allowed list; `result.reasons` says which.
     pub dirty: bool,
+    /// The worst status among the module's declarations: `dirty` unless
+    /// `proved`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProofStatus>,
     /// This snapshot and everything it imports have passed the kernel
     /// re-check.
     pub verified: bool,
@@ -626,6 +631,9 @@ pub struct SnapshotInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaced>,
     pub dirty: bool,
+    /// As in [`SnapshotResponse::status`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProofStatus>,
     /// As in [`SnapshotResponse::verified`].
     pub verified: bool,
     pub result: CheckResult,
@@ -666,6 +674,9 @@ pub struct SnapshotSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaced>,
     pub dirty: bool,
+    /// As in [`SnapshotResponse::status`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProofStatus>,
     /// As in [`SnapshotResponse::verified`].
     pub verified: bool,
     /// When the entry was created, in seconds since the Unix epoch.
@@ -837,6 +848,59 @@ pub struct RebuildItem {
     /// one it builds on in the plan, has no declaration export to read.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub affected_unknown: bool,
+}
+
+/// `GET /snapshots/audit`: what the entries that have every label the query
+/// names (as in a listing) rest on. Statuses come from the same axiom lists
+/// as `dirty`: the build's report, or the kernel re-check once a module is
+/// verified, so a trusted audit has no `rejected` or `sorry` and
+/// `unverified_modules` 0. Whether an assumption is reasonable is for review.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotAudit {
+    pub summary: AuditSummary,
+    /// The assumptions what the entries declare uses, by name, wherever they
+    /// are declared.
+    pub assumptions: Vec<AuditAssumption>,
+    /// The declarations that are `sorry` or `rejected`.
+    pub not_proved: Vec<AuditUnproved>,
+}
+
+/// The entries' declarations by status, each module's once, without the
+/// assumptions themselves and what Lean generated.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct AuditSummary {
+    pub proved: u64,
+    pub conditional: u64,
+    pub sorry: u64,
+    pub rejected: u64,
+    /// The entries' modules that haven't passed the kernel re-check, so
+    /// whose statuses come from the build's report.
+    pub unverified_modules: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuditAssumption {
+    pub name: String,
+    /// As written, from its module's declaration export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// An entry on the module that declares it: one with the labels if there
+    /// is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
+    /// Its module has passed the kernel re-check.
+    pub verified: bool,
+    /// The entries' declarations that rest on it.
+    pub used_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuditUnproved {
+    pub name: String,
+    pub entry: String,
+    pub status: ProofStatus,
+    /// Its axioms outside the allowed list.
+    pub axioms: Vec<String>,
 }
 
 /// `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets

@@ -33,9 +33,10 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    Allow, CheckResult, Declaration, Deleted, Error, ErrorKind, ModuleDecl, RebuildItem,
-    RebuildResponse, Replaced, Replacement, Replaces, SnapshotDependents, SnapshotFailure,
-    SnapshotInfo, SnapshotList, SnapshotResponse, SnapshotSummary, SnapshotVerified,
+    Allow, AuditAssumption, AuditUnproved, CheckResult, Declaration, Deleted, Error, ErrorKind,
+    ModuleDecl, RebuildItem, RebuildResponse, Replaced, Replacement, Replaces, SnapshotAudit,
+    SnapshotDependents, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse,
+    SnapshotSummary, SnapshotVerified,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
@@ -43,7 +44,7 @@ use pisa_protocol::labels::{
 };
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::{Change, Verification, normalised, statement_changes};
+use pisa_protocol::verify::{Change, ProofStatus, Verification, normalised, statement_changes};
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
 use sha2::{Digest, Sha256};
 
@@ -53,7 +54,9 @@ use crate::catalog::{
 };
 use crate::check::{header_error, policy_error, run, unexpected};
 use crate::db::Db;
-use crate::policy::{module_export, module_report, parse_export, parse_report, uses_macros};
+use crate::policy::{
+    Policy, module_export, module_report, parse_export, parse_report, uses_macros,
+};
 use crate::pool::{Lease, Pool};
 
 /// Time allowed for the report on a snapshot's declarations.
@@ -72,6 +75,8 @@ pub struct Snapshots {
     confirmed: Mutex<HashMap<String, Instant>>,
     /// One task at a time loads or builds a given snapshot.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// The pool's policy, for the statuses of records kept without them.
+    policy: Policy,
 }
 
 fn internal(e: impl std::fmt::Display) -> Error {
@@ -96,7 +101,12 @@ fn parse_entry(entry: &str) -> Result<&str, Error> {
 }
 
 /// An entry with its module's state.
-fn summary(entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> SnapshotSummary {
+fn summary(
+    entry: String,
+    entry_meta: EntryMeta,
+    meta: &ModuleMeta,
+    status: ProofStatus,
+) -> SnapshotSummary {
     SnapshotSummary {
         entry,
         snapshot: snapshot::module(&entry_meta.module),
@@ -105,6 +115,7 @@ fn summary(entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> SnapshotS
         labels: entry_meta.labels,
         replaces: entry_meta.replaces,
         dirty: meta.dirty,
+        status: Some(status),
         verified: meta.verified,
         created: entry_meta.created_micros / 1_000_000,
     }
@@ -636,6 +647,7 @@ impl Snapshots {
         version: String,
         root: PathBuf,
         confirm_every: Duration,
+        policy: Policy,
     ) -> Self {
         Snapshots {
             store,
@@ -646,7 +658,19 @@ impl Snapshots {
             cached: Mutex::default(),
             confirmed: Mutex::default(),
             locks: Mutex::default(),
+            policy,
         }
+    }
+
+    /// What `d`'s axioms make it, as recorded or else by the policy.
+    fn status(&self, d: &Declaration) -> ProofStatus {
+        d.status.unwrap_or_else(|| self.policy.status(d))
+    }
+
+    /// The worst status among a module's declarations.
+    fn module_status(&self, meta: &ModuleMeta) -> ProofStatus {
+        let statuses = meta.result.declarations.iter().map(|d| self.status(d));
+        statuses.max().unwrap_or(ProofStatus::Proved)
     }
 
     /// Where the store keeps file `ext` of a module build.
@@ -797,12 +821,14 @@ impl Snapshots {
         let (entry, labels, replaced) = entry.map_or((None, Default::default(), None), |(e, m)| {
             (Some(e), m.labels, m.replaces)
         });
+        let status = Some(self.module_status(&meta));
         SnapshotResponse {
             entry,
             snapshot: Some(snapshot::module(id)),
             header: Some(meta.header),
             version: self.version.clone(),
             dirty: meta.dirty,
+            status,
             verified: meta.verified,
             labels,
             // A key replay doesn't compare again.
@@ -813,8 +839,16 @@ impl Snapshots {
                 changed_definitions: Vec::new(),
                 affected: Vec::new(),
             }),
-            result: meta.result,
+            result: self.with_statuses(meta.result),
         }
+    }
+
+    /// `result` with each declaration's status, for records kept without.
+    fn with_statuses(&self, mut result: CheckResult) -> CheckResult {
+        for d in &mut result.declarations {
+            d.status = Some(self.status(d));
+        }
+        result
     }
 
     /// Checks `job.code` by compiling it to a module and keeps the module
@@ -828,6 +862,7 @@ impl Snapshots {
             header: None,
             version: self.version.clone(),
             dirty: false,
+            status: None,
             verified: false,
             labels: Default::default(),
             replaces: None,
@@ -1552,6 +1587,7 @@ impl Snapshots {
         let entry_meta = self.catalog.entry(entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
         let decls = self.decls(&entry_meta.module).await?;
+        let status = Some(self.module_status(&meta));
         Ok(SnapshotInfo {
             entry: entry.to_string(),
             snapshot: snapshot::module(&entry_meta.module),
@@ -1561,8 +1597,9 @@ impl Snapshots {
             labels: entry_meta.labels,
             replaces: entry_meta.replaces,
             dirty: meta.dirty,
+            status,
             verified: meta.verified,
-            result: meta.result,
+            result: self.with_statuses(meta.result),
             created: entry_meta.created_micros / 1_000_000,
             decls,
         })
@@ -1626,7 +1663,7 @@ impl Snapshots {
                 modules.insert(id.clone(), meta);
             }
             if let Some(meta) = &modules[&id] {
-                entries.push(summary(entry, entry_meta, meta));
+                entries.push(summary(entry, entry_meta, meta, self.module_status(meta)));
             }
         }
         Ok(SnapshotList { entries, next })
@@ -1667,7 +1704,7 @@ impl Snapshots {
                 metas.insert(id.clone(), meta);
             }
             if let Some(meta) = &metas[&id] {
-                entries.push(summary(entry, entry_meta, meta));
+                entries.push(summary(entry, entry_meta, meta, self.module_status(meta)));
             }
         }
         Ok(SnapshotDependents { entries })
@@ -1858,6 +1895,146 @@ impl Snapshots {
         })
     }
 
+    /// What the entries with every label in `labels` rest on; see
+    /// [`SnapshotAudit`]. It reads records only.
+    pub async fn audit(&self, labels: &[(String, String)]) -> Result<SnapshotAudit, Error> {
+        if labels.len() > MAX_LABELS {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!("{} label filters; at most {MAX_LABELS}", labels.len()),
+            ));
+        }
+        // An entry on each module the labels reach.
+        let mut entries: BTreeMap<String, String> = BTreeMap::new();
+        let mut after = None;
+        loop {
+            let (page, next) = self
+                .catalog
+                .list(labels, MAX_LIMIT, after.as_deref())
+                .await?;
+            for (e, entry_meta) in page {
+                entries.entry(entry_meta.module).or_insert(e);
+            }
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        let mut audit = SnapshotAudit::default();
+        let mut used_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
+        for (m, entry) in &entries {
+            let meta = match self.catalog.module(m).await {
+                Ok(meta) => meta,
+                // Its entries were deleted since they were listed.
+                Err(e) if e.kind == ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
+            audit.summary.unverified_modules += u64::from(!meta.verified);
+            for d in meta.result.declarations.iter().filter(|d| !d.generated) {
+                let assumes = d.assumes.as_deref().unwrap_or_default();
+                // An assumption itself.
+                if d.kind == "axiom" && assumes.contains(&d.name) {
+                    continue;
+                }
+                let status = self.status(d);
+                let summary = &mut audit.summary;
+                *match status {
+                    ProofStatus::Proved => &mut summary.proved,
+                    ProofStatus::Conditional => &mut summary.conditional,
+                    ProofStatus::Sorry => &mut summary.sorry,
+                    ProofStatus::Rejected => &mut summary.rejected,
+                } += 1;
+                for a in assumes {
+                    used_by.entry(a.clone()).or_default().push(d.name.clone());
+                }
+                if status >= ProofStatus::Sorry {
+                    let allowed = &self.policy.allowed_axioms;
+                    audit.not_proved.push(AuditUnproved {
+                        name: d.name.clone(),
+                        entry: entry.clone(),
+                        status,
+                        axioms: d
+                            .axioms
+                            .iter()
+                            .filter(|a| !allowed.contains(a))
+                            .cloned()
+                            .collect(),
+                    });
+                }
+            }
+            metas.insert(m.clone(), meta);
+        }
+        // Each is declared among the entries' modules or what they build on.
+        let closure: BTreeSet<String> = metas
+            .values()
+            .flat_map(|m| ids(&m.modules).cloned())
+            .collect();
+        for (name, mut users) in used_by {
+            users.sort();
+            users.dedup();
+            let mut assumption = AuditAssumption {
+                name,
+                signature: None,
+                entry: None,
+                verified: false,
+                used_by: users,
+            };
+            if let Some(m) = self
+                .declaring(&assumption.name, &closure, &mut metas)
+                .await?
+            {
+                assumption.verified = metas[&m].verified;
+                let exported = self
+                    .catalog
+                    .decls(&m)
+                    .await?
+                    .map(|d| d.decls)
+                    .unwrap_or_default();
+                assumption.signature = exported
+                    .into_iter()
+                    .find(|d| d.name == assumption.name)
+                    .map(|d| d.signature);
+                assumption.entry = match entries.get(&m) {
+                    Some(e) => Some(e.clone()),
+                    None => {
+                        let on = self
+                            .catalog
+                            .entries_on(std::slice::from_ref(&m), &[])
+                            .await?;
+                        on.into_iter().next().map(|(e, _)| e)
+                    }
+                };
+            }
+            audit.assumptions.push(assumption);
+        }
+        Ok(audit)
+    }
+
+    /// The module among `modules` that declares the axiom `name`, loading
+    /// the records `metas` doesn't hold yet.
+    async fn declaring(
+        &self,
+        name: &str,
+        modules: &BTreeSet<String>,
+        metas: &mut HashMap<String, ModuleMeta>,
+    ) -> Result<Option<String>, Error> {
+        for m in modules {
+            if !metas.contains_key(m) {
+                match self.catalog.module(m).await {
+                    Ok(meta) => metas.insert(m.clone(), meta),
+                    Err(e) if e.kind == ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e),
+                };
+            }
+            let declares = |d: &Declaration| d.kind == "axiom" && d.name == name;
+            if metas[m].result.declarations.iter().any(declares) {
+                return Ok(Some(m.clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Edits an entry's labels; see [`Catalog::set_labels`].
     pub async fn set_labels(
         &self,
@@ -1868,7 +2045,8 @@ impl Snapshots {
         let entry = parse_entry(entry)?;
         let entry_meta = self.catalog.set_labels(entry, set, remove).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
-        Ok(summary(entry.to_string(), entry_meta, &meta))
+        let status = self.module_status(&meta);
+        Ok(summary(entry.to_string(), entry_meta, &meta, status))
     }
 
     /// Deletes an entry, then each module that nothing needs any more: the
@@ -2212,7 +2390,22 @@ mod tests {
     fn snapshots(db: Db, dir: &Path) -> Arc<Snapshots> {
         std::fs::create_dir_all(dir.join(snapshot::ROOT)).unwrap();
         let store = Arc::new(InMemory::new());
-        let s = Snapshots::new(store, db, "v".into(), dir.into(), Duration::from_secs(60));
+        let policy = Policy {
+            allowed_axioms: crate::policy::DEFAULT_AXIOMS
+                .split(',')
+                .map(String::from)
+                .collect(),
+            allowed_options: Vec::new(),
+            allow_metaprogramming: false,
+        };
+        let s = Snapshots::new(
+            store,
+            db,
+            "v".into(),
+            dir.into(),
+            Duration::from_secs(60),
+            policy,
+        );
         Arc::new(s)
     }
 

@@ -67,6 +67,7 @@ impl Versions {
         snapshots::verify,
         snapshots::dependents,
         snapshots::rebuild,
+        snapshots::audit,
         jobs::get,
         jobs::cancel,
     )
@@ -91,6 +92,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/snapshots/{entry}/verify", post(snapshots::verify))
         .route("/snapshots/{entry}/dependents", get(snapshots::dependents))
         .route("/snapshots/rebuild", post(snapshots::rebuild))
+        .route("/snapshots/audit", get(snapshots::audit))
         .route("/jobs/{job}", get(jobs::get).delete(jobs::cancel))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
