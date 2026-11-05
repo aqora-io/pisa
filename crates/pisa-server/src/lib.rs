@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{any, get};
 use axum::{Json, Router};
 use pisa_db::db::Db;
@@ -61,15 +62,18 @@ pub async fn start_on(cfg: ServerConfig, db: Db) -> anyhow::Result<Server> {
     Ok(Server { running, search })
 }
 
-/// 200 whenever the API is up, as checks don't need search, with the live
-/// workers; `search` says whether it can serve.
-async fn health(State((app, search)): State<(Arc<App>, Option<Arc<Search>>)>) -> Json<Value> {
-    let mut health = app.health().await;
+/// The API's health, with the live workers: 200 whenever it is up, as
+/// checks don't need search, until the server drains. `search` says whether
+/// search can serve.
+async fn health(
+    State((app, search)): State<(Arc<App>, Option<Arc<Search>>)>,
+) -> (StatusCode, Json<Value>) {
+    let (status, mut health) = app.health().await;
     health["search"] = match search {
         Some(search) => search.health().await.1,
         None => Value::Null,
     };
-    Json(health)
+    (status, Json(health))
 }
 
 async fn no_search() -> pisa_router::http::ApiError {

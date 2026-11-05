@@ -4,8 +4,8 @@ use clap::Parser;
 use pisa_server::ServerConfig;
 use tracing_subscriber::EnvFilter;
 
-/// How long a server keeps taking requests after it is told to stop: its
-/// Service stops sending it new ones a moment after the signal.
+/// How long a server keeps taking requests after it is told to stop, while
+/// its failing `/health` takes it out of the load balancer.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
 #[tokio::main]
@@ -22,7 +22,6 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => {}
     }
     tracing::info!("shutting down: draining");
-    tokio::time::sleep(STOP_GRACE).await;
-    server.running.shutdown(drain).await;
+    server.running.shutdown(STOP_GRACE, drain).await;
     Ok(())
 }

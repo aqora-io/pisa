@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::extract::{FromRequest, Request, State};
 use axum::http::StatusCode;
@@ -25,6 +26,9 @@ use crate::{sessions, snapshots};
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
     pub versions: Versions,
+    /// Set when the server is about to stop: `/health` fails, so that load
+    /// balancers stop sending it requests while it still serves them.
+    pub draining: AtomicBool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -110,15 +114,24 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     }
 }
 
-pub async fn health(State(app): State<Arc<App>>) -> Json<serde_json::Value> {
-    Json(app.health().await)
+pub async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<serde_json::Value>) {
+    let (status, body) = app.health().await;
+    (status, Json(body))
 }
 
 impl App {
-    /// The API's health: up, with the number of live workers on the queue,
-    /// `null` if the queue can't be read.
-    pub async fn health(&self) -> serde_json::Value {
-        json!({ "status": "ok", "workers": self.dispatcher.workers().await })
+    /// The API's health: up, or 503 once draining, with the number of live
+    /// workers on the queue, `null` if the queue can't be read.
+    pub async fn health(&self) -> (StatusCode, serde_json::Value) {
+        let workers = self.dispatcher.workers().await;
+        if self.draining.load(Ordering::Acquire) {
+            let body = json!({ "status": "draining", "workers": workers });
+            return (StatusCode::SERVICE_UNAVAILABLE, body);
+        }
+        (
+            StatusCode::OK,
+            json!({ "status": "ok", "workers": workers }),
+        )
     }
 }
 

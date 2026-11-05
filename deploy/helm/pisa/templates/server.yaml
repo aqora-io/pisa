@@ -90,13 +90,13 @@ spec:
           ports:
             - { name: http, containerPort: 8000 }
           # Ready while the API answers, whether or not search can: checks
-          # don't need it, and every replica shares one Qdrant.
+          # don't need it, and every replica shares one Qdrant. A replica told
+          # to stop fails it at once, so the Service stops sending requests
+          # while it answers those it has. No liveness probe: it would fail
+          # during that drain, and kill the replica before it finished.
           readinessProbe:
             httpGet: { path: /health, port: http }
-            periodSeconds: 5
-          livenessProbe:
-            httpGet: { path: /health, port: http }
-            periodSeconds: 10
+            periodSeconds: 2
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
 ---

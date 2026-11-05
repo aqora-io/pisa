@@ -146,10 +146,11 @@ running, which KEDA's `postgresql` trigger counts in the job queue every
 - `worker.drainTimeoutSecs` is the longest it waits for running jobs.
 - The pod's grace period is that plus 30s.
 
-A server that receives SIGTERM keeps taking requests for 5s, while its
-Service stops sending them, then waits up to `server.drainTimeoutSecs` (360)
-for those in flight; its grace period is that plus 30s. A request it cuts off
-still runs, as its job is in the queue.
+A server that receives SIGTERM answers `/health` with a 503 `draining` but
+keeps taking requests for 5s, while its readiness probe takes it out of
+rotation, then waits up to `server.drainTimeoutSecs` (360) for those in
+flight; its grace period is that plus 30s. A request it cuts off still runs,
+as its job is in the queue.
 
 Scale-downs and rollouts therefore don't cut jobs off.
 
@@ -267,7 +268,7 @@ module-system (a `module` header with `public`, `meta` and `all` imports).
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
-| `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search) |
+| `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
 - `ok` is the verdict.

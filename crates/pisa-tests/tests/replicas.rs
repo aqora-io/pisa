@@ -166,7 +166,14 @@ async fn a_server_shutting_down_answers_what_it_has() {
         c.queue.counts(LIVE).await.unwrap().running == 1
     })
     .await;
-    b.shutdown(Duration::from_secs(10)).await;
+    let health = url_of(&b, "/health");
+    let stopping = tokio::spawn(b.shutdown(Duration::from_millis(300), Duration::from_secs(10)));
+    // Load balancers learn first, while it still serves.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let r = c.client.get(health).send().await.unwrap();
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.json::<Value>().await.unwrap()["status"], "draining");
+    stopping.await.unwrap();
     let (status, r) = slow.await.unwrap();
     assert_eq!(status, 200, "{r}");
     assert!(r.get("error").is_none(), "{r}");

@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use pisa_db::db::Db;
@@ -61,10 +62,13 @@ pub struct Running {
 }
 
 impl Running {
-    /// Stops taking connections, and waits up to `drain` for the requests in
-    /// flight. Their jobs are in the queue: one cut off still runs, and its
-    /// result is swept.
-    pub async fn shutdown(self, drain: Duration) {
+    /// Fails `/health` but keeps serving for `grace`, while load balancers
+    /// stop sending requests here; then stops taking connections, and waits
+    /// up to `drain` for the requests in flight. Their jobs are in the queue:
+    /// one cut off still runs, and its result is swept.
+    pub async fn shutdown(self, grace: Duration, drain: Duration) {
+        self.app.draining.store(true, Ordering::Release);
+        tokio::time::sleep(grace).await;
         let _ = self.stop.send(true);
         if tokio::time::timeout(drain, self.served).await.is_err() {
             tracing::warn!("requests still in flight after {drain:?}");
@@ -105,6 +109,7 @@ pub async fn start_with(
             default: cfg.default_version.clone(),
             aliases: cfg.alias.iter().cloned().collect::<HashMap<_, _>>(),
         },
+        draining: AtomicBool::new(false),
     });
 
     let sweeper = tokio::spawn(async move {
