@@ -19,9 +19,14 @@
 //! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
 //! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
 //! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
+//! | `GET /jobs/{job}` | `?wait=` ([`JobWait`]) → the request's answer, or [`JobStatus`] (202) |
+//! | `DELETE /jobs/{job}` | → [`JobStatus`] |
 //!
 //! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
-//! Checks can ask for more in `detail` ([`Detail`]).
+//! Checks can ask for more in `detail` ([`Detail`]). Checks, sessions, and
+//! snapshot creates and verifies run asynchronously with
+//! `Prefer: respond-async` ([`PreferAsync`]), answering 202 with a
+//! [`JobStatus`].
 
 use std::collections::BTreeMap;
 
@@ -119,7 +124,8 @@ pub enum ApiErrors {
     /// `bad_request`: the request breaks the API's rules.
     #[response(status = 400)]
     BadRequest(ErrorResponse),
-    /// `not_found`: an unknown or expired state, session, entry or declaration.
+    /// `not_found`: an unknown or expired job, state, session, entry or
+    /// declaration.
     #[response(status = 404)]
     NotFound(ErrorResponse),
     /// `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
@@ -135,6 +141,96 @@ pub enum ApiErrors {
     /// `unavailable`: e.g. search isn't ready; retry later.
     #[response(status = 503)]
     Unavailable(ErrorResponse),
+}
+
+/// The `Prefer` header of a request that may run asynchronously.
+#[derive(IntoParams)]
+#[into_params(parameter_in = Header)]
+pub struct PreferAsync {
+    /// `respond-async` for a job at once (202), to wait for at
+    /// `/jobs/{job}`, rather than the answer.
+    #[param(rename = "Prefer")]
+    pub prefer: Option<String>,
+}
+
+/// What a request with `Prefer: respond-async` answers.
+#[derive(IntoResponses)]
+pub enum Accepted {
+    /// Queued: wait for its answer at `/jobs/{job}`.
+    #[response(
+        status = 202,
+        headers(
+            ("Location" = String, description = "`/jobs/{job}`, relative to the server's root"),
+            ("Preference-Applied" = String, description = "`respond-async`"),
+        )
+    )]
+    Accepted(JobStatus),
+}
+
+/// An async request, as `/jobs/{job}` reports it until it is done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct JobStatus {
+    /// Its id: 32 hex digits, to keep secret, as anyone who has it can read
+    /// the answer or cancel the job.
+    pub job: String,
+    pub kind: JobKind,
+    pub status: JobState,
+}
+
+/// The endpoint an async request ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    /// `POST /check`
+    Check,
+    /// `POST /sessions`
+    StartSession,
+    /// `POST /states/{id}/tactic`
+    Tactic,
+    /// `POST /sessions/{id}/check`
+    CheckSession,
+    /// `POST /snapshots`
+    CreateSnapshot,
+    /// `POST /snapshots/{entry}/verify`
+    VerifySnapshot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    /// Waiting for a worker.
+    Queued,
+    /// A worker is running it.
+    Running,
+    /// Its answer is waiting at `/jobs/{job}`.
+    Done,
+    /// Withdrawn before a worker started it.
+    Cancelled,
+}
+
+/// `GET /jobs/{job}`'s query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct JobWait {
+    /// How long to wait for the job to finish, in seconds: at most 60, and
+    /// by default 0, which answers at once.
+    #[serde(default)]
+    pub wait: Option<u64>,
+}
+
+/// What `GET /jobs/{job}` answers once the job is done: what its request
+/// would have. By `kind`: `check` and `check_session` a `CheckResult`,
+/// `start_session` a `StartResponse`, `tactic` a `TacticResponse`,
+/// `create_snapshot` a `SnapshotResponse` and `verify_snapshot` a
+/// `SnapshotVerified`. An error is the request's own, with its status.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum JobOutcome {
+    Check(CheckResult),
+    Session(StartResponse),
+    Tactic(TacticResponse),
+    Snapshot(Box<SnapshotResponse>),
+    Verified(SnapshotVerified),
 }
 
 /// `GET /health`: 200, or 503 once the server is stopping.

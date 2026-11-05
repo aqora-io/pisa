@@ -7,9 +7,11 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, RawQuery, State};
+use axum::response::Response;
 use pisa_protocol::api::{
-    ApiErrors, Deleted, ErrorKind, LabelsRequest, SnapshotInfo, SnapshotList, SnapshotRequest,
-    SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
+    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, LabelsRequest, PreferAsync, SnapshotInfo,
+    SnapshotList, SnapshotRequest, SnapshotResponse, SnapshotSummary, SnapshotVerified,
+    VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LABELS, MAX_LIMIT, is_cursor, parse_filter};
@@ -18,8 +20,9 @@ use pisa_protocol::wire::{
     Job, JobResult, SnapshotCreateJob, SnapshotJob, SnapshotLabelsJob, SnapshotListJob,
 };
 
-use crate::dispatch::{Priority, Route};
+use crate::dispatch::{Prepared, Priority, Route};
 use crate::http::{ApiError, App, Body};
+use crate::jobs::Prefer;
 use crate::sessions::unexpected;
 
 #[utoipa::path(
@@ -28,13 +31,15 @@ use crate::sessions::unexpected;
     description = "Checks code like `/check` and, if Lean accepts it, keeps it as a module that \
         later code can import, with a new entry on it. Code that is already kept gets a new \
         entry on its module.",
+    params(PreferAsync),
     request_body = SnapshotRequest,
-    responses((status = 200, description = "The entry, or why nothing was kept", body = SnapshotResponse), ApiErrors),
+    responses((status = 200, description = "The entry, or why nothing was kept", body = SnapshotResponse), Accepted, ApiErrors),
 )]
 pub async fn create(
     State(app): State<Arc<App>>,
+    prefer: Prefer,
     Body(req): Body<SnapshotRequest>,
-) -> Result<Json<SnapshotResponse>, ApiError> {
+) -> Response {
     let split = split_header(&req.code);
     let next = snapshot::next_header(&split.header, &snapshot::id(&req.code));
     let route = Route {
@@ -50,11 +55,19 @@ pub async fn create(
         labels: req.labels,
         key: req.key,
     });
-    let done = app.dispatcher.submit(job, route, Priority::Batch).await?;
+    let p = Prepared {
+        job,
+        route,
+        priority: Priority::Batch,
+    };
+    app.answer(prefer, JobKind::CreateSnapshot, p).await
+}
+
+pub(crate) fn created(done: JobResult) -> Result<SnapshotResponse, ApiError> {
     let JobResult::SnapshotCreated(r) = done else {
         return Err(unexpected(done));
     };
-    Ok(Json(*r))
+    Ok(*r)
 }
 
 #[utoipa::path(
@@ -191,18 +204,36 @@ pub async fn delete(
     summary = "Re-check an entry's module with the kernel",
     description = "Re-checks the module and the modules it imports; `failure` says which one \
         failed and why.",
-    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
-    responses((status = 200, description = "Whether the module passed", body = SnapshotVerified), ApiErrors),
+    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery, PreferAsync),
+    responses((status = 200, description = "Whether the module passed", body = SnapshotVerified), Accepted, ApiErrors),
 )]
 pub async fn verify(
     State(app): State<Arc<App>>,
     Path(entry): Path<String>,
     Query(q): Query<VersionQuery>,
-) -> Result<Json<SnapshotVerified>, ApiError> {
+    prefer: Prefer,
+) -> Response {
     let job = Job::SnapshotVerify(SnapshotJob { entry });
-    match submit(&app, job, q, Priority::Batch).await? {
-        JobResult::SnapshotVerified(r) => Ok(Json(r.map_err(ApiError)?)),
+    let p = prepare(&app, job, q, Priority::Batch);
+    app.answer(prefer, JobKind::VerifySnapshot, p).await
+}
+
+pub(crate) fn verified(done: JobResult) -> Result<SnapshotVerified, ApiError> {
+    match done {
+        JobResult::SnapshotVerified(r) => r.map_err(ApiError),
         other => Err(unexpected(other)),
+    }
+}
+
+fn prepare(app: &App, job: Job, q: VersionQuery, priority: Priority) -> Prepared {
+    let route = Route {
+        version: app.versions.resolve(q.version.as_deref()),
+        ..Default::default()
+    };
+    Prepared {
+        job,
+        route,
+        priority,
     }
 }
 
@@ -212,9 +243,8 @@ async fn submit(
     q: VersionQuery,
     priority: Priority,
 ) -> Result<JobResult, ApiError> {
-    let route = Route {
-        version: app.versions.resolve(q.version.as_deref()),
-        ..Default::default()
-    };
-    Ok(app.dispatcher.submit(job, route, priority).await?)
+    Ok(app
+        .dispatcher
+        .submit(prepare(app, job, q, priority))
+        .await?)
 }

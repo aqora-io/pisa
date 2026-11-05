@@ -12,15 +12,16 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::join_all;
 use pisa_protocol::api::{
-    self, ApiErrors, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail, ErrorKind,
-    ErrorResponse, Health, HealthStatus,
+    self, Accepted, ApiErrors, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail,
+    ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, PreferAsync,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{CheckJob, Job, JobResult};
 use serde::de::DeserializeOwned;
 
-use crate::dispatch::{DispatchError, Dispatcher, Priority, Route};
+use crate::dispatch::{DispatchError, Dispatcher, Prepared, Priority, Route};
+use crate::jobs::{self, Prefer};
 use crate::{sessions, snapshots};
 
 pub struct App {
@@ -64,6 +65,8 @@ impl Versions {
         snapshots::labels,
         snapshots::delete,
         snapshots::verify,
+        jobs::get,
+        jobs::cancel,
     )
 )]
 pub struct ApiDoc;
@@ -84,6 +87,7 @@ pub fn router(app: Arc<App>) -> Router {
                 .delete(snapshots::delete),
         )
         .route("/snapshots/{entry}/verify", post(snapshots::verify))
+        .route("/jobs/{job}", get(jobs::get).delete(jobs::cancel))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
 }
@@ -164,17 +168,18 @@ impl App {
     summary = "Check Lean code",
     description = "Checks code against the version's Lean and imports. The verdict is `ok`; \
         what Lean, the policy or a limit reported is in-band, in `error`, `messages` and `reasons`.",
+    params(PreferAsync),
     request_body = CheckRequest,
-    responses((status = 200, description = "The verdict", body = CheckResult), ApiErrors),
+    responses((status = 200, description = "The verdict", body = CheckResult), Accepted, ApiErrors),
 )]
 async fn check(
     State(app): State<Arc<App>>,
+    prefer: Prefer,
     Body(req): Body<CheckRequest>,
-) -> Result<Json<CheckResult>, ApiError> {
+) -> Response {
     let version = app.versions.resolve(req.version.as_deref());
-    Ok(Json(
-        check_one(&app, req.code, req.timeout, req.detail, version).await?,
-    ))
+    let p = prepare_check(req.code, req.timeout, req.detail, version);
+    app.answer(prefer, JobKind::Check, p).await
 }
 
 #[utoipa::path(
@@ -219,6 +224,16 @@ async fn check_one(
     detail: Vec<Detail>,
     version: Option<String>,
 ) -> Result<CheckResult, DispatchError> {
+    let p = prepare_check(code, timeout_secs, detail, version);
+    Ok(check_result(app.dispatcher.submit(p).await?))
+}
+
+fn prepare_check(
+    code: String,
+    timeout_secs: u64,
+    detail: Vec<Detail>,
+    version: Option<String>,
+) -> Prepared {
     let split = split_header(&code);
     let route = Route {
         version,
@@ -231,12 +246,19 @@ async fn check_one(
         timeout_secs,
         detail,
     });
-    Ok(
-        match app.dispatcher.submit(job, route, Priority::Batch).await? {
-            JobResult::Check(o) => CheckResult::from(o),
-            other => failed_result(other),
-        },
-    )
+    Prepared {
+        job,
+        route,
+        priority: Priority::Batch,
+    }
+}
+
+/// A check's result: failures are in-band.
+pub(crate) fn check_result(done: JobResult) -> CheckResult {
+    match done {
+        JobResult::Check(o) => CheckResult::from(o),
+        other => failed_result(other),
+    }
 }
 
 /// The header new workers may pre-warm, when it is in demand. Headers that import

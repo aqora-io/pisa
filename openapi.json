@@ -484,6 +484,68 @@
         ],
         "type": "object"
       },
+      "JobKind": {
+        "description": "The endpoint an async request ran.",
+        "enum": [
+          "check",
+          "start_session",
+          "tactic",
+          "check_session",
+          "create_snapshot",
+          "verify_snapshot"
+        ],
+        "type": "string"
+      },
+      "JobOutcome": {
+        "description": "What `GET /jobs/{job}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `StartResponse`, `tactic` a `TacticResponse`,\n`create_snapshot` a `SnapshotResponse` and `verify_snapshot` a\n`SnapshotVerified`. An error is the request's own, with its status.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          {
+            "$ref": "#/components/schemas/StartResponse"
+          },
+          {
+            "$ref": "#/components/schemas/TacticResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotResponse"
+          },
+          {
+            "$ref": "#/components/schemas/SnapshotVerified"
+          }
+        ]
+      },
+      "JobState": {
+        "enum": [
+          "queued",
+          "running",
+          "done",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "JobStatus": {
+        "description": "An async request, as `/jobs/{job}` reports it until it is done.",
+        "properties": {
+          "job": {
+            "description": "Its id: 32 hex digits, to keep secret, as anyone who has it can read\nthe answer or cancel the job.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobState"
+          }
+        },
+        "required": [
+          "job",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
       "LabelsRequest": {
         "description": "`PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets\nthose in `set`. The labels that result must follow the rules of\n[`check_labels`](crate::labels::check_labels).",
         "properties": {
@@ -1375,6 +1437,17 @@
       "post": {
         "description": "Checks code against the version's Lean and imports. The verdict is `ok`; what Lean, the policy or a limit reported is in-band, in `error`, `messages` and `reasons`.",
         "operationId": "check",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1396,6 +1469,30 @@
             },
             "description": "The verdict"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "400": {
             "content": {
               "application/json": {
@@ -1414,7 +1511,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -1506,7 +1603,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -1587,10 +1684,226 @@
         ]
       }
     },
+    "/jobs/{job}": {
+      "delete": {
+        "description": "Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is.",
+        "operationId": "cancelJob",
+        "parameters": [
+          {
+            "description": "The job, from the 202",
+            "in": "path",
+            "name": "job",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "What became of it"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Cancel an async request",
+        "tags": [
+          "jobs"
+        ]
+      },
+      "get": {
+        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers as its request would have, with the same status; an error is the request's own. Until then it answers 202. A job's answer is kept for an hour after it is done.",
+        "operationId": "getJob",
+        "parameters": [
+          {
+            "description": "The job, from the 202",
+            "in": "path",
+            "name": "job",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How long to wait for the job to finish, in seconds: at most 60, and\nby default 0, which answers at once.",
+            "in": "query",
+            "name": "wait",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOutcome"
+                }
+              }
+            },
+            "description": "Done: the request's answer"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Not done yet"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "An async request's answer",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/sessions": {
       "post": {
         "description": "Checks code with `sorry`s and returns a state for each, to apply tactics to.",
         "operationId": "startSession",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1612,6 +1925,30 @@
             },
             "description": "The session, with a state for each `sorry`"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "400": {
             "content": {
               "application/json": {
@@ -1630,7 +1967,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -1692,6 +2029,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -1715,6 +2061,30 @@
             },
             "description": "The verdict"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "400": {
             "content": {
               "application/json": {
@@ -1733,7 +2103,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -1857,7 +2227,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -1908,6 +2278,17 @@
       "post": {
         "description": "Checks code like `/check` and, if Lean accepts it, keeps it as a module that later code can import, with a new entry on it. Code that is already kept gets a new entry on its module.",
         "operationId": "createSnapshot",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -1929,6 +2310,30 @@
             },
             "description": "The entry, or why nothing was kept"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "400": {
             "content": {
               "application/json": {
@@ -1947,7 +2352,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2049,7 +2454,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2148,7 +2553,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2257,7 +2662,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2328,6 +2733,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2340,6 +2754,30 @@
               }
             },
             "description": "Whether the module passed"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -2359,7 +2797,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2421,6 +2859,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2444,6 +2891,30 @@
             },
             "description": "The new state"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{job}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
           "400": {
             "content": {
               "application/json": {
@@ -2462,7 +2933,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2564,7 +3035,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2656,7 +3127,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2748,7 +3219,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired state, session, entry or declaration."
+            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2820,6 +3291,10 @@
     {
       "description": "Finding declarations",
       "name": "search"
+    },
+    {
+      "description": "Answers to async requests, made with `Prefer: respond-async`",
+      "name": "jobs"
     },
     {
       "description": "Whether a server can take requests",

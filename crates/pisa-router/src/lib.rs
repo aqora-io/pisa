@@ -18,6 +18,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub mod dispatch;
 pub mod http;
+pub mod jobs;
 pub mod sessions;
 pub mod snapshots;
 
@@ -78,7 +79,15 @@ fn cors(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
     let layer = CorsLayer::new()
         .allow_origin(allow)
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        .allow_headers([header::CONTENT_TYPE])
+        // An async request prefers `respond-async`, and its 202 names the job.
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::HeaderName::from_static("prefer"),
+        ])
+        .expose_headers([
+            header::LOCATION,
+            header::HeaderName::from_static("preference-applied"),
+        ])
         .max_age(Duration::from_secs(3600));
     Ok(Some(layer))
 }

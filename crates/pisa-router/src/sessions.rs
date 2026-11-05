@@ -5,17 +5,18 @@
 
 use std::sync::Arc;
 
-use axum::Json;
 use axum::extract::{Path, State};
+use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    ApiErrors, CheckResult, ErrorKind, Key, SessionCheckRequest, StartRequest, StartResponse,
-    TacticRequest, TacticResponse,
+    Accepted, ApiErrors, CheckResult, ErrorKind, JobKind, Key, PreferAsync, SessionCheckRequest,
+    StartRequest, StartResponse, TacticRequest, TacticResponse,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{Job, JobResult, SessionCheckJob, SessionStartJob, SessionTacticJob};
 
-use crate::dispatch::{Priority, Route};
+use crate::dispatch::{Prepared, Priority, Route};
 use crate::http::{ApiError, App, Body, failed_result, prewarm_header};
+use crate::jobs::Prefer;
 
 fn parse_key(id: &str) -> Result<Key, ApiError> {
     Key::parse(id).ok_or_else(|| ApiError::new(ErrorKind::BadRequest, format!("invalid key: {id}")))
@@ -33,13 +34,15 @@ pub(crate) fn unexpected(result: JobResult) -> ApiError {
     post, path = "/sessions", operation_id = "startSession", tag = "sessions",
     summary = "Start a proof session",
     description = "Checks code with `sorry`s and returns a state for each, to apply tactics to.",
+    params(PreferAsync),
     request_body = StartRequest,
-    responses((status = 200, description = "The session, with a state for each `sorry`", body = StartResponse), ApiErrors),
+    responses((status = 200, description = "The session, with a state for each `sorry`", body = StartResponse), Accepted, ApiErrors),
 )]
 pub async fn start(
     State(app): State<Arc<App>>,
+    prefer: Prefer,
     Body(req): Body<StartRequest>,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Response {
     let split = split_header(&req.code);
     let route = Route {
         version: app.versions.resolve(req.version.as_deref()),
@@ -51,14 +54,19 @@ pub async fn start(
         code: req.code,
         timeout_secs: req.timeout,
     });
-    let done = app
-        .dispatcher
-        .submit(job, route, Priority::Interactive)
-        .await?;
+    let p = Prepared {
+        job,
+        route,
+        priority: Priority::Interactive,
+    };
+    app.answer(prefer, JobKind::StartSession, p).await
+}
+
+pub(crate) fn started(done: JobResult) -> Result<StartResponse, ApiError> {
     let JobResult::SessionStarted(result) = done else {
         return Err(unexpected(done));
     };
-    Ok(Json(result.map_err(ApiError)?))
+    result.map_err(ApiError)
 }
 
 #[utoipa::path(
@@ -67,16 +75,20 @@ pub async fn start(
     description = "Returns the new state. Earlier states stay valid, so a session is a tree. \
         A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an \
         unknown identifier, is in `messages`.",
-    params(("id" = String, Path, description = "A state key, from a session or an earlier tactic")),
+    params(("id" = String, Path, description = "A state key, from a session or an earlier tactic"), PreferAsync),
     request_body = TacticRequest,
-    responses((status = 200, description = "The new state", body = TacticResponse), ApiErrors),
+    responses((status = 200, description = "The new state", body = TacticResponse), Accepted, ApiErrors),
 )]
 pub async fn tactic(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    prefer: Prefer,
     Body(req): Body<TacticRequest>,
-) -> Result<Json<TacticResponse>, ApiError> {
-    let key = parse_key(&id)?;
+) -> Response {
+    let key = match parse_key(&id) {
+        Ok(key) => key,
+        Err(e) => return e.into_response(),
+    };
     let route = Route {
         version: Some(key.version),
         header_key: Some(key.header_key),
@@ -88,14 +100,19 @@ pub async fn tactic(
         tactic: req.tactic,
         timeout_secs: req.timeout,
     });
-    let done = app
-        .dispatcher
-        .submit(job, route, Priority::Interactive)
-        .await?;
+    let p = Prepared {
+        job,
+        route,
+        priority: Priority::Interactive,
+    };
+    app.answer(prefer, JobKind::Tactic, p).await
+}
+
+pub(crate) fn applied(done: JobResult) -> Result<TacticResponse, ApiError> {
     let JobResult::TacticApplied(result) = done else {
         return Err(unexpected(done));
     };
-    Ok(Json(result.map_err(ApiError)?))
+    result.map_err(ApiError)
 }
 
 #[utoipa::path(
@@ -104,19 +121,20 @@ pub async fn tactic(
     description = "Re-checks the completed code from scratch and confirms it proves the \
         statements the session started from, with the same imports. Failures are in-band, \
         as for `/check`, with statement changes in `reasons`.",
-    params(("id" = String, Path, description = "The session ID")),
+    params(("id" = String, Path, description = "The session ID"), PreferAsync),
     request_body = SessionCheckRequest,
-    responses((status = 200, description = "The verdict", body = CheckResult), ApiErrors),
+    responses((status = 200, description = "The verdict", body = CheckResult), Accepted, ApiErrors),
 )]
-/// The completed proof's check result, with statement changes added to
-/// `reasons`. A bad or unknown session ID is an HTTP error; everything else
-/// is in-band, as for `/check`.
 pub async fn check(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    prefer: Prefer,
     Body(req): Body<SessionCheckRequest>,
-) -> Result<Json<CheckResult>, ApiError> {
-    let key = parse_key(&id)?;
+) -> Response {
+    let key = match parse_key(&id) {
+        Ok(key) => key,
+        Err(e) => return e.into_response(),
+    };
     let route = Route {
         version: Some(key.version),
         header_key: Some(key.header_key),
@@ -128,12 +146,20 @@ pub async fn check(
         code: req.code,
         timeout_secs: req.timeout,
     });
-    let done = app
-        .dispatcher
-        .submit(job, route, Priority::Interactive)
-        .await?;
+    let p = Prepared {
+        job,
+        route,
+        priority: Priority::Interactive,
+    };
+    app.answer(prefer, JobKind::CheckSession, p).await
+}
+
+/// The completed proof's check result, with statement changes added to
+/// `reasons`. A bad or unknown session ID is an HTTP error; everything else
+/// is in-band, as for `/check`.
+pub(crate) fn checked(done: JobResult) -> Result<CheckResult, ApiError> {
     let JobResult::SessionChecked(checked) = done else {
-        return Ok(Json(failed_result(done)));
+        return Ok(failed_result(done));
     };
     let about_the_request = |e: &&pisa_protocol::api::Error| {
         matches!(e.kind, ErrorKind::NotFound | ErrorKind::BadRequest)
@@ -144,5 +170,5 @@ pub async fn check(
     let mut result = CheckResult::from(checked.outcome);
     result.ok &= checked.statement_reasons.is_empty();
     result.reasons.extend(checked.statement_reasons);
-    Ok(Json(result))
+    Ok(result)
 }

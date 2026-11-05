@@ -104,6 +104,7 @@ pub fn openapi() -> Value {
             (name = "sessions", description = "Proving `sorry`s a tactic at a time"),
             (name = "snapshots", description = "Keeping code for later code to import"),
             (name = "search", description = "Finding declarations"),
+            (name = "jobs", description = "Answers to async requests, made with `Prefer: respond-async`"),
             (name = "health", description = "Whether a server can take requests"),
         ),
         servers((url = "/", description = "The server that serves this document")),

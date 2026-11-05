@@ -192,6 +192,11 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release with async requests, upgrade every server before clients send
+`Prefer: respond-async`: older servers answer such requests at once, don't
+know `/jobs`, and sweep async jobs' answers after 10 minutes. The job queue
+gains two columns, which each process adds as it starts.
+
 To the release with replicated servers, whose workers take jobs from the
 database:
 - `pisa-server` replaces `pisa-router` and `pisa-search serve`: one image
@@ -285,11 +290,35 @@ pnpm -C web generate
 | `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
 | `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
+| `GET /jobs/{job}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{job, kind, status}`; see [Async requests](#async-requests) |
+| `DELETE /jobs/{job}` | → `{job, kind, status}`, `cancelled` if no worker had started it |
 | `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
 takes a comma-separated list of origins, or `*`. It is empty by default.
+
+<a id="async-requests"></a>
+**Async requests.** A check, a session's start, tactic or check, and a
+snapshot's create or verify can take minutes: a wait for a worker, loading the
+imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
+requests off at 60 s, or over a network that drops, send them with
+`Prefer: respond-async`. The server then answers `202 {job, kind, status:
+"queued"}` at once, with `Location: /jobs/{job}`, and runs the request as it
+would have:
+- `GET /jobs/{job}?wait=30` waits up to `wait` seconds (at most 60) and, once
+  the job is done, answers exactly as the request would have: its status and
+  body, errors included, e.g. a 429 when no worker took it in time. Until then
+  it answers 202 with `status` `queued` or `running`. Any server answers for
+  any job.
+- An answer is kept for an hour after its job is done; then the job is a 404.
+- `DELETE /jobs/{job}` withdraws a job no worker has started (`cancelled`); a
+  `running` or `done` one stays as it is.
+- Anyone with a job's id can read its answer or cancel it, so keep it secret.
+  Build its URL from `job` rather than `Location`, which is relative to the
+  server's root.
+- `/check/batch`, and the snapshot reads and edits, answer at once whatever
+  `Prefer` says: send a batch's items to `/check` instead.
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
 - `ok` is the verdict.

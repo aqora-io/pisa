@@ -64,6 +64,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/jobs/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * An async request's answer
+         * @description Waits up to `wait` seconds for the job to finish. Done, it answers as its request would have, with the same status; an error is the request's own. Until then it answers 202. A job's answer is kept for an hour after it is done.
+         */
+        get: operations["getJob"];
+        put?: never;
+        post?: never;
+        /**
+         * Cancel an async request
+         * @description Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is.
+         */
+        delete: operations["cancelJob"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions": {
         parameters: {
             query?: never;
@@ -434,6 +458,31 @@ export interface components {
             source: string;
             statement_latex?: string;
             statement_nl: string;
+        };
+        /**
+         * @description The endpoint an async request ran.
+         * @enum {string}
+         */
+        JobKind: "check" | "start_session" | "tactic" | "check_session" | "create_snapshot" | "verify_snapshot";
+        /**
+         * @description What `GET /jobs/{job}` answers once the job is done: what its request
+         *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
+         *     `start_session` a `StartResponse`, `tactic` a `TacticResponse`,
+         *     `create_snapshot` a `SnapshotResponse` and `verify_snapshot` a
+         *     `SnapshotVerified`. An error is the request's own, with its status.
+         */
+        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["StartResponse"] | components["schemas"]["TacticResponse"] | components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotVerified"];
+        /** @enum {string} */
+        JobState: "queued" | "running" | "done" | "cancelled";
+        /** @description An async request, as `/jobs/{job}` reports it until it is done. */
+        JobStatus: {
+            /**
+             * @description Its id: 32 hex digits, to keep secret, as anyone who has it can read
+             *     the answer or cancel the job.
+             */
+            job: string;
+            kind: components["schemas"]["JobKind"];
+            status: components["schemas"]["JobState"];
         };
         /**
          * @description `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets
@@ -852,6 +901,10 @@ export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
 export type Hit = components['schemas']['Hit'];
 export type Informal = components['schemas']['Informal'];
+export type JobKind = components['schemas']['JobKind'];
+export type JobOutcome = components['schemas']['JobOutcome'];
+export type JobState = components['schemas']['JobState'];
+export type JobStatus = components['schemas']['JobStatus'];
 export type LabelsRequest = components['schemas']['LabelsRequest'];
 export type Message = components['schemas']['Message'];
 export type ModuleDecl = components['schemas']['ModuleDecl'];
@@ -888,7 +941,13 @@ export interface operations {
     check: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -907,6 +966,19 @@ export interface operations {
                     "application/json": components["schemas"]["CheckResult"];
                 };
             };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
             /** @description `bad_request`: the request breaks the API's rules. */
             400: {
                 headers: {
@@ -916,7 +988,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -997,7 +1072,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1076,10 +1154,197 @@ export interface operations {
             };
         };
     };
-    startSession: {
+    getJob: {
+        parameters: {
+            query?: {
+                /**
+                 * @description How long to wait for the job to finish, in seconds: at most 60, and
+                 *     by default 0, which answers at once.
+                 */
+                wait?: number;
+            };
+            header?: never;
+            path: {
+                /** @description The job, from the 202 */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done: the request's answer */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobOutcome"];
+                };
+            };
+            /** @description Not done yet */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    cancelJob: {
         parameters: {
             query?: never;
             header?: never;
+            path: {
+                /** @description The job, from the 202 */
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What became of it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    startSession: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1098,6 +1363,19 @@ export interface operations {
                     "application/json": components["schemas"]["StartResponse"];
                 };
             };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
             /** @description `bad_request`: the request breaks the API's rules. */
             400: {
                 headers: {
@@ -1107,7 +1385,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1160,7 +1441,13 @@ export interface operations {
     checkSession: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path: {
                 /** @description The session ID */
                 id: string;
@@ -1182,6 +1469,19 @@ export interface operations {
                     "application/json": components["schemas"]["CheckResult"];
                 };
             };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
             /** @description `bad_request`: the request breaks the API's rules. */
             400: {
                 headers: {
@@ -1191,7 +1491,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1277,7 +1580,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1330,7 +1636,13 @@ export interface operations {
     createSnapshot: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -1349,6 +1661,19 @@ export interface operations {
                     "application/json": components["schemas"]["SnapshotResponse"];
                 };
             };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
             /** @description `bad_request`: the request breaks the API's rules. */
             400: {
                 headers: {
@@ -1358,7 +1683,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1441,7 +1769,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1524,7 +1855,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1611,7 +1945,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1667,7 +2004,13 @@ export interface operations {
                 /** @description The worker version; the server's default when absent. */
                 version?: string;
             };
-            header?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path: {
                 /** @description The entry ID, 32 hex digits */
                 entry: string;
@@ -1685,6 +2028,19 @@ export interface operations {
                     "application/json": components["schemas"]["SnapshotVerified"];
                 };
             };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
             /** @description `bad_request`: the request breaks the API's rules. */
             400: {
                 headers: {
@@ -1694,7 +2050,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1747,7 +2106,13 @@ export interface operations {
     tactic: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{job}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
             path: {
                 /** @description A state key, from a session or an earlier tactic */
                 id: string;
@@ -1769,6 +2134,19 @@ export interface operations {
                     "application/json": components["schemas"]["TacticResponse"];
                 };
             };
+            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{job}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobStatus"];
+                };
+            };
             /** @description `bad_request`: the request breaks the API's rules. */
             400: {
                 headers: {
@@ -1778,7 +2156,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1861,7 +2242,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1942,7 +2326,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -2023,7 +2410,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `not_found`: an unknown or expired state, session, entry or declaration. */
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, entry or
+             *     declaration.
+             */
             404: {
                 headers: {
                     [name: string]: unknown;

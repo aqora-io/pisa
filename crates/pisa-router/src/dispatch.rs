@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::{DbError, Notice};
-use pisa_db::queue::{LIVE, NewJob, Poll, Queue};
+use pisa_db::queue::{LIVE, NewJob, Poll, Queue, Stage};
+use pisa_protocol::api::{JobKind, JobState};
 use pisa_protocol::wire::{Job, JobResult};
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
@@ -29,6 +30,29 @@ pub struct Route {
     /// The hash of the proof state the job continues: the worker that stored
     /// it, which may still hold it, gets first refusal. Needs `version`.
     pub state: Option<String>,
+}
+
+/// A job, where it may run, and how soon, as an endpoint makes it.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    pub job: Job,
+    pub route: Route,
+    pub priority: Priority,
+}
+
+/// An async job, as its client looks it up.
+#[derive(Debug, Clone)]
+pub struct Looked {
+    pub kind: JobKind,
+    pub state: Looking,
+}
+
+#[derive(Debug, Clone)]
+pub enum Looking {
+    /// `Queued` or `Running`.
+    Pending(JobState),
+    /// What its request would have got.
+    Done(Box<Result<JobResult, DispatchError>>),
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -71,29 +95,57 @@ pub struct Dispatcher {
 }
 
 /// This process's requests waiting for their jobs, woken by the queue's
-/// [`Notice::Done`]s.
+/// [`Notice::Done`]s. Several can wait for one job, e.g. long polls of an
+/// async one.
 #[derive(Default)]
-struct Waiters(Mutex<HashMap<i64, Arc<Notify>>>);
+struct Waiters(Mutex<HashMap<i64, Vec<Arc<Notify>>>>);
 
 impl Waiters {
-    fn add(&self, id: i64) -> Arc<Notify> {
+    fn add(self: &Arc<Self>, id: i64) -> Woken {
         let notify = Arc::new(Notify::new());
-        self.0.lock().unwrap().insert(id, notify.clone());
-        notify
-    }
-
-    fn remove(&self, id: i64) {
-        self.0.lock().unwrap().remove(&id);
+        let mut waiting = self.0.lock().unwrap();
+        waiting.entry(id).or_default().push(notify.clone());
+        Woken {
+            waiters: self.clone(),
+            id,
+            notify,
+        }
     }
 
     fn wake(&self, id: i64) {
-        if let Some(n) = self.0.lock().unwrap().get(&id) {
-            n.notify_one();
+        if let Some(waiting) = self.0.lock().unwrap().get(&id) {
+            waiting.iter().for_each(|n| n.notify_one());
         }
     }
 
     fn wake_all(&self) {
-        self.0.lock().unwrap().values().for_each(|n| n.notify_one());
+        let waiting = self.0.lock().unwrap();
+        waiting.values().flatten().for_each(|n| n.notify_one());
+    }
+}
+
+/// A wake-up when job `id` is done, until it is dropped.
+struct Woken {
+    waiters: Arc<Waiters>,
+    id: i64,
+    notify: Arc<Notify>,
+}
+
+impl Woken {
+    async fn notified(&self) {
+        self.notify.notified().await
+    }
+}
+
+impl Drop for Woken {
+    fn drop(&mut self) {
+        let mut waiting = self.waiters.0.lock().unwrap();
+        if let Some(these) = waiting.get_mut(&self.id) {
+            these.retain(|n| !Arc::ptr_eq(n, &self.notify));
+            if these.is_empty() {
+                waiting.remove(&self.id);
+            }
+        }
     }
 }
 
@@ -106,7 +158,6 @@ struct Waiting<'a> {
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
         let Some(id) = self.id else { return };
-        self.dispatcher.waiters.remove(id);
         let queue = self.dispatcher.queue.clone();
         tokio::spawn(async move {
             if let Err(e) = queue.give_up(id).await {
@@ -160,25 +211,8 @@ impl Dispatcher {
     /// `max_wait`, and [`DispatchError::WorkerLost`] if its worker was lost
     /// more times than `max_retries` allows, or no other one claimed it
     /// within `max_wait` after.
-    pub async fn submit(
-        &self,
-        job: Job,
-        route: Route,
-        priority: Priority,
-    ) -> Result<JobResult, DispatchError> {
-        let job = serde_json::to_value(&job)
-            .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?;
-        let new = NewJob {
-            state: route.state.zip(route.version.clone()).map(|(h, v)| (v, h)),
-            version: route.version,
-            priority: priority as i16,
-            header_key: route.header_key,
-            header: route.header,
-            job,
-            max_wait: self.cfg.max_wait,
-            max_attempts: self.cfg.max_retries + 1,
-        };
-        let id = self.queue.enqueue(&new).await?;
+    pub async fn submit(&self, p: Prepared) -> Result<JobResult, DispatchError> {
+        let id = self.queue.enqueue(&self.new_job(p)?).await?;
         let mut waiting = Waiting {
             dispatcher: self,
             id: Some(id),
@@ -212,9 +246,93 @@ impl Dispatcher {
                 }
             }
         };
-        self.waiters.remove(id);
         waiting.id = None;
         outcome
+    }
+
+    /// Queues `p` for its client to look up later, as `kind`, by the token
+    /// this returns; nothing gives it up if the client goes away.
+    pub async fn submit_async(&self, kind: JobKind, p: Prepared) -> Result<String, DispatchError> {
+        let new = self.new_job(p)?;
+        Ok(self.queue.enqueue_async(&new, &kind_name(kind)).await?.1)
+    }
+
+    /// Where the async job `token` stands, after waiting up to `wait` for it
+    /// to finish; `None` if there's no such job, or it has expired.
+    pub async fn look(&self, token: &str, wait: Duration) -> Result<Option<Looked>, DispatchError> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let poll_every = self.queue.db().poll_interval();
+        let mut woken = None;
+        loop {
+            let Some(status) = self.queue.status(token).await? else {
+                return Ok(None);
+            };
+            let kind = kind_of(&status.kind)?;
+            let mut sleep = poll_every;
+            let state = match status.stage {
+                Stage::Done(result) => Looking::Done(Box::new(Ok(decode(result)))),
+                Stage::GaveUp { attempts: 0 } => {
+                    Looking::Done(Box::new(Err(DispatchError::NoCapacity)))
+                }
+                Stage::GaveUp { attempts } => {
+                    Looking::Done(Box::new(Err(DispatchError::WorkerLost(attempts))))
+                }
+                Stage::Running => Looking::Pending(JobState::Running),
+                Stage::Queued { give_up_at } => {
+                    // Then the next look closes it.
+                    let left = (give_up_at - now_micros()).max(0) as u64;
+                    sleep = sleep.min(Duration::from_micros(left));
+                    Looking::Pending(JobState::Queued)
+                }
+            };
+            let now = tokio::time::Instant::now();
+            if matches!(state, Looking::Done(_)) || now >= deadline {
+                return Ok(Some(Looked { kind, state }));
+            }
+            let Some(woken) = &woken else {
+                // Look again once subscribed, so a notice in between isn't
+                // missed.
+                woken = Some(self.waiters.add(status.id));
+                continue;
+            };
+            let sleep = sleep.min(deadline - now);
+            let _ = tokio::time::timeout(sleep, woken.notified()).await;
+        }
+    }
+
+    /// Withdraws the async job `token` if no worker holds it. Returns its
+    /// kind and what became of it, or `None` if there's no such job.
+    pub async fn cancel(&self, token: &str) -> Result<Option<(JobKind, JobState)>, DispatchError> {
+        let Some(status) = self.queue.status(token).await? else {
+            return Ok(None);
+        };
+        let kind = kind_of(&status.kind)?;
+        if self.queue.cancel(token).await?.is_some() {
+            return Ok(Some((kind, JobState::Cancelled)));
+        }
+        let state = match self.queue.status(token).await?.map(|s| s.stage) {
+            None => JobState::Cancelled,
+            Some(Stage::Queued { .. }) => JobState::Queued,
+            Some(Stage::Running) => JobState::Running,
+            Some(Stage::Done(_) | Stage::GaveUp { .. }) => JobState::Done,
+        };
+        Ok(Some((kind, state)))
+    }
+
+    fn new_job(&self, p: Prepared) -> Result<NewJob, DispatchError> {
+        let job = serde_json::to_value(&p.job)
+            .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?;
+        let route = p.route;
+        Ok(NewJob {
+            state: route.state.zip(route.version.clone()).map(|(h, v)| (v, h)),
+            version: route.version,
+            priority: p.priority as i16,
+            header_key: route.header_key,
+            header: route.header,
+            job,
+            max_wait: self.cfg.max_wait,
+            max_attempts: self.cfg.max_retries + 1,
+        })
     }
 
     /// The live workers on the queue, if it can be read.
@@ -229,6 +347,22 @@ impl Dispatcher {
     }
 }
 
+/// How the queue records `kind`: as the API names it.
+fn kind_name(kind: JobKind) -> String {
+    match serde_json::to_value(kind) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => unreachable!("a JobKind serializes as a string"),
+    }
+}
+
+/// The kind the queue recorded, which a server of another release may not
+/// know.
+fn kind_of(name: &str) -> Result<JobKind, DispatchError> {
+    serde_json::from_value(serde_json::Value::String(name.into())).map_err(|_| {
+        DispatchError::Unavailable(format!("this server doesn't know jobs of kind {name}"))
+    })
+}
+
 /// A worker's result, or why it isn't one.
 fn decode(result: serde_json::Value) -> JobResult {
     serde_json::from_value(result).unwrap_or_else(|e| JobResult::Failed {
@@ -237,4 +371,29 @@ fn decode(result: serde_json::Value) -> JobResult {
              release: {e}"
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_waiter_on_a_job_is_woken_and_leaves_alone() {
+        let waiters = Arc::new(Waiters::default());
+        let a = waiters.add(1);
+        let b = waiters.add(1);
+        waiters.wake(1);
+        let woken = |w: &Woken| {
+            let n = w.notify.clone();
+            async move { tokio::time::timeout(Duration::from_millis(50), n.notified()).await }
+        };
+        assert!(woken(&a).await.is_ok());
+        assert!(woken(&b).await.is_ok());
+        // `a` going leaves `b` waiting.
+        drop(a);
+        waiters.wake(1);
+        assert!(woken(&b).await.is_ok());
+        drop(b);
+        assert!(waiters.0.lock().unwrap().is_empty());
+    }
 }
