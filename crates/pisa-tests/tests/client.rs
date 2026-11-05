@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, Replaces, SnapshotList,
-    SnapshotOptions,
+    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, RebuildOptions, Replaces,
+    SnapshotList, SnapshotOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -190,7 +190,7 @@ async fn client_lists_dependents_and_plans_rebuilds() {
         .await
         .unwrap();
     let plan = client
-        .rebuild_plan(&old, &new.entry.unwrap(), &labels, false)
+        .rebuild_plan(&old, new.entry.as_deref().unwrap(), &labels, false)
         .await
         .unwrap();
     assert!(plan.ok && plan.changes.is_empty(), "{plan:?}");
@@ -209,6 +209,19 @@ async fn client_lists_dependents_and_plans_rebuilds() {
         rebuilt.replaces.as_ref().map(|r| &r.entry),
         above.entry.as_ref()
     );
+
+    // The server runs the same plan: the item above replays, as a job too.
+    let new = new.entry.unwrap();
+    let opts = RebuildOptions::default();
+    let run = client.rebuild(&old, &new, &labels, &opts).await.unwrap();
+    assert!(run.ok, "{run:?}");
+    assert_eq!(run.created[0].new_entry, rebuilt.entry.clone().unwrap());
+    let job = client
+        .submit_rebuild(&old, &new, &labels, &opts)
+        .await
+        .unwrap();
+    let again = client.wait_job(&job).await.unwrap();
+    assert_eq!(again.created[0].new_entry, run.created[0].new_entry);
     assert_eq!(
         rebuilt.snapshot.as_deref(),
         Some(item.new_snapshot.as_str())

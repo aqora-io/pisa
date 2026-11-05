@@ -294,6 +294,34 @@ class Client:
         created to replace `from_entry`, a `to_entry` that changes what
         `from_entry` states gives `ok: False` and no plan, unless
         `allow_changes`."""
+    def rebuild(
+        self,
+        from_entry: str,
+        to_entry: str,
+        labels: dict[str, str],
+        *,
+        allow_changes: bool = False,
+        retire: bool = False,
+        verify: bool | None = None,
+    ) -> RebuildResponse:
+        """Rebuild `from_entry`'s dependents with every label in `labels` on
+        `to_entry`: the server runs the plan `rebuild_plan` gives, a level at
+        a time, and says what it `created`, what `failed` and what it
+        `skipped` as built on those. `retire` then deletes the old entries,
+        from the top down, and `from_entry`. Calling it again replays the
+        creates that are done. It can take minutes: `submit_rebuild` runs it
+        as a job."""
+    def submit_rebuild(
+        self,
+        from_entry: str,
+        to_entry: str,
+        labels: dict[str, str],
+        *,
+        allow_changes: bool = False,
+        retire: bool = False,
+        verify: bool | None = None,
+    ) -> JobStatus:
+        """Like `rebuild`, as a job."""
     def set_snapshot_labels(
         self,
         entry: str,
@@ -327,11 +355,13 @@ class Client:
         """Like `verify_snapshot`, as a job."""
     def poll_job(
         self, job: JobStatus, *, wait: int = 0
-    ) -> CheckResult | Session | Step | Snapshot | SnapshotVerified | None:
+    ) -> CheckResult | Session | Step | Snapshot | SnapshotVerified | RebuildResponse | None:
         """The job's answer, after waiting up to `wait` seconds (at most 60) for
         it to finish, or None if it hasn't yet. The answer is what the request
         would have returned, and raises what it would have raised."""
-    def wait_job(self, job: JobStatus) -> CheckResult | Session | Step | Snapshot | SnapshotVerified:
+    def wait_job(
+        self, job: JobStatus
+    ) -> CheckResult | Session | Step | Snapshot | SnapshotVerified | RebuildResponse:
         """Wait for the job to finish, however long it takes, and return what
         its request would have returned (or raise what it would have raised).
         The server keeps the answer for an hour after the job is done."""

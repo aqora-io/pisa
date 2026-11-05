@@ -309,6 +309,56 @@ impl Client {
         })
     }
 
+    #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false, retire = false, verify = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn rebuild<'py>(
+        &self,
+        py: Python<'py>,
+        from_entry: String,
+        to_entry: String,
+        labels: BTreeMap<String, String>,
+        allow_changes: bool,
+        retire: bool,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::RebuildOptions {
+            allow_changes,
+            retire,
+            verify,
+        };
+        call(py, async move {
+            self.inner
+                .rebuild(&from_entry, &to_entry, &labels, &opts)
+                .await
+        })
+    }
+
+    #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false, retire = false, verify = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn submit_rebuild<'py>(
+        &self,
+        py: Python<'py>,
+        from_entry: String,
+        to_entry: String,
+        labels: BTreeMap<String, String>,
+        allow_changes: bool,
+        retire: bool,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::RebuildOptions {
+            allow_changes,
+            retire,
+            verify,
+        };
+        call(py, async move {
+            let job = self
+                .inner
+                .submit_rebuild(&from_entry, &to_entry, &labels, &opts)
+                .await?;
+            Ok(queued(job))
+        })
+    }
+
     #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false))]
     fn rebuild_plan<'py>(
         &self,

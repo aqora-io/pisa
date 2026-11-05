@@ -121,6 +121,19 @@ pub struct SnapshotOptions {
     pub replaces: Option<Replaces>,
 }
 
+/// Options for [`Client::rebuild`].
+#[derive(Debug, Clone, Default)]
+pub struct RebuildOptions {
+    /// Rebuild even though `to`, created without `replaces`, changes what
+    /// `from` states.
+    pub allow_changes: bool,
+    /// Once every item is created, delete the old entries, from the top
+    /// down, then `from`.
+    pub retire: bool,
+    /// The kernel re-check for each create; see [`SnapshotOptions::verify`].
+    pub verify: Option<bool>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("invalid server URL: {0}")]
@@ -617,18 +630,64 @@ impl Client {
         labels: &BTreeMap<String, String>,
         allow_changes: bool,
     ) -> Result<RebuildResponse, Error> {
-        let req = RebuildRequest {
+        let opts = RebuildOptions {
+            allow_changes,
+            ..Default::default()
+        };
+        let req = self.rebuild_request(from, to, labels, &opts, true);
+        self.post("snapshots/rebuild", &req).await
+    }
+
+    /// Rebuilds `from`'s dependents with every label in `labels` on `to`:
+    /// the server runs the plan [`rebuild_plan`](Self::rebuild_plan) gives,
+    /// a level at a time, and with `retire` then deletes the old entries and
+    /// `from`. Sending it again replays the creates that are done. It can
+    /// take minutes; [`submit_rebuild`](Self::submit_rebuild) runs it as a
+    /// job.
+    pub async fn rebuild(
+        &self,
+        from: &str,
+        to: &str,
+        labels: &BTreeMap<String, String>,
+        opts: &RebuildOptions,
+    ) -> Result<RebuildResponse, Error> {
+        let req = self.rebuild_request(from, to, labels, opts, false);
+        self.post("snapshots/rebuild", &req).await
+    }
+
+    /// Like [`Client::rebuild`], as a job.
+    pub async fn submit_rebuild(
+        &self,
+        from: &str,
+        to: &str,
+        labels: &BTreeMap<String, String>,
+        opts: &RebuildOptions,
+    ) -> Result<Job<RebuildResponse>, Error> {
+        let req = self.rebuild_request(from, to, labels, opts, false);
+        self.endpoint
+            .submit(self.endpoint.url("snapshots/rebuild")?, Some(&req))
+            .await
+    }
+
+    fn rebuild_request(
+        &self,
+        from: &str,
+        to: &str,
+        labels: &BTreeMap<String, String>,
+        opts: &RebuildOptions,
+        dry_run: bool,
+    ) -> RebuildRequest {
+        RebuildRequest {
             from: from.to_string(),
             to: to.to_string(),
             labels: labels.clone(),
-            dry_run: true,
-            allow_changes,
-            retire: false,
-            verify: None,
+            dry_run,
+            allow_changes: opts.allow_changes,
+            retire: opts.retire,
+            verify: opts.verify,
             timeout: self.timeout,
             version: self.version.clone(),
-        };
-        self.post("snapshots/rebuild", &req).await
+        }
     }
 
     pub async fn set_snapshot_labels(

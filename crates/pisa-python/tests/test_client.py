@@ -257,6 +257,10 @@ def test_rebuild_plan(url):
     assert item["entry"] == above["entry"] and item["level"] == 1
     made = client.create_snapshot(item["code"], labels=item["labels"], key=item["key"])
     assert made["snapshot"] == item["new_snapshot"]
+    run = client.rebuild(base["entry"], proof["entry"], {"suite": "rebuild"})
+    assert run["ok"] and run["created"][0]["new_entry"] == made["entry"]
+    done = client.wait_job(client.submit_rebuild(base["entry"], proof["entry"], {"suite": "rebuild"}, retire=True))
+    assert done["retired"] == [above["entry"], base["entry"]]
     with pytest.raises(PisaError) as e:
         client.rebuild_plan(base["entry"], proof["entry"], {})
     assert (e.value.kind, e.value.status) == ("bad_request", 400)

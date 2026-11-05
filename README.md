@@ -681,6 +681,9 @@ let extended = client.create_snapshot_with(lemma, &opts).await?;
 let above = client.dependents(&entry, &[("run", "7")]).await?; // parents first
 let labels = std::collections::BTreeMap::from([("run".to_string(), "7".to_string())]);
 let plan = client.rebuild_plan(&entry, extended.entry.as_deref().unwrap(), &labels, false).await?;
+let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old entries after
+let job = client.submit_rebuild(&entry, extended.entry.as_deref().unwrap(), &labels, &opts).await?;
+let done = client.wait_job(&job).await?; // the server ran the plan: done.created, done.failed
 let removed = client.delete_snapshot(&entry).await?; // the modules that went with it
 // A long request as a job (see Async requests), answered however long it takes.
 let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
@@ -706,6 +709,7 @@ more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : doub
 extended = client.create_snapshot(more, replaces=base["entry"])   # or {"entry": …, "allow": "definitions"}
 client.dependents(base["entry"], {"run": "7"})   # parents first
 plan = client.rebuild_plan(base["entry"], extended["entry"], {"run": "7"})   # create each item, a level at a time
+done = client.wait_job(client.submit_rebuild(base["entry"], extended["entry"], {"run": "7"}))   # retire=True deletes the old entries
 client.delete_snapshot(base["entry"])   # the modules that went with it
 job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
 client.wait_job(job)["ok"]   # what check would have returned, or raised

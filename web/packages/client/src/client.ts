@@ -68,9 +68,14 @@ export interface VersionOptions extends RequestOptions {
 }
 
 export interface RebuildOptions extends VersionOptions {
-  /** Plan even though `to`, created without `replaces`, changes what `from`
-   *  states. */
+  /** Plan or rebuild even though `to`, created without `replaces`, changes
+   *  what `from` states. */
   allowChanges?: boolean;
+  /** For `rebuild`: once every item is created, delete the old entries,
+   *  from the top down, then `from`. */
+  retire?: boolean;
+  /** For `rebuild`: the kernel re-check for each create. */
+  verify?: boolean;
 }
 
 export interface SearchOptions extends RequestOptions {
@@ -243,10 +248,30 @@ export class PisaClient {
    *  `labels` on `to`. It only plans: create each item's `code` with its
    *  `labels` and `key`, a level at a time. */
   rebuildPlan(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildResponse> {
+    return this.call("POST", ["snapshots", "rebuild"], this.rebuildRequest(from, to, labels, options, true), options);
+  }
+
+  /** Rebuilds `from`'s dependents with every label in `labels` on `to`: the
+   *  server runs the plan `rebuildPlan` gives, a level at a time, and with
+   *  `retire` then deletes the old entries and `from`. Sending it again
+   *  replays the creates that are done. It can take minutes: `submitRebuild`
+   *  runs it as a job. */
+  rebuild(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildResponse> {
+    return this.call("POST", ["snapshots", "rebuild"], this.rebuildRequest(from, to, labels, options, false), options);
+  }
+
+  /** `rebuild` as a job. */
+  submitRebuild(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<Job<RebuildResponse>> {
+    return this.submit(["snapshots", "rebuild"], this.rebuildRequest(from, to, labels, options, false), options);
+  }
+
+  private rebuildRequest(from: string, to: string, labels: Labels, options: RebuildOptions, dryRun: boolean): RebuildRequest {
     const version = options.version ?? this.version;
-    const body: RebuildRequest = { from, to, labels, dry_run: true, ...(version !== undefined && { version }) };
+    const body: RebuildRequest = { from, to, labels, dry_run: dryRun, ...(version !== undefined && { version }) };
     if (options.allowChanges) body.allow_changes = true;
-    return this.call("POST", ["snapshots", "rebuild"], body, options);
+    if (options.retire) body.retire = true;
+    if (options.verify !== undefined) body.verify = options.verify;
+    return body;
   }
 
   setSnapshotLabels(

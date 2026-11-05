@@ -86,6 +86,17 @@ describe("PisaClient", () => {
     });
   });
 
+  it("runs a rebuild, at once or as a job", async () => {
+    const { client, sent } = recording((s) =>
+      s.headers["prefer"] ? json({ job: "j", kind: "rebuild_snapshots", status: "running" }, 202) : json({ ok: true, changes: [], plan: [] }),
+    );
+    await client.rebuild("e1", "e2", { p: "1" }, { retire: true, verify: false });
+    const job = await client.submitRebuild("e1", "e2", { p: "1" });
+    expect(sent[0]?.body).toEqual({ from: "e1", to: "e2", labels: { p: "1" }, dry_run: false, version: "v1", retire: true, verify: false });
+    expect(sent[1]?.headers["prefer"]).toBe("respond-async");
+    expect(job).toMatchObject({ job: "j", kind: "rebuild_snapshots" });
+  });
+
   it("pins search to its environment", async () => {
     const { client, sent } = recording(() => json({ env_id: "e", results: [{ hits: [] }] }));
     expect(await client.search({ nl: "x" }, { envId: "e" })).toEqual({ hits: [] });
