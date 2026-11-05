@@ -95,6 +95,8 @@ diesel::table! {
         attempts -> Integer,
         result -> Nullable<Jsonb>,
         done_micros -> Nullable<BigInt>,
+        token -> Nullable<Text>,
+        kind -> Nullable<Text>,
     }
 }
 

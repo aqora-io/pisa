@@ -27,6 +27,10 @@ use crate::db::{Db, DbError};
 /// this long.
 pub const RESULT_RETENTION: Duration = Duration::from_secs(600);
 
+/// An async job's outcome, which its client reads back, is kept this long
+/// after it is done.
+pub const ASYNC_RETENTION: Duration = Duration::from_secs(3600);
+
 /// Jobs nobody can claim any more, and workers that stopped heartbeating,
 /// are swept after this long.
 pub const STALE_RETENTION: Duration = Duration::from_secs(3600);
@@ -72,6 +76,28 @@ pub enum Poll {
     Lost { attempts: u32 },
     /// Not in the queue: given up or swept.
     Gone,
+}
+
+/// An async job, as its client reads it back by token.
+#[derive(Debug, Clone)]
+pub struct Status {
+    pub id: i64,
+    /// What it was submitted as, e.g. `check`.
+    pub kind: String,
+    pub stage: Stage,
+}
+
+#[derive(Debug, Clone)]
+pub enum Stage {
+    /// Waiting for a worker until `give_up_at` (microseconds).
+    Queued { give_up_at: i64 },
+    /// A worker holds a live claim on it.
+    Running,
+    /// Its worker's result.
+    Done(Value),
+    /// Nobody could run it: no worker claimed it in time if `attempts` is
+    /// 0, or its last worker was lost.
+    GaveUp { attempts: u32 },
 }
 
 /// An open job, as a worker picks between them.
@@ -135,6 +161,26 @@ impl Queue {
         dispatch!(&self.db, enqueue(&self.name, job))
     }
 
+    /// Adds `job`, which its client reads back as `kind` by the returned
+    /// token rather than waiting for it, and tells the workers; returns its
+    /// id and token. Its outcome is kept for [`ASYNC_RETENTION`].
+    pub async fn enqueue_async(&self, job: &NewJob, kind: &str) -> Result<(i64, String), DbError> {
+        dispatch!(&self.db, enqueue_async(&self.name, job, kind))
+    }
+
+    /// Where the async job `token` stands, if it is still kept. Reading
+    /// leaves it, except that one nobody may claim any more is closed as
+    /// [`Stage::GaveUp`].
+    pub async fn status(&self, token: &str) -> Result<Option<Status>, DbError> {
+        dispatch!(&self.db, status(&self.name, token))
+    }
+
+    /// Takes the async job `token` out of the queue unless a worker holds a
+    /// live claim on it or it is done; returns its id if it did.
+    pub async fn cancel(&self, token: &str) -> Result<Option<i64>, DbError> {
+        dispatch!(&self.db, cancel(&self.name, token))
+    }
+
     /// Where job `id` stands, taking it out of the queue if it is done or
     /// lost.
     pub async fn poll(&self, id: i64) -> Result<Poll, DbError> {
@@ -153,10 +199,19 @@ impl Queue {
         dispatch!(&self.db, counts(&self.name, stale))
     }
 
-    /// Deletes results older than [`RESULT_RETENTION`], and jobs and workers
-    /// nobody has touched for [`STALE_RETENTION`]; returns how many rows.
+    /// Deletes results older than [`RESULT_RETENTION`], async outcomes older
+    /// than [`ASYNC_RETENTION`], and jobs and workers nobody has touched for
+    /// [`STALE_RETENTION`]; closes async jobs nobody may claim any more.
+    /// Returns how many rows.
     pub async fn sweep(&self) -> Result<usize, DbError> {
-        dispatch!(&self.db, sweep_jobs(&self.name))
+        let now = crate::catalog::now_micros() as i64;
+        dispatch!(&self.db, sweep_jobs(&self.name, now))
+    }
+
+    /// [`Queue::sweep`] as if it were `now` (microseconds).
+    #[cfg(test)]
+    pub async fn sweep_as_of(&self, now: i64) -> Result<usize, DbError> {
+        dispatch!(&self.db, sweep_jobs(&self.name, now))
     }
 
     /// Adds or resets `worker`'s row, and lets its claims from before, of a
@@ -365,6 +420,121 @@ mod tests {
                 Poll::Lost { attempts: 2 }
             ));
             assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_async_job_is_read_by_its_token_until_swept() {
+        for q in queues().await {
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            assert_eq!(token.len(), 32);
+            assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+            let status = q.status(&token).await.unwrap().unwrap();
+            assert_eq!((status.id, status.kind.as_str()), (id, "check"));
+            assert!(matches!(status.stage, Stage::Queued { .. }));
+            assert_eq!(q.claim("w", &[id], LEASE).await.unwrap().len(), 1);
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Running));
+            assert!(q.complete("w", id, &json!({"ok": true})).await.unwrap());
+            // Reading leaves it.
+            for _ in 0..2 {
+                let stage = q.status(&token).await.unwrap().unwrap().stage;
+                assert!(matches!(stage, Stage::Done(v) if v == json!({"ok": true})));
+            }
+            let (_, other) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            assert_ne!(other, token);
+            // Another queue's jobs are its own.
+            let elsewhere = Queue::new(q.db().clone(), "elsewhere");
+            assert!(elsewhere.status(&token).await.unwrap().is_none());
+            assert!(elsewhere.cancel(&token).await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_async_job_nobody_claims_in_time_is_closed_given_up() {
+        for q in queues().await {
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            for _ in 0..2 {
+                let stage = q.status(&token).await.unwrap().unwrap().stage;
+                assert!(matches!(stage, Stage::GaveUp { attempts: 0 }));
+            }
+            // Closed: nobody can claim or complete it, and it isn't queued.
+            assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
+            assert!(!q.complete("w", id, &json!(1)).await.unwrap());
+            assert_eq!(q.counts(LIVE).await.unwrap().queued, [0, 0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_async_job_lost_with_its_last_worker_stays_lost() {
+        for q in queues().await {
+            let mut new = job(Some("v"), 1);
+            new.max_attempts = 1;
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }));
+            // The worker answers too late.
+            assert!(!q.complete("a", id, &json!(1)).await.unwrap());
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_an_async_job_no_worker_holds_is_cancelled() {
+        for q in queues().await {
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            assert_eq!(q.cancel(&token).await.unwrap(), Some(id));
+            assert!(q.status(&token).await.unwrap().is_none());
+
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            q.claim("w", &[id], LEASE).await.unwrap();
+            assert_eq!(q.cancel(&token).await.unwrap(), None);
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Running));
+            q.complete("w", id, &json!(1)).await.unwrap();
+            assert_eq!(q.cancel(&token).await.unwrap(), None);
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Done(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sweep_keeps_async_outcomes_an_hour() {
+        for q in queues().await {
+            let sync = q.enqueue(&job(Some("v"), 1)).await.unwrap();
+            let (id, done) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            q.claim("w", &[sync, id], LEASE).await.unwrap();
+            q.complete("w", sync, &json!(1)).await.unwrap();
+            q.complete("w", id, &json!(2)).await.unwrap();
+            let mut unclaimed = job(Some("v"), 1);
+            unclaimed.max_wait = Duration::from_millis(1);
+            let sync_unclaimed = q.enqueue(&unclaimed).await.unwrap();
+            let (_, given_up) = q.enqueue_async(&unclaimed, "check").await.unwrap();
+            let later = |minutes: u64| {
+                (crate::catalog::now_micros()
+                    + Duration::from_secs(60 * minutes).as_micros() as u64) as i64
+            };
+
+            q.sweep_as_of(later(11)).await.unwrap();
+            assert!(matches!(q.poll(sync).await.unwrap(), Poll::Gone));
+            assert!(matches!(q.poll(sync_unclaimed).await.unwrap(), Poll::Gone));
+            let stage = q.status(&done).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Done(_)));
+            let stage = q.status(&given_up).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 0 }));
+
+            // The sweep closed `given_up` at +11 minutes; both are gone an
+            // hour after.
+            q.sweep_as_of(later(72)).await.unwrap();
+            assert!(q.status(&done).await.unwrap().is_none());
+            assert!(q.status(&given_up).await.unwrap().is_none());
         }
     }
 

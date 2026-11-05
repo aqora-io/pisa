@@ -14,7 +14,8 @@ use serde_json::Value;
 use crate::catalog::now_micros;
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
-    Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION, STALE_RETENTION,
+    ASYNC_RETENTION, Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION,
+    STALE_RETENTION, Stage, Status,
 };
 use crate::schema::{jobs, states, workers};
 
@@ -45,6 +46,21 @@ macro_rules! claimable {
     };
 }
 
+/// Open jobs nobody may claim at `$now` any more: those without a live claim
+/// that [`claimable!`] leaves out.
+macro_rules! unclaimable {
+    ($now:expr) => {
+        jobs::worker
+            .is_null()
+            .and((jobs::enqueued_micros + jobs::max_wait_micros).le($now))
+            .or(jobs::lease_micros.lt($now).and(
+                jobs::attempts
+                    .ge(jobs::max_attempts)
+                    .or((jobs::lease_micros + jobs::max_wait_micros.nullable()).le($now)),
+            ))
+    };
+}
+
 /// A notification is only a wake-up: whoever waits also polls.
 async fn wake(db: &Handle, conn: &mut Conn, notice: Notice) {
     if let Err(e) = notify(db, conn, notice).await {
@@ -53,6 +69,27 @@ async fn wake(db: &Handle, conn: &mut Conn, notice: Notice) {
 }
 
 pub(crate) async fn enqueue(db: &Handle, q: &str, job: &NewJob) -> Result<i64, DbError> {
+    Ok(insert(db, q, job, None).await?.0)
+}
+
+pub(crate) async fn enqueue_async(
+    db: &Handle,
+    q: &str,
+    job: &NewJob,
+    kind: &str,
+) -> Result<(i64, String), DbError> {
+    let (id, token) = insert(db, q, job, Some(kind)).await?;
+    Ok((id, token.unwrap_or_default()))
+}
+
+/// Adds `job`, with a token for its client to read it back by if it is an
+/// async job of `kind`.
+async fn insert(
+    db: &Handle,
+    q: &str,
+    job: &NewJob,
+    kind: Option<&str>,
+) -> Result<(i64, Option<String>), DbError> {
     retry(|| async {
         let mut c = conn(db).await?;
         let affinity = match &job.state {
@@ -65,9 +102,12 @@ pub(crate) async fn enqueue(db: &Handle, q: &str, job: &NewJob) -> Result<i64, D
                 .flatten(),
             None => None,
         };
+        let token = kind.map(|_| uuid::Uuid::new_v4().simple().to_string());
         let id = diesel::insert_into(jobs::table)
             .values((
                 jobs::queue.eq(q),
+                jobs::token.eq(&token),
+                jobs::kind.eq(kind),
                 jobs::version.eq(&job.version),
                 jobs::priority.eq(job.priority),
                 jobs::header_key.eq(&job.header_key),
@@ -82,12 +122,33 @@ pub(crate) async fn enqueue(db: &Handle, q: &str, job: &NewJob) -> Result<i64, D
             .get_result::<i64>(&mut *c)
             .await?;
         wake(db, &mut c, Notice::Queued(q.to_string())).await;
-        Ok(id)
+        Ok((id, token))
     })
     .await
 }
 
-type Status = (Option<String>, Option<i64>, i32, i32, i64, i64);
+/// An open job's claim: its worker, lease, attempts, max attempts, when it
+/// was enqueued, and its max wait.
+type Open = (Option<String>, Option<i64>, i32, i32, i64, i64);
+
+/// When an open job stops being claimable, as [`claimable!`] decides it:
+/// `None` while a worker holds a live claim. A lapsed claim with no
+/// attempts left is due at once.
+fn give_up_at(now: i64, open: &Open) -> Option<i64> {
+    let (worker, lease, attempts, max_attempts, enqueued, max_wait) = open;
+    match (worker, lease) {
+        (None, _) => Some(enqueued + max_wait),
+        (Some(_), Some(lease)) if *lease >= now => None,
+        (Some(_), lease) => {
+            let lapsed = lease.unwrap_or(now);
+            Some(if attempts < max_attempts {
+                lapsed + max_wait
+            } else {
+                lapsed
+            })
+        }
+    }
+}
 
 pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
     retry(|| async {
@@ -100,7 +161,7 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
         if let Some(result) = done {
             return Ok(Poll::Done(result.unwrap_or_default()));
         }
-        let status = jobs::table
+        let open = jobs::table
             .find(id)
             .select((
                 jobs::worker,
@@ -110,29 +171,24 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
                 jobs::enqueued_micros,
                 jobs::max_wait_micros,
             ))
-            .first::<Status>(&mut *c)
+            .first::<Open>(&mut *c)
             .await
             .optional()?;
-        let Some((worker, lease, attempts, max_attempts, enqueued, max_wait)) = status else {
+        let Some(open) = open else {
             return Ok(Poll::Gone);
         };
         let now = now();
-        let lapsed = match (worker, lease) {
-            (None, _) => {
+        match give_up_at(now, &open) {
+            None => return Ok(Poll::Waiting { give_up_at: None }),
+            // The server gives an unclaimed job up itself.
+            Some(at) if open.0.is_none() || at > now => {
                 return Ok(Poll::Waiting {
-                    give_up_at: Some(enqueued + max_wait),
+                    give_up_at: Some(at),
                 });
             }
-            (Some(_), Some(lease)) if lease >= now => {
-                return Ok(Poll::Waiting { give_up_at: None });
-            }
-            (Some(_), lease) => lease.unwrap_or(now),
-        };
-        if attempts < max_attempts && lapsed + max_wait > now {
-            return Ok(Poll::Waiting {
-                give_up_at: Some(lapsed + max_wait),
-            });
+            Some(_) => {}
         }
+        let attempts = open.2;
         // Nobody may claim it again. Unless it was completed meanwhile, it
         // is lost.
         let taken = diesel::delete(
@@ -150,6 +206,109 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
         } else {
             Poll::Waiting { give_up_at: None }
         })
+    })
+    .await
+}
+
+/// An async job's row: its id and kind, its result, and its claim.
+type Row = (
+    i64,
+    Option<String>,
+    Option<Value>,
+    Option<String>,
+    Option<i64>,
+    i32,
+    i32,
+    i64,
+    i64,
+);
+
+pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<Status>, DbError> {
+    retry(|| async {
+        let mut c = conn(db).await?;
+        // Closing it races the workers, other servers and the sweep: whoever
+        // loses reads it again, and finds what the winner made of it.
+        for _ in 0..3 {
+            let row = jobs::table
+                .filter(jobs::queue.eq(q))
+                .filter(jobs::token.eq(token))
+                .select((
+                    jobs::id,
+                    jobs::kind,
+                    jobs::result,
+                    jobs::worker,
+                    jobs::lease_micros,
+                    jobs::attempts,
+                    jobs::max_attempts,
+                    jobs::enqueued_micros,
+                    jobs::max_wait_micros,
+                ))
+                .first::<Row>(&mut *c)
+                .await
+                .optional()?;
+            let Some((id, kind, result, worker, lease, attempts, max_attempts, enqueued, max_wait)) =
+                row
+            else {
+                return Ok(None);
+            };
+            let open = (worker, lease, attempts, max_attempts, enqueued, max_wait);
+            let now = now();
+            let stage = match result {
+                Some(Value::Null) => Stage::GaveUp {
+                    attempts: attempts as u32,
+                },
+                Some(result) => Stage::Done(result),
+                None => match give_up_at(now, &open) {
+                    None => Stage::Running,
+                    Some(at) if at > now => Stage::Queued { give_up_at: at },
+                    Some(_) => {
+                        let closed = diesel::update(
+                            jobs::table
+                                .find(id)
+                                .filter(jobs::result.is_null())
+                                .filter(unclaimable!(now)),
+                        )
+                        .set((jobs::result.eq(&Value::Null), jobs::done_micros.eq(now)))
+                        .returning(jobs::attempts)
+                        .get_result::<i32>(&mut *c)
+                        .await
+                        .optional()?;
+                        let Some(attempts) = closed else { continue };
+                        wake(db, &mut c, Notice::Done(id)).await;
+                        Stage::GaveUp {
+                            attempts: attempts as u32,
+                        }
+                    }
+                },
+            };
+            let kind = kind.unwrap_or_default();
+            return Ok(Some(Status { id, kind, stage }));
+        }
+        // It kept changing as it was read: run it again.
+        Err(DbError::Conflict)
+    })
+    .await
+}
+
+pub(crate) async fn cancel(db: &Handle, q: &str, token: &str) -> Result<Option<i64>, DbError> {
+    let now = now();
+    retry(|| async {
+        let mut c = conn(db).await?;
+        let id = diesel::delete(
+            jobs::table
+                .filter(jobs::queue.eq(q))
+                .filter(jobs::token.eq(token))
+                .filter(jobs::result.is_null())
+                .filter(jobs::worker.is_null().or(jobs::lease_micros.lt(now))),
+        )
+        .returning(jobs::id)
+        .get_result::<i64>(&mut *c)
+        .await
+        .optional()?;
+        if let Some(id) = id {
+            wake(db, &mut c, Notice::Done(id)).await;
+        }
+        Ok(id)
     })
     .await
 }
@@ -205,34 +364,44 @@ pub(crate) async fn counts(db: &Handle, q: &str, stale: Duration) -> Result<Coun
     Ok(counts)
 }
 
-pub(crate) async fn sweep_jobs(db: &Handle, q: &str) -> Result<usize, DbError> {
-    let now = now();
+pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, DbError> {
     let cutoff = now - micros(SWEEP_GRACE);
     retry(|| async {
         let mut c = conn(db).await?;
         let results = diesel::delete(
             jobs::table
                 .filter(jobs::queue.eq(q))
+                .filter(jobs::token.is_null())
                 .filter(jobs::done_micros.lt(now - micros(RESULT_RETENTION))),
+        )
+        .execute(&mut *c)
+        .await?;
+        let kept = diesel::delete(
+            jobs::table
+                .filter(jobs::queue.eq(q))
+                .filter(jobs::token.is_not_null())
+                .filter(jobs::done_micros.lt(now - micros(ASYNC_RETENTION))),
         )
         .execute(&mut *c)
         .await?;
         let unclaimable = diesel::delete(
             jobs::table
                 .filter(jobs::queue.eq(q))
+                .filter(jobs::token.is_null())
                 .filter(jobs::result.is_null())
-                .filter(
-                    jobs::worker
-                        .is_null()
-                        .and((jobs::enqueued_micros + jobs::max_wait_micros).lt(cutoff))
-                        .or(jobs::lease_micros.lt(cutoff).and(
-                            jobs::attempts
-                                .ge(jobs::max_attempts)
-                                .or((jobs::lease_micros + jobs::max_wait_micros.nullable())
-                                    .lt(cutoff)),
-                        )),
-                ),
+                .filter(unclaimable!(cutoff)),
         )
+        .execute(&mut *c)
+        .await?;
+        // An async job's client reads that it was given up.
+        let closed = diesel::update(
+            jobs::table
+                .filter(jobs::queue.eq(q))
+                .filter(jobs::token.is_not_null())
+                .filter(jobs::result.is_null())
+                .filter(unclaimable!(cutoff)),
+        )
+        .set((jobs::result.eq(&Value::Null), jobs::done_micros.eq(now)))
         .execute(&mut *c)
         .await?;
         let workers = diesel::delete(
@@ -242,7 +411,7 @@ pub(crate) async fn sweep_jobs(db: &Handle, q: &str) -> Result<usize, DbError> {
         )
         .execute(&mut *c)
         .await?;
-        Ok(results + unclaimable + workers)
+        Ok(results + kept + unclaimable + closed + workers)
     })
     .await
 }
