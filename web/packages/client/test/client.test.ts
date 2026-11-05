@@ -65,6 +65,16 @@ describe("PisaClient", () => {
     expect(sent[3]).toMatchObject({ url: "/api/states/v1~h~s/tactic", body: { tactic: "simp" } });
   });
 
+  it("sends what a snapshot replaces", async () => {
+    const { client, sent } = recording(() => json({ version: "v1", dirty: false, verified: false, result: {} }));
+    await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: "e1", key: "k" });
+    await client.createSnapshot("def f := 2", { replaces: { entry: "e2", allow: "definitions" } });
+    expect(sent.map((s) => s.body)).toEqual([
+      { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: "e1" },
+      { code: "def f := 2", version: "v1", replaces: { entry: "e2", allow: "definitions" } },
+    ]);
+  });
+
   it("pins search to its environment", async () => {
     const { client, sent } = recording(() => json({ env_id: "e", results: [{ hits: [] }] }));
     expect(await client.search({ nl: "x" }, { envId: "e" })).toEqual({ hits: [] });

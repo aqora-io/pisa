@@ -221,6 +221,28 @@ def test_snapshots(url):
         client.snapshot(entry)
 
 
+def test_replaces(url):
+    client = Client(url, timeout=5)
+    old = client.create_snapshot("import Foo\ntheorem replaced : 1 = 1 := sorry")["entry"]
+    proof = client.create_snapshot("import Foo\ntheorem replaced : 1 = 1 := rfl", replaces=old)
+    assert proof["replaces"] == {"entry": old, "filled": ["replaced"]}
+    assert client.snapshot(proof["entry"])["replaces"] == {"entry": old}
+
+    weakened = client.create_snapshot("import Foo\ntheorem replaced : True := trivial", replaces=old)
+    assert "entry" not in weakened and not weakened["result"]["ok"]
+    assert weakened["result"]["reasons"] == ["statement: replaced has a different type"]
+
+    skeleton = "import Foo\ndef g : Nat := 1\ntheorem uses_g : g = g := sorry"
+    old = client.create_snapshot(skeleton)["entry"]
+    fixed = "import Foo\ndef g : Nat := 2\ntheorem uses_g : g = g := rfl"
+    job = client.submit_snapshot(fixed, replaces={"entry": old, "allow": "definitions"})
+    done = client.wait_job(job)
+    assert done["replaces"]["changed_definitions"] == ["g"]
+    assert done["replaces"]["affected"] == ["uses_g"]
+    with pytest.raises(ValueError):
+        client.create_snapshot(fixed, replaces={"entry": old, "allow": "everything"})
+
+
 def test_snapshot_labels(url):
     client = Client(url, timeout=5)
     code = "import Foo\ntheorem listed : 1 = 1 := rfl"

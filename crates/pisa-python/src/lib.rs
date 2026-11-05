@@ -145,6 +145,15 @@ fn job_of(status: &Bound<'_, PyAny>) -> PyResult<Job<Value>> {
     Ok(Job::new(status.job, status.kind))
 }
 
+/// A create's `replaces`: an entry, or `{"entry": …, "allow": "definitions"}`.
+fn replaces_of(replaces: &Bound<'_, PyAny>) -> PyResult<pisa_client::Replaces> {
+    serde_json::from_value(from_py(replaces)?).map_err(|_| {
+        PyValueError::new_err(
+            "replaces must be an entry, or {\"entry\": ..., \"allow\": \"definitions\"}",
+        )
+    })
+}
+
 fn parse_detail(detail: Vec<String>) -> PyResult<Vec<pisa_client::Detail>> {
     serde_json::from_value(detail.into())
         .map_err(|e| PyValueError::new_err(format!("invalid detail: {e}")))
@@ -225,7 +234,7 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None))]
     fn create_snapshot<'py>(
         &self,
         py: Python<'py>,
@@ -233,11 +242,13 @@ impl Client {
         verify: Option<bool>,
         labels: Option<BTreeMap<String, String>>,
         key: Option<String>,
+        replaces: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = pisa_client::SnapshotOptions {
             verify,
             labels: labels.unwrap_or_default(),
             key,
+            replaces: replaces.as_ref().map(replaces_of).transpose()?,
         };
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
@@ -325,7 +336,7 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None))]
     fn submit_snapshot<'py>(
         &self,
         py: Python<'py>,
@@ -333,11 +344,13 @@ impl Client {
         verify: Option<bool>,
         labels: Option<BTreeMap<String, String>>,
         key: Option<String>,
+        replaces: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = pisa_client::SnapshotOptions {
             verify,
             labels: labels.unwrap_or_default(),
             key,
+            replaces: replaces.as_ref().map(replaces_of).transpose()?,
         };
         call(py, async move {
             Ok(queued(self.inner.submit_snapshot_with(&code, &opts).await?))

@@ -74,7 +74,7 @@ export interface DeclOptions extends RequestOptions {
 }
 
 export type CreateSnapshotOptions = RunOptions &
-  Pick<SnapshotRequest, "verify" | "labels" | "key">;
+  Pick<SnapshotRequest, "verify" | "labels" | "key" | "replaces">;
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -327,6 +327,7 @@ export class PisaClient {
     if (options.verify !== undefined) body.verify = options.verify;
     if (options.labels !== undefined) body.labels = options.labels;
     if (options.key !== undefined) body.key = options.key;
+    if (options.replaces !== undefined) body.replaces = options.replaces;
     return body;
   }
 

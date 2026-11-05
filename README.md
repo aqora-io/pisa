@@ -575,6 +575,11 @@ let more = client.list_snapshots(&[("run", "7")], Some(50), page.next.as_deref()
 let done = std::collections::BTreeMap::from([("stage".to_string(), "done".to_string())]);
 let summary = client.set_snapshot_labels(&entry, &done, &[]).await?;
 let verified = client.verify_snapshot(&entry).await?;
+// Kept only if it keeps the replaced entry's statements; see Replacing.
+let replaces = Some(pisa_client::Replaces::Entry(entry.clone()));
+let opts = pisa_client::SnapshotOptions { replaces, ..Default::default() };
+let lemma = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl";
+let extended = client.create_snapshot_with(lemma, &opts).await?;
 let removed = client.delete_snapshot(&entry).await?; // the modules that went with it
 // A long request as a job (see Async requests), answered however long it takes.
 let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
@@ -596,6 +601,8 @@ client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
 page = client.list_snapshots({"run": "7"}, limit=50)   # newest first; pass page["next"] as after=
 client.set_snapshot_labels(base["entry"], set={"stage": "done"}, remove=["run"])
 client.verify_snapshot(base["entry"])["verified"]
+more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl"
+client.create_snapshot(more, replaces=base["entry"])   # or {"entry": …, "allow": "definitions"}
 client.delete_snapshot(base["entry"])   # the modules that went with it
 job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
 client.wait_job(job)["ok"]   # what check would have returned, or raised

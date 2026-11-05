@@ -74,7 +74,19 @@ class Snapshot(TypedDict):
     dirty: bool
     verified: bool
     labels: NotRequired[dict[str, str]]
+    replaces: NotRequired[Replacement]
     result: CheckResult
+
+class Replaced(TypedDict):
+    entry: str
+    allow: NotRequired[Literal["definitions"]]
+
+class Replacement(TypedDict):
+    entry: str
+    allow: NotRequired[Literal["definitions"]]
+    filled: list[str]
+    changed_definitions: NotRequired[list[str]]
+    affected: NotRequired[list[str]]
 
 class SnapshotInfo(TypedDict):
     entry: str
@@ -83,6 +95,7 @@ class SnapshotInfo(TypedDict):
     header: str
     code: str
     labels: NotRequired[dict[str, str]]
+    replaces: NotRequired[Replaced]
     dirty: bool
     verified: bool
     result: CheckResult
@@ -102,6 +115,7 @@ class SnapshotSummary(TypedDict):
     imports: list[str]
     header: str
     labels: dict[str, str]
+    replaces: NotRequired[Replaced]
     dirty: bool
     verified: bool
     created: int
@@ -163,6 +177,7 @@ class Client:
         verify: bool | None = None,
         labels: dict[str, str] | None = None,
         key: str | None = None,
+        replaces: str | Replaced | None = None,
     ) -> Snapshot:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module (`snapshot`) that later code can import, with a new `entry`
@@ -182,7 +197,16 @@ class Client:
         own or an import's. `verify=True` always runs it and also re-checks the
         imports, so the snapshot ends `verified` or the result has an error,
         except on a `key` replay, which can be `verified: False` with no error.
-        `verify=False` skips it, and the snapshot stays not `verified`."""
+        `verify=False` skips it, and the snapshot stays not `verified`.
+
+        `replaces` names the entry this code replaces, e.g. the skeleton a
+        proof fills in. The code is kept only if it still declares everything
+        that entry's module declares, with the same types and definitions'
+        values, and still builds on the snapshots that module builds on (it
+        may import more); `replaces` in the result lists what it `filled`;
+        otherwise nothing is kept and `result["reasons"]` says what changed.
+        `{"entry": …, "allow": "definitions"}` lets definitions change their
+        value, and lists the theorems that use them as `affected`."""
     def verify_snapshot(self, entry: str) -> SnapshotVerified:
         """Re-check an entry's module and everything it imports through the
         kernel, imports first, skipping what already passed. A module the kernel
@@ -232,6 +256,7 @@ class Client:
         verify: bool | None = None,
         labels: dict[str, str] | None = None,
         key: str | None = None,
+        replaces: str | Replaced | None = None,
     ) -> JobStatus:
         """Like `create_snapshot`, as a job."""
     def submit_verify(self, entry: str) -> JobStatus:

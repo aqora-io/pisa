@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, SnapshotList, SnapshotOptions,
+    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, Replaces, SnapshotList,
+    SnapshotOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -122,6 +123,42 @@ async fn client_passes_labels() {
 
     let again = client.create_snapshot_with(code, &opts).await.unwrap();
     assert_eq!(again.entry, Some(entry));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_replaces_entries() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let skeleton = client
+        .create_snapshot("import Foo\ntheorem t : 1 = 1 := sorry")
+        .await
+        .unwrap();
+    let old = skeleton.entry.unwrap();
+    let opts = SnapshotOptions {
+        replaces: Some(Replaces::Entry(old.clone())),
+        ..Default::default()
+    };
+    let proof = client
+        .create_snapshot_with("import Foo\ntheorem t : 1 = 1 := rfl", &opts)
+        .await
+        .unwrap();
+    let replacement = proof.replaces.unwrap();
+    assert_eq!(
+        (replacement.entry.as_str(), replacement.filled),
+        (old.as_str(), vec!["t".into()])
+    );
+    let info = client.snapshot(&proof.entry.unwrap()).await.unwrap();
+    assert_eq!(info.replaces.unwrap().entry, old);
+
+    let weakened = client
+        .create_snapshot_with("import Foo\ntheorem t : True := trivial", &opts)
+        .await
+        .unwrap();
+    assert!(weakened.entry.is_none() && !weakened.result.ok);
+    assert_eq!(
+        weakened.result.reasons,
+        ["statement: t has a different type"]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -52,10 +52,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    CheckResult, Declaration, Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos,
-    Severity, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot,
-    SnapshotSummary, SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
-    TacticResponse as Step,
+    Allow, CheckResult, Declaration, Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos,
+    Replaced, Replacement, Replaces, Severity, SnapshotFailure, SnapshotInfo, SnapshotList,
+    SnapshotResponse as Snapshot, SnapshotSummary, SnapshotVerified, Sorry,
+    StartResponse as Session, StateInfo, TacticInfo, TacticResponse as Step,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope,
@@ -114,6 +114,10 @@ pub struct SnapshotOptions {
     /// An idempotency key: a retried create with the same key returns the
     /// entry the first one made, as it is, ignoring the other options.
     pub key: Option<String>,
+    /// The entry this code replaces. It is kept only if it keeps that entry's
+    /// statements; otherwise the result is not `ok`, its `reasons` say what
+    /// changed, and there is no entry.
+    pub replaces: Option<Replaces>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -467,7 +471,7 @@ impl Client {
             verify: opts.verify,
             labels: opts.labels.clone(),
             key: opts.key.clone(),
-            replaces: None,
+            replaces: opts.replaces.clone(),
         }
     }
 

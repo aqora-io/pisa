@@ -19,6 +19,9 @@ const proof = proofText(code, [{ sorry: states[0]!, tactics: ["simp"] }]);
 (await pisa.checkSession(session, proof)).ok;
 
 const base = await pisa.createSnapshot("import Mathlib\ndef double (n : Nat) := 2 * n");
+// Kept only if it keeps the statements of the entry it replaces.
+const more = "import Mathlib\ndef double (n : Nat) := 2 * n\ntheorem double_two : double 2 = 4 := rfl";
+await pisa.createSnapshot(more, { replaces: base.entry! });
 await pisa.check(`${base.header}\nexample : double 2 = 4 := rfl`);
 
 const { hits } = await pisa.search({ nl: "trace of a density matrix is one" });
