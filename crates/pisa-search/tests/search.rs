@@ -478,10 +478,15 @@ async fn results_are_deterministic_and_rendered_compactly() {
 #[tokio::test(flavor = "multi_thread")]
 async fn detail_lists_dependencies_and_users() {
     let Some(t) = engine().await else { return };
-    let d = t.engine.detail("Matrix.trace").await.unwrap().unwrap();
+    let d = t
+        .engine
+        .detail("Matrix.trace", None)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(d.deps, ["Matrix"]);
     assert!(d.used_by.contains(&"Matrix.trace_one".to_string()));
-    assert!(t.engine.detail("Nope").await.unwrap().is_none());
+    assert!(t.engine.detail("Nope", None).await.unwrap().is_none());
     t.done().await;
 }
 

@@ -495,6 +495,36 @@ async fn snapshots_are_searched_by_scope() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_declaration_opens_by_its_module() {
+    let Some(mut s) = setup().await else { return };
+    create(&s.catalog, "a1", doubling(), &[]).await;
+    let e = s.engine().await;
+    s.index(&e, false);
+    until(&e, about_doubling(SnapshotScope::All), |hits| {
+        has(hits, "double_eq")
+    })
+    .await;
+
+    let d = e.detail("double_eq", Some("PisaSnap.sa1")).await.unwrap();
+    let d = d.expect("the snapshot's declaration");
+    assert_eq!(
+        (d.library.as_str(), d.module.as_str()),
+        ("PisaSnap", "PisaSnap.sa1")
+    );
+    assert_eq!(d.signature, "double_eq (n : ℕ) : double n = n + n");
+    // Without its module, a name is the bundle's only.
+    assert!(e.detail("double_eq", None).await.unwrap().is_none());
+    // The bundle's declarations open from a snapshot's too, as its
+    // dependencies would.
+    let d = e
+        .detail("Nat.add_comm", Some("PisaSnap.sa1"))
+        .await
+        .unwrap();
+    assert_eq!(d.unwrap().module, "Mathlib.Fixture");
+    s.done(e).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn scopes_are_checked() {
     let Some(s) = setup().await else { return };
     let e = s.engine().await;

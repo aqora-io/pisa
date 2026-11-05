@@ -15,7 +15,8 @@ export function useResolve(names: string[], input: SearchInput = {}): UseQueryRe
   return useQuery(resolveOptions(usePisaClient(), names, input));
 }
 
-/** A declaration's details, or nothing while `name` is null. */
-export function useDecl(name: string | null): UseQueryResult<DeclDetail, PisaError> {
-  return useQuery({ ...declOptions(usePisaClient(), name ?? ""), enabled: name !== null });
+/** A declaration's details, or nothing while `name` is null. Pass a snapshot
+ *  hit's `module` to open that snapshot's declaration. */
+export function useDecl(name: string | null, module?: string): UseQueryResult<DeclDetail, PisaError> {
+  return useQuery({ ...declOptions(usePisaClient(), name ?? "", module), enabled: name !== null });
 }

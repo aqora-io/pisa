@@ -130,10 +130,12 @@ export function resolveOptions(client: PisaClient, names: string[], input: Searc
   };
 }
 
-export function declOptions(client: PisaClient, name: string): PisaQueryOptions<DeclDetail> {
+/** Declaration `name`: the one in snapshot module `module` if it has it, else
+ *  the bundle's. */
+export function declOptions(client: PisaClient, name: string, module?: string): PisaQueryOptions<DeclDetail> {
   return {
-    queryKey: [...pisaKeys.search(client), "decl", name] as QueryKey,
-    queryFn: ({ signal }) => client.decl(name, { signal }),
+    queryKey: [...pisaKeys.search(client), "decl", name, module ?? null] as QueryKey,
+    queryFn: ({ signal }) => client.decl(name, { ...(module !== undefined && { module }), signal }),
     staleTime: Infinity,
     retry: retryQuery,
   };

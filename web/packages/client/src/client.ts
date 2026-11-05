@@ -67,6 +67,11 @@ export interface SearchOptions extends RequestOptions {
   envId?: string;
 }
 
+export interface DeclOptions extends RequestOptions {
+  /** A snapshot module to look in first, as a snapshot hit's `module`. */
+  module?: string;
+}
+
 export type CreateSnapshotOptions = RunOptions &
   Pick<SnapshotRequest, "verify" | "labels" | "key">;
 
@@ -228,8 +233,9 @@ export class PisaClient {
     return r.results;
   }
 
-  async decl(name: string, options: RequestOptions = {}): Promise<DeclDetail> {
-    const r = await this.call<DeclResponse>("GET", ["v1", "decl", name], undefined, options);
+  async decl(name: string, options: DeclOptions = {}): Promise<DeclDetail> {
+    const query = options.module === undefined ? undefined : new URLSearchParams({ module: options.module });
+    const r = await this.call<DeclResponse>("GET", ["v1", "decl", name], undefined, options, query);
     return r.decl;
   }
 

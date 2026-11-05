@@ -715,7 +715,7 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 | --- | --- |
 | `POST /v1/search` | `{queries: [{q?, nl?, latex?, pattern?, goal?, name?, libraries?, kinds?, k?, include_sorried?, snapshots?}], env_id?}` → `{env_id, results: [{hits}]}`, at most 64 queries |
 | `POST /v1/resolve` | `{names, env_id?}` → `{env_id, results: [{name, exists, deprecated_to?, suggestions}]}` |
-| `GET /v1/decl/{name}` | → `{env_id, decl}`: signature, description, flags, dependencies and users |
+| `GET /v1/decl/{name}` | `?module=` → `{env_id, decl}`: signature, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 
 Each hit carries:
 - name, kind, library, module and signature;

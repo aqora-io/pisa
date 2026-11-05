@@ -36,8 +36,13 @@ describe("PisaClient", () => {
   it("joins paths to a relative base and encodes each segment", async () => {
     const { client, sent } = recording(() => json({ decl: { name: "x" } }));
     await client.decl("Real.sqrt/x y");
+    await client.decl("double_eq", { module: "PisaSnap.sa1" });
     await client.getSnapshot("abc");
-    expect(sent.map((s) => s.url)).toEqual(["/api/v1/decl/Real.sqrt%2Fx%20y", "/api/snapshots/abc?version=v1"]);
+    expect(sent.map((s) => s.url)).toEqual([
+      "/api/v1/decl/Real.sqrt%2Fx%20y",
+      "/api/v1/decl/double_eq?module=PisaSnap.sa1",
+      "/api/snapshots/abc?version=v1",
+    ]);
   });
 
   it("puts the version in the body or the query, as the server reads it", async () => {

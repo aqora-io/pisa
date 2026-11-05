@@ -1,7 +1,7 @@
 import { PisaClient, PisaError, type Query, type QueryResult } from "@aqora/pisa-client";
 import { describe, expect, it } from "vitest";
 
-import { checkOptions, compactQuery, hasTerms, isTransient, retryQuery, searchOptions } from "../src/index.ts";
+import { checkOptions, compactQuery, declOptions, hasTerms, isTransient, retryQuery, searchOptions } from "../src/index.ts";
 
 const client = new PisaClient({ url: "http://pisa.test", version: "v" });
 const result = (kind?: string) => ({
@@ -51,6 +51,11 @@ describe("query options", () => {
   it("searches again for a result that left out the dense lane while it was embedded", () => {
     expect(staleTime({ nl: "trace" }, { hits: [], dense_pending: true })).toBe(0);
     expect(staleTime({ nl: "trace" }, { hits: [], warnings: ["dense lane unavailable"] })).toBe(Infinity);
+  });
+
+  it("keys a declaration on the snapshot module it's looked up in", () => {
+    expect(declOptions(client, "x").queryKey).toEqual(["pisa", "http://pisa.test", "search", "decl", "x", null]);
+    expect(declOptions(client, "x", "PisaSnap.s1").queryKey).not.toEqual(declOptions(client, "x").queryKey);
   });
 
   it("retries once after a 503, twice after a network error, never after a 429", () => {

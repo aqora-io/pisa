@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use axum::extract::{FromRequest, Path, Request, State};
+use axum::extract::{FromRequest, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -14,6 +14,7 @@ use pisa_protocol::api::{Error, ErrorKind, ErrorResponse};
 use pisa_protocol::search::{
     DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
 };
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 
@@ -361,12 +362,24 @@ async fn resolve(
     Ok(Json(ResolveResponse { env_id, results }))
 }
 
+/// `GET /v1/decl/{name}`'s query.
+#[derive(Deserialize)]
+struct DeclQuery {
+    /// A snapshot module to look in first.
+    module: Option<String>,
+}
+
 async fn decl(
     State(search): State<Arc<Search>>,
     Path(name): Path<String>,
+    Query(q): Query<DeclQuery>,
 ) -> Result<Json<DeclResponse>, ApiError> {
     let engine = search.engine()?;
-    match engine.detail(&name).await.map_err(unavailable)? {
+    match engine
+        .detail(&name, q.module.as_deref())
+        .await
+        .map_err(unavailable)?
+    {
         Some(decl) => Ok(Json(DeclResponse {
             env_id: engine.env_id().to_string(),
             decl,

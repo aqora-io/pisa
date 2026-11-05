@@ -23,13 +23,21 @@ function parseLabels(text: string): Labels {
   return Object.fromEntries(split(text).map((p) => [p.split("=")[0]?.trim() ?? "", p.split("=").slice(1).join("=").trim()]));
 }
 
-function HitView({ hit, onOpen }: { hit: Hit; onOpen: (name: string) => void }) {
+/** A declaration to show: a snapshot's, with its module, or the bundle's. */
+interface Opened {
+  name: string;
+  module?: string;
+}
+
+function HitView({ hit, onOpen }: { hit: Hit; onOpen: (open: Opened) => void }) {
+  const open = () => onOpen({ name: hit.name, ...(hit.snapshot !== undefined && { module: hit.module }) });
   return (
     <li className="space-y-1 py-2">
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="font-mono text-sm font-medium text-indigo-700 hover:underline" onClick={() => onOpen(hit.name)}>
+        <button type="button" className="font-mono text-sm font-medium text-indigo-700 hover:underline" onClick={open}>
           {hit.name}
         </button>
+        {hit.informal_name !== undefined && <span className="text-sm text-slate-700">{hit.informal_name}</span>}
         <Badge>{hit.kind}</Badge>
         <span className="text-xs text-slate-500">{hit.module}</span>
         {hit.flags.uses_sorry === true && <Badge tone="amber">uses sorry</Badge>}
@@ -60,8 +68,11 @@ function Names({ names, onOpen }: { names: string[]; onOpen: (name: string) => v
   );
 }
 
-function DeclView({ name, onOpen }: { name: string; onOpen: (name: string) => void }) {
-  const decl = useDecl(name);
+function DeclView({ name, module, onOpen }: { name: string; module: string | undefined; onOpen: (open: Opened) => void }) {
+  const decl = useDecl(name, module);
+  // A snapshot declaration's dependencies may be its module's too; the
+  // server falls back to the bundle's.
+  const openName = (n: string) => onOpen({ name: n, ...(module !== undefined && { module }) });
   if (decl.isPending) return <Panel title={name}>Loading…</Panel>;
   if (decl.isError) return <ErrorNote error={decl.error} />;
   const d = decl.data;
@@ -84,12 +95,12 @@ function DeclView({ name, onOpen }: { name: string; onOpen: (name: string) => vo
         )}
         {d.deps.length > 0 && (
           <Field label="Uses">
-            <Names names={d.deps} onOpen={onOpen} />
+            <Names names={d.deps} onOpen={openName} />
           </Field>
         )}
         {d.used_by.length > 0 && (
           <Field label="Used by">
-            <Names names={d.used_by} onOpen={onOpen} />
+            <Names names={d.used_by} onOpen={openName} />
           </Field>
         )}
       </div>
@@ -149,7 +160,7 @@ export function SearchTab() {
   const [sorried, setSorried] = useState(false);
   const [scope, setScope] = useState<"none" | "all" | "labels">("none");
   const [scopeLabels, setScopeLabels] = useState("");
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<Opened | null>(null);
   // What was last asked for, with Enter or the button; nothing runs as you type.
   const [submitted, setSubmitted] = useState<Query | null>(null);
   const search = useSearch(submitted ?? {});
@@ -274,8 +285,8 @@ export function SearchTab() {
         )}
       </div>
       <div className="space-y-4">
-        {open !== null && <DeclView name={open} onOpen={setOpen} />}
-        <Resolver onOpen={setOpen} />
+        {open !== null && <DeclView name={open.name} module={open.module} onOpen={setOpen} />}
+        <Resolver onOpen={(name) => setOpen({ name })} />
       </div>
     </div>
   );

@@ -59,7 +59,8 @@ function Editor({ code }: { code: string }) {
   - `useSearch(query)` runs once the query has a term, and keeps the last hits
     while new ones load. A result with `dense_pending` is stale at once, so
     `refetch()` or asking again gets the dense lane once it's embedded.
-  - `useResolve(names)` and `useDecl(name)`.
+  - `useResolve(names)`, and `useDecl(name, module?)`, where `module` is a
+    snapshot hit's, to open that snapshot's declaration.
   - `useDebouncedValue` debounces typed input.
 
 **Query options.** `checkOptions`, `searchOptions` and the like give the same

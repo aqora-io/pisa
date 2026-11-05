@@ -3,6 +3,7 @@ export {
   type CheckOptions,
   type ClientOptions,
   type CreateSnapshotOptions,
+  type DeclOptions,
   type RequestOptions,
   type RunOptions,
   type SearchOptions,

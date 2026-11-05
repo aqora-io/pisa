@@ -916,13 +916,29 @@ impl Engine {
         Ok(out)
     }
 
-    /// The bundle's declaration `name` with its description, dependencies and users.
-    pub async fn detail(&self, name: &str) -> anyhow::Result<Option<DeclDetail>> {
-        let search = json!({
+    /// Declaration `name` with its description, dependencies and users: the
+    /// one in snapshot module `module`, when this searches snapshots and the
+    /// module has it, else the bundle's.
+    pub async fn detail(
+        &self,
+        name: &str,
+        module: Option<&str>,
+    ) -> anyhow::Result<Option<DeclDetail>> {
+        let mut searches = Vec::new();
+        if let Some(m) = module.filter(|_| self.snapshots) {
+            let snapshot = vec![
+                is("name", name),
+                is("source", "snapshot"),
+                is("has_entries", true),
+                is("module", m),
+            ];
+            searches.push(json!({"filter": and(snapshot), "limit": 1, "with_payload": true}));
+        }
+        searches.push(json!({
             "filter": and(vec![is("name", name), is("source", "base")]),
             "limit": 1, "with_payload": true,
-        });
-        let found = self.q.query_batch(&self.collection, vec![search]).await?;
+        }));
+        let found = self.q.query_batch(&self.collection, searches).await?;
         let Some(s) = found.into_iter().flatten().next().and_then(scored) else {
             return Ok(None);
         };
