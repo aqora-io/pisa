@@ -145,12 +145,11 @@ function Create({ version, onUse }: { version: string; onUse: (header: string) =
   );
 }
 
-function Detail({ id, version, onUse, onGone }: { id: SnapshotId; version: string; onUse: (h: string) => void; onGone: () => void }) {
-  const input = version !== "" ? { version } : {};
-  const info = useSnapshot(id, input);
-  const update = useUpdateSnapshot(input);
-  const verify = useVerifySnapshot(input);
-  const remove = useDeleteSnapshot(input);
+function Detail({ id, onUse, onGone }: { id: SnapshotId; onUse: (h: string) => void; onGone: () => void }) {
+  const info = useSnapshot(id);
+  const update = useUpdateSnapshot();
+  const verify = useVerifySnapshot();
+  const remove = useDeleteSnapshot();
   const [label, setLabel] = useState("");
   if (info.isPending) return <Panel title="Snapshot">Loading…</Panel>;
   if (info.isError) return <ErrorNote error={info.error} />;
@@ -254,7 +253,7 @@ export function SnapshotsTab({ version, onUse }: { version: string; onUse: (head
             </SubtleButton>
           )}
         </Panel>
-        {selected !== null && <Detail id={selected} version={version} onUse={onUse} onGone={() => setSelected(null)} />}
+        {selected !== null && <Detail id={selected} onUse={onUse} onGone={() => setSelected(null)} />}
       </div>
     </div>
   );

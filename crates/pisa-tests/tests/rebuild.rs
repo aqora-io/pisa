@@ -113,7 +113,8 @@ async fn dependents_come_parents_first() {
     let (_, above_e) = get(&c, &format!("/snapshots/{}/dependents", entry(&lib.e))).await;
     assert!(entries(&above_e).is_empty());
 
-    let (status, r) = get(&c, &format!("/snapshots/{}/dependents", "0".repeat(32))).await;
+    let unknown = format!("{}~{}", c.version("v"), "0".repeat(32));
+    let (status, r) = get(&c, &format!("/snapshots/{unknown}/dependents")).await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
     let path = format!("/snapshots/{}/dependents?label=nocolon", entry(&lib.b));
     let (status, _) = get(&c, &path).await;
@@ -251,15 +252,38 @@ async fn a_plan_takes_labels_and_a_replacement_beside_from() {
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
+    let unknown = format!("{}~{}", c.version("v"), "0".repeat(32));
     for (body, status) in [
         (with("labels", json!({})), 400),
         (with("to", json!(entry(&lib.c))), 400),
         (with("to", json!(entry(&again))), 400),
         (with("to", json!("nope")), 400),
-        (with("from", json!("0".repeat(32))), 404),
+        (with("from", json!("0".repeat(32))), 400),
+        (with("from", json!(unknown)), 404),
     ] {
         let (got, r) = plan(&c, body.clone()).await;
         assert_eq!(got, status, "{body}: {r}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn from_and_to_must_share_a_version() {
+    let c = Cluster::start(&[("w0", "va", 1), ("w1", "vb", 1)]).await;
+    let code = "import Foo\n\ntheorem b : 1 = 1 := sorry";
+    let from = create(&c, json!({"code": code, "version": "va"})).await;
+    let to = create(&c, json!({"code": code, "version": "vb"})).await;
+    for dry_run in [true, false] {
+        let body = json!({"from": entry(&from), "to": entry(&to), "labels": {"p": "1"}, "dry_run": dry_run});
+        let (status, r) = plan(&c, body).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{r}"
+        );
+        let message = r["error"]["message"].as_str().unwrap();
+        for v in [c.version("va"), c.version("vb")] {
+            assert!(message.contains(&v), "{v}: {message}");
+        }
     }
 }
 

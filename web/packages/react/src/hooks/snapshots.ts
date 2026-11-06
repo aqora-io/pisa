@@ -35,17 +35,17 @@ export function useSnapshots(
 }
 
 /** One snapshot, or nothing while `id` is null. */
-export function useSnapshot(id: SnapshotId | null, input: VersionInput = {}): UseQueryResult<SnapshotDetail, PisaError> {
-  return useQuery({ ...snapshotOptions(usePisaClient(), id ?? "", input), enabled: id !== null });
+export function useSnapshot(id: SnapshotId | null): UseQueryResult<SnapshotDetail, PisaError> {
+  return useQuery({ ...snapshotOptions(usePisaClient(), id ?? ""), enabled: id !== null });
 }
 
-/** Invalidates every snapshot query of the version: a change to one snapshot
- *  can show in others, as a module's `verified` and `status` are shared by
- *  its snapshots. */
-function useInvalidate(input: VersionInput): () => Promise<void> {
+/** Invalidates every snapshot query: a change to one snapshot can show in
+ *  others, as a module's `verified` and `status` are shared by its
+ *  snapshots. */
+function useInvalidate(): () => Promise<void> {
   const client = usePisaClient();
   const queryClient = useQueryClient();
-  return () => queryClient.invalidateQueries({ queryKey: pisaKeys.snapshots(client, input.version) });
+  return () => queryClient.invalidateQueries({ queryKey: pisaKeys.snapshots(client) });
 }
 
 export interface CreateSnapshotInput extends Omit<CreateSnapshotOptions, "signal" | "version"> {
@@ -56,7 +56,7 @@ export function useCreateSnapshot(
   input: VersionInput = {},
 ): UseMutationResult<CreateSnapshotResponse, PisaError, CreateSnapshotInput> {
   const client = usePisaClient();
-  const invalidate = useInvalidate(input);
+  const invalidate = useInvalidate();
   return useMutation({
     mutationFn: ({ code, ...options }) => client.createSnapshot(code, { ...options, ...input }),
     onSuccess: invalidate,
@@ -67,14 +67,14 @@ export interface UpdateSnapshotInput extends UpdateSnapshotRequest {
   id: SnapshotId;
 }
 
-export function useUpdateSnapshot(input: VersionInput = {}): UseMutationResult<Snapshot, PisaError, UpdateSnapshotInput> {
+export function useUpdateSnapshot(): UseMutationResult<Snapshot, PisaError, UpdateSnapshotInput> {
   const client = usePisaClient();
   const queryClient = useQueryClient();
-  const invalidate = useInvalidate(input);
+  const invalidate = useInvalidate();
   return useMutation({
-    mutationFn: ({ id, ...update }) => client.updateSnapshot(id, update, input),
+    mutationFn: ({ id, ...update }) => client.updateSnapshot(id, update),
     onSuccess: async (snapshot) => {
-      queryClient.setQueryData<SnapshotDetail>(snapshotOptions(client, snapshot.id, input).queryKey, (old) =>
+      queryClient.setQueryData<SnapshotDetail>(snapshotOptions(client, snapshot.id).queryKey, (old) =>
         old === undefined ? old : { ...old, labels: snapshot.labels },
       );
       await invalidate();
@@ -82,24 +82,24 @@ export function useUpdateSnapshot(input: VersionInput = {}): UseMutationResult<S
   });
 }
 
-export function useDeleteSnapshot(input: VersionInput = {}): UseMutationResult<DeleteSnapshotResponse, PisaError, SnapshotId> {
+export function useDeleteSnapshot(): UseMutationResult<DeleteSnapshotResponse, PisaError, SnapshotId> {
   const client = usePisaClient();
   const queryClient = useQueryClient();
-  const invalidate = useInvalidate(input);
+  const invalidate = useInvalidate();
   return useMutation({
-    mutationFn: (id) => client.deleteSnapshot(id, input),
+    mutationFn: (id) => client.deleteSnapshot(id),
     onSuccess: async (_, id) => {
-      queryClient.removeQueries({ queryKey: snapshotOptions(client, id, input).queryKey });
+      queryClient.removeQueries({ queryKey: snapshotOptions(client, id).queryKey });
       await invalidate();
     },
   });
 }
 
-export function useVerifySnapshot(input: VersionInput = {}): UseMutationResult<VerifySnapshotResponse, PisaError, SnapshotId> {
+export function useVerifySnapshot(): UseMutationResult<VerifySnapshotResponse, PisaError, SnapshotId> {
   const client = usePisaClient();
-  const invalidate = useInvalidate(input);
+  const invalidate = useInvalidate();
   return useMutation({
-    mutationFn: (id) => client.verifySnapshot(id, input),
+    mutationFn: (id) => client.verifySnapshot(id),
     onSuccess: invalidate,
   });
 }

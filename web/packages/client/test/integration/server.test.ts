@@ -88,6 +88,7 @@ describe("snapshots", () => {
     const base = created.snapshot;
     if (base === undefined) throw new Error(`not kept: ${JSON.stringify(created)}`);
     expect(base).toMatchObject({ status: "proved", verified: false, labels: { suite: "web" }, version: "v" });
+    expect(base.id.startsWith("v~")).toBe(true);
     expect(base.header).toBe(`import Foo\nimport ${base.module}`);
     expect((await client.check(`${base.header}\nneeds base`)).ok).toBe(true);
 

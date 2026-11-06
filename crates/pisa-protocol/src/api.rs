@@ -25,7 +25,9 @@
 //! | `GET /jobs/{id}` | `?wait=` ([`JobWait`]) → the request's answer, or [`Job`] (202) |
 //! | `DELETE /jobs/{id}` | → [`Job`] |
 //!
-//! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
+//! Snapshot ids carry their worker version, as session and state ids do, so
+//! the endpoints that take one take no version; listings and audits take an
+//! optional `?version=`.
 //! Checks can ask for more in `detail` ([`Detail`]). Checks, sessions, and
 //! snapshot creates and verifies run asynchronously with
 //! `Prefer: respond-async` ([`PreferAsync`]), answering 202 with a
@@ -563,6 +565,8 @@ pub struct CreateSnapshotRequest {
 /// snapshot keeps, and a rebuild item's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Replaces {
+    /// The replaced snapshot. A create's is of the create's version, and
+    /// chooses it when neither the create nor the server names one.
     pub snapshot_id: String,
     /// What the replacement may change besides adding declarations; by
     /// default nothing.
@@ -604,7 +608,8 @@ pub struct Replacement {
 /// a kept module that imports it, needs it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Snapshot {
-    /// Its id, which the other snapshot endpoints take.
+    /// Its id, `<version>~<32 lowercase hex>`, which the other snapshot
+    /// endpoints take. It carries the version, so they need no other.
     pub id: String,
     /// The worker pool version it belongs to.
     pub version: String,
@@ -709,12 +714,13 @@ pub struct ListDependentsResponse {
 /// (see [`ListDependentsResponse`]) again on `to`, each with its imports of
 /// `from`'s module, and of the other modules it rebuilds, swapped for the new
 /// ones, and unless `dry_run` creates them: a level at a time, a level's
-/// creates side by side once the level below is done.
+/// creates side by side once the level below is done. `from` and `to` are of
+/// one version, which the rebuild runs on.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildSnapshotsRequest {
     /// The snapshot being replaced.
     pub from: String,
-    /// Its replacement.
+    /// Its replacement, of `from`'s version.
     pub to: String,
     /// Which dependents to rebuild: those with a snapshot that has every
     /// label, and the modules they build on above `from`. Required, so that
@@ -737,8 +743,6 @@ pub struct RebuildSnapshotsRequest {
     /// As [`CreateSnapshotRequest::timeout`], for each create.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
-    #[serde(default)]
-    pub version: Option<String>,
 }
 
 /// What a rebuild planned and, unless it was a dry run, did. Sending the same
@@ -954,12 +958,13 @@ pub struct DeleteSnapshotResponse {
     pub removed: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct VersionQuery {
-    /// The worker version; the server's default when absent.
-    #[serde(default)]
-    pub version: Option<String>,
+/// Whether `p` can be a part of a [`Key`] or a [`SnapshotId`]: non-empty
+/// `[A-Za-z0-9._-]`, not starting with `.`, so that no part is a path trick.
+fn is_id_part(p: &str) -> bool {
+    !p.is_empty()
+        && !p.starts_with('.')
+        && p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
 /// A state key or session ID: `<version>~<header key>~<id>`. Carrying the
@@ -975,13 +980,7 @@ impl Key {
     pub fn parse(s: &str) -> Option<Key> {
         let mut parts = s.split('~');
         let (version, header_key, id) = (parts.next()?, parts.next()?, parts.next()?);
-        let ok = |p: &str| {
-            !p.is_empty()
-                && !p.starts_with('.')
-                && p.chars()
-                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-        };
-        if parts.next().is_some() || ![version, header_key, id].into_iter().all(ok) {
+        if parts.next().is_some() || ![version, header_key, id].into_iter().all(is_id_part) {
             return None;
         }
         Some(Key {
@@ -995,6 +994,33 @@ impl Key {
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}~{}~{}", self.version, self.header_key, self.id)
+    }
+}
+
+/// A snapshot id, `<version>~<32 lowercase hex>`; the hex is the entry's row
+/// id. Carrying the version lets the router route it without a lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotId {
+    pub version: String,
+    pub entry: String,
+}
+
+impl SnapshotId {
+    pub fn parse(s: &str) -> Option<SnapshotId> {
+        let (version, entry) = s.split_once('~')?;
+        if !is_id_part(version) || !crate::labels::is_entry_id(entry) {
+            return None;
+        }
+        Some(SnapshotId {
+            version: version.into(),
+            entry: entry.into(),
+        })
+    }
+}
+
+impl std::fmt::Display for SnapshotId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}~{}", self.version, self.entry)
     }
 }
 
@@ -1127,5 +1153,26 @@ mod tests {
         assert_eq!(Key::parse("v~h~a/../b"), None);
         assert_eq!(Key::parse("v~~a"), None);
         assert_eq!(Key::parse("v~h~.."), None);
+    }
+
+    #[test]
+    fn snapshot_ids_round_trip_and_reject_old_and_odd_ids() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let id = SnapshotId {
+            version: "v4.35.0-1a2b3c4d".into(),
+            entry: hex.into(),
+        };
+        assert_eq!(id.to_string(), format!("v4.35.0-1a2b3c4d~{hex}"));
+        assert_eq!(SnapshotId::parse(&id.to_string()), Some(id));
+        for bad in [
+            hex.to_string(),
+            format!("PisaSnap.s{hex}"),
+            "a~b~c".into(),
+            "v~..".into(),
+            format!("v~{}", &hex[1..]),
+            format!("v~{}", hex.to_uppercase()),
+        ] {
+            assert_eq!(SnapshotId::parse(&bad), None, "{bad}");
+        }
     }
 }

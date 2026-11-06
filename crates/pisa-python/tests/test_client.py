@@ -243,6 +243,7 @@ def test_snapshots(url):
     base = created["snapshot"]
     assert base["status"] == "proved" and "dirty" not in base
     snapshot_id, name = base["id"], base["module"]
+    assert snapshot_id.startswith(base["version"] + "~")
     assert base["header"] == f"import Foo\nimport {name}"
     assert client.check(base["header"] + "\nneeds base")["ok"]
 

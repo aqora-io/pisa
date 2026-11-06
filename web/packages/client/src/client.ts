@@ -72,11 +72,16 @@ export interface CheckOptions extends RunOptions {
   at?: Pos[];
 }
 
+/** What a listing or an audit takes. Requests that take an id don't: it
+ *  carries its version. */
 export interface VersionOptions extends RequestOptions {
   version?: string;
 }
 
-export interface RebuildOptions extends RunOptions {
+/** A rebuild runs on the version of its `from` and `to`. */
+export interface RebuildOptions extends RequestOptions {
+  /** Seconds Lean may run for each create. */
+  timeout?: number;
   /** Only plan: create each item's `code` with its `labels`, `key` and
    *  `replaces`, a level at a time. */
   dryRun?: boolean;
@@ -236,8 +241,8 @@ export class PisaClient {
   }
 
   /** A snapshot, with its module's code, check and exports. */
-  getSnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<SnapshotDetail> {
-    return this.call("GET", ["snapshots", id], undefined, options, this.versionQuery(options));
+  getSnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<SnapshotDetail> {
+    return this.call("GET", ["snapshots", id], undefined, options);
   }
 
   /** A page of snapshots, newest first; pass `next` back as `after`. */
@@ -263,9 +268,9 @@ export class PisaClient {
   listDependents(
     id: SnapshotId,
     params: { labels?: Labels } = {},
-    options: VersionOptions = {},
+    options: RequestOptions = {},
   ): Promise<ListDependentsResponse> {
-    const query = this.versionQuery(options);
+    const query = new URLSearchParams();
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
     return this.call("GET", ["snapshots", id, "dependents"], undefined, options, query);
   }
@@ -301,7 +306,7 @@ export class PisaClient {
     labels: Labels,
     options: RebuildOptions,
   ): RebuildSnapshotsRequest {
-    const body: RebuildSnapshotsRequest = { from, to, labels, dry_run: options.dryRun ?? false, ...this.run(options) };
+    const body: RebuildSnapshotsRequest = { from, to, labels, dry_run: options.dryRun ?? false, ...this.timeoutOf(options) };
     if (options.allowChanges) body.allow_changes = true;
     if (options.retire) body.retire = true;
     if (options.verify !== undefined) body.verify = options.verify;
@@ -310,24 +315,24 @@ export class PisaClient {
 
   /** Changes a snapshot's labels as a merge patch: a label set to `null` is
    *  removed, one set to a string takes it, and the rest stay. */
-  updateSnapshot(id: SnapshotId, update: UpdateSnapshotRequest, options: VersionOptions = {}): Promise<Snapshot> {
-    return this.call("PATCH", ["snapshots", id], update, options, this.versionQuery(options));
+  updateSnapshot(id: SnapshotId, update: UpdateSnapshotRequest, options: RequestOptions = {}): Promise<Snapshot> {
+    return this.call("PATCH", ["snapshots", id], update, options);
   }
 
   /** Deletes a snapshot, and the modules nothing else needs. */
-  deleteSnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<DeleteSnapshotResponse> {
-    return this.call("DELETE", ["snapshots", id], undefined, options, this.versionQuery(options));
+  deleteSnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<DeleteSnapshotResponse> {
+    return this.call("DELETE", ["snapshots", id], undefined, options);
   }
 
   /** Re-checks the snapshot's module and its imports through the kernel. A
    *  rejection is in `failure`, not thrown. */
-  verifySnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<VerifySnapshotResponse> {
-    return this.call("POST", ["snapshots", id, "verify"], undefined, options, this.versionQuery(options));
+  verifySnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<VerifySnapshotResponse> {
+    return this.call("POST", ["snapshots", id, "verify"], undefined, options);
   }
 
   /** `verifySnapshot` as a job. */
-  submitVerifySnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<Job<VerifySnapshotResponse>> {
-    return this.submit(["snapshots", id, "verify"], undefined, options, this.versionQuery(options));
+  submitVerifySnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<Job<VerifySnapshotResponse>> {
+    return this.submit(["snapshots", id, "verify"], undefined, options);
   }
 
   /** Where `job` stands, after waiting up to `wait` seconds for it to
@@ -410,8 +415,8 @@ export class PisaClient {
   }
 
   /** POSTs with `Prefer: respond-async`: the job the server queued. */
-  private async submit<T>(path: string[], body: unknown, options: RequestOptions, query?: URLSearchParams): Promise<Job<T>> {
-    const r = await this.send("POST", path, body, query, options.signal, { prefer: "respond-async" });
+  private async submit<T>(path: string[], body: unknown, options: RequestOptions): Promise<Job<T>> {
+    const r = await this.send("POST", path, body, undefined, options.signal, { prefer: "respond-async" });
     const answer = ok<Job<T>>(r, await readJson(r));
     if (r.status !== 202) {
       throw new PisaError("bad_response", "the server answered at once: it doesn't queue requests", r.status);

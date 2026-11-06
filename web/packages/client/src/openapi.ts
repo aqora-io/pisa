@@ -183,7 +183,7 @@ export interface paths {
         put?: never;
         /**
          * Rebuild a snapshot's dependents on its replacement
-         * @description Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
+         * @description Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
          */
         post: operations["rebuildSnapshots"];
         delete?: never;
@@ -968,7 +968,8 @@ export interface components {
          *     (see [`ListDependentsResponse`]) again on `to`, each with its imports of
          *     `from`'s module, and of the other modules it rebuilds, swapped for the new
          *     ones, and unless `dry_run` creates them: a level at a time, a level's
-         *     creates side by side once the level below is done.
+         *     creates side by side once the level below is done. `from` and `to` are of
+         *     one version, which the rebuild runs on.
          */
         RebuildSnapshotsRequest: {
             /**
@@ -998,11 +999,10 @@ export interface components {
              * @description As [`CreateSnapshotRequest::timeout`], for each create.
              */
             timeout?: number;
-            /** @description Its replacement. */
+            /** @description Its replacement, of `from`'s version. */
             to: string;
             /** @description As [`CreateSnapshotRequest::verify`], for each create. */
             verify?: boolean;
-            version?: string;
         };
         /**
          * @description What a rebuild planned and, unless it was a dry run, did. Sending the same
@@ -1073,6 +1073,10 @@ export interface components {
              *     default nothing.
              */
             allow?: components["schemas"]["Allow"];
+            /**
+             * @description The replaced snapshot. A create's is of the create's version, and
+             *     chooses it when neither the create nor the server names one.
+             */
             snapshot_id: string;
         };
         Resolution: {
@@ -1142,7 +1146,10 @@ export interface components {
              *     this header reuses the Lean process the snapshot's builder keeps warm.
              */
             header: string;
-            /** @description Its id, which the other snapshot endpoints take. */
+            /**
+             * @description Its id, `<version>~<32 lowercase hex>`, which the other snapshot
+             *     endpoints take. It carries the version, so they need no other.
+             */
             id: string;
             /** @description The modules its module imports. */
             imports: string[];
@@ -1186,7 +1193,10 @@ export interface components {
              *     outside the allowed list.
              */
             dirty: boolean;
-            /** @description The query's entries on the module, newest first, at most 10. */
+            /**
+             * @description The ids of the query's snapshots of the module, newest first, at most
+             *     10.
+             */
             entries: string[];
             /** @description The module and everything it imports passed the kernel re-check. */
             verified: boolean;
@@ -2367,13 +2377,10 @@ export interface operations {
     };
     getSnapshot: {
         parameters: {
-            query?: {
-                /** @description The worker version; the server's default when absent. */
-                version?: string;
-            };
+            query?: never;
             header?: never;
             path: {
-                /** @description The snapshot's id, 32 hex digits */
+                /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
             };
             cookie?: never;
@@ -2453,13 +2460,10 @@ export interface operations {
     };
     deleteSnapshot: {
         parameters: {
-            query?: {
-                /** @description The worker version; the server's default when absent. */
-                version?: string;
-            };
+            query?: never;
             header?: never;
             path: {
-                /** @description The snapshot's id, 32 hex digits */
+                /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
             };
             cookie?: never;
@@ -2539,13 +2543,10 @@ export interface operations {
     };
     updateSnapshot: {
         parameters: {
-            query?: {
-                /** @description The worker version; the server's default when absent. */
-                version?: string;
-            };
+            query?: never;
             header?: never;
             path: {
-                /** @description The snapshot's id, 32 hex digits */
+                /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
             };
             cookie?: never;
@@ -2632,12 +2633,10 @@ export interface operations {
             query?: {
                 /** @description `key:value`, split on the first `:`; repeatable */
                 label?: string[];
-                /** @description The worker version; the server's default when absent. */
-                version?: string;
             };
             header?: never;
             path: {
-                /** @description The snapshot's id, 32 hex digits */
+                /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
             };
             cookie?: never;
@@ -2717,10 +2716,7 @@ export interface operations {
     };
     verifySnapshot: {
         parameters: {
-            query?: {
-                /** @description The worker version; the server's default when absent. */
-                version?: string;
-            };
+            query?: never;
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
@@ -2729,7 +2725,7 @@ export interface operations {
                 Prefer?: string;
             };
             path: {
-                /** @description The snapshot's id, 32 hex digits */
+                /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
             };
             cookie?: never;

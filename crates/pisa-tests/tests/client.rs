@@ -395,7 +395,7 @@ async fn client_lists_and_updates_snapshots() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn verify_snapshot_uses_the_clients_version() {
+async fn ids_route_whatever_the_clients_version() {
     let c = Cluster::start(&[("w0", "a", 1), ("w1", "b", 1)]).await;
     let client = |version: &str| Client::new(&c.url("/")).unwrap().with_version(version);
     let code = "import Foo\ntheorem base : 1 = 1 := rfl";
@@ -407,9 +407,9 @@ async fn verify_snapshot_uses_the_clients_version() {
         .unwrap()
         .id;
 
-    let err = client("a").verify_snapshot(&id).await.unwrap_err();
-    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
-    let verified = client("b").verify_snapshot(&id).await.unwrap();
+    let other = client("a");
+    assert_eq!(other.get_snapshot(&id).await.unwrap().snapshot.id, id);
+    let verified = other.verify_snapshot(&id).await.unwrap();
     assert!(verified.snapshot.verified);
 }
 

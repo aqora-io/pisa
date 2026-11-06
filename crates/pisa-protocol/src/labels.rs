@@ -28,7 +28,7 @@ const MAX_IDEMPOTENCY_KEY: usize = 256;
 pub fn check_labels(labels: &BTreeMap<String, String>) -> Result<(), String> {
     if labels.len() > MAX_LABELS {
         return Err(format!(
-            "{} labels; an entry can have at most {MAX_LABELS}",
+            "{} labels; a snapshot can have at most {MAX_LABELS}",
             labels.len()
         ));
     }
@@ -90,16 +90,17 @@ pub fn check_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `s` is an entry id: 32 lowercase hex digits.
+/// Whether `s` is an entry id, the part of a snapshot id after its version:
+/// 32 lowercase hex digits.
 pub fn is_entry_id(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// The error for a path segment that isn't an entry id.
-pub fn entry_id_error(s: &str) -> String {
+/// The error for an id that isn't a snapshot id.
+pub fn snapshot_id_error(s: &str) -> String {
     format!(
-        "{s} is not a snapshot entry: use the `entry` that creating the snapshot returned, \
-         32 lowercase hex digits. Names like PisaSnap.s… are module names, for imports"
+        "{s} is not a snapshot id: use the `id` that creating the snapshot returned, \
+         `<version>~<32 lowercase hex digits>`. Names like PisaSnap.s… are module names, for imports"
     )
 }
 
@@ -164,9 +165,9 @@ mod tests {
         assert!(!is_entry_id(&hex.to_uppercase()));
         assert!(!is_entry_id(&hex[1..]));
 
-        let error = entry_id_error(&format!("PisaSnap.s{hex}"));
+        let error = snapshot_id_error(&format!("PisaSnap.s{hex}"));
         assert!(
-            error.contains("entry") && error.contains("module"),
+            error.contains("<version>~") && error.contains("module"),
             "{error}"
         );
     }

@@ -1,7 +1,18 @@
 import { PisaClient, PisaError, type Query, type QueryResult } from "@aqora/pisa-client";
 import { describe, expect, it } from "vitest";
 
-import { checkOptions, compactQuery, declOptions, hasTerms, isTransient, retryQuery, searchOptions } from "../src/index.ts";
+import {
+  checkOptions,
+  compactQuery,
+  declOptions,
+  hasTerms,
+  isTransient,
+  pisaKeys,
+  retryQuery,
+  searchOptions,
+  snapshotOptions,
+  snapshotsOptions,
+} from "../src/index.ts";
 
 const client = new PisaClient({ url: "http://pisa.test", version: "v" });
 const result = (kind?: string) => ({
@@ -59,6 +70,13 @@ describe("query options", () => {
   it("keys a declaration on the snapshot module it's looked up in", () => {
     expect(declOptions(client, "x").queryKey).toEqual(["pisa", "http://pisa.test", "search", "decl", "x", null]);
     expect(declOptions(client, "x", "PisaSnap.s1").queryKey).not.toEqual(declOptions(client, "x").queryKey);
+  });
+
+  it("keys a snapshot by its id alone, and a listing by its version, under every snapshot query", () => {
+    expect(snapshotOptions(client, "w~e").queryKey).toEqual(["pisa", "http://pisa.test", "snapshots", "snapshot", "w~e"]);
+    expect(snapshotsOptions(client).queryKey).toEqual(["pisa", "http://pisa.test", "snapshots", "list", "v", {}]);
+    expect(snapshotsOptions(client, {}, { version: "w" }).queryKey).not.toEqual(snapshotsOptions(client).queryKey);
+    expect(pisaKeys.snapshots(client)).toEqual(snapshotOptions(client, "w~e").queryKey.slice(0, 3));
   });
 
   it("retries once after a 503, twice after a network error, never after a 429", () => {

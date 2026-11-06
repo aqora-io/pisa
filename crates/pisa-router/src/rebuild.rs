@@ -10,7 +10,6 @@ use std::sync::Arc;
 use pisa_protocol::api::{
     CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, Error, ErrorKind, RebuildCreated,
     RebuildFailed, RebuildItem, RebuildSkipped, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
-    VersionQuery,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -19,7 +18,7 @@ use pisa_protocol::wire::{Job, JobResult, SnapshotJob, SnapshotRebuildJob};
 use crate::dispatch::{DispatchError, Priority};
 use crate::http::{ApiError, App};
 use crate::sessions::unexpected;
-use crate::snapshots::{prepare_create, submit};
+use crate::snapshots::{parse_id, prepare_create, submit};
 
 /// How many creates of a level run at once.
 const PARALLEL: usize = 8;
@@ -27,21 +26,36 @@ const PARALLEL: usize = 8;
 /// How many times a create that no worker took in time is sent again.
 const CAPACITY_RETRIES: u32 = 5;
 
-/// Plans `req` (as a dry run) and runs the plan; see [`RebuildSnapshotsResponse`].
+/// The version `req` rebuilds in: that of its `from` and its `to`, which
+/// must be the same.
+pub(crate) fn version(req: &RebuildSnapshotsRequest) -> Result<String, ApiError> {
+    let (from, to) = (parse_id(&req.from)?.version, parse_id(&req.to)?.version);
+    if from != to {
+        return Err(ApiError::new(
+            ErrorKind::BadRequest,
+            format!(
+                "from is of version {from} and to of version {to}: a rebuild stays in one version"
+            ),
+        ));
+    }
+    Ok(from)
+}
+
+/// Plans `req` (as a dry run) and runs the plan on `version`, the one
+/// [`version`] found; see [`RebuildSnapshotsResponse`].
 pub(crate) async fn run(
     app: &Arc<App>,
     req: &RebuildSnapshotsRequest,
+    version: &str,
 ) -> Result<RebuildSnapshotsResponse, ApiError> {
-    let q = VersionQuery {
-        version: req.version.clone(),
-    };
     let job = Job::SnapshotRebuild(SnapshotRebuildJob {
         from: req.from.clone(),
         to: req.to.clone(),
         labels: req.labels.clone(),
         allow_changes: req.allow_changes,
     });
-    let mut response = match submit(app, job, q.clone(), Priority::Interactive).await? {
+    let version = Some(version.to_string());
+    let mut response = match submit(app, job, version.clone(), Priority::Interactive).await? {
         JobResult::SnapshotRebuild(r) => r.map_err(ApiError)?,
         other => return Err(unexpected(other)),
     };
@@ -69,7 +83,8 @@ pub(crate) async fn run(
                 .iter()
                 .map(|item| {
                     let (app, req, item) = (app.clone(), req.clone(), (*item).clone());
-                    tokio::spawn(async move { create(&app, &req, &item).await })
+                    let version = version.clone();
+                    tokio::spawn(async move { create(&app, &req, version, &item).await })
                 })
                 .collect();
             for (item, running) in chunk.iter().zip(running) {
@@ -112,7 +127,7 @@ pub(crate) async fn run(
     }
     response.ok = response.failed.is_empty() && response.skipped.is_empty();
     if req.retire && response.ok {
-        response.retired = retire(app, req, &response.plan, q).await?;
+        response.retired = retire(app, req, &response.plan, version).await?;
     }
     Ok(response)
 }
@@ -125,23 +140,24 @@ fn builds_on(item: &RebuildItem, missing: &HashSet<String>) -> bool {
         .any(|id| missing.contains(&snapshot::module(id)))
 }
 
-/// Creates `item` as the plan says, sending it again while no worker takes
-/// it in time.
+/// Creates `item` on `version` as the plan says, sending it again while no
+/// worker takes it in time.
 async fn create(
     app: &App,
     req: &RebuildSnapshotsRequest,
+    version: Option<String>,
     item: &RebuildItem,
 ) -> Result<CreateSnapshotResponse, Error> {
     let create = CreateSnapshotRequest {
         code: item.code.clone(),
-        version: req.version.clone(),
+        version,
         timeout: req.timeout,
         verify: req.verify,
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
         replaces: item.replaces.clone(),
     };
-    let p = prepare_create(app, create);
+    let p = prepare_create(app, create).map_err(|e| e.0)?;
     let mut tries = 0;
     loop {
         match app.dispatcher.submit(p.clone()).await {
@@ -159,7 +175,7 @@ async fn retire(
     app: &App,
     req: &RebuildSnapshotsRequest,
     plan: &[RebuildItem],
-    q: VersionQuery,
+    version: Option<String>,
 ) -> Result<Vec<String>, ApiError> {
     let old = plan.iter().rev().filter_map(|i| i.snapshot_id.clone());
     let mut retired = Vec::new();
@@ -167,7 +183,7 @@ async fn retire(
         let job = Job::SnapshotDelete(SnapshotJob {
             entry: entry.clone(),
         });
-        match submit(app, job, q.clone(), Priority::Interactive).await? {
+        match submit(app, job, version.clone(), Priority::Interactive).await? {
             JobResult::SnapshotDeleted(Ok(_)) => retired.push(entry),
             JobResult::SnapshotDeleted(Err(e)) if e.kind == ErrorKind::NotFound => {
                 retired.push(entry)

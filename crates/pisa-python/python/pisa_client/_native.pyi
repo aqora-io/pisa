@@ -253,8 +253,10 @@ class Client:
     release the GIL while waiting."""
 
     def __init__(self, url: str, *, version: str | None = None, timeout: int = 60) -> None:
-        """`version` selects a worker pool label or alias; `timeout` is Lean's
-        limit per request in seconds."""
+        """`version` selects a worker pool label or alias for checks,
+        sessions, creates, listings and audits; session, state and snapshot
+        ids carry their own. `timeout` is Lean's limit per request in
+        seconds."""
     def health(self) -> Health:
         """The server's health. A draining server's 503 is returned, with
         `status` "draining", not raised."""

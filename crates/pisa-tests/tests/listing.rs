@@ -171,7 +171,8 @@ async fn patch_sets_and_removes_labels() {
         [e],
         "unchanged"
     );
-    let (status, r) = patch(&c, &"0".repeat(32), json!({"labels": {"k": "c"}})).await;
+    let unknown = format!("{}~{}", c.version("v"), "0".repeat(32));
+    let (status, r) = patch(&c, &unknown, json!({"labels": {"k": "c"}})).await;
     assert_eq!(
         (status, &r["error"]["kind"]),
         (404, &json!("not_found")),

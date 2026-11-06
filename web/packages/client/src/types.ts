@@ -92,7 +92,7 @@ export type { Error as ApiError } from "./openapi.ts";
 export type StateId = string;
 /** A tactic session, `<version>~<header_key>~<id>`. */
 export type SessionId = string;
-/** A snapshot's id: 32 lowercase hex digits. */
+/** A snapshot's id, `<version>~<32 lowercase hex>`. */
 export type SnapshotId = string;
 /** A snapshot module, `PisaSnap.s<32 hex>`, shared by every snapshot of the
  *  same code. */

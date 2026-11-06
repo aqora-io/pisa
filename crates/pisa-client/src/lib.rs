@@ -283,8 +283,10 @@ impl Client {
         })
     }
 
-    /// Checks against this worker pool version or alias instead of the
-    /// server's default.
+    /// Checks, starts sessions, creates, lists and audits against this worker
+    /// pool version or alias instead of the server's default. Session, state
+    /// and snapshot ids carry their own version, so calls that take one
+    /// don't send it.
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
@@ -692,7 +694,6 @@ impl Client {
             retire: opts.retire,
             verify: opts.verify,
             timeout: self.timeout,
-            version: self.version.clone(),
         }
     }
 
@@ -737,9 +738,6 @@ impl Client {
         url.path_segments_mut()
             .map_err(|_| Error::Url(id.to_string()))?
             .push(id);
-        if let Some(v) = &self.version {
-            url.query_pairs_mut().append_pair("version", v);
-        }
         Ok(url)
     }
 

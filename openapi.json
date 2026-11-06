@@ -1237,7 +1237,7 @@
         "type": "object"
       },
       "RebuildSnapshotsRequest": {
-        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`ListDependentsResponse`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones, and unless `dry_run` creates them: a level at a time, a level's\ncreates side by side once the level below is done.",
+        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`ListDependentsResponse`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones, and unless `dry_run` creates them: a level at a time, a level's\ncreates side by side once the level below is done. `from` and `to` are of\none version, which the rebuild runs on.",
         "properties": {
           "allow_changes": {
             "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](CreateSnapshotRequest::replaces) `from`.",
@@ -1272,15 +1272,12 @@
             "type": "integer"
           },
           "to": {
-            "description": "Its replacement.",
+            "description": "Its replacement, of `from`'s version.",
             "type": "string"
           },
           "verify": {
             "description": "As [`CreateSnapshotRequest::verify`], for each create.",
             "type": "boolean"
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
@@ -1392,6 +1389,7 @@
             "description": "What the replacement may change besides adding declarations; by\ndefault nothing."
           },
           "snapshot_id": {
+            "description": "The replaced snapshot. A create's is of the create's version, and\nchooses it when neither the create nor the server names one.",
             "type": "string"
           }
         },
@@ -1582,7 +1580,7 @@
             "type": "string"
           },
           "id": {
-            "description": "Its id, which the other snapshot endpoints take.",
+            "description": "Its id, `<version>~<32 lowercase hex>`, which the other snapshot\nendpoints take. It carries the version, so they need no other.",
             "type": "string"
           },
           "imports": {
@@ -1673,7 +1671,7 @@
             "type": "boolean"
           },
           "entries": {
-            "description": "The query's entries on the module, newest first, at most 10.",
+            "description": "The ids of the query's snapshots of the module, newest first, at most\n10.",
             "items": {
               "type": "string"
             },
@@ -3028,7 +3026,7 @@
     },
     "/snapshots/rebuild": {
       "post": {
-        "description": "Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
+        "description": "Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
         "operationId": "rebuildSnapshots",
         "parameters": [
           {
@@ -3159,19 +3157,10 @@
         "operationId": "deleteSnapshot",
         "parameters": [
           {
-            "description": "The snapshot's id, 32 hex digits",
+            "description": "The snapshot's id, `<version>~<32 hex>`",
             "in": "path",
             "name": "id",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The worker version; the server's default when absent.",
-            "in": "query",
-            "name": "version",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3258,19 +3247,10 @@
         "operationId": "getSnapshot",
         "parameters": [
           {
-            "description": "The snapshot's id, 32 hex digits",
+            "description": "The snapshot's id, `<version>~<32 hex>`",
             "in": "path",
             "name": "id",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The worker version; the server's default when absent.",
-            "in": "query",
-            "name": "version",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3358,19 +3338,10 @@
         "operationId": "updateSnapshot",
         "parameters": [
           {
-            "description": "The snapshot's id, 32 hex digits",
+            "description": "The snapshot's id, `<version>~<32 hex>`",
             "in": "path",
             "name": "id",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The worker version; the server's default when absent.",
-            "in": "query",
-            "name": "version",
-            "required": false,
             "schema": {
               "type": "string"
             }
@@ -3470,7 +3441,7 @@
         "operationId": "listDependents",
         "parameters": [
           {
-            "description": "The snapshot's id, 32 hex digits",
+            "description": "The snapshot's id, `<version>~<32 hex>`",
             "in": "path",
             "name": "id",
             "required": true,
@@ -3488,15 +3459,6 @@
                 "type": "string"
               },
               "type": "array"
-            }
-          },
-          {
-            "description": "The worker version; the server's default when absent.",
-            "in": "query",
-            "name": "version",
-            "required": false,
-            "schema": {
-              "type": "string"
             }
           }
         ],
@@ -3584,19 +3546,10 @@
         "operationId": "verifySnapshot",
         "parameters": [
           {
-            "description": "The snapshot's id, 32 hex digits",
+            "description": "The snapshot's id, `<version>~<32 hex>`",
             "in": "path",
             "name": "id",
             "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "The worker version; the server's default when absent.",
-            "in": "query",
-            "name": "version",
-            "required": false,
             "schema": {
               "type": "string"
             }

@@ -128,26 +128,25 @@ async fn a_definition_changes_only_when_allowed_and_its_users_are_listed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_snapshots_are_errors_and_key_replays_skip_the_comparison() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    for (replaces, kind) in [
-        (replacing(&"0".repeat(32)), "not_found"),
-        (replacing("nope"), "bad_request"),
+    let unknown = format!("{}~{}", c.version("v"), "0".repeat(32));
+    let r = create(&c, json!({"code": PROOF, "replaces": replacing(&unknown)})).await;
+    assert_eq!(r["check"]["error"]["kind"], "not_found", "{r}");
+    assert!(r.get("snapshot").is_none(), "{r}");
+    // Not snapshot ids, and a bare id is not a `replaces`.
+    for replaces in [
+        replacing("nope"),
+        replacing(&"0".repeat(32)),
+        json!("0".repeat(32)),
     ] {
-        let r = create(&c, json!({"code": PROOF, "replaces": replaces})).await;
-        assert_eq!(r["check"]["error"]["kind"], kind, "{r}");
-        assert!(r.get("snapshot").is_none(), "{r}");
+        let (status, r) = c
+            .post("/snapshots", json!({"code": PROOF, "replaces": replaces}))
+            .await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{replaces}: {r}"
+        );
     }
-    // A bare id is not a `replaces`.
-    let (status, r) = c
-        .post(
-            "/snapshots",
-            json!({"code": PROOF, "replaces": "0".repeat(32)}),
-        )
-        .await;
-    assert_eq!(
-        (status, &r["error"]["kind"]),
-        (400, &json!("bad_request")),
-        "{r}"
-    );
 
     let weakened = "import Foo\n\ntheorem t : True := trivial";
     let first = create(&c, json!({"code": weakened, "key": "k"})).await;
@@ -279,6 +278,23 @@ async fn a_record_that_doesnt_say_what_it_uses_is_verified_to_say_it() {
     );
     let r = create(&c, json!({"code": proof, "replaces": replacing(&old)})).await;
     assert_eq!(r["replacement"]["filled"], json!(["thm3"]), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_id_of_another_version_is_a_bad_request() {
+    let c = Cluster::start(&[("w0", "va", 1), ("w1", "vb", 1)]).await;
+    let skeleton = create(&c, json!({"code": SKELETON, "version": "va"})).await;
+    let body = json!({"code": PROOF, "version": "vb", "replaces": replacing(entry(&skeleton))});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
+    let message = r["error"]["message"].as_str().unwrap();
+    for v in [c.version("va"), c.version("vb")] {
+        assert!(message.contains(&v), "{v}: {message}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

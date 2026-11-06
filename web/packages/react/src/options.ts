@@ -49,10 +49,9 @@ export const pisaKeys = {
   all: (c: PisaClient): QueryKey => ["pisa", c.url],
   health: (c: PisaClient): QueryKey => ["pisa", c.url, "health"],
   checks: (c: PisaClient): QueryKey => ["pisa", c.url, "check"],
-  /** Every snapshot query of `version`, which a change to any snapshot may
-   *  affect: a module's `verified` and `status` are shared by its
-   *  snapshots. */
-  snapshots: (c: PisaClient, version?: string): QueryKey => ["pisa", c.url, "snapshots", version ?? c.version ?? null],
+  /** Every snapshot query, which a change to any snapshot may affect: a
+   *  module's `verified` and `status` are shared by its snapshots. */
+  snapshots: (c: PisaClient): QueryKey => ["pisa", c.url, "snapshots"],
   search: (c: PisaClient): QueryKey => ["pisa", c.url, "search"],
 };
 
@@ -148,10 +147,11 @@ export interface VersionInput {
   version?: string;
 }
 
-export function snapshotOptions(client: PisaClient, id: SnapshotId, input: VersionInput = {}): PisaQueryOptions<SnapshotDetail> {
+/** One snapshot, keyed by its id alone: the id carries its version. */
+export function snapshotOptions(client: PisaClient, id: SnapshotId): PisaQueryOptions<SnapshotDetail> {
   return {
-    queryKey: [...pisaKeys.snapshots(client, input.version), "snapshot", id] as QueryKey,
-    queryFn: ({ signal }) => client.getSnapshot(id, { ...input, signal }),
+    queryKey: [...pisaKeys.snapshots(client), "snapshot", id] as QueryKey,
+    queryFn: ({ signal }) => client.getSnapshot(id, { signal }),
     retry: retryQuery,
   };
 }
@@ -163,7 +163,7 @@ export function snapshotsOptions(
   input: VersionInput = {},
 ): PisaInfiniteOptions<ListSnapshotsResponse, string | undefined> {
   return {
-    queryKey: [...pisaKeys.snapshots(client, input.version), "list", params] as QueryKey,
+    queryKey: [...pisaKeys.snapshots(client), "list", input.version ?? client.version ?? null, params] as QueryKey,
     queryFn: ({ pageParam, signal }) =>
       client.listSnapshots({ ...params, ...(pageParam !== undefined && { after: pageParam }) }, { ...input, signal }),
     initialPageParam: undefined as string | undefined,

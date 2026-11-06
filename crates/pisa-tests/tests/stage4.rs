@@ -1073,33 +1073,89 @@ async fn a_snapshot_deleted_while_a_create_verifies_it_is_built_again() {
     assert_eq!(info(&c, &r).await["verified"], true);
 }
 
+/// The requests to every endpoint that takes the snapshot id `id`, with no
+/// `?version=`, ending with its delete.
+fn by_id(id: &str) -> Vec<(reqwest::Method, String)> {
+    let path = format!("/snapshots/{id}");
+    vec![
+        (reqwest::Method::GET, path.clone()),
+        (reqwest::Method::PATCH, path.clone()),
+        (reqwest::Method::POST, format!("{path}/verify")),
+        (reqwest::Method::GET, format!("{path}/dependents")),
+        (reqwest::Method::DELETE, path),
+    ]
+}
+
+/// [`request`], with a label to set as a PATCH's body.
+async fn send(c: &Cluster, method: reqwest::Method, path: &str) -> (u16, Value) {
+    let r = c.client.request(method.clone(), c.url(path));
+    let r = match method {
+        reqwest::Method::PATCH => r.json(&json!({"labels": {"k": "a"}})),
+        _ => r,
+    };
+    let r = r.send().await.unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+/// Sends each of [`by_id`]'s requests for `snapshot`, which must find it.
+async fn found_by_its_id(c: &Cluster, snapshot: &Value) {
+    for (method, path) in by_id(entry(snapshot)) {
+        let (status, r) = send(c, method.clone(), &path).await;
+        assert_eq!(status, 200, "{method} {path}: {r}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn verify_runs_on_the_requested_version() {
+async fn snapshot_ids_carry_their_version() {
     let c = Cluster::start(&[("w0", "a", 1), ("w1", "b", 1)]).await;
     let (status, snapshot) = c
         .post("/snapshots", json!({"code": ROOT, "version": "b"}))
         .await;
     assert_eq!(status, 200, "{snapshot}");
-    let path = |v: &str| format!("/snapshots/{}/verify?version={v}", entry(&snapshot));
+    let id = entry(&snapshot);
+    let prefix = format!("{}~", c.version("b"));
+    assert!(id.starts_with(&prefix), "{snapshot}");
 
-    let (status, r) = request(&c, reqwest::Method::POST, &path("a")).await;
-    assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
-    let (status, r) = request(&c, reqwest::Method::POST, &path("b")).await;
-    assert_eq!(
-        (status, &r["snapshot"]["verified"]),
-        (200, &json!(true)),
-        "{r}"
-    );
+    // A bare id, as ids were before they carried their version.
+    let bare = &id[prefix.len()..];
+    for (method, path) in by_id(bare) {
+        let (status, r) = send(&c, method.clone(), &path).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{method} {path}: {r}"
+        );
+        let message = r["error"]["message"].as_str().unwrap();
+        assert!(message.contains("<version>~"), "{message}");
+    }
+
+    found_by_its_id(&c, &snapshot).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_alias_resolves_into_the_id() {
+    let mut router = common::router_config();
+    router.alias.push(("stable".into(), "b".into()));
+    let c = Cluster::start_with(router, &[("w0", "a", 1), ("w1", "b", 1)], |w| w).await;
+    let (status, snapshot) = c
+        .post("/snapshots", json!({"code": ROOT, "version": "stable"}))
+        .await;
+    assert_eq!(status, 200, "{snapshot}");
+    let prefix = format!("{}~", c.version("b"));
+    assert!(entry(&snapshot).starts_with(&prefix), "{snapshot}");
+    assert_eq!(info(&c, &snapshot).await["id"], entry(&snapshot));
+
+    found_by_its_id(&c, &snapshot).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_rejects_unknown_snapshots_and_other_modules() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let unknown = format!("/snapshots/{}/verify", "0".repeat(32));
+    let unknown = format!("/snapshots/{}~{}/verify", c.version("v"), "0".repeat(32));
     let (status, r) = request(&c, reqwest::Method::POST, &unknown).await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
 
-    // Modules aren't entries, even kept ones.
+    // Modules aren't snapshots, even kept ones.
     let snapshot = kept(&c, ROOT).await;
     let path = format!("/snapshots/{}", module(&snapshot));
     for (method, path) in [
@@ -1114,7 +1170,10 @@ async fn verify_rejects_unknown_snapshots_and_other_modules() {
             "{method} {path}"
         );
         let message = r["error"]["message"].as_str().unwrap();
-        assert!(message.contains("entry"), "{message}");
+        assert!(
+            message.contains("<version>~") && message.contains("module"),
+            "{message}"
+        );
     }
     let (status, _) = request(&c, reqwest::Method::POST, "/snapshots/Mathlib/verify").await;
     assert_eq!(status, 400);

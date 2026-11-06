@@ -4,6 +4,7 @@
 mod common;
 
 use common::Cluster;
+use pisa_protocol::api::SnapshotId;
 use pisa_worker::catalog::{Catalog, Change};
 use serde_json::{Value, json};
 
@@ -24,6 +25,12 @@ fn module(r: &Value) -> String {
     name.strip_prefix("PisaSnap.s").unwrap().to_string()
 }
 
+/// The entry of a create's snapshot, as the catalog names it.
+fn entry(r: &Value) -> String {
+    let id = r["snapshot"]["id"].as_str().unwrap();
+    SnapshotId::parse(id).unwrap().entry
+}
+
 /// Every change logged so far, oldest first.
 async fn changes(catalog: &Catalog) -> Vec<Change> {
     let page = catalog.changes(0, None, 1000).await.unwrap();
@@ -36,7 +43,6 @@ async fn a_create_records_declarations_and_a_change() {
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({"run": "1"})).await;
     let m = module(&r);
-    let entry = r["snapshot"]["id"].as_str().unwrap();
 
     let decls = catalog.decls(&m).await.unwrap().expect("declarations");
     assert_eq!(decls.header, r["snapshot"]["header"].as_str().unwrap());
@@ -52,7 +58,7 @@ async fn a_create_records_declarations_and_a_change() {
     assert_eq!(
         logged,
         [Change {
-            entry: Some(entry.into()),
+            entry: Some(entry(&r)),
             module: Some(m.clone()),
         }]
     );
@@ -117,7 +123,6 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({})).await;
     let m = module(&r);
-    let entry = r["snapshot"]["id"].as_str().unwrap();
     assert!(
         catalog
             .put_described(&m, &[("one".into(), json!({}))])
@@ -126,7 +131,7 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     );
     assert_eq!(catalog.described(&m).await.unwrap().len(), 1);
 
-    let path = format!("/snapshots/{entry}");
+    let path = format!("/snapshots/{}", r["snapshot"]["id"].as_str().unwrap());
     let patched = c
         .client
         .patch(c.url(&path))
@@ -139,7 +144,7 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     assert_eq!(deleted.status(), 200);
 
     let touched = Change {
-        entry: Some(entry.into()),
+        entry: Some(entry(&r)),
         module: Some(m.clone()),
     };
     assert_eq!(

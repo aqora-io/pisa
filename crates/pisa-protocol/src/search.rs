@@ -159,7 +159,8 @@ pub struct Hit {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotHit {
-    /// The query's entries on the module, newest first, at most 10.
+    /// The ids of the query's snapshots of the module, newest first, at most
+    /// 10.
     pub entries: Vec<String>,
     /// See the snapshot API: the module depends on `sorry` or other axioms
     /// outside the allowed list.

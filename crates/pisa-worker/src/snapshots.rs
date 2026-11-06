@@ -36,11 +36,12 @@ use pisa_protocol::api::{
     Allow, AuditAssumption, AuditSnapshotsResponse, AuditUnproved, CheckResult,
     CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Error, ErrorKind, Export,
     ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildSnapshotsResponse,
-    Replacement, Replaces, Snapshot, SnapshotDetail, VerifyFailure, VerifySnapshotResponse,
+    Replacement, Replaces, Snapshot, SnapshotDetail, SnapshotId, VerifyFailure,
+    VerifySnapshotResponse,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
-    MAX_LABELS, MAX_LIMIT, check_key, check_labels, entry_id_error, is_cursor, is_entry_id,
+    MAX_LABELS, MAX_LIMIT, check_key, check_labels, is_cursor, snapshot_id_error,
 };
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::search::{Description, Informal};
@@ -92,22 +93,27 @@ fn key_in_use() -> Error {
     )
 }
 
-/// Checks that a path segment is an entry id.
-fn parse_entry(entry: &str) -> Result<&str, Error> {
-    if is_entry_id(entry) {
-        Ok(entry)
-    } else {
-        Err(Error::new(ErrorKind::BadRequest, entry_id_error(entry)))
-    }
-}
-
 /// The entry a create replaces, as it was found before the build.
 struct Replacing {
+    /// The replaced snapshot, as the request names it.
     replaced: Replaces,
+    /// The replaced entry, which the new entry's link names.
+    entry: String,
     /// The declarations of the replaced entry's module.
     declarations: Vec<Declaration>,
     /// The snapshot modules it needs, other than its own.
     needs: Vec<String>,
+}
+
+impl Replacing {
+    /// The link the new entry records: the replaced entry, and what the
+    /// replacement may change.
+    fn link(&self) -> Replaces {
+        Replaces {
+            snapshot_id: self.entry.clone(),
+            allow: self.replaced.allow,
+        }
+    }
 }
 
 /// The snapshot modules a replacement swaps: those the replaced module builds
@@ -828,16 +834,41 @@ impl Snapshots {
         }
     }
 
+    /// The snapshot id of entry `entry`, as the API answers it.
+    fn id(&self, entry: &str) -> String {
+        let id = SnapshotId {
+            version: self.version.clone(),
+            entry: entry.to_string(),
+        };
+        id.to_string()
+    }
+
+    /// The entry snapshot id `id` names, if it is of this worker's version.
+    fn parse(&self, id: &str) -> Result<String, Error> {
+        let parsed = SnapshotId::parse(id)
+            .ok_or_else(|| Error::new(ErrorKind::BadRequest, snapshot_id_error(id)))?;
+        if parsed.version != self.version {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!("snapshot {id} belongs to version {}", parsed.version),
+            ));
+        }
+        Ok(parsed.entry)
+    }
+
     /// Entry `entry`, on the module `meta` records, as the API answers it.
     fn snapshot(&self, entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> Snapshot {
         Snapshot {
-            id: entry,
+            id: self.id(&entry),
             version: self.version.clone(),
             module: snapshot::module(&entry_meta.module),
             header: meta.header.clone(),
             imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
             labels: entry_meta.labels,
-            replaces: entry_meta.replaces,
+            replaces: entry_meta.replaces.map(|r| Replaces {
+                snapshot_id: self.id(&r.snapshot_id),
+                ..r
+            }),
             status: self.module_status(meta),
             verified: meta.verified,
             created: entry_meta.created_micros / 1_000_000,
@@ -947,11 +978,12 @@ impl Snapshots {
 
     /// The entry `r` names, with its module's declarations.
     async fn replacing(&self, r: &Replaces) -> Result<Replacing, Error> {
-        let entry = parse_entry(&r.snapshot_id)?;
-        let entry_meta = self.catalog.entry(entry).await?;
+        let entry = self.parse(&r.snapshot_id)?;
+        let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
         Ok(Replacing {
             replaced: r.clone(),
+            entry,
             declarations: meta.result.declarations,
             needs: ids(&meta.modules)
                 .filter(|m| **m != entry_meta.module)
@@ -1138,7 +1170,7 @@ impl Snapshots {
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
-            replaces: replacing.map(|r| r.replaced.clone()),
+            replaces: replacing.map(Replacing::link),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -1360,7 +1392,7 @@ impl Snapshots {
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
-            replaces: replacing.map(|r| r.replaced.clone()),
+            replaces: replacing.map(Replacing::link),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)
@@ -1434,14 +1466,14 @@ impl Snapshots {
         pool: &Arc<Pool>,
         entry: &str,
     ) -> Result<VerifySnapshotResponse, Error> {
-        let entry = parse_entry(entry)?;
-        let id = self.catalog.entry(entry).await?.module;
+        let entry = self.parse(entry)?;
+        let id = self.catalog.entry(&entry).await?.module;
         let (checked, failure) = self.verify_chain(pool, &id).await?;
         // As the entry and its module are now.
-        let entry_meta = self.catalog.entry(entry).await?;
+        let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
         Ok(VerifySnapshotResponse {
-            snapshot: self.snapshot(entry.to_string(), entry_meta, &meta),
+            snapshot: self.snapshot(entry, entry_meta, &meta),
             checked,
             failure,
         })
@@ -1601,11 +1633,11 @@ impl Snapshots {
     }
 
     pub async fn get(&self, entry: &str) -> Result<SnapshotDetail, Error> {
-        let entry = parse_entry(entry)?;
-        let entry_meta = self.catalog.entry(entry).await?;
+        let entry = self.parse(entry)?;
+        let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
         let exports = self.exports(&entry_meta.module).await?;
-        let snapshot = self.snapshot(entry.to_string(), entry_meta, &meta);
+        let snapshot = self.snapshot(entry, entry_meta, &meta);
         Ok(SnapshotDetail {
             snapshot,
             code: meta.code,
@@ -1686,14 +1718,14 @@ impl Snapshots {
         entry: &str,
         labels: &[(String, String)],
     ) -> Result<ListDependentsResponse, Error> {
-        let entry = parse_entry(entry)?;
+        let entry = self.parse(entry)?;
         if labels.len() > MAX_LABELS {
             return Err(Error::new(
                 ErrorKind::BadRequest,
                 format!("{} label filters; at most {MAX_LABELS}", labels.len()),
             ));
         }
-        let root = self.catalog.entry(entry).await?.module;
+        let root = self.catalog.entry(&entry).await?.module;
         let above = self.catalog.dependents(&root).await?;
         let levels = levels(&above, &root);
         let modules: Vec<String> = above.keys().cloned().collect();
@@ -1742,13 +1774,13 @@ impl Snapshots {
         job: &SnapshotRebuildJob,
     ) -> Result<RebuildSnapshotsResponse, Error> {
         let bad = |m: &str| Error::new(ErrorKind::BadRequest, m);
-        let (from, to) = (parse_entry(&job.from)?, parse_entry(&job.to)?);
+        let (from, to) = (self.parse(&job.from)?, self.parse(&job.to)?);
         if job.labels.is_empty() {
             return Err(bad("a rebuild takes labels: which dependents to rebuild"));
         }
         check_labels(&job.labels).map_err(|e| bad(&e))?;
-        let to_entry = self.catalog.entry(to).await?;
-        let (old, new) = (self.catalog.entry(from).await?.module, to_entry.module);
+        let to_entry = self.catalog.entry(&to).await?;
+        let (old, new) = (self.catalog.entry(&from).await?.module, to_entry.module);
         if old == new {
             return Err(bad(
                 "from and to are on the same module: there is nothing to rebuild",
@@ -1768,9 +1800,10 @@ impl Snapshots {
         // `to` compared as a replacement of `from` would be.
         let replacing = |allow| Replacing {
             replaced: Replaces {
-                snapshot_id: from.to_string(),
+                snapshot_id: job.from.clone(),
                 allow,
             },
+            entry: from.clone(),
             declarations: old_meta.result.declarations.clone(),
             needs: ids(&old_meta.modules)
                 .filter(|m| **m != old)
@@ -1878,10 +1911,10 @@ impl Snapshots {
                 // Under a link, each rebuilt entry replaces its old one, which
                 // compares what its statements depend on.
                 replaces: link.as_ref().zip(entry.as_ref()).map(|(link, e)| Replaces {
-                    snapshot_id: e.clone(),
+                    snapshot_id: self.id(e),
                     allow: link.allow,
                 }),
-                snapshot_id: entry,
+                snapshot_id: entry.as_deref().map(|e| self.id(e)),
                 module: snapshot::module(&m),
                 new_module: snapshot::module(&id),
                 new_header: header.clone(),
@@ -1968,7 +2001,7 @@ impl Snapshots {
                     let allowed = &self.policy.allowed_axioms;
                     audit.not_proved.push(AuditUnproved {
                         name: d.name.clone(),
-                        snapshot_id: entry.clone(),
+                        snapshot_id: self.id(entry),
                         status,
                         axioms: d
                             .axioms
@@ -2012,13 +2045,13 @@ impl Snapshots {
                     .find(|d| d.name == assumption.name)
                     .map(|d| d.signature);
                 assumption.snapshot_id = match entries.get(&m) {
-                    Some(e) => Some(e.clone()),
+                    Some(e) => Some(self.id(e)),
                     None => {
                         let on = self
                             .catalog
                             .entries_on(std::slice::from_ref(&m), &[])
                             .await?;
-                        on.into_iter().next().map(|(e, _)| e)
+                        on.into_iter().next().map(|(e, _)| self.id(&e))
                     }
                 };
             }
@@ -2058,10 +2091,10 @@ impl Snapshots {
         entry: &str,
         labels: &BTreeMap<String, Option<String>>,
     ) -> Result<Snapshot, Error> {
-        let entry = parse_entry(entry)?;
-        let entry_meta = self.catalog.set_labels(entry, labels).await?;
+        let entry = self.parse(entry)?;
+        let entry_meta = self.catalog.set_labels(&entry, labels).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
-        Ok(self.snapshot(entry.to_string(), entry_meta, &meta))
+        Ok(self.snapshot(entry, entry_meta, &meta))
     }
 
     /// Deletes an entry, then each module that nothing needs any more: the
@@ -2069,8 +2102,8 @@ impl Snapshots {
     /// the rest is best effort: what fails is logged, and a module whose
     /// record went is listed even if its files couldn't be deleted.
     pub async fn delete(&self, entry: &str) -> Result<DeleteSnapshotResponse, Error> {
-        let entry = parse_entry(entry)?;
-        let (entry_meta, cleaned) = self.catalog.remove_entry(entry).await?;
+        let entry = self.parse(entry)?;
+        let (entry_meta, cleaned) = self.catalog.remove_entry(&entry).await?;
         let mut queue = VecDeque::from_iter(cleaned.map(|m| (entry_meta.module, m)));
         let mut removed = Vec::new();
         while let Some((id, meta)) = queue.pop_front() {
@@ -2127,9 +2160,10 @@ mod tests {
     fn replacing(old: Vec<Declaration>, allow: Option<Allow>) -> Replacing {
         Replacing {
             replaced: Replaces {
-                snapshot_id: "e".into(),
+                snapshot_id: "v~e".into(),
                 allow,
             },
+            entry: "e".into(),
             declarations: old,
             needs: vec!["a".into()],
         }
@@ -2575,7 +2609,7 @@ mod tests {
         let building = lock.lock().await;
         let deleting = tokio::spawn({
             let s = s.clone();
-            async move { s.delete(&entry).await }
+            async move { s.delete(&s.id(&entry)).await }
         });
         tokio::time::timeout(Duration::from_secs(5), async {
             while has_files(&s, &old).await {
@@ -2696,6 +2730,22 @@ mod tests {
         assert!(s.list(&filters(64), 10, None).await.is_ok());
         let error = s.list(&filters(65), 10, None).await.unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadRequest, "{error:?}");
+    }
+
+    /// A snapshot id of another version, which a router routes elsewhere, or
+    /// a bare entry, is refused here too.
+    #[tokio::test]
+    async fn an_id_of_another_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = snapshots(Db::memory().await, dir.path());
+        let entry = "0".repeat(32);
+        let error = s.get(&format!("w~{entry}")).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadRequest, "{error:?}");
+        assert!(error.message.contains("belongs to version w"), "{error:?}");
+        let error = s.get(&entry).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::BadRequest, "{error:?}");
+        let error = s.get(&s.id(&entry)).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::NotFound, "{error:?}");
     }
 
     /// Two workers build the same code at once and the other one stores it

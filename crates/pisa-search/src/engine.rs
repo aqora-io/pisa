@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lru::LruCache;
+use pisa_protocol::api::SnapshotId;
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope, Suggestion,
@@ -136,8 +137,9 @@ pub struct Engine {
     pub weights: Weights,
     symbols: Symbols,
     pub embedder: Option<Embedder>,
-    /// Whether queries may ask for snapshots.
-    pub snapshots: bool,
+    /// The worker version whose snapshots queries may ask for, if any. Hits'
+    /// snapshot ids carry it.
+    pub snapshots: Option<String>,
     /// Whether this replica leads the snapshot index.
     pub leader: Arc<AtomicBool>,
     /// Query vectors by text, and the texts being embedded: the most recently
@@ -275,7 +277,7 @@ impl Engine {
             weights: Weights::default(),
             symbols,
             embedder,
-            snapshots: false,
+            snapshots: None,
             leader: Arc::default(),
             cache: Arc::new(Mutex::new(LruCache::new(QUERY_VECTORS))),
             embed_wait: EMBED_WAIT,
@@ -292,7 +294,9 @@ impl Engine {
     pub fn check_filters(&self, q: &mut Query) -> Result<(), String> {
         match &q.snapshots {
             SnapshotScope::None => {}
-            _ if !self.snapshots => return Err("this server doesn't search snapshots".into()),
+            _ if self.snapshots.is_none() => {
+                return Err("this server doesn't search snapshots".into());
+            }
             SnapshotScope::All => {}
             SnapshotScope::Labels(labels) if labels.is_empty() => {
                 return Err("snapshots: no labels given; use \"all\" for every snapshot".into());
@@ -301,7 +305,7 @@ impl Engine {
         }
         let snapshot_library = SNAPSHOT_LIBRARY.to_string();
         let mut libraries: Vec<&String> = self.manifest.libraries.keys().collect();
-        if self.snapshots {
+        if self.snapshots.is_some() {
             libraries.push(&snapshot_library);
         }
         let kinds: Vec<&String> = self.manifest.kinds.iter().collect();
@@ -792,8 +796,8 @@ impl Engine {
         Ok(())
     }
 
-    /// For each query's snapshot hits, the query's entries on their modules,
-    /// newest first.
+    /// For each query's snapshot hits, the ids of the query's entries on their
+    /// modules, newest first.
     async fn hit_entries(
         &self,
         queries: &[Query],
@@ -825,9 +829,13 @@ impl Engine {
             .into_iter()
             .zip(found)
             .map(|(k, points)| {
+                let id = |entry: &str| SnapshotId {
+                    version: self.snapshots.clone().unwrap_or_default(),
+                    entry: entry.to_string(),
+                };
                 let entries = points
                     .into_iter()
-                    .filter_map(|p| p.payload?.get("entry")?.as_str().map(str::to_string))
+                    .filter_map(|p| Some(id(p.payload?.get("entry")?.as_str()?).to_string()))
                     .collect();
                 (k, entries)
             })
@@ -925,7 +933,7 @@ impl Engine {
         module: Option<&str>,
     ) -> anyhow::Result<Option<DeclDetail>> {
         let mut searches = Vec::new();
-        if let Some(m) = module.filter(|_| self.snapshots) {
+        if let Some(m) = module.filter(|_| self.snapshots.is_some()) {
             let snapshot = vec![
                 is("name", name),
                 is("source", "snapshot"),

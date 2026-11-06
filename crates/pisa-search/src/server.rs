@@ -184,7 +184,7 @@ impl Search {
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(MAX_BACKOFF);
         };
-        engine.snapshots = snapshots.is_some();
+        engine.snapshots = snapshots.as_ref().map(|s| s.version.clone());
         let engine = Arc::new(engine);
         if let Some(s) = snapshots {
             tracing::info!(version = %s.version, "searching snapshots");
@@ -207,7 +207,7 @@ impl Search {
         tracing::info!(
             env_id = engine.env_id(),
             decls = engine.manifest.decls,
-            snapshots = engine.snapshots,
+            snapshots = engine.snapshots.is_some(),
             "searching"
         );
         let _ = self.engine.set(engine);

@@ -240,7 +240,7 @@ impl Setup {
         let mut e = Engine::open(self.q.clone(), &self.env_id, symbols, embedder)
             .await
             .unwrap();
-        e.snapshots = true;
+        e.snapshots = Some(self.version.clone());
         e
     }
 
@@ -465,7 +465,7 @@ async fn snapshots_are_searched_by_scope() {
     );
     assert!(hit.text.contains("import PisaSnap.sa1"), "{}", hit.text);
     let snap = hit.snapshot.as_ref().unwrap();
-    assert_eq!(snap.entries, [entry]);
+    assert_eq!(snap.entries, [format!("{}~{entry}", s.version)]);
     assert!(!snap.dirty && !snap.verified);
 
     let hits = search(&e, about_doubling(labels(&[("run", "1")]))).await;
@@ -858,7 +858,7 @@ async fn a_module_with_many_entries() {
     let hit = hits.iter().find(|h| h.name == "double_eq").unwrap();
     assert_eq!(
         hit.snapshot.as_ref().unwrap().entries,
-        [entries[499].clone()]
+        [format!("{}~{}", s.version, entries[499])]
     );
     let all = search(&e, about_doubling(SnapshotScope::All)).await;
     let hit = all.iter().find(|h| h.name == "double_eq").unwrap();

@@ -37,11 +37,11 @@ describe("PisaClient", () => {
     const { client, sent } = recording(() => json({ decl: { name: "x" } }));
     await client.decl("Real.sqrt/x y");
     await client.decl("double_eq", { module: "PisaSnap.sa1" });
-    await client.getSnapshot("abc");
+    await client.getSnapshot("v2~abc");
     expect(sent.map((s) => s.url)).toEqual([
       "/api/v1/decl/Real.sqrt%2Fx%20y",
       "/api/v1/decl/double_eq?module=PisaSnap.sa1",
-      "/api/snapshots/abc?version=v1",
+      "/api/snapshots/v2~abc",
     ]);
   });
 
@@ -69,25 +69,45 @@ describe("PisaClient", () => {
       "1",
       "c",
     ]);
-    // A state's id carries its version.
+    // A state's id carries its version, and so does a snapshot's.
     expect(sent[3]).toMatchObject({ url: "/api/states/v1~h~s/tactic", body: { tactic: "simp" } });
+  });
+
+  it("sends no version with a snapshot id, which carries its own", async () => {
+    const { client, sent } = recording((s) =>
+      s.headers["prefer"] ? json({ id: "j", kind: "verify_snapshot", status: "queued" }, 202) : json({}),
+    );
+    await client.getSnapshot("v2~e1");
+    await client.updateSnapshot("v2~e1", { labels: {} });
+    await client.deleteSnapshot("v2~e1");
+    await client.verifySnapshot("v2~e1");
+    await client.submitVerifySnapshot("v2~e1");
+    await client.listDependents("v2~e1");
+    expect(sent.map((s) => s.url)).toEqual([
+      "/api/snapshots/v2~e1",
+      "/api/snapshots/v2~e1",
+      "/api/snapshots/v2~e1",
+      "/api/snapshots/v2~e1/verify",
+      "/api/snapshots/v2~e1/verify",
+      "/api/snapshots/v2~e1/dependents",
+    ]);
   });
 
   it("sends what a snapshot replaces", async () => {
     const { client, sent } = recording(() => json({ check: {} }));
-    await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: { snapshot_id: "e1" }, key: "k" });
-    await client.createSnapshot("def f := 2", { replaces: { snapshot_id: "e2", allow: "definitions" } });
+    await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: { snapshot_id: "v1~e1" }, key: "k" });
+    await client.createSnapshot("def f := 2", { replaces: { snapshot_id: "v1~e2", allow: "definitions" } });
     expect(sent.map((s) => s.body)).toEqual([
-      { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: { snapshot_id: "e1" } },
-      { code: "def f := 2", version: "v1", replaces: { snapshot_id: "e2", allow: "definitions" } },
+      { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: { snapshot_id: "v1~e1" } },
+      { code: "def f := 2", version: "v1", replaces: { snapshot_id: "v1~e2", allow: "definitions" } },
     ]);
   });
 
   it("updates labels with a merge patch", async () => {
-    const { client, sent } = recording(() => json({ id: "e1", labels: { stage: "done" } }));
-    await client.updateSnapshot("e1", { labels: { stage: "done", draft: null } });
+    const { client, sent } = recording(() => json({ id: "v1~e1", labels: { stage: "done" } }));
+    await client.updateSnapshot("v1~e1", { labels: { stage: "done", draft: null } });
     expect(sent[0]).toMatchObject({
-      url: "/api/snapshots/e1?version=v1",
+      url: "/api/snapshots/v1~e1",
       method: "PATCH",
       body: { labels: { stage: "done", draft: null } },
     });
@@ -95,14 +115,14 @@ describe("PisaClient", () => {
 
   it("asks for dependents and rebuild plans", async () => {
     const { client, sent } = recording(() => json({ snapshots: [], ok: true, changes: [], plan: [] }));
-    await client.listDependents("e1", { labels: { p: "1" } });
+    await client.listDependents("v1~e1", { labels: { p: "1" } });
     await client.auditSnapshots({ labels: { p: "1" } });
-    await client.rebuildSnapshots("e1", "e2", { p: "1" }, { dryRun: true, allowChanges: true });
-    expect(sent[0]?.url).toBe("/api/snapshots/e1/dependents?version=v1&label=p%3A1");
+    await client.rebuildSnapshots("v1~e1", "v1~e2", { p: "1" }, { dryRun: true, allowChanges: true });
+    expect(sent[0]?.url).toBe("/api/snapshots/v1~e1/dependents?label=p%3A1");
     expect(sent[1]?.url).toBe("/api/snapshots/audit?version=v1&label=p%3A1");
     expect(sent[2]).toMatchObject({
       url: "/api/snapshots/rebuild",
-      body: { from: "e1", to: "e2", labels: { p: "1" }, dry_run: true, version: "v1", allow_changes: true },
+      body: { from: "v1~e1", to: "v1~e2", labels: { p: "1" }, dry_run: true, allow_changes: true },
     });
   });
 
@@ -110,14 +130,13 @@ describe("PisaClient", () => {
     const { client, sent } = recording((s) =>
       s.headers["prefer"] ? json({ id: "j", kind: "rebuild_snapshots", status: "running" }, 202) : json({ ok: true, changes: [], plan: [] }),
     );
-    await client.rebuildSnapshots("e1", "e2", { p: "1" }, { retire: true, verify: false, timeout: 30 });
-    const job = await client.submitRebuildSnapshots("e1", "e2", { p: "1" });
+    await client.rebuildSnapshots("v1~e1", "v1~e2", { p: "1" }, { retire: true, verify: false, timeout: 30 });
+    const job = await client.submitRebuildSnapshots("v1~e1", "v1~e2", { p: "1" });
     expect(sent[0]?.body).toEqual({
-      from: "e1",
-      to: "e2",
+      from: "v1~e1",
+      to: "v1~e2",
       labels: { p: "1" },
       dry_run: false,
-      version: "v1",
       timeout: 30,
       retire: true,
       verify: false,

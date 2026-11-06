@@ -84,8 +84,9 @@ pub struct SnapshotCreateJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotJob {
-    /// The entry id. Routers of the release before entries called it
-    /// `snapshot` and sent a module name, which is then a `bad_request`.
+    /// The snapshot id, `<version>~<entry id>`. Routers of the release before
+    /// entries called it `snapshot` and sent a module name, which is then a
+    /// `bad_request`.
     #[serde(alias = "snapshot")]
     pub entry: String,
 }
@@ -102,11 +103,11 @@ pub struct SnapshotListJob {
     pub after: Option<String>,
 }
 
-/// `GET /snapshots/{entry}/dependents`, its filters parsed and checked by
-/// the router.
+/// `GET /snapshots/{id}/dependents`, its filters parsed and checked by the
+/// router.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotDependentsJob {
-    /// The entry id.
+    /// The snapshot id.
     pub entry: String,
     /// `(key, value)` pairs that an entry must all have.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -133,7 +134,7 @@ pub struct SnapshotRebuildJob {
 /// `PATCH /snapshots/{id}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotLabelsJob {
-    /// The entry id.
+    /// The snapshot id.
     pub entry: String,
     /// The request's merge patch: `None` removes a label, `Some` sets it.
     pub labels: BTreeMap<String, Option<String>>,
