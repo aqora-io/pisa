@@ -803,8 +803,17 @@ impl SearchClient {
         self
     }
 
+    /// Fails with a 503 while the server drains.
     pub async fn health(&self) -> Result<(), Error> {
-        self.endpoint.health().await.map(drop)
+        let health = self.endpoint.health().await?;
+        match health.status {
+            HealthStatus::Ok => Ok(()),
+            HealthStatus::Draining => Err(Error::Server {
+                status: 503,
+                kind: ErrorKind::Internal,
+                message: serde_json::to_string(&health).unwrap_or_default(),
+            }),
+        }
     }
 
     pub async fn search(&self, query: &Query) -> Result<QueryResult, Error> {

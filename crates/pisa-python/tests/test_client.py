@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from pisa_client import CapacityError, Client, LeanError, NotFoundError, PisaError
+from pisa_client import CapacityError, Client, LeanError, NotFoundError, PisaError, SearchClient
 
 BIN = Path(os.environ.get("PISA_BIN_DIR", Path(__file__).parents[3] / "target" / "debug"))
 
@@ -84,12 +84,18 @@ def test_health(url, db):
         env={**os.environ, "RUST_LOG": "warn"},
     )
     client = Client(f"http://127.0.0.1:{http}")
+    search = SearchClient(f"http://127.0.0.1:{http}")
     try:
         wait_for(lambda: client.health()["status"] == "ok")
+        assert search.health() is None
         server.terminate()
         seen = []
         wait_for(lambda: seen.append(client.health()) or seen[-1]["status"] == "draining")
         assert seen[-1]["workers"] == 1 and seen[-1]["search"] is None
+        # The search client has no health to return: a draining server fails it.
+        with pytest.raises(PisaError) as e:
+            search.health()
+        assert e.value.status == 503
     finally:
         server.terminate()
         server.wait(timeout=30)

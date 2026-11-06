@@ -9,7 +9,7 @@ use common::{Cluster, url_of};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use pisa_client::{Client, HealthStatus};
+use pisa_client::{Client, Error, HealthStatus, SearchClient};
 use pisa_worker::queue::LIVE;
 use serde_json::{Value, json};
 
@@ -168,18 +168,30 @@ async fn a_server_shutting_down_answers_what_it_has() {
     })
     .await;
     let health = url_of(&b, "/health");
-    let client = Client::new(&url_of(&b, "/")).unwrap();
+    let base = url_of(&b, "/");
+    let client = Client::new(&base).unwrap();
+    let search = SearchClient::new(&base).unwrap();
     assert_eq!(client.health().await.unwrap().status, HealthStatus::Ok);
+    search.health().await.unwrap();
     let stopping = tokio::spawn(b.shutdown(Duration::from_millis(300), Duration::from_secs(10)));
-    // Load balancers learn first, while it still serves.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Load balancers learn first, while it still serves. The clients ask
+    // first, to be early in the grace period.
+    let mut draining = client.health().await.unwrap();
+    until("the server drains", async || {
+        draining = client.health().await.unwrap();
+        draining.status == HealthStatus::Draining
+    })
+    .await;
+    // The client returns that health rather than failing on the 503, and
+    // search's, which has no health to return, fails.
+    assert_eq!(draining.workers, Some(1));
+    match search.health().await {
+        Err(Error::Server { status: 503, .. }) => {}
+        other => panic!("{other:?}"),
+    }
     let r = c.client.get(health).send().await.unwrap();
     assert_eq!(r.status(), 503);
     assert_eq!(r.json::<Value>().await.unwrap()["status"], "draining");
-    // The client returns that health rather than failing on the 503.
-    let draining = client.health().await.unwrap();
-    assert_eq!(draining.status, HealthStatus::Draining);
-    assert_eq!(draining.workers, Some(1));
     stopping.await.unwrap();
     let (status, r) = slow.await.unwrap();
     assert_eq!(status, 200, "{r}");
