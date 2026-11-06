@@ -596,10 +596,9 @@ export interface components {
         Declaration: {
             /**
              * @description Its axioms that are assumptions: declared as `axiom` in this code or
-             *     in a snapshot it builds on. Absent in records from before they were
-             *     reported.
+             *     in a snapshot it builds on.
              */
-            assumes?: string[];
+            assumes: string[];
             axioms: string[];
             /**
              * @description Made by Lean on demand, such as an equation lemma: code with the same
@@ -609,7 +608,7 @@ export interface components {
             kind: string;
             name: string;
             /** @description What its axioms make it, by [`ProofStatus`]. */
-            status?: components["schemas"]["ProofStatus"];
+            status: components["schemas"]["ProofStatus"];
             /**
              * @description A hash of its type, with private names taken without their module,
              *     and with the internal auxiliaries it uses folded in.
@@ -617,10 +616,9 @@ export interface components {
             type_hash: string;
             /**
              * @description The constants of this code and of the snapshots it builds on that its
-             *     type uses, through internal auxiliaries. Absent in records from before
-             *     they were reported.
+             *     type uses, through internal auxiliaries.
              */
-            type_refs?: string[];
+            type_refs: string[];
             /**
              * @description For definitions, a hash of the value, as of the type, so a proof can't
              *     change what a statement means by redefining something it mentions.
@@ -630,7 +628,7 @@ export interface components {
              * @description The same for a definition's value, or an inductive's constructors and
              *     recursor.
              */
-            value_refs?: string[];
+            value_refs: string[];
         };
         DeclarationDetail: {
             /** @description Declarations it uses, in its statement and its proof or body. */
@@ -920,11 +918,6 @@ export interface components {
              *     directly or through other definitions, here or below.
              */
             affected?: string[];
-            /**
-             * @description Which theorems use a changed definition is unknown: this module, or
-             *     one it builds on in the plan, has no declaration export to read.
-             */
-            affected_unknown?: boolean;
             /** @description The old module's code with its imports swapped. */
             code: string;
             /**

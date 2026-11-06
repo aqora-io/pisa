@@ -30,12 +30,12 @@ class Declaration(TypedDict):
     name: str
     kind: str
     axioms: list[str]
-    assumes: NotRequired[list[str]]
-    status: NotRequired[ProofStatus]
+    assumes: list[str]
+    status: ProofStatus
     type_hash: str
     value_hash: NotRequired[str]
-    type_refs: NotRequired[list[str]]
-    value_refs: NotRequired[list[str]]
+    type_refs: list[str]
+    value_refs: list[str]
     generated: NotRequired[bool]
 
 class TacticInfo(TypedDict):
@@ -176,7 +176,6 @@ class RebuildItem(TypedDict):
     key: str
     replaces: NotRequired[Replaces]
     affected: NotRequired[list[str]]
-    affected_unknown: NotRequired[bool]
 
 class RebuildCreated(TypedDict):
     snapshot_id: NotRequired[str]

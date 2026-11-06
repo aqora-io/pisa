@@ -19,8 +19,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use pisa_db::catalog::{Catalog, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls};
 use pisa_db::db::Db;
-use pisa_protocol::api::{CheckResult, ProofStatus};
+use pisa_protocol::api::{CheckResult, Declaration, ProofStatus};
 use pisa_protocol::search::{Hit, Query, QueryResult, SnapshotScope};
+use pisa_protocol::verify::ReportedDeclaration;
 use pisa_search::anthropic::Client;
 use pisa_search::corpus::{Corpus, Decl, Manifest};
 use pisa_search::dense::{self, Embedder};
@@ -302,7 +303,8 @@ impl Setup {
     }
 }
 
-fn meta(id: &str) -> ModuleMeta {
+/// Module `id`, whose check found `found`.
+fn meta(id: &str, found: Vec<Declaration>) -> ModuleMeta {
     ModuleMeta {
         imports: Vec::new(),
         modules: vec![Module {
@@ -312,12 +314,30 @@ fn meta(id: &str) -> ModuleMeta {
         }],
         header: format!("import Mathlib\nimport PisaSnap.s{id}"),
         code: String::new(),
-        dirty: false,
+        status: found
+            .iter()
+            .map(|d| d.status)
+            .max()
+            .unwrap_or(ProofStatus::Proved),
         verified: false,
         macros: false,
-        result: CheckResult::default(),
+        result: CheckResult {
+            declarations: found,
+            ..Default::default()
+        },
         created: 0,
     }
+}
+
+/// A theorem of a module's check, with `axioms`, which make it `status`.
+fn checked(name: &str, axioms: &[&str], status: ProofStatus) -> Declaration {
+    let reported = ReportedDeclaration {
+        name: name.into(),
+        kind: "theorem".into(),
+        axioms: axioms.iter().map(|a| a.to_string()).collect(),
+        ..Default::default()
+    };
+    reported.with_status(status)
 }
 
 fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
@@ -346,15 +366,30 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
     }
 }
 
-/// Stores module `id` with `decls` and an entry with `labels`, as a worker
-/// does; returns the entry.
+/// Stores module `id` with `decls`, which its check proved, and an entry
+/// with `labels`, as a worker does; returns the entry.
 async fn create(
     catalog: &Catalog,
     id: &str,
     decls: Vec<SnapshotDecl>,
     labels: &[(&str, &str)],
 ) -> String {
-    let m = meta(id);
+    let proved = decls
+        .iter()
+        .map(|d| checked(&d.name, &[], ProofStatus::Proved))
+        .collect();
+    create_checked(catalog, id, decls, proved, labels).await
+}
+
+/// [`create`], with what the module's check found, `found`.
+async fn create_checked(
+    catalog: &Catalog,
+    id: &str,
+    decls: Vec<SnapshotDecl>,
+    found: Vec<Declaration>,
+    labels: &[(&str, &str)],
+) -> String {
+    let m = meta(id, found);
     let decls = SnapshotDecls::new(&m, decls);
     let (e, _, _) = catalog
         .commit(id, &m, Some(&decls), labelled(labels))
@@ -495,6 +530,45 @@ async fn snapshots_are_searched_by_scope() {
     assert_eq!(misspelled[0].name, "double_eq");
     let none = search(&e, by_name("double_eq", SnapshotScope::None)).await;
     assert!(!has(&none, "double_eq"));
+    s.done(e).await;
+}
+
+/// A hit has its own declaration's status: a proved theorem next to a
+/// `sorry` reads `proved`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hit_has_its_own_status() {
+    let Some(mut s) = setup().await else { return };
+    let mut decls = doubling();
+    decls.push(snapshot_decl(
+        "double_pos",
+        "double_pos (n : ℕ) (h : 0 < n) : 0 < double n",
+        "Doubling a positive number keeps it positive.",
+    ));
+    let found = vec![
+        checked("double_eq", &[], ProofStatus::Proved),
+        checked("double_pos", &["sorryAx"], ProofStatus::Sorry),
+    ];
+    create_checked(&s.catalog, "a1", decls, found, &[]).await;
+    let e = s.engine().await;
+    s.index(&e, false);
+
+    let by_name = |name: &str| Query {
+        name: Some(name.into()),
+        include_sorried: true,
+        snapshots: SnapshotScope::All,
+        ..Default::default()
+    };
+    for (name, status) in [
+        ("double_eq", ProofStatus::Proved),
+        ("double_pos", ProofStatus::Sorry),
+    ] {
+        let hits = until(&e, by_name(name), |hits| {
+            hits.first().is_some_and(|h| h.name == name)
+        })
+        .await;
+        assert_eq!(hits[0].module, "PisaSnap.sa1");
+        assert_eq!(hits[0].status, Some(status), "{name}");
+    }
     s.done(e).await;
 }
 

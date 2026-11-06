@@ -7,7 +7,6 @@
 mod common;
 
 use common::Cluster;
-use pisa_worker::catalog::Catalog;
 use serde_json::{Value, json};
 
 const SKELETON: &str = "import Foo\n\ntheorem t : 1 = 1 := sorry";
@@ -223,60 +222,6 @@ async fn a_replacement_on_other_snapshots_keeps_what_its_statements_use() {
         module(&helper)
     );
     let r = create(&c, json!({"code": both, "replaces": replacing(&old)})).await;
-    assert_eq!(r["replacement"]["filled"], json!(["thm3"]), "{r}");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_record_that_doesnt_say_what_it_uses_is_verified_to_say_it() {
-    let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let a = create(&c, json!({"code": "import Foo\n\ndef foo : Nat := 1"})).await;
-    let skeleton = create(
-        &c,
-        json!({"code": on(&a, "theorem thm3 : foo = 1 := sorry")}),
-    )
-    .await;
-    let old = entry(&skeleton).to_string();
-    // As a module kept before records said what declarations use, verified.
-    let id = &module(&skeleton)["PisaSnap.s".len()..];
-    let catalog = Catalog::new(c.db.clone(), c.version("v"));
-    let build = catalog
-        .module(id)
-        .await
-        .unwrap()
-        .modules
-        .last()
-        .unwrap()
-        .build
-        .clone();
-    let stripped = catalog.update_module(id, &build, |meta| {
-        meta.verified = true;
-        for d in &mut meta.result.declarations {
-            (d.type_refs, d.value_refs) = (None, None);
-        }
-    });
-    assert!(stripped.await.unwrap().is_some());
-
-    let more = create(
-        &c,
-        json!({"code": "import Foo\n\ndef foo : Nat := 1\ntheorem extra : 2 = 2 := rfl"}),
-    )
-    .await;
-    let proof = on(&more, "theorem thm3 : foo = 1 := rfl");
-    let r = create(&c, json!({"code": proof, "replaces": replacing(&old)})).await;
-    assert!(r.get("snapshot").is_none(), "{r}");
-    let reasons = r["check"]["reasons"].to_string();
-    assert!(reasons.contains("verify it to record them"), "{r}");
-
-    let (status, verified) = c.post(&format!("/snapshots/{old}/verify"), json!({})).await;
-    assert_eq!(status, 200, "{verified}");
-    assert!(
-        verified["checked"]
-            .as_array()
-            .unwrap()
-            .contains(&skeleton["snapshot"]["module"]),
-        "{verified}"
-    );
-    let r = create(&c, json!({"code": proof, "replaces": replacing(&old)})).await;
     assert_eq!(r["replacement"]["filled"], json!(["thm3"]), "{r}");
 }
 

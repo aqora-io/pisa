@@ -447,7 +447,7 @@
         "description": "A new declaration and the axioms it depends on.",
         "properties": {
           "assumes": {
-            "description": "Its axioms that are assumptions: declared as `axiom` in this code or\nin a snapshot it builds on. Absent in records from before they were\nreported.",
+            "description": "Its axioms that are assumptions: declared as `axiom` in this code or\nin a snapshot it builds on.",
             "items": {
               "type": "string"
             },
@@ -478,7 +478,7 @@
             "type": "string"
           },
           "type_refs": {
-            "description": "The constants of this code and of the snapshots it builds on that its\ntype uses, through internal auxiliaries. Absent in records from before\nthey were reported.",
+            "description": "The constants of this code and of the snapshots it builds on that its\ntype uses, through internal auxiliaries.",
             "items": {
               "type": "string"
             },
@@ -500,7 +500,11 @@
           "name",
           "kind",
           "axioms",
-          "type_hash"
+          "assumes",
+          "status",
+          "type_hash",
+          "type_refs",
+          "value_refs"
         ],
         "type": "object"
       },
@@ -1137,10 +1141,6 @@
               "type": "string"
             },
             "type": "array"
-          },
-          "affected_unknown": {
-            "description": "Which theorems use a changed definition is unknown: this module, or\none it builds on in the plan, has no declaration export to read.",
-            "type": "boolean"
           },
           "code": {
             "description": "The old module's code with its imports swapped.",

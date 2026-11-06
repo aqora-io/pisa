@@ -84,10 +84,7 @@ pub struct SnapshotCreateJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotJob {
-    /// The snapshot id, `<version>~<entry id>`. Routers of the release before
-    /// entries called it `snapshot` and sent a module name, which is then a
-    /// `bad_request`.
-    #[serde(alias = "snapshot")]
+    /// The snapshot id, `<version>~<entry id>`.
     pub entry: String,
 }
 
@@ -248,10 +245,7 @@ mod tests {
         let decode = serde_json::from_value::<Job>;
         assert!(decode(serde_json::json!({"kind": "check", "code": 5})).is_err());
         // A job from a server of the release before entries.
-        let old = decode(serde_json::json!({"kind": "snapshot_get", "snapshot": "PisaSnap.s0"}));
-        let Ok(Job::SnapshotGet(job)) = old else {
-            panic!("{old:?}")
-        };
-        assert_eq!(job.entry, "PisaSnap.s0");
+        let old = serde_json::json!({"kind": "snapshot_get", "snapshot": "PisaSnap.s0"});
+        assert!(decode(old).is_err());
     }
 }

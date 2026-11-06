@@ -852,10 +852,6 @@ pub struct RebuildItem {
     /// directly or through other definitions, here or below.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affected: Vec<String>,
-    /// Which theorems use a changed definition is unknown: this module, or
-    /// one it builds on in the plan, has no declaration export to read.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub affected_unknown: bool,
 }
 
 /// `GET /snapshots/audit`: what the snapshots that have every label the

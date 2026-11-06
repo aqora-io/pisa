@@ -46,7 +46,9 @@ use pisa_protocol::labels::{
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::search::{Description, Informal};
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::{Change, ProofStatus, Verification, normalised, statement_changes};
+use pisa_protocol::verify::{
+    Change, ProofStatus, ReportedDeclaration, Verification, normalised, statement_changes,
+};
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
 use sha2::{Digest, Sha256};
 
@@ -77,7 +79,7 @@ pub struct Snapshots {
     confirmed: Mutex<HashMap<String, Instant>>,
     /// One task at a time loads or builds a given snapshot.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// The pool's policy, for the statuses of records kept without them.
+    /// The pool's policy, for the axioms an audit lists.
     policy: Policy,
 }
 
@@ -127,8 +129,6 @@ struct Swapped {
 
 /// Compares a replacement's declarations, `now`, with those of the module it
 /// replaces: what it filled and changed, or why it can't replace it.
-/// `exported` is its declaration export, for when `now` doesn't record what
-/// each declaration uses.
 ///
 /// The declarations are compared by their hashes, and a hash names the
 /// constants a type or value uses without saying what they are. When the
@@ -141,7 +141,6 @@ fn compare(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
-    exported: Option<&[SnapshotDecl]>,
 ) -> Result<Replacement, Vec<String>> {
     let allow = replacing.replaced.allow;
     let definitions = allow == Some(Allow::Definitions);
@@ -164,19 +163,10 @@ fn compare(
     let affected = if changed_definitions.is_empty() {
         Vec::new()
     } else {
-        let gained = swapped.gained.iter().filter_map(|(_, d)| recorded_uses(d));
-        let own = recorded_uses(now).or_else(|| exported.map(exported_uses));
-        let Some(own) = own else {
-            return Err(vec![
-                "statement: the theorems that use the changed definitions are unknown, as the \
-                 module's declarations don't say what they use"
-                    .into(),
-            ]);
-        };
-        let names: HashSet<&str> = own.iter().map(|u| u.name).collect();
-        let items: Vec<Uses> = own.into_iter().chain(gained.flatten()).collect();
+        let gained = swapped.gained.iter().flat_map(|(_, d)| d);
+        let names: HashSet<&str> = now.iter().map(|d| d.name.as_str()).collect();
         let used = changed_definitions.iter().cloned().collect();
-        let (_, theorems) = uses(&used, &items);
+        let (_, theorems) = uses(&used, now.iter().chain(gained));
         theorems
             .into_iter()
             .filter(|t| names.contains(t.as_str()))
@@ -267,21 +257,21 @@ impl std::fmt::Display for Reached {
 }
 
 /// What `d` uses: its type's refs, and its value's for a definition or an
-/// inductive. `None` if its record doesn't say.
-fn refs_of(d: &Declaration) -> Option<Vec<&String>> {
-    let mut refs: Vec<&String> = d.type_refs.as_ref()?.iter().collect();
+/// inductive.
+fn refs_of(d: &Declaration) -> Vec<&String> {
+    let mut refs: Vec<&String> = d.type_refs.iter().collect();
     if d.value_hash.is_some() || d.kind == "inductive" {
-        refs.extend(d.value_refs.as_ref()?);
+        refs.extend(&d.value_refs);
     }
-    Some(refs)
+    refs
 }
 
 /// Follows what the replaced module's declarations use, through types and
 /// values, into the snapshots the replacement no longer builds on, and
 /// compares each constant reached there with the one of the same name (see
 /// [`normalised`]) that the replacement declares or builds on now. What it
-/// can't compare, because a record doesn't say what its declarations use or
-/// a private name is ambiguous, is an error: the replacement is refused.
+/// can't compare, because a private name is ambiguous, is an error: the
+/// replacement is refused.
 fn walk(
     replacing: &Replacing,
     now: &[Declaration],
@@ -290,14 +280,6 @@ fn walk(
     if swapped.lost.is_empty() {
         return Ok(Vec::new());
     }
-    let lost = || {
-        let modules: Vec<String> = swapped
-            .lost
-            .iter()
-            .map(|(m, _)| snapshot::module(m))
-            .collect();
-        modules.join(", ")
-    };
     // Refs name constants as they are, so the old side is found exactly.
     let old: HashMap<&str, (&str, &Declaration)> = swapped
         .lost
@@ -314,19 +296,9 @@ fn walk(
             .and_modify(|found| *found = None)
             .or_insert(Some(d));
     }
-    let mut todo: Vec<&String> = Vec::new();
-    for d in &replacing.declarations {
-        let Some(refs) = refs_of(d) else {
-            return Err(vec![format!(
-                "statement: the code no longer builds on {}, and the replaced entry's \
-                 declarations don't record what they use: verify it to record them",
-                lost()
-            )]);
-        };
-        todo.extend(refs);
-    }
+    let mut todo: Vec<&String> = replacing.declarations.iter().flat_map(refs_of).collect();
     let mut seen: HashSet<&str> = HashSet::new();
-    let (mut reached, mut unknown) = (Vec::new(), Vec::new());
+    let (mut reached, mut ambiguous) = (Vec::new(), Vec::new());
     while let Some(r) = todo.pop() {
         if !seen.insert(r) {
             continue;
@@ -339,7 +311,7 @@ fn walk(
         let change = match new.get(&normalised(r)) {
             None => Some(Change::Missing),
             Some(None) => {
-                unknown.push(format!(
+                ambiguous.push(format!(
                     "statement: {r}, from {}, matches more than one declaration of the code \
                      and what it builds on",
                     snapshot::module(module)
@@ -358,20 +330,13 @@ fn walk(
                 change,
             });
         }
-        match refs_of(c) {
-            Some(refs) => todo.extend(refs),
-            None => unknown.push(format!(
-                "statement: {r}, from {}, can't be compared, as that module's declarations \
-                 don't record what they use: verify the replaced entry to record them",
-                snapshot::module(module)
-            )),
-        }
+        todo.extend(refs_of(c));
     }
-    if unknown.is_empty() {
+    if ambiguous.is_empty() {
         Ok(reached)
     } else {
-        unknown.dedup();
-        Err(unknown)
+        ambiguous.dedup();
+        Err(ambiguous)
     }
 }
 
@@ -397,59 +362,29 @@ fn replaced(
     }
 }
 
-/// A declaration as [`uses`] reads it: from a module's declaration export,
-/// or from the refs its records keep.
-struct Uses<'a> {
-    name: &'a str,
-    theorem: bool,
-    type_refs: &'a [String],
-    value_refs: &'a [String],
-}
-
-fn exported_uses(decls: &[SnapshotDecl]) -> Vec<Uses<'_>> {
-    decls
-        .iter()
-        .map(|d| Uses {
-            name: &d.name,
-            theorem: d.kind == "theorem",
-            type_refs: &d.type_refs,
-            value_refs: &d.value_refs,
-        })
-        .collect()
-}
-
-/// `None` if a declaration doesn't record what it uses.
-fn recorded_uses(decls: &[Declaration]) -> Option<Vec<Uses<'_>>> {
-    decls
-        .iter()
-        .map(|d| {
-            Some(Uses {
-                name: &d.name,
-                theorem: d.kind == "theorem",
-                type_refs: d.type_refs.as_deref()?,
-                value_refs: d.value_refs.as_deref().unwrap_or_default(),
-            })
-        })
-        .collect()
-}
-
-/// What among `items` uses a name in `used`, directly or through each other:
-/// the declarations other than theorems whose type or value does, which then
-/// count as used too, and the theorems whose type does. Names are matched as
-/// [`normalised`].
-fn uses(used: &HashSet<String>, items: &[Uses]) -> (Vec<String>, Vec<String>) {
+/// What among `items` uses a name in `used`, directly or through each other,
+/// by the refs they record: the declarations other than theorems whose type
+/// or value does, which then count as used too, and the theorems whose type
+/// does. Names are matched as [`normalised`].
+fn uses<'a, I>(used: &HashSet<String>, items: I) -> (Vec<String>, Vec<String>)
+where
+    I: IntoIterator<Item = &'a Declaration>,
+    I::IntoIter: Clone,
+{
+    let items = items.into_iter();
+    let theorem = |d: &Declaration| d.kind == "theorem";
     let mut names: HashSet<String> = used.iter().map(|u| normalised(u).into_owned()).collect();
     let mut users: Vec<String> = Vec::new();
     let is_used = |r: &String, names: &HashSet<String>| names.contains(normalised(r).as_ref());
     loop {
         let before = users.len();
-        for d in items.iter().filter(|d| !d.theorem) {
-            let refs = d.type_refs.iter().chain(d.value_refs);
-            if !names.contains(normalised(d.name).as_ref())
+        for d in items.clone().filter(|d| !theorem(d)) {
+            let refs = d.type_refs.iter().chain(&d.value_refs);
+            if !names.contains(normalised(&d.name).as_ref())
                 && refs.clone().any(|r| is_used(r, &names))
             {
-                names.insert(normalised(d.name).into_owned());
-                users.push(d.name.to_string());
+                names.insert(normalised(&d.name).into_owned());
+                users.push(d.name.clone());
             }
         }
         if users.len() == before {
@@ -457,9 +392,8 @@ fn uses(used: &HashSet<String>, items: &[Uses]) -> (Vec<String>, Vec<String>) {
         }
     }
     let theorems = items
-        .iter()
-        .filter(|d| d.theorem && d.type_refs.iter().any(|r| is_used(r, &names)))
-        .map(|d| d.name.to_string())
+        .filter(|d| theorem(d) && d.type_refs.iter().any(|r| is_used(r, &names)))
+        .map(|d| d.name.clone())
         .collect();
     (users, theorems)
 }
@@ -571,26 +505,20 @@ fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashMap<String, 
     levels
 }
 
-/// Marks what `reported`, the axiom report of the same module, marks as
-/// generated in `decls`, from the kernel verifier: the verifier's environment
-/// lacks what tells some of Lean's generated names apart.
-fn keep_generated(decls: &mut [Declaration], reported: &[Declaration]) {
-    let generated: HashSet<&str> = reported
-        .iter()
-        .filter(|d| d.generated)
-        .map(|d| d.name.as_str())
-        .collect();
+/// Marks `generated`, what the axiom report of the same module marks as
+/// generated, in `decls`, from the kernel verifier: the verifier's
+/// environment lacks what tells some of Lean's generated names apart.
+fn keep_generated<'a>(decls: &mut [Declaration], generated: impl IntoIterator<Item = &'a str>) {
+    let generated: HashSet<&str> = generated.into_iter().collect();
     for d in decls {
         d.generated |= generated.contains(d.name.as_str());
     }
 }
 
-/// Whether `meta`'s declarations record what they use.
-fn records_refs(meta: &ModuleMeta) -> bool {
-    meta.result
-        .declarations
-        .iter()
-        .all(|d| d.type_refs.is_some())
+/// The worst status among a module's declarations, `decls`.
+fn worst_status(decls: &[Declaration]) -> ProofStatus {
+    let statuses = decls.iter().map(|d| d.status);
+    statuses.max().unwrap_or(ProofStatus::Proved)
 }
 
 /// The ids of `modules`.
@@ -610,7 +538,7 @@ fn failure_error(f: &VerifyFailure) -> Error {
 /// Re-checks the module through the kernel in a clean process, and returns its
 /// declarations with their axioms from there, so that they don't depend on
 /// whatever ran during the build. The error is why the re-check failed.
-async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<Declaration>, String> {
+async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<ReportedDeclaration>, String> {
     let verified = slot.verify(&snapshot::module(id), REPORT_TIMEOUT).await;
     if !verified.ok {
         return Err(verified
@@ -648,7 +576,11 @@ async fn run_report<T>(
 
 /// The declarations of a module in a process that has it imported, with their
 /// axioms as that process reports them.
-async fn report_module(slot: &mut Lease, id: &str, env: u64) -> Result<Vec<Declaration>, Error> {
+async fn report_module(
+    slot: &mut Lease,
+    id: &str,
+    env: u64,
+) -> Result<Vec<ReportedDeclaration>, Error> {
     let text = module_report(&snapshot::module(id));
     run_report(slot, text, env, "axiom report", parse_report).await
 }
@@ -683,17 +615,6 @@ impl Snapshots {
             locks: Mutex::default(),
             policy,
         }
-    }
-
-    /// What `d`'s axioms make it, as recorded or else by the policy.
-    fn status(&self, d: &Declaration) -> ProofStatus {
-        d.status.unwrap_or_else(|| self.policy.status(d))
-    }
-
-    /// The worst status among a module's declarations.
-    fn module_status(&self, meta: &ModuleMeta) -> ProofStatus {
-        let statuses = meta.result.declarations.iter().map(|d| self.status(d));
-        statuses.max().unwrap_or(ProofStatus::Proved)
     }
 
     /// Where the store keeps file `ext` of a module build.
@@ -869,7 +790,7 @@ impl Snapshots {
                 snapshot_id: self.id(&r.snapshot_id),
                 ..r
             }),
-            status: self.module_status(meta),
+            status: meta.status,
             verified: meta.verified,
             created: entry_meta.created_micros / 1_000_000,
         }
@@ -885,7 +806,7 @@ impl Snapshots {
     ) -> CreateSnapshotResponse {
         CreateSnapshotResponse {
             snapshot: Some(self.snapshot(entry, entry_meta, &meta)),
-            check: self.with_statuses(meta.result),
+            check: meta.result,
             replacement: None,
         }
     }
@@ -894,21 +815,13 @@ impl Snapshots {
     /// that added no entry: the module's check, failed, for the caller to
     /// say why.
     fn refused(&self, meta: ModuleMeta) -> CreateSnapshotResponse {
-        let mut check = self.with_statuses(meta.result);
+        let mut check = meta.result;
         check.ok = false;
         CreateSnapshotResponse {
             snapshot: None,
             check,
             replacement: None,
         }
-    }
-
-    /// `result` with each declaration's status, for records kept without.
-    fn with_statuses(&self, mut result: CheckResult) -> CheckResult {
-        for d in &mut result.declarations {
-            d.status = Some(self.status(d));
-        }
-        result
     }
 
     /// Checks `job.code` by compiling it to a module and keeps the module
@@ -1137,16 +1050,6 @@ impl Snapshots {
         };
         let replacement = match replacing {
             Some(r) => {
-                let exported = match r.replaced.allow {
-                    Some(_) => match self.catalog.decls(id).await {
-                        Ok(decls) => decls.map(|d| d.decls),
-                        Err(e) => {
-                            response.check.error = Some(e);
-                            return Some(response);
-                        }
-                    },
-                    None => None,
-                };
                 let needs: Vec<String> = ids(&meta.modules).cloned().collect();
                 let swapped = match self.swapped(r, &needs, id).await {
                     Ok(swapped) => swapped,
@@ -1155,8 +1058,7 @@ impl Snapshots {
                         return Some(response);
                     }
                 };
-                let decls = &meta.result.declarations;
-                match compare(r, decls, &swapped, exported.as_deref()) {
+                match compare(r, &meta.result.declarations, &swapped) {
                     Ok(replacement) => Some(replacement),
                     Err(reasons) => {
                         let mut refused = self.refused(meta);
@@ -1327,20 +1229,24 @@ impl Snapshots {
                 return fail(outcome, e);
             }
         };
-        let decls = match rechecked {
-            Some(mut decls) => {
-                keep_generated(&mut decls, &reported);
-                decls
+        let mut verification = match rechecked {
+            Some(decls) => {
+                let mut verification = slot.policy().judge_decls(false, Some(decls));
+                let generated = reported.iter().filter(|d| d.generated);
+                keep_generated(
+                    &mut verification.declarations,
+                    generated.map(|d| d.name.as_str()),
+                );
+                verification
             }
-            None => reported,
+            None => slot.policy().judge_decls(false, Some(reported)),
         };
         // For search only, so a failure just leaves the module out of it.
         let exported = export_module(slot, id, env)
             .await
             .inspect_err(|e| tracing::warn!(module = %id, "exporting declarations failed: {e}"))
             .ok();
-        let mut verification = slot.policy().judge_decls(false, Some(decls));
-        let dirty = !verification.ok;
+        let status = worst_status(&verification.declarations);
         let needs: Vec<String> = ids(&modules(&parents, own.clone())).cloned().collect();
         let replacement = match replacing {
             Some(r) => {
@@ -1351,8 +1257,7 @@ impl Snapshots {
                         return fail(outcome, e);
                     }
                 };
-                let decls = &verification.declarations;
-                match compare(r, decls, &swapped, exported.as_deref()) {
+                match compare(r, &verification.declarations, &swapped) {
                     Ok(replacement) => Some(replacement),
                     Err(reasons) => {
                         self.unbuild(slot, id);
@@ -1372,7 +1277,7 @@ impl Snapshots {
             modules: modules(&parents, own.clone()),
             header: header.to_string(),
             code: job.code.clone(),
-            dirty,
+            status,
             verified: recheck && parents.iter().all(|p| p.verified),
             macros,
             result: outcome.clone().into(),
@@ -1544,10 +1449,7 @@ impl Snapshots {
             return Ok(Some(Recheck::Changed));
         }
         self.fetch(module).await?;
-        // A record from before declarations recorded what they use is
-        // checked again, to record it.
-        let done = meta.verified && records_refs(&meta);
-        Ok(done.then_some(Recheck::AlreadyVerified))
+        Ok(meta.verified.then_some(Recheck::AlreadyVerified))
     }
 
     /// Records that a module build passed the re-check, with what it found.
@@ -1562,11 +1464,12 @@ impl Snapshots {
             .catalog
             .update_module(&module.id, &module.build, |meta| {
                 meta.verified = true;
-                meta.dirty = !verification.ok;
+                meta.status = worst_status(&verification.declarations);
                 meta.result.ok = verification.ok;
                 meta.result.reasons = verification.reasons.clone();
                 let mut decls = verification.declarations.clone();
-                keep_generated(&mut decls, &meta.result.declarations);
+                let generated = meta.result.declarations.iter().filter(|d| d.generated);
+                keep_generated(&mut decls, generated.map(|d| d.name.as_str()));
                 meta.result.declarations = decls;
             })
             .await?;
@@ -1641,7 +1544,7 @@ impl Snapshots {
         Ok(SnapshotDetail {
             snapshot,
             code: meta.code,
-            check: self.with_statuses(meta.result),
+            check: meta.result,
             exports,
         })
     }
@@ -1752,21 +1655,6 @@ impl Snapshots {
         Ok(ListDependentsResponse { snapshots })
     }
 
-    /// [`uses`] in module `m`, whose declarations are `decls`: from the refs
-    /// they record, or else from the module's export. `None` if neither says.
-    async fn uses(
-        &self,
-        m: &str,
-        decls: &[Declaration],
-        used: &HashSet<String>,
-    ) -> Result<Option<(Vec<String>, Vec<String>)>, Error> {
-        if let Some(items) = recorded_uses(decls) {
-            return Ok(Some(uses(used, &items)));
-        }
-        let exported = self.catalog.decls(m).await?;
-        Ok(exported.map(|d| uses(used, &exported_uses(&d.decls))))
-    }
-
     /// Plans the creates that rebuild `job.from`'s dependents on `job.to`;
     /// see [`RebuildSnapshotsResponse`].
     pub async fn rebuild_plan(
@@ -1817,12 +1705,10 @@ impl Snapshots {
         let link = to_entry.replaces.filter(|r| r.snapshot_id == from);
         let changes = match link {
             Some(_) => Vec::new(),
-            None => compare(&strict, now, &swapped, None)
-                .err()
-                .unwrap_or_default(),
+            None => compare(&strict, now, &swapped).err().unwrap_or_default(),
         };
         let definitions = replacing(Some(Allow::Definitions));
-        let changed_definitions = match compare(&definitions, now, &swapped, None) {
+        let changed_definitions = match compare(&definitions, now, &swapped) {
             Ok(r) => r.changed_definitions,
             // What else changed is in `changes`.
             Err(_) => statement_changes(&old_meta.result.declarations, now)
@@ -1869,14 +1755,9 @@ impl Snapshots {
         // modules' declarations use, level by level: what uses one below is
         // used here.
         let mut used: HashSet<String> = changed_definitions.iter().cloned().collect();
-        let mut unknown: HashSet<String> = HashSet::new();
         if !changed_definitions.is_empty() {
-            match self.uses(&new, now, &used).await? {
-                Some((users, _)) => used.extend(users),
-                None => {
-                    unknown.insert(old.clone());
-                }
-            }
+            let (users, _) = uses(&used, now);
+            used.extend(users);
         }
 
         let mut renamed = BTreeMap::from([(old.clone(), new.clone())]);
@@ -1888,22 +1769,12 @@ impl Snapshots {
             let id = snapshot::id(&code);
             let header = snapshot::next_header(&split_header(&code).header, &id);
             renamed.insert(m.clone(), id.clone());
-            let (affected, affected_unknown) = if changed_definitions.is_empty() {
-                (Vec::new(), false)
-            } else if above[&m].iter().any(|i| unknown.contains(i)) {
-                unknown.insert(m.clone());
-                (Vec::new(), true)
+            let affected = if changed_definitions.is_empty() {
+                Vec::new()
             } else {
-                match self.uses(&m, &meta.result.declarations, &used).await? {
-                    Some((users, theorems)) => {
-                        used.extend(users);
-                        (theorems, false)
-                    }
-                    None => {
-                        unknown.insert(m.clone());
-                        (Vec::new(), true)
-                    }
-                }
+                let (users, theorems) = uses(&used, &meta.result.declarations);
+                used.extend(users);
+                theorems
             };
             let item = |entry: Option<String>, labels: BTreeMap<String, String>| RebuildItem {
                 level,
@@ -1921,7 +1792,6 @@ impl Snapshots {
                 code: code.clone(),
                 labels,
                 affected: affected.clone(),
-                affected_unknown,
             };
             match matching.remove(&m) {
                 Some(entries) => plan.extend(entries.into_iter().map(|(e, entry_meta)| {
@@ -1981,12 +1851,11 @@ impl Snapshots {
             };
             audit.summary.unverified_modules += u64::from(!meta.verified);
             for d in meta.result.declarations.iter().filter(|d| !d.generated) {
-                let assumes = d.assumes.as_deref().unwrap_or_default();
                 // An assumption itself.
-                if d.kind == "axiom" && assumes.contains(&d.name) {
+                if d.kind == "axiom" && d.assumes.contains(&d.name) {
                     continue;
                 }
-                let status = self.status(d);
+                let status = d.status;
                 let summary = &mut audit.summary;
                 *match status {
                     ProofStatus::Proved => &mut summary.proved,
@@ -1994,7 +1863,7 @@ impl Snapshots {
                     ProofStatus::Sorry => &mut summary.sorry,
                     ProofStatus::Rejected => &mut summary.rejected,
                 } += 1;
-                for a in assumes {
+                for a in &d.assumes {
                     used_by.entry(a.clone()).or_default().push(d.name.clone());
                 }
                 if status >= ProofStatus::Sorry {
@@ -2133,29 +2002,25 @@ mod tests {
     use object_store::memory::InMemory;
 
     fn decl(name: &str, ty: &str, value: Option<&str>, axioms: &[&str]) -> Declaration {
-        Declaration {
+        let reported = ReportedDeclaration {
             name: name.into(),
             kind: if value.is_some() { "def" } else { "theorem" }.into(),
             axioms: axioms.iter().map(|a| a.to_string()).collect(),
             type_hash: ty.into(),
             value_hash: value.map(Into::into),
             ..Default::default()
-        }
+        };
+        reported.with_status(ProofStatus::Proved)
     }
 
-    fn exported(name: &str, kind: &str, type_refs: &[&str], value_refs: &[&str]) -> SnapshotDecl {
-        SnapshotDecl {
-            name: name.into(),
+    /// A `kind` declaration whose type uses `type_refs` and value
+    /// `value_refs`.
+    fn declared(name: &str, kind: &str, type_refs: &[&str], value_refs: &[&str]) -> Declaration {
+        let d = Declaration {
             kind: kind.into(),
-            signature: String::new(),
-            type_pp_full: String::new(),
-            type_refs: type_refs.iter().map(|r| r.to_string()).collect(),
-            value_refs: value_refs.iter().map(|r| r.to_string()).collect(),
-            docstring: None,
-            deprecated_to: None,
-            uses_sorry: false,
-            status: ProofStatus::Proved,
-        }
+            ..decl(name, "", None, &[])
+        };
+        using(d, type_refs, value_refs)
     }
 
     fn replacing(old: Vec<Declaration>, allow: Option<Allow>) -> Replacing {
@@ -2185,13 +2050,13 @@ mod tests {
         ];
         // It may build on more snapshots than the replaced module does.
         let needs = Swapped::default();
-        let r = compare(&replacing(old.clone(), None), &now, &needs, None).unwrap();
+        let r = compare(&replacing(old.clone(), None), &now, &needs).unwrap();
         assert_eq!(r.filled, ["t"]);
         assert!(r.changed_definitions.is_empty() && r.affected.is_empty());
 
         let retyped = [decl("t", "X", None, &[]), now[1].clone(), now[2].clone()];
         assert_eq!(
-            compare(&replacing(old.clone(), None), &retyped, &needs, None),
+            compare(&replacing(old.clone(), None), &retyped, &needs),
             Err(vec!["statement: t has a different type".to_string()])
         );
         // A definition's value changes only when that is allowed, and never
@@ -2202,29 +2067,17 @@ mod tests {
             decl("f", "3", Some("5"), &[]),
         ];
         assert_eq!(
-            compare(&replacing(old.clone(), None), &redefined, &needs, Some(&[])),
+            compare(&replacing(old.clone(), None), &redefined, &needs),
             Err(vec!["statement: f has a different value".to_string()])
         );
         let allowed = replacing(old.clone(), Some(Allow::Definitions));
-        let r = compare(&allowed, &redefined, &needs, Some(&[])).unwrap();
+        let r = compare(&allowed, &redefined, &needs).unwrap();
         assert_eq!(r.changed_definitions, ["f"]);
-        assert_eq!(
-            compare(&allowed, &retyped, &needs, Some(&[]))
-                .unwrap_err()
-                .len(),
-            1
-        );
-        // Without the export, which theorems use it is unknown.
-        assert_eq!(
-            compare(&allowed, &redefined, &needs, None)
-                .unwrap_err()
-                .len(),
-            1
-        );
+        assert_eq!(compare(&allowed, &retyped, &needs).unwrap_err().len(), 1);
     }
 
     fn using(d: Declaration, type_refs: &[&str], value_refs: &[&str]) -> Declaration {
-        let refs = |r: &[&str]| Some(r.iter().map(|r| r.to_string()).collect());
+        let refs = |r: &[&str]| r.iter().map(|r| r.to_string()).collect();
         Declaration {
             type_refs: refs(type_refs),
             value_refs: refs(value_refs),
@@ -2253,7 +2106,7 @@ mod tests {
         let foo = || using(decl("foo", "1", Some("2"), &[]), &[], &["bar"]);
         let bar = |value: &str| using(decl("bar", "3", Some(value), &[]), &[], &[]);
         let (old, swapped) = swap(Some(foo()), bar("4"));
-        assert!(compare(&replacing(old.clone(), None), &old, &swapped, None).is_ok());
+        assert!(compare(&replacing(old.clone(), None), &old, &swapped).is_ok());
 
         // `bar` changed under `foo`, which `thm3` names.
         let (old, swapped) = swap(Some(foo()), bar("5"));
@@ -2262,11 +2115,11 @@ mod tests {
             snapshot::module("a")
         );
         assert_eq!(
-            compare(&replacing(old.clone(), None), &old, &swapped, None),
+            compare(&replacing(old.clone(), None), &old, &swapped),
             Err(vec![reason])
         );
         let allowed = replacing(old.clone(), Some(Allow::Definitions));
-        let r = compare(&allowed, &old, &swapped, None).unwrap();
+        let r = compare(&allowed, &old, &swapped).unwrap();
         assert_eq!(
             (r.changed_definitions, r.affected),
             (vec!["bar".into()], vec!["thm3".into()])
@@ -2275,7 +2128,7 @@ mod tests {
         let (old, swapped) = swap(None, bar("4"));
         let reason = format!("statement: foo, from {}, is missing", snapshot::module("a"));
         assert_eq!(
-            compare(&replacing(old.clone(), None), &old, &swapped, None),
+            compare(&replacing(old.clone(), None), &old, &swapped),
             Err(vec![reason])
         );
     }
@@ -2290,7 +2143,7 @@ mod tests {
         let skeleton = || replacing(old.clone(), None);
         let none = Swapped::default();
         // The theorem itself, assumed.
-        let err = compare(&skeleton(), &[axiom("lem2", "1")], &none, None).unwrap_err();
+        let err = compare(&skeleton(), &[axiom("lem2", "1")], &none).unwrap_err();
         assert_eq!(
             err,
             [
@@ -2300,12 +2153,7 @@ mod tests {
         );
         // An assumption of its own, or of a snapshot it now builds on.
         let proof = using(decl("lem2", "1", None, &["helper"]), &[], &[]);
-        let err = compare(
-            &skeleton(),
-            &[axiom("helper", "1"), proof.clone()],
-            &none,
-            None,
-        );
+        let err = compare(&skeleton(), &[axiom("helper", "1"), proof.clone()], &none);
         assert_eq!(
             err.unwrap_err(),
             ["statement: the code adds the assumption helper"]
@@ -2314,7 +2162,7 @@ mod tests {
             lost: Vec::new(),
             gained: vec![("x".into(), vec![axiom("helper", "1")])],
         };
-        let err = compare(&skeleton(), std::slice::from_ref(&proof), &gained, None).unwrap_err();
+        let err = compare(&skeleton(), std::slice::from_ref(&proof), &gained).unwrap_err();
         assert_eq!(err, ["statement: the code adds the assumption helper"]);
 
         // Assumptions it already had are kept, with their statements.
@@ -2324,12 +2172,12 @@ mod tests {
             axiom("kunneth", "5"),
             using(decl("lem2", "1", None, &["kunneth"]), &[], &[]),
         ];
-        assert!(compare(&with, &kept, &none, None).is_ok());
+        assert!(compare(&with, &kept, &none).is_ok());
         let moved = Swapped {
             lost: vec![("a".into(), vec![axiom("other", "6")])],
             gained: vec![("b".into(), vec![axiom("other", "7")])],
         };
-        let err = compare(&with, &kept, &moved, None).unwrap_err();
+        let err = compare(&with, &kept, &moved).unwrap_err();
         assert!(
             err.contains(&"statement: the assumption other has a different statement".to_string()),
             "{err:?}"
@@ -2339,28 +2187,11 @@ mod tests {
             axiom("lem2._native.native_decide.ax_1_1", "8"),
             old[0].clone(),
         ];
-        assert!(compare(&skeleton(), &native, &none, None).is_ok());
+        assert!(compare(&skeleton(), &native, &none).is_ok());
     }
 
     #[test]
     fn a_swap_that_cant_be_followed_is_refused() {
-        let foo = using(decl("foo", "1", Some("2"), &[]), &[], &["bar"]);
-        let bar = using(decl("bar", "3", Some("4"), &[]), &[], &[]);
-        // The replaced module's record doesn't say what it uses.
-        let (_, swapped) = swap(Some(foo.clone()), bar.clone());
-        let unrecorded = vec![decl("thm3", "9", None, &[])];
-        let err = compare(
-            &replacing(unrecorded.clone(), None),
-            &unrecorded,
-            &swapped,
-            None,
-        );
-        assert!(err.unwrap_err()[0].contains("verify it to record them"));
-        // Nor does the lost snapshot's.
-        let (old, mut swapped) = swap(Some(foo.clone()), bar.clone());
-        swapped.lost[0].1[0].value_refs = None;
-        let err = compare(&replacing(old.clone(), None), &old, &swapped, None);
-        assert!(err.unwrap_err()[0].contains("can't be compared"));
         // A private name the new side has twice.
         let private = |m: &str| {
             using(
@@ -2381,14 +2212,14 @@ mod tests {
                 ("c".into(), vec![private("c")]),
             ],
         };
-        let err = compare(&replacing(old.clone(), None), &old, &swapped, None);
+        let err = compare(&replacing(old.clone(), None), &old, &swapped);
         assert!(err.unwrap_err()[0].contains("more than one"));
         // Once, it is found under its new module.
         let swapped = Swapped {
             gained: vec![("b".into(), vec![private("b")])],
             ..swapped
         };
-        assert!(compare(&replacing(old.clone(), None), &old, &swapped, None).is_ok());
+        assert!(compare(&replacing(old.clone(), None), &old, &swapped).is_ok());
     }
 
     #[test]
@@ -2397,14 +2228,7 @@ mod tests {
             decl("f.match_1.eq_1", "1", None, &[]),
             decl("t", "2", None, &[]),
         ];
-        let reported = [
-            Declaration {
-                generated: true,
-                ..decl("f.match_1.eq_1", "1", None, &[])
-            },
-            decl("t", "2", None, &[]),
-        ];
-        keep_generated(&mut verified, &reported);
+        keep_generated(&mut verified, ["f.match_1.eq_1"]);
         assert_eq!(
             verified.iter().map(|d| d.generated).collect::<Vec<_>>(),
             [true, false]
@@ -2460,14 +2284,14 @@ mod tests {
 
     #[test]
     fn uses_say_what_comes_to_use_a_name() {
-        let exported = [
-            exported("g", "def", &["Nat"], &["f"]),
-            exported("h", "def", &["Nat"], &["g"]),
-            exported("t", "theorem", &["h"], &["f"]),
-            exported("u", "theorem", &["Nat"], &["f"]),
+        let declared = [
+            declared("g", "def", &["Nat"], &["f"]),
+            declared("h", "def", &["Nat"], &["g"]),
+            declared("t", "theorem", &["h"], &["f"]),
+            declared("u", "theorem", &["Nat"], &["f"]),
         ];
         let used = HashSet::from(["f".to_string()]);
-        let (users, theorems) = uses(&used, &exported_uses(&exported));
+        let (users, theorems) = uses(&used, &declared);
         assert_eq!(
             (users, theorems),
             (vec!["g".into(), "h".into()], vec!["t".into()])
@@ -2476,21 +2300,15 @@ mod tests {
 
     #[test]
     fn affected_theorems_use_a_changed_definition_directly_or_through_others() {
-        let exported = [
-            exported("f", "def", &["Nat"], &["Nat.add"]),
-            exported("g", "abbrev", &["Nat"], &["f"]),
-            exported("h", "def", &["Nat"], &["Nat.mul"]),
-            exported("direct", "theorem", &["f", "Eq"], &[]),
-            exported("through", "theorem", &["g"], &[]),
-            exported("unrelated", "theorem", &["h"], &["f"]),
+        let declared = [
+            declared("f", "def", &["Nat"], &["Nat.add"]),
+            declared("g", "def", &["Nat"], &["f"]),
+            declared("h", "def", &["Nat"], &["Nat.mul"]),
+            declared("direct", "theorem", &["f", "Eq"], &[]),
+            declared("through", "theorem", &["g"], &[]),
+            declared("unrelated", "theorem", &["h"], &["f"]),
         ];
-        let affected = |changed: &str| {
-            uses(
-                &HashSet::from([changed.to_string()]),
-                &exported_uses(&exported),
-            )
-            .1
-        };
+        let affected = |changed: &str| uses(&HashSet::from([changed.to_string()]), &declared).1;
         assert_eq!(affected("f"), ["direct", "through"]);
         assert!(affected("nothing").is_empty());
     }
@@ -2533,7 +2351,7 @@ mod tests {
             modules: vec![own],
             header: String::new(),
             code: String::new(),
-            dirty: false,
+            status: ProofStatus::Proved,
             verified: false,
             macros: false,
             result: CheckResult::default(),

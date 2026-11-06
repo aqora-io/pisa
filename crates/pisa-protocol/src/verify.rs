@@ -1,6 +1,7 @@
 //! Outcome of the verification policy that workers apply to checked code.
-//! Declarations are parsed from the worker's Lean report, so their field
-//! names must match the JSON it prints.
+//! [`ReportedDeclaration`]s are parsed from the worker's Lean report, so
+//! their field names must match the JSON it prints, and a [`Declaration`]
+//! keeps the same names.
 
 use std::borrow::Cow;
 
@@ -18,19 +19,16 @@ pub struct Verification {
 }
 
 /// A new declaration and the axioms it depends on.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Declaration {
     pub name: String,
     pub kind: String,
     pub axioms: Vec<String>,
     /// Its axioms that are assumptions: declared as `axiom` in this code or
-    /// in a snapshot it builds on. Absent in records from before they were
-    /// reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assumes: Option<Vec<String>>,
+    /// in a snapshot it builds on.
+    pub assumes: Vec<String>,
     /// What its axioms make it, by [`ProofStatus`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ProofStatus>,
+    pub status: ProofStatus,
     /// A hash of its type, with private names taken without their module,
     /// and with the internal auxiliaries it uses folded in.
     pub type_hash: String,
@@ -39,18 +37,49 @@ pub struct Declaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_hash: Option<String>,
     /// The constants of this code and of the snapshots it builds on that its
-    /// type uses, through internal auxiliaries. Absent in records from before
-    /// they were reported.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub type_refs: Option<Vec<String>>,
+    /// type uses, through internal auxiliaries.
+    pub type_refs: Vec<String>,
     /// The same for a definition's value, or an inductive's constructors and
     /// recursor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value_refs: Option<Vec<String>>,
+    pub value_refs: Vec<String>,
     /// Made by Lean on demand, such as an equation lemma: code with the same
     /// statements needn't have it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
+}
+
+/// A [`Declaration`] as Lean's report prints it: the same fields, without
+/// `status`, which the worker's policy works out from the axioms.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct ReportedDeclaration {
+    pub name: String,
+    pub kind: String,
+    pub axioms: Vec<String>,
+    pub assumes: Vec<String>,
+    pub type_hash: String,
+    pub value_hash: Option<String>,
+    pub type_refs: Vec<String>,
+    pub value_refs: Vec<String>,
+    #[serde(default)]
+    pub generated: bool,
+}
+
+impl ReportedDeclaration {
+    /// The declaration, with what its axioms make it.
+    pub fn with_status(self, status: ProofStatus) -> Declaration {
+        Declaration {
+            name: self.name,
+            kind: self.kind,
+            axioms: self.axioms,
+            assumes: self.assumes,
+            status,
+            type_hash: self.type_hash,
+            value_hash: self.value_hash,
+            type_refs: self.type_refs,
+            value_refs: self.value_refs,
+            generated: self.generated,
+        }
+    }
 }
 
 /// What a declaration's axioms make it, besides the allowed ones (by default
@@ -163,13 +192,14 @@ mod tests {
     use super::*;
 
     fn decl(name: &str, ty: &str, value: Option<&str>) -> Declaration {
-        Declaration {
+        let reported = ReportedDeclaration {
             name: name.into(),
             kind: if value.is_some() { "def" } else { "theorem" }.into(),
             type_hash: ty.into(),
             value_hash: value.map(Into::into),
             ..Default::default()
-        }
+        };
+        reported.with_status(ProofStatus::Proved)
     }
 
     #[test]

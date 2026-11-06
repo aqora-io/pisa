@@ -244,7 +244,6 @@ async fn worker_publishes_a_new_warm_header_before_the_result() {
 /// worker can't decode. That job fails, and the worker carries on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_does_not_decode_fails_alone() {
-    use pisa_protocol::api::ErrorKind;
     use pisa_protocol::wire::{CheckJob, Job, JobResult};
 
     let (queue, _dir) = lone_worker().await;
@@ -255,13 +254,6 @@ async fn a_job_that_does_not_decode_fails_alone() {
     let r = result(json!({"kind": "check", "code": 5})).await;
     assert!(
         matches!(&r, JobResult::Failed { error } if error.contains("another release")),
-        "{r:?}"
-    );
-
-    // The release before entries named the entry `snapshot`.
-    let r = result(json!({"kind": "snapshot_get", "snapshot": "PisaSnap.s0"})).await;
-    assert!(
-        matches!(&r, JobResult::Snapshot(Err(e)) if e.kind == ErrorKind::BadRequest),
         "{r:?}"
     );
 

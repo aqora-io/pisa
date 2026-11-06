@@ -178,6 +178,7 @@ async fn patch_sets_and_removes_labels() {
         (404, &json!("not_found")),
         "{r}"
     );
+    assert_eq!(r["error"]["message"], format!("unknown snapshot {unknown}"));
 }
 
 /// Review Focus 4: a patch that removes a label the snapshot doesn't have,

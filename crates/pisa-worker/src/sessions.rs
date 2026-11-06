@@ -90,10 +90,9 @@ impl Sessions {
             ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
             other => return Err(unexpected(other)),
         };
-        let declarations = axiom_report(slot, &r)
-            .await
-            .as_ref()
-            .and_then(parse_report)
+        let reported = axiom_report(slot, &r).await.as_ref().and_then(parse_report);
+        let declarations = reported
+            .map(|decls| slot.policy().judge_decls(false, Some(decls)).declarations)
             .unwrap_or_default();
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();

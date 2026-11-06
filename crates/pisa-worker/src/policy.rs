@@ -7,7 +7,7 @@
 
 use pisa_protocol::header::import_parts;
 use pisa_protocol::repl::{CommandResponse, Severity};
-use pisa_protocol::verify::{Declaration, ProofStatus, Verification};
+use pisa_protocol::verify::{ProofStatus, ReportedDeclaration, Verification};
 
 use crate::catalog::SnapshotDecl;
 
@@ -330,11 +330,12 @@ impl Policy {
     }
 
     /// Judges from whether the body had errors and the declarations the axiom
-    /// report found (from the REPL report, or a snapshot's kernel re-check).
+    /// report found (from the REPL report, or a snapshot's kernel re-check),
+    /// each with its status.
     pub fn judge_decls(
         &self,
         errors: bool,
-        declarations: Option<Vec<Declaration>>,
+        declarations: Option<Vec<ReportedDeclaration>>,
     ) -> Verification {
         let mut v = Verification {
             ok: true,
@@ -345,12 +346,17 @@ impl Policy {
             v.reasons.push("error: Lean reported errors".into());
         }
         match declarations {
-            Some(decls) => v.declarations = decls,
+            Some(decls) => {
+                v.declarations = decls
+                    .into_iter()
+                    .map(|d| {
+                        let status = self.status(&d);
+                        d.with_status(status)
+                    })
+                    .collect();
+            }
             None if errors => {}
             None => v.reasons.push("error: axiom report unavailable".into()),
-        }
-        for d in &mut v.declarations {
-            d.status = Some(self.status(d));
         }
         for d in &v.declarations {
             for ax in d.axioms.iter().filter(|a| !self.allowed_axioms.contains(a)) {
@@ -366,14 +372,13 @@ impl Policy {
     /// What `d`'s axioms make it: besides the allowed ones, none is
     /// `proved`; only assumptions (`d.assumes`) `conditional`; `sorryAx`,
     /// with or without assumptions, `sorry`; anything else `rejected`.
-    pub fn status(&self, d: &Declaration) -> ProofStatus {
-        let assumes = d.assumes.as_deref().unwrap_or_default();
+    pub fn status(&self, d: &ReportedDeclaration) -> ProofStatus {
         let each = d
             .axioms
             .iter()
             .filter(|a| !self.allowed_axioms.contains(a))
             .map(|a| {
-                if assumes.contains(a) {
+                if d.assumes.contains(a) {
                     ProofStatus::Conditional
                 } else if a == "sorryAx" {
                     ProofStatus::Sorry
@@ -385,13 +390,13 @@ impl Policy {
     }
 }
 
-pub fn parse_report(report: &CommandResponse) -> Option<Vec<Declaration>> {
+pub fn parse_report(report: &CommandResponse) -> Option<Vec<ReportedDeclaration>> {
     report
         .messages
         .iter()
         .filter(|m| m.severity == Severity::Info)
         .find_map(|m| m.data.strip_prefix(MARKER))
-        .and_then(|json| serde_json::from_str::<Vec<Declaration>>(json).ok())
+        .and_then(|json| serde_json::from_str::<Vec<ReportedDeclaration>>(json).ok())
         .map(|mut decls| {
             decls.sort_by(|a, b| a.name.cmp(&b.name));
             decls
@@ -472,26 +477,22 @@ mod tests {
     #[test]
     fn a_status_tells_assumptions_from_sorry_and_the_rest() {
         let p = policy();
-        let decl = |axioms: &[&str], assumes: Option<&[&str]>| Declaration {
+        let decl = |axioms: &[&str], assumes: &[&str]| ReportedDeclaration {
             name: "t".into(),
             axioms: axioms.iter().map(|a| a.to_string()).collect(),
-            assumes: assumes.map(|a| a.iter().map(|a| a.to_string()).collect()),
+            assumes: assumes.iter().map(|a| a.to_string()).collect(),
             ..Default::default()
         };
-        let none: Option<&[&str]> = Some(&[]);
+        let none: &[&str] = &[];
         for (axioms, assumes, status) in [
             (&["propext"][..], none, ProofStatus::Proved),
             (
                 &["propext", "kunneth"],
-                Some(&["kunneth"][..]),
+                &["kunneth"][..],
                 ProofStatus::Conditional,
             ),
             (&["sorryAx"], none, ProofStatus::Sorry),
-            (
-                &["sorryAx", "kunneth"],
-                Some(&["kunneth"]),
-                ProofStatus::Sorry,
-            ),
+            (&["sorryAx", "kunneth"], &["kunneth"], ProofStatus::Sorry),
             (
                 &["t._native.native_decide.ax_1_1"],
                 none,
@@ -499,11 +500,9 @@ mod tests {
             ),
             (
                 &["sorryAx", "Lean.trustCompiler", "kunneth"],
-                Some(&["kunneth"]),
+                &["kunneth"],
                 ProofStatus::Rejected,
             ),
-            // A record from before assumptions were reported.
-            (&["kunneth"], None, ProofStatus::Rejected),
         ] {
             assert_eq!(p.status(&decl(axioms, assumes)), status, "{axioms:?}");
         }
@@ -511,8 +510,8 @@ mod tests {
         assert!(ProofStatus::Sorry > ProofStatus::Conditional);
         assert!(ProofStatus::Conditional > ProofStatus::Proved);
         // Judging sets each declaration's status, and `ok` stays as it was.
-        let v = p.judge_decls(false, Some(vec![decl(&["kunneth"], Some(&["kunneth"]))]));
-        assert_eq!(v.declarations[0].status, Some(ProofStatus::Conditional));
+        let v = p.judge_decls(false, Some(vec![decl(&["kunneth"], &["kunneth"])]));
+        assert_eq!(v.declarations[0].status, ProofStatus::Conditional);
         assert!(!v.ok);
     }
 
@@ -673,14 +672,16 @@ mod tests {
                 "pos": {"line": 1, "column": 0}, "data": format!("PISA_DECLS {decls}")}]}))
         };
         let ok = report(json!([{"name": "x", "kind": "theorem",
-            "axioms": ["propext", "Quot.sound"], "type_hash": "1"}]));
+            "axioms": ["propext", "Quot.sound"], "assumes": [], "type_hash": "1",
+            "type_refs": [], "value_refs": []}]));
         let v = p.judge(&response(json!({"env": 1})), Some(&ok));
         assert!(v.ok, "{v:?}");
         assert_eq!(v.declarations[0].name, "x");
 
         let bad = report(json!([{"name": "x", "kind": "theorem",
-            "axioms": ["sorryAx"], "type_hash": "1"},
-            {"name": "y", "kind": "theorem", "axioms": ["Lean.ofReduceBool"], "type_hash": "2"}]));
+            "axioms": ["sorryAx"], "assumes": [], "type_hash": "1", "type_refs": [], "value_refs": []},
+            {"name": "y", "kind": "theorem", "axioms": ["Lean.ofReduceBool"], "assumes": [],
+             "type_hash": "2", "type_refs": [], "value_refs": []}]));
         let v = p.judge(&response(json!({"env": 1})), Some(&bad));
         assert!(!v.ok);
         assert_eq!(
@@ -698,5 +699,22 @@ mod tests {
             Some(&response(json!({"env": 2}))),
         );
         assert_eq!(v.reasons, ["error: axiom report unavailable"]);
+    }
+
+    #[test]
+    fn a_report_without_refs_does_not_parse() {
+        let report = |decl: &serde_json::Value| {
+            response(json!({"env": 2, "messages": [{"severity": "info",
+                "pos": {"line": 1, "column": 0}, "data": format!("PISA_DECLS {}", json!([decl]))}]}))
+        };
+        let decl = json!({"name": "x", "kind": "theorem", "axioms": [], "assumes": [],
+            "type_hash": "1", "value_hash": null, "type_refs": [], "value_refs": [],
+            "generated": false});
+        assert!(parse_report(&report(&decl)).is_some());
+        for field in ["type_refs", "value_refs", "assumes"] {
+            let mut without = decl.clone();
+            without.as_object_mut().unwrap().remove(field);
+            assert!(parse_report(&report(&without)).is_none(), "{field}");
+        }
     }
 }

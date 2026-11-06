@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use pisa_protocol::api::{CheckResult, Error, ErrorKind, ProofStatus, Replaces};
+use pisa_protocol::api::{CheckResult, Error, ErrorKind, ProofStatus, Replaces, SnapshotId};
 use pisa_protocol::snapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,7 +40,9 @@ pub struct ModuleMeta {
     /// See [`Snapshot::header`](pisa_protocol::api::Snapshot::header).
     pub header: String,
     pub code: String,
-    pub dirty: bool,
+    /// See [`Snapshot::status`](pisa_protocol::api::Snapshot::status): the
+    /// worst status among its check result's declarations.
+    pub status: ProofStatus,
     /// See [`Snapshot::verified`](pisa_protocol::api::Snapshot::verified).
     #[serde(default)]
     pub verified: bool,
@@ -147,16 +149,23 @@ impl SnapshotDecls {
 
     /// Takes `verified` from `meta`, and each declaration's `uses_sorry` and
     /// `status` from the declaration of its name in `meta`'s check result.
-    /// The export skips private and generated names, so the name is enough.
+    /// The export and the check (the axiom report, or the kernel re-check's)
+    /// walk the same module's constants by full name, and the check skips
+    /// fewer of them (only internal names that aren't private), so the name
+    /// finds each. One the check doesn't have has no status to be indexed
+    /// with, so it is left out.
     pub(crate) fn refresh(&mut self, meta: &ModuleMeta) {
         self.verified = meta.verified;
-        for d in &mut self.decls {
-            let checked = meta.result.declarations.iter().find(|r| r.name == d.name);
-            d.uses_sorry = checked.is_some_and(|r| r.axioms.iter().any(|a| a == "sorryAx"));
-            d.status = checked
-                .and_then(|r| r.status)
-                .unwrap_or(ProofStatus::Proved);
-        }
+        self.decls.retain_mut(|d| {
+            let Some(checked) = meta.result.declarations.iter().find(|r| r.name == d.name) else {
+                let module = meta.modules.last().map_or("", |m| m.id.as_str());
+                tracing::warn!(module, name = %d.name, "the module's check has no such declaration");
+                return false;
+            };
+            d.uses_sorry = checked.axioms.iter().any(|a| a == "sorryAx");
+            d.status = checked.status;
+            true
+        });
     }
 }
 
@@ -329,8 +338,14 @@ pub fn unknown_module(m: &str) -> Error {
     )
 }
 
-pub(crate) fn unknown_entry(e: &str) -> Error {
-    Error::new(ErrorKind::NotFound, format!("unknown snapshot entry {e}"))
+/// The error for entry `e` of version `v`, which isn't kept, by the
+/// snapshot id that names it.
+pub(crate) fn unknown_entry(v: &str, e: &str) -> Error {
+    let id = SnapshotId {
+        version: v.to_string(),
+        entry: e.to_string(),
+    };
+    Error::new(ErrorKind::NotFound, format!("unknown snapshot {id}"))
 }
 
 pub(crate) fn now_micros() -> u64 {
@@ -430,7 +445,9 @@ impl Catalog {
     }
 
     pub async fn entry(&self, e: &str) -> Result<EntryMeta, Error> {
-        self.find_entry(e).await?.ok_or_else(|| unknown_entry(e))
+        self.find_entry(e)
+            .await?
+            .ok_or_else(|| unknown_entry(&self.version, e))
     }
 
     /// Removes the entry; returns its module's record if that module was
@@ -586,7 +603,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use pisa_protocol::verify::Declaration;
+    use pisa_protocol::verify::{Declaration, ReportedDeclaration};
 
     fn meta(id: &str) -> ModuleMeta {
         ModuleMeta {
@@ -598,7 +615,7 @@ mod tests {
             }],
             header: "import PisaSnap.sx".into(),
             code: String::new(),
-            dirty: false,
+            status: ProofStatus::Proved,
             verified: false,
             macros: false,
             result: CheckResult::default(),
@@ -613,6 +630,17 @@ mod tests {
         m.imports = vec![parent.modules.last().unwrap().id.clone()];
         m.modules = [parent.modules.clone(), vec![own]].concat();
         m
+    }
+
+    /// A theorem `name` of a check result, with `axioms` and `status`.
+    fn checked(name: &str, axioms: &[&str], status: ProofStatus) -> Declaration {
+        let reported = ReportedDeclaration {
+            name: name.into(),
+            kind: "theorem".into(),
+            axioms: axioms.iter().map(|a| a.to_string()).collect(),
+            ..Default::default()
+        };
+        reported.with_status(status)
     }
 
     fn decl(name: &str) -> SnapshotDecl {
@@ -683,8 +711,11 @@ mod tests {
     #[tokio::test]
     async fn a_recheck_refreshes_the_declarations_and_is_logged() {
         for catalog in catalogs().await {
-            let m = meta("x");
-            let decls = SnapshotDecls::new(&m, vec![decl("a"), decl("b")]);
+            let mut m = meta("x");
+            m.result.declarations = ["a", "b", "c"]
+                .map(|n| checked(n, &[], ProofStatus::Proved))
+                .into();
+            let decls = SnapshotDecls::new(&m, vec![decl("a"), decl("b"), decl("c")]);
             catalog
                 .commit("x", &m, Some(&decls), no_labels())
                 .await
@@ -694,19 +725,19 @@ mod tests {
             catalog
                 .update_module("x", "b", |meta| {
                     meta.verified = true;
-                    meta.dirty = true;
-                    meta.result.declarations = vec![Declaration {
-                        name: "b".into(),
-                        kind: "theorem".into(),
-                        axioms: vec!["sorryAx".into()],
-                        status: Some(ProofStatus::Sorry),
-                        ..Default::default()
-                    }];
+                    meta.status = ProofStatus::Sorry;
+                    meta.result.declarations = vec![
+                        checked("a", &[], ProofStatus::Proved),
+                        checked("b", &["sorryAx"], ProofStatus::Sorry),
+                    ];
                 })
                 .await
                 .unwrap();
             let decls = catalog.decls("x").await.unwrap().unwrap();
             assert!(decls.verified);
+            // `c`, which the re-check doesn't have, has no status to index.
+            let names: Vec<_> = decls.decls.iter().map(|d| d.name.as_str()).collect();
+            assert_eq!(names, ["a", "b"]);
             assert!(!decls.decls[0].uses_sorry && decls.decls[1].uses_sorry);
             let statuses: Vec<_> = decls.decls.iter().map(|d| d.status).collect();
             assert_eq!(statuses, [ProofStatus::Proved, ProofStatus::Sorry]);
@@ -718,9 +749,25 @@ mod tests {
                 (None, Some("x"))
             );
             // A record from another build is left alone.
-            let other = catalog.update_module("x", "c", |meta| meta.dirty = false);
+            let other = catalog.update_module("x", "c", |meta| meta.status = ProofStatus::Proved);
             assert!(other.await.unwrap().is_none());
-            assert!(catalog.module("x").await.unwrap().dirty);
+            assert_eq!(
+                catalog.module("x").await.unwrap().status,
+                ProofStatus::Sorry
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_entry_is_named_by_its_snapshot_id() {
+        for catalog in catalogs().await {
+            let e = "0".repeat(32);
+            let unknown = format!("unknown snapshot {}~{e}", catalog.version);
+            assert_eq!(catalog.entry(&e).await.unwrap_err().message, unknown);
+            let removed = catalog.remove_entry(&e).await;
+            assert_eq!(removed.unwrap_err().message, unknown);
+            let labelled = catalog.set_labels(&e, &BTreeMap::new()).await;
+            assert_eq!(labelled.unwrap_err().message, unknown);
         }
     }
 

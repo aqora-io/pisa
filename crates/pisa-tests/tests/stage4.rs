@@ -952,12 +952,12 @@ async fn verify_takes_the_axioms_from_the_kernel_re_check() {
         .build
         .clone();
     let forged = catalog.update_module(id, &build, |meta| {
-        meta.dirty = false;
+        meta.status = ProofStatus::Proved;
         meta.result.ok = true;
         meta.result.reasons = Vec::new();
         for d in &mut meta.result.declarations {
             d.axioms.clear();
-            d.status = Some(ProofStatus::Proved);
+            d.status = ProofStatus::Proved;
         }
     });
     assert!(forged.await.unwrap().is_some());

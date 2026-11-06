@@ -336,7 +336,7 @@ pub(crate) async fn remove_entry(
         let conn = &mut *c;
         tx!(conn, {
             let Some(meta) = entry_in(conn, v, e).await? else {
-                return Err(Fail::Api(unknown_entry(e)));
+                return Err(Fail::Api(unknown_entry(v, e)));
             };
             diesel::delete(entries::table.find((v, e)))
                 .execute(conn)
@@ -449,12 +449,12 @@ pub(crate) async fn set_labels(
         let conn = &mut *c;
         tx!(conn, {
             let Some(mut meta) = entry_in(conn, v, e).await? else {
-                return Err(Fail::Api(unknown_entry(e)));
+                return Err(Fail::Api(unknown_entry(v, e)));
             };
-            for (k, v) in labels {
-                match v {
-                    Some(v) => meta.labels.insert(k.clone(), v.clone()),
-                    None => meta.labels.remove(k),
+            for (key, value) in labels {
+                match value {
+                    Some(value) => meta.labels.insert(key.clone(), value.clone()),
+                    None => meta.labels.remove(key),
                 };
             }
             check_labels(&meta.labels)

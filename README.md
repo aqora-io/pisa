@@ -192,103 +192,13 @@ and the rest of the API works.
 
 ## Upgrading
 
-To the release with goals and types at positions, upgrade the workers before
-clients send `at` or `detail: ["terms"]`. An older worker answers a check with
-`at` as if it had none, and can't read one with `terms`: its result has an
-`internal` error saying so.
-
-To the release with statuses and the audit, upgrade the workers before the
-servers, and rebuild the worker image: the kernel verifier reports
-assumptions too. An older worker answers `GET /snapshots/audit` with a 500.
-
-To the release whose declaration reports record what each declaration uses:
-- A declaration's `type_hash` and `value_hash` now leave the module out of
-  private names and fold in the internal auxiliaries it uses, such as the
-  `f._unary` that holds a well-founded definition's body. Only declarations
-  that use a private or an internal constant hash differently. For those, a
-  session started before the upgrade, or an entry kept before it, compares
-  unequal: `POST /snapshots/{entry}/verify` records such an entry again.
-- The kernel verifier changed too, so rebuild the worker image, not just the
-  binary, and upgrade the workers before the servers.
-
-To the release with dependents and rebuild plans, upgrade the workers before
-clients call `GET /snapshots/{entry}/dependents` or `POST /snapshots/rebuild`:
-they run on a worker, and an older one answers them with a 500. A rebuild
-the server runs needs only the servers upgraded.
-
-To the release with `replaces` on snapshot creates, upgrade the workers before
-clients send `replaces`: an older worker refuses such a create, answering 500
-that it may be older than the server, rather than keeping the code unchecked.
-Snapshot entries gain two columns, which each process adds as it starts.
-
-To the release with async requests, upgrade every server before clients send
-`Prefer: respond-async`: older servers answer such requests at once, don't
-know `/jobs`, and sweep async jobs' answers after 10 minutes. The job queue
-gains two columns, which each process adds as it starts.
-
-To the release with replicated servers, whose workers take jobs from the
-database:
-- `pisa-server` replaces `pisa-router` and `pisa-search serve`: one image
-  (the Dockerfile's `server` target, which also has `pisa-search`) serves the
-  check, session and snapshot API and search, on one port (8000; search was
-  on 8100). Point `SearchClient` at the server's URL.
-- Upgrade the servers and the workers together. Servers no longer listen for
-  workers (`PISA_WORKERS`, port 7070), and workers no longer dial them
-  (`PISA_ROUTER`): both need `PISA_DATABASE_URL`, the same database, and the
-  same `PISA_QUEUE`.
-- Search is on when `PISA_SEARCH_QDRANT` is set. It always has the database,
-  so snapshots are searched unless `PISA_SEARCH_NO_SNAPSHOTS` is set. Until
-  Qdrant answers with the bundle, `/v1/search` answers 503 instead of the
-  process exiting, and `/health` is 200 whenever the API is up, with search's
-  state under `search`.
-- In the chart:
-  - `server.*` holds what `router.image`, `router.service`, `router.resources`
-    and `search.image`, `search.replicas`, `search.service`,
-    `search.resources`, `search.minAvailable` and `search.autoscaling` held;
-  - the `-router`, `-router-workers` and `-search` Services are replaced by
-    `-server`;
-  - KEDA counts the queue in the database, so `keda.prometheus` is gone;
-  - `queue` names the release's queue, its name by default.
-- There are no Prometheus metrics any more: `/metrics`, the chart's
-  `ServiceMonitor`, scrape annotations and `metrics.*` values are gone, and
-  check results no longer carry whether the header was warm. `/health`
-  reports the live workers on the queue as `workers`.
-- Prewarming follows the headers of the jobs that are queued when a worker
-  starts, rather than the router's counts since it started.
-
-To the release that moved metadata from TiKV into PostgreSQL:
-- Run PostgreSQL, and set `PISA_DATABASE_URL` where `PISA_METADATA` and
-  `PISA_TIKV_PD` were, for the search service too (in the chart,
-  `metadata.database.urlSecret` where `metadata.tikv` was). The workers and
-  the search service create the tables.
-- Nothing is carried over from TiKV: snapshot entries and modules, sessions
-  and proof states start over, and the first search leader removes the old
-  snapshots from the index.
-- A listing page that has `next` is full; the page after it may be empty.
-- A label value or filter with a NUL character is a `bad_request`.
-
-To the release that moved metadata into TiKV and snapshots onto entries:
-- Upgrade the router and the workers together. Their snapshot jobs changed
-  shape, and a router and workers of different releases fail each other's.
-- Nothing is carried over: the snapshot, session and proof-state metadata in
-  S3 is ignored, so snapshots, sessions and states start over.
-- The snapshot HTTP API takes entry ids where it took module names; see
-  [Snapshots](#snapshots).
-
-To the release that searches snapshots:
-- Upgrade the workers first: only they record what the search service reads,
-  each module's declarations and a log of changes.
-- Modules built before the upgrade aren't searchable, and creating the same
-  code again doesn't make them so, as it doesn't build them again.
-
-To the release that moved search onto Qdrant:
-- Run Qdrant (≥ 1.19.1), build bundles again (format 4, without `tantivy/`),
-  and load them with `pisa-search load`. `serve` takes `--qdrant` and
-  `--env-id` where it took `--bundle`.
-- Hits no longer carry `lanes`: Qdrant fuses the lanes and doesn't say which
-  found a hit.
-- Snapshots are indexed again from TiKV by the first leader, without calling the
-  LLM or the embedder again for what was described and embedded.
+To the release that names each thing in the API once:
+- Reset the database, and the object store's `snapshots/` and `states/`.
+  Nothing reads what earlier releases stored, so snapshots, sessions and
+  proof states start over.
+- Rebuild the images, and upgrade the servers and the workers together: their
+  jobs changed shape, and a server and workers of different releases fail
+  each other's.
 
 ## API
 
