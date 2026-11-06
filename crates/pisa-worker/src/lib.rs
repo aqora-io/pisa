@@ -153,11 +153,9 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
                 .list(&j.labels, j.limit, j.after.as_deref())
                 .await,
         ),
-        Job::SnapshotLabels(j) => JobResult::SnapshotLabels(
-            pool.snapshots()
-                .set_labels(&j.entry, &j.set, &j.remove)
-                .await,
-        ),
+        Job::SnapshotLabels(j) => {
+            JobResult::SnapshotLabels(pool.snapshots().set_labels(&j.entry, &j.labels).await)
+        }
         Job::SnapshotDependents(j) => {
             JobResult::SnapshotDependents(pool.snapshots().dependents(&j.entry, &j.labels).await)
         }

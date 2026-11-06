@@ -54,7 +54,7 @@ describe("PisaClient", () => {
   });
 
   it("puts the version in the body or the query, as the server reads it", async () => {
-    const { client, sent } = recording(() => json({ entries: [], results: [] }));
+    const { client, sent } = recording(() => json({ snapshots: [], results: [] }));
     await client.check("#check Nat", { detail: ["tactics"], timeout: 5 });
     await client.checkBatch(["x"], { version: "v2" });
     await client.listSnapshots({ labels: { run: "a b", "k.x": "1:2" }, limit: 1, after: "c" });
@@ -74,20 +74,30 @@ describe("PisaClient", () => {
   });
 
   it("sends what a snapshot replaces", async () => {
-    const { client, sent } = recording(() => json({ version: "v1", dirty: false, verified: false, result: {} }));
-    await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: "e1", key: "k" });
-    await client.createSnapshot("def f := 2", { replaces: { entry: "e2", allow: "definitions" } });
+    const { client, sent } = recording(() => json({ check: {} }));
+    await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: { snapshot_id: "e1" }, key: "k" });
+    await client.createSnapshot("def f := 2", { replaces: { snapshot_id: "e2", allow: "definitions" } });
     expect(sent.map((s) => s.body)).toEqual([
-      { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: "e1" },
-      { code: "def f := 2", version: "v1", replaces: { entry: "e2", allow: "definitions" } },
+      { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: { snapshot_id: "e1" } },
+      { code: "def f := 2", version: "v1", replaces: { snapshot_id: "e2", allow: "definitions" } },
     ]);
   });
 
+  it("updates labels with a merge patch", async () => {
+    const { client, sent } = recording(() => json({ id: "e1", labels: { stage: "done" } }));
+    await client.updateSnapshot("e1", { labels: { stage: "done", draft: null } });
+    expect(sent[0]).toMatchObject({
+      url: "/api/snapshots/e1?version=v1",
+      method: "PATCH",
+      body: { labels: { stage: "done", draft: null } },
+    });
+  });
+
   it("asks for dependents and rebuild plans", async () => {
-    const { client, sent } = recording(() => json({ entries: [], ok: true, changes: [], plan: [] }));
-    await client.dependents("e1", { labels: { p: "1" } });
-    await client.audit({ labels: { p: "1" } });
-    await client.rebuildPlan("e1", "e2", { p: "1" }, { allowChanges: true });
+    const { client, sent } = recording(() => json({ snapshots: [], ok: true, changes: [], plan: [] }));
+    await client.listDependents("e1", { labels: { p: "1" } });
+    await client.auditSnapshots({ labels: { p: "1" } });
+    await client.rebuildSnapshots("e1", "e2", { p: "1" }, { dryRun: true, allowChanges: true });
     expect(sent[0]?.url).toBe("/api/snapshots/e1/dependents?version=v1&label=p%3A1");
     expect(sent[1]?.url).toBe("/api/snapshots/audit?version=v1&label=p%3A1");
     expect(sent[2]).toMatchObject({
@@ -100,9 +110,18 @@ describe("PisaClient", () => {
     const { client, sent } = recording((s) =>
       s.headers["prefer"] ? json({ id: "j", kind: "rebuild_snapshots", status: "running" }, 202) : json({ ok: true, changes: [], plan: [] }),
     );
-    await client.rebuild("e1", "e2", { p: "1" }, { retire: true, verify: false });
-    const job = await client.submitRebuild("e1", "e2", { p: "1" });
-    expect(sent[0]?.body).toEqual({ from: "e1", to: "e2", labels: { p: "1" }, dry_run: false, version: "v1", retire: true, verify: false });
+    await client.rebuildSnapshots("e1", "e2", { p: "1" }, { retire: true, verify: false, timeout: 30 });
+    const job = await client.submitRebuildSnapshots("e1", "e2", { p: "1" });
+    expect(sent[0]?.body).toEqual({
+      from: "e1",
+      to: "e2",
+      labels: { p: "1" },
+      dry_run: false,
+      version: "v1",
+      timeout: 30,
+      retire: true,
+      verify: false,
+    });
     expect(sent[1]?.headers["prefer"]).toBe("respond-async");
     expect(job).toMatchObject({ id: "j", kind: "rebuild_snapshots" });
   });

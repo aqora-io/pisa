@@ -112,7 +112,7 @@ describe("useProofSession", () => {
 describe("snapshot mutations", () => {
   it("refetch the listings", async () => {
     const { client, calls } = fakeClient((call) =>
-      call.method === "DELETE" ? { entry: "e", removed: [] } : { entries: [] },
+      call.method === "DELETE" ? { removed: [] } : { snapshots: [] },
     );
     const { result } = renderHook(() => ({ list: useSnapshots(), remove: useDeleteSnapshot() }), {
       wrapper: wrapper(client),

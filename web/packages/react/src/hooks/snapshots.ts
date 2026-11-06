@@ -1,14 +1,15 @@
 import type {
   CreateSnapshotOptions,
-  Deleted,
-  Labels,
+  CreateSnapshotResponse,
+  DeleteSnapshotResponse,
   ListSnapshotsParams,
+  ListSnapshotsResponse,
   PisaError,
-  SnapshotInfo,
-  SnapshotList,
-  SnapshotResponse,
-  SnapshotSummary,
-  SnapshotVerified,
+  Snapshot,
+  SnapshotDetail,
+  SnapshotId,
+  UpdateSnapshotRequest,
+  VerifySnapshotResponse,
 } from "@aqora/pisa-client";
 import {
   type InfiniteData,
@@ -24,23 +25,23 @@ import {
 import { type VersionInput, pisaKeys, snapshotOptions, snapshotsOptions } from "../options.ts";
 import { usePisaClient } from "../provider.tsx";
 
-/** Entries with every label in `params.labels`, newest first, a page at a
+/** Snapshots with every label in `params.labels`, newest first, a page at a
  *  time: `fetchNextPage` while `hasNextPage`. */
 export function useSnapshots(
   params: Omit<ListSnapshotsParams, "after"> = {},
   input: VersionInput = {},
-): UseInfiniteQueryResult<InfiniteData<SnapshotList, string | undefined>, PisaError> {
+): UseInfiniteQueryResult<InfiniteData<ListSnapshotsResponse, string | undefined>, PisaError> {
   return useInfiniteQuery(snapshotsOptions(usePisaClient(), params, input));
 }
 
-/** One entry, or nothing while `entry` is null. */
-export function useSnapshot(entry: string | null, input: VersionInput = {}): UseQueryResult<SnapshotInfo, PisaError> {
-  return useQuery({ ...snapshotOptions(usePisaClient(), entry ?? "", input), enabled: entry !== null });
+/** One snapshot, or nothing while `id` is null. */
+export function useSnapshot(id: SnapshotId | null, input: VersionInput = {}): UseQueryResult<SnapshotDetail, PisaError> {
+  return useQuery({ ...snapshotOptions(usePisaClient(), id ?? "", input), enabled: id !== null });
 }
 
-/** Invalidates every snapshot query of the version: a change to one entry
- *  can show in others, as a module's `verified` and `dirty` are shared by
- *  its entries. */
+/** Invalidates every snapshot query of the version: a change to one snapshot
+ *  can show in others, as a module's `verified` and `status` are shared by
+ *  its snapshots. */
 function useInvalidate(input: VersionInput): () => Promise<void> {
   const client = usePisaClient();
   const queryClient = useQueryClient();
@@ -53,7 +54,7 @@ export interface CreateSnapshotInput extends Omit<CreateSnapshotOptions, "signal
 
 export function useCreateSnapshot(
   input: VersionInput = {},
-): UseMutationResult<SnapshotResponse, PisaError, CreateSnapshotInput> {
+): UseMutationResult<CreateSnapshotResponse, PisaError, CreateSnapshotInput> {
   const client = usePisaClient();
   const invalidate = useInvalidate(input);
   return useMutation({
@@ -62,45 +63,43 @@ export function useCreateSnapshot(
   });
 }
 
-export interface LabelsInput {
-  entry: string;
-  set?: Labels;
-  remove?: string[];
+export interface UpdateSnapshotInput extends UpdateSnapshotRequest {
+  id: SnapshotId;
 }
 
-export function useSetSnapshotLabels(input: VersionInput = {}): UseMutationResult<SnapshotSummary, PisaError, LabelsInput> {
+export function useUpdateSnapshot(input: VersionInput = {}): UseMutationResult<Snapshot, PisaError, UpdateSnapshotInput> {
   const client = usePisaClient();
   const queryClient = useQueryClient();
   const invalidate = useInvalidate(input);
   return useMutation({
-    mutationFn: ({ entry, ...change }) => client.setSnapshotLabels(entry, change, input),
-    onSuccess: async (summary) => {
-      queryClient.setQueryData<SnapshotInfo>(snapshotOptions(client, summary.entry, input).queryKey, (old) =>
-        old === undefined ? old : { ...old, labels: summary.labels },
+    mutationFn: ({ id, ...update }) => client.updateSnapshot(id, update, input),
+    onSuccess: async (snapshot) => {
+      queryClient.setQueryData<SnapshotDetail>(snapshotOptions(client, snapshot.id, input).queryKey, (old) =>
+        old === undefined ? old : { ...old, labels: snapshot.labels },
       );
       await invalidate();
     },
   });
 }
 
-export function useDeleteSnapshot(input: VersionInput = {}): UseMutationResult<Deleted, PisaError, string> {
+export function useDeleteSnapshot(input: VersionInput = {}): UseMutationResult<DeleteSnapshotResponse, PisaError, SnapshotId> {
   const client = usePisaClient();
   const queryClient = useQueryClient();
   const invalidate = useInvalidate(input);
   return useMutation({
-    mutationFn: (entry) => client.deleteSnapshot(entry, input),
-    onSuccess: async (deleted) => {
-      queryClient.removeQueries({ queryKey: snapshotOptions(client, deleted.entry, input).queryKey });
+    mutationFn: (id) => client.deleteSnapshot(id, input),
+    onSuccess: async (_, id) => {
+      queryClient.removeQueries({ queryKey: snapshotOptions(client, id, input).queryKey });
       await invalidate();
     },
   });
 }
 
-export function useVerifySnapshot(input: VersionInput = {}): UseMutationResult<SnapshotVerified, PisaError, string> {
+export function useVerifySnapshot(input: VersionInput = {}): UseMutationResult<VerifySnapshotResponse, PisaError, SnapshotId> {
   const client = usePisaClient();
   const invalidate = useInvalidate(input);
   return useMutation({
-    mutationFn: (entry) => client.verifySnapshot(entry, input),
+    mutationFn: (id) => client.verifySnapshot(id, input),
     onSuccess: invalidate,
   });
 }

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    CheckOptions, Client, Detail, Error, ErrorKind, HealthStatus, Job, JobKind, JobPoll, JobStatus,
-    Pos, ProofStatus, RebuildOptions, Replaces, SnapshotList, SnapshotOptions,
+    CheckOptions, Client, CreateSnapshotOptions, Detail, Error, ErrorKind, HealthStatus, Job,
+    JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos, ProofStatus, RebuildOptions, Replaces,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -126,45 +126,47 @@ async fn client_covers_snapshots() {
         .create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
         .await
         .unwrap();
-    let name = base.snapshot.unwrap();
-    let entry = base.entry.unwrap();
-    let header = base.header.unwrap();
-    assert!(base.result.ok, "{:?}", base.result);
+    assert!(base.check.ok, "{:?}", base.check);
+    assert!(base.replacement.is_none());
+    let base = base.snapshot.unwrap();
+    let (id, name) = (base.id.clone(), base.module.clone());
+    assert_eq!(base.version, "v");
 
     let r = client
-        .check(&format!("{header}\nneeds base"))
+        .check(&format!("{}\nneeds base", base.header))
         .await
         .unwrap();
     assert!(r.ok, "{r:?}");
-    let info = client.snapshot(&entry).await.unwrap();
-    assert_eq!(
-        (info.entry.as_str(), info.snapshot.as_str()),
-        (entry.as_str(), name.as_str())
-    );
-    assert_eq!(info.header, header);
-    assert!(!info.dirty);
-    assert!(!info.verified);
+    let detail = client.get_snapshot(&id).await.unwrap();
+    assert_eq!(detail.snapshot, base);
+    assert_eq!(detail.snapshot.status, ProofStatus::Proved);
+    assert!(!detail.snapshot.verified);
+    assert_eq!(detail.exports[0].name, "base");
 
-    let verified = client.verify_snapshot(&entry).await.unwrap();
-    assert!(verified.verified);
-    assert_eq!(verified.entry, entry);
+    let verified = client.verify_snapshot(&id).await.unwrap();
+    assert!(verified.snapshot.verified);
+    assert_eq!(verified.snapshot.id, id);
     assert_eq!(verified.checked, std::slice::from_ref(&name));
     assert!(verified.failure.is_none());
-    assert!(client.snapshot(&entry).await.unwrap().verified);
+    assert!(client.get_snapshot(&id).await.unwrap().snapshot.verified);
+    let verify = |verify| CreateSnapshotOptions {
+        verify: Some(verify),
+        ..Default::default()
+    };
     let forged = client
-        .create_snapshot_with_verify("import Foo\ntheorem forge : 1 = 1 := rfl", true)
+        .create_snapshot_with("import Foo\ntheorem forge : 1 = 1 := rfl", &verify(true))
         .await
         .unwrap();
     assert!(forged.snapshot.is_none(), "{forged:?}");
     let opted_out = client
-        .create_snapshot_with_verify("import Foo\nmacro \"m\" : term => `(1)", false)
+        .create_snapshot_with("import Foo\nmacro \"m\" : term => `(1)", &verify(false))
         .await
         .unwrap();
-    assert!(!opted_out.verified, "{opted_out:?}");
+    assert!(!opted_out.snapshot.unwrap().verified);
 
-    let removed = client.delete_snapshot(&entry).await.unwrap();
-    assert_eq!(removed, std::slice::from_ref(&name));
-    let err = client.snapshot(&entry).await.unwrap_err();
+    let deleted = client.delete_snapshot(&id).await.unwrap();
+    assert_eq!(deleted.removed, std::slice::from_ref(&name));
+    let err = client.get_snapshot(&id).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
 }
 
@@ -172,54 +174,55 @@ async fn client_covers_snapshots() {
 async fn client_passes_labels() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
-    let opts = SnapshotOptions {
+    let opts = CreateSnapshotOptions {
         labels: BTreeMap::from([("k".to_string(), "v".to_string())]),
         key: Some("run-1".to_string()),
         ..Default::default()
     };
     let code = "import Foo\ntheorem base : 1 = 1 := rfl";
     let created = client.create_snapshot_with(code, &opts).await.unwrap();
+    let created = created.snapshot.unwrap();
     assert_eq!(created.labels, opts.labels);
-    let entry = created.entry.unwrap();
-    let info = client.snapshot(&entry).await.unwrap();
-    assert_eq!(info.labels, opts.labels);
+    let detail = client.get_snapshot(&created.id).await.unwrap();
+    assert_eq!(detail.snapshot.labels, opts.labels);
 
     let again = client.create_snapshot_with(code, &opts).await.unwrap();
-    assert_eq!(again.entry, Some(entry));
+    assert_eq!(again.snapshot, Some(created));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn client_replaces_entries() {
+async fn client_replaces_snapshots() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
     let skeleton = client
         .create_snapshot("import Foo\ntheorem t : 1 = 1 := sorry")
         .await
         .unwrap();
-    let old = skeleton.entry.unwrap();
-    let opts = SnapshotOptions {
-        replaces: Some(Replaces::Entry(old.clone())),
+    let replaces = Replaces {
+        snapshot_id: skeleton.snapshot.unwrap().id,
+        allow: None,
+    };
+    let opts = CreateSnapshotOptions {
+        replaces: Some(replaces.clone()),
         ..Default::default()
     };
     let proof = client
         .create_snapshot_with("import Foo\ntheorem t : 1 = 1 := rfl", &opts)
         .await
         .unwrap();
-    let replacement = proof.replaces.unwrap();
-    assert_eq!(
-        (replacement.entry.as_str(), replacement.filled),
-        (old.as_str(), vec!["t".into()])
-    );
-    let info = client.snapshot(&proof.entry.unwrap()).await.unwrap();
-    assert_eq!(info.replaces.unwrap().entry, old);
+    assert_eq!(proof.replacement.unwrap().filled, ["t"]);
+    let proof = proof.snapshot.unwrap();
+    assert_eq!(proof.replaces.as_ref(), Some(&replaces));
+    let detail = client.get_snapshot(&proof.id).await.unwrap();
+    assert_eq!(detail.snapshot.replaces, Some(replaces));
 
     let weakened = client
         .create_snapshot_with("import Foo\ntheorem t : True := trivial", &opts)
         .await
         .unwrap();
-    assert!(weakened.entry.is_none() && !weakened.result.ok);
+    assert!(weakened.snapshot.is_none() && !weakened.check.ok);
     assert_eq!(
-        weakened.result.reasons,
+        weakened.check.reasons,
         ["statement: t has a different type"]
     );
 }
@@ -231,63 +234,80 @@ async fn client_lists_dependents_and_plans_rebuilds() {
     let b = client
         .create_snapshot("import Foo\ntheorem rb : 1 = 1 := sorry")
         .await
+        .unwrap()
+        .snapshot
         .unwrap();
-    let old = b.entry.unwrap();
     let labels = BTreeMap::from([("k".to_string(), "v".to_string())]);
-    let opts = SnapshotOptions {
+    let opts = CreateSnapshotOptions {
         labels: labels.clone(),
         ..Default::default()
     };
-    let code = format!("{}\n\ntheorem above : 2 = 2 := rfl", b.header.unwrap());
+    let code = format!("{}\n\ntheorem above : 2 = 2 := rfl", b.header);
     let above = client.create_snapshot_with(&code, &opts).await.unwrap();
-    let listed = client.dependents(&old, &[("k", "v")]).await.unwrap();
-    assert_eq!(listed.entries.len(), 1);
-    assert_eq!(Some(&listed.entries[0].entry), above.entry.as_ref());
+    let above = above.snapshot.unwrap();
+    let listed = client.list_dependents(&b.id, &labels).await.unwrap();
+    assert_eq!(listed.snapshots, std::slice::from_ref(&above));
 
-    let opts = SnapshotOptions {
-        replaces: Some(Replaces::Entry(old.clone())),
+    let opts = CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: b.id.clone(),
+            allow: None,
+        }),
         ..Default::default()
     };
     let new = client
         .create_snapshot_with("import Foo\ntheorem rb : 1 = 1 := rfl", &opts)
         .await
+        .unwrap()
+        .snapshot
         .unwrap();
+    let dry_run = RebuildOptions {
+        dry_run: true,
+        ..Default::default()
+    };
     let plan = client
-        .rebuild_plan(&old, new.entry.as_deref().unwrap(), &labels, false)
+        .rebuild_snapshots(&b.id, &new.id, &labels, &dry_run)
         .await
         .unwrap();
     assert!(plan.ok && plan.changes.is_empty(), "{plan:?}");
+    assert!(plan.created.is_empty(), "a dry run creates nothing");
     let item = &plan.plan[0];
-    let opts = SnapshotOptions {
+    assert_eq!(item.snapshot_id.as_ref(), Some(&above.id));
+    let opts = CreateSnapshotOptions {
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
-        replaces: item.replaces.clone().map(Replaces::With),
+        replaces: item.replaces.clone(),
         ..Default::default()
     };
     let rebuilt = client
         .create_snapshot_with(&item.code, &opts)
         .await
         .unwrap();
+    assert!(rebuilt.replacement.is_some(), "{rebuilt:?}");
+    let rebuilt = rebuilt.snapshot.unwrap();
     assert_eq!(
-        rebuilt.replaces.as_ref().map(|r| &r.entry),
-        above.entry.as_ref()
+        rebuilt.replaces.as_ref().map(|r| &r.snapshot_id),
+        Some(&above.id)
     );
+    assert_eq!(rebuilt.module, item.new_module);
 
     // The server runs the same plan: the item above replays, as a job too.
-    let new = new.entry.unwrap();
     let opts = RebuildOptions::default();
-    let run = client.rebuild(&old, &new, &labels, &opts).await.unwrap();
-    assert!(run.ok, "{run:?}");
-    assert_eq!(run.created[0].new_entry, rebuilt.entry.clone().unwrap());
-    let job = client
-        .submit_rebuild(&old, &new, &labels, &opts)
+    let run = client
+        .rebuild_snapshots(&b.id, &new.id, &labels, &opts)
         .await
         .unwrap();
+    assert!(run.ok, "{run:?}");
+    assert_eq!(run.created[0].new_snapshot_id, rebuilt.id);
+    let job = client
+        .submit_rebuild_snapshots(&b.id, &new.id, &labels, &opts)
+        .await
+        .unwrap();
+    assert_eq!(job.kind, JobKind::RebuildSnapshots);
     let again = client.wait_job(&job).await.unwrap();
-    assert_eq!(again.created[0].new_entry, run.created[0].new_entry);
     assert_eq!(
-        rebuilt.snapshot.as_deref(),
-        Some(item.new_snapshot.as_str())
+        again.created[0].new_snapshot_id,
+        run.created[0].new_snapshot_id
     );
 }
 
@@ -298,74 +318,77 @@ async fn client_audits_a_project() {
     let a = client
         .create_snapshot("import Foo\naxiom kunneth : 1 = 1")
         .await
+        .unwrap()
+        .snapshot
         .unwrap();
-    let opts = SnapshotOptions {
-        labels: BTreeMap::from([("audit".to_string(), "1".to_string())]),
+    let labels = BTreeMap::from([("audit".to_string(), "1".to_string())]);
+    let opts = CreateSnapshotOptions {
+        labels: labels.clone(),
         ..Default::default()
     };
-    let code = format!("{}\n\ntheorem thm3 : 1 = 1 := kunneth", a.header.unwrap());
+    let code = format!("{}\n\ntheorem thm3 : 1 = 1 := kunneth", a.header);
     let b = client.create_snapshot_with(&code, &opts).await.unwrap();
-    assert_eq!(b.status, Some(ProofStatus::Conditional));
-    let audit = client.audit(&[("audit", "1")]).await.unwrap();
+    assert_eq!(b.snapshot.unwrap().status, ProofStatus::Conditional);
+    let audit = client.audit_snapshots(&labels).await.unwrap();
     assert_eq!(audit.summary.conditional, 1);
     assert_eq!(audit.assumptions[0].name, "kunneth");
+    assert_eq!(audit.assumptions[0].snapshot_id.as_ref(), Some(&a.id));
     assert_eq!(audit.assumptions[0].used_by, ["thm3"]);
     assert!(audit.not_proved.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn client_lists_and_labels_snapshots() {
+async fn client_lists_and_updates_snapshots() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
     let code = "import Foo\ntheorem base : 1 = 1 := rfl";
     let labels = |value: &str| BTreeMap::from([("k".to_string(), value.to_string())]);
     let mut created = Vec::new();
     for value in ["v", "w"] {
-        let opts = SnapshotOptions {
+        let opts = CreateSnapshotOptions {
             labels: labels(value),
             ..Default::default()
         };
-        let snapshot = client.create_snapshot_with(code, &opts).await.unwrap();
-        created.push(snapshot.entry.unwrap());
+        let made = client.create_snapshot_with(code, &opts).await.unwrap();
+        created.push(made.snapshot.unwrap().id);
     }
-    let entries = |list: &SnapshotList| -> Vec<String> {
-        list.entries.iter().map(|s| s.entry.clone()).collect()
+    let ids = |list: &ListSnapshotsResponse| -> Vec<String> {
+        list.snapshots.iter().map(|s| s.id.clone()).collect()
     };
 
     let found = client
-        .list_snapshots(&[("k", "v")], None, None)
+        .list_snapshots(&labels("v"), None, None)
         .await
         .unwrap();
-    assert_eq!(entries(&found), [created[0].clone()]);
+    assert_eq!(ids(&found), [created[0].clone()]);
     assert!(found.next.is_none());
-    let page = client.list_snapshots(&[], Some(1), None).await.unwrap();
-    assert_eq!(entries(&page), [created[1].clone()]);
+    let all = BTreeMap::new();
+    let page = client.list_snapshots(&all, Some(1), None).await.unwrap();
+    assert_eq!(ids(&page), [created[1].clone()]);
     let rest = client
-        .list_snapshots(&[], Some(1), page.next.as_deref())
+        .list_snapshots(&all, Some(1), page.next.as_deref())
         .await
         .unwrap();
-    assert_eq!(entries(&rest), [created[0].clone()]);
+    assert_eq!(ids(&rest), [created[0].clone()]);
 
-    let summary = client
-        .set_snapshot_labels(&created[0], &labels("u"), &[])
+    let patch = |value: Option<&str>| BTreeMap::from([("k".to_string(), value.map(String::from))]);
+    let updated = client
+        .update_snapshot(&created[0], &patch(Some("u")))
         .await
         .unwrap();
-    assert_eq!(
-        (&summary.entry, &summary.labels),
-        (&created[0], &labels("u"))
-    );
+    assert_eq!((&updated.id, &updated.labels), (&created[0], &labels("u")));
     let gone = client
-        .list_snapshots(&[("k", "v")], None, None)
+        .list_snapshots(&labels("v"), None, None)
         .await
         .unwrap();
-    assert!(gone.entries.is_empty());
+    assert!(gone.snapshots.is_empty());
     let moved = client
-        .list_snapshots(&[("k", "u")], None, None)
+        .list_snapshots(&labels("u"), None, None)
         .await
         .unwrap();
-    assert_eq!(entries(&moved), [created[0].clone()]);
+    assert_eq!(ids(&moved), [created[0].clone()]);
     let removed = client
-        .set_snapshot_labels(&created[0], &BTreeMap::new(), &["k".to_string()])
+        .update_snapshot(&created[0], &patch(None))
         .await
         .unwrap();
     assert!(removed.labels.is_empty());
@@ -376,16 +399,18 @@ async fn verify_snapshot_uses_the_clients_version() {
     let c = Cluster::start(&[("w0", "a", 1), ("w1", "b", 1)]).await;
     let client = |version: &str| Client::new(&c.url("/")).unwrap().with_version(version);
     let code = "import Foo\ntheorem base : 1 = 1 := rfl";
-    let entry = client("b")
+    let id = client("b")
         .create_snapshot(code)
         .await
         .unwrap()
-        .entry
-        .unwrap();
+        .snapshot
+        .unwrap()
+        .id;
 
-    let err = client("a").verify_snapshot(&entry).await.unwrap_err();
+    let err = client("a").verify_snapshot(&id).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
-    assert!(client("b").verify_snapshot(&entry).await.unwrap().verified);
+    let verified = client("b").verify_snapshot(&id).await.unwrap();
+    assert!(verified.snapshot.verified);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -435,11 +460,16 @@ async fn client_submits_and_waits_for_jobs() {
         .unwrap();
     assert!(client.wait_job(&job).await.unwrap().ok);
 
-    let job = client.submit_snapshot("def jobbed := 1").await.unwrap();
+    let job = client
+        .submit_create_snapshot("def jobbed := 1")
+        .await
+        .unwrap();
+    assert_eq!(job.kind, JobKind::CreateSnapshot);
     let made = client.wait_job(&job).await.unwrap();
-    let entry = made.entry.expect("kept");
-    let job = client.submit_verify(&entry).await.unwrap();
-    assert!(client.wait_job(&job).await.unwrap().verified);
+    let id = made.snapshot.expect("kept").id;
+    let job = client.submit_verify_snapshot(&id).await.unwrap();
+    assert_eq!(job.kind, JobKind::VerifySnapshot);
+    assert!(client.wait_job(&job).await.unwrap().snapshot.verified);
 
     // A job resumed by its id; a slow one is pending, and once a worker
     // holds it, it can't be cancelled.

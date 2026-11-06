@@ -33,16 +33,17 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    Allow, AuditAssumption, AuditUnproved, CheckResult, Declaration, Deleted, Error, ErrorKind,
-    ModuleDecl, RebuildItem, RebuildResponse, Replaced, Replacement, Replaces, SnapshotAudit,
-    SnapshotDependents, SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse,
-    SnapshotSummary, SnapshotVerified,
+    Allow, AuditAssumption, AuditSnapshotsResponse, AuditUnproved, CheckResult,
+    CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Error, ErrorKind, Export,
+    ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildSnapshotsResponse,
+    Replacement, Replaces, Snapshot, SnapshotDetail, VerifyFailure, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
     MAX_LABELS, MAX_LIMIT, check_key, check_labels, entry_id_error, is_cursor, is_entry_id,
 };
 use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
+use pisa_protocol::search::{Description, Informal};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{Change, ProofStatus, Verification, normalised, statement_changes};
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
@@ -100,30 +101,9 @@ fn parse_entry(entry: &str) -> Result<&str, Error> {
     }
 }
 
-/// An entry with its module's state.
-fn summary(
-    entry: String,
-    entry_meta: EntryMeta,
-    meta: &ModuleMeta,
-    status: ProofStatus,
-) -> SnapshotSummary {
-    SnapshotSummary {
-        entry,
-        snapshot: snapshot::module(&entry_meta.module),
-        imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
-        header: meta.header.clone(),
-        labels: entry_meta.labels,
-        replaces: entry_meta.replaces,
-        dirty: meta.dirty,
-        status: Some(status),
-        verified: meta.verified,
-        created: entry_meta.created_micros / 1_000_000,
-    }
-}
-
 /// The entry a create replaces, as it was found before the build.
 struct Replacing {
-    replaced: Replaced,
+    replaced: Replaces,
     /// The declarations of the replaced entry's module.
     declarations: Vec<Declaration>,
     /// The snapshot modules it needs, other than its own.
@@ -210,8 +190,6 @@ fn compare(
         .map(|d| d.name.clone())
         .collect();
     Ok(Replacement {
-        entry: replacing.replaced.entry.clone(),
-        allow,
         filled,
         changed_definitions,
         affected,
@@ -395,25 +373,21 @@ fn walk(
 /// what the replacement changed.
 type Built = Option<(ModuleMeta, (String, EntryMeta), Option<Replacement>)>;
 
-/// The link a new entry records for `replacement`.
-fn link(replacement: &Replacement) -> Replaced {
-    Replaced {
-        entry: replacement.entry.clone(),
-        allow: replacement.allow,
-    }
-}
-
-/// Puts what a create's comparison found into its response, if the entry
-/// the response has records that comparison: a create that lost a race on
-/// its key gets the other create's entry.
-fn replaced(done: &mut SnapshotResponse, replacement: Option<Replacement>) {
-    if let Some(r) = replacement
+/// Puts what a create's comparison with `replacing` found into its
+/// response, if the entry the response has records that comparison: a create
+/// that lost a race on its key gets the other create's entry.
+fn replaced(
+    done: &mut CreateSnapshotResponse,
+    replacing: Option<&Replacing>,
+    replacement: Option<Replacement>,
+) {
+    if let (Some(replacing), Some(r)) = (replacing, replacement)
         && done
-            .replaces
+            .snapshot
             .as_ref()
-            .is_some_and(|d| d.entry == r.entry && d.allow == r.allow)
+            .is_some_and(|s| s.replaces.as_ref() == Some(&replacing.replaced))
     {
-        done.replaces = Some(r);
+        done.replacement = Some(r);
     }
 }
 
@@ -620,10 +594,10 @@ fn ids(modules: &[Module]) -> impl Iterator<Item = &String> {
 
 /// The error for a create that asked to verify an import or existing snapshot
 /// and couldn't.
-fn failure_error(f: &SnapshotFailure) -> Error {
+fn failure_error(f: &VerifyFailure) -> Error {
     Error::new(
         ErrorKind::Lean,
-        format!("{} failed verification: {}", f.snapshot, f.reason),
+        format!("{} failed verification: {}", f.module, f.reason),
     )
 }
 
@@ -854,35 +828,47 @@ impl Snapshots {
         }
     }
 
-    /// A kept module, with the entry that this create added to it, if any.
-    fn response(
-        &self,
-        id: &str,
-        meta: ModuleMeta,
-        entry: Option<(String, EntryMeta)>,
-    ) -> SnapshotResponse {
-        let (entry, labels, replaced) = entry.map_or((None, Default::default(), None), |(e, m)| {
-            (Some(e), m.labels, m.replaces)
-        });
-        let status = Some(self.module_status(&meta));
-        SnapshotResponse {
-            entry,
-            snapshot: Some(snapshot::module(id)),
-            header: Some(meta.header),
+    /// Entry `entry`, on the module `meta` records, as the API answers it.
+    fn snapshot(&self, entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> Snapshot {
+        Snapshot {
+            id: entry,
             version: self.version.clone(),
-            dirty: meta.dirty,
-            status,
+            module: snapshot::module(&entry_meta.module),
+            header: meta.header.clone(),
+            imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
+            labels: entry_meta.labels,
+            replaces: entry_meta.replaces,
+            status: self.module_status(meta),
             verified: meta.verified,
-            labels,
-            // A key replay doesn't compare again.
-            replaces: replaced.map(|r| Replacement {
-                entry: r.entry,
-                allow: r.allow,
-                filled: Vec::new(),
-                changed_definitions: Vec::new(),
-                affected: Vec::new(),
-            }),
-            result: self.with_statuses(meta.result),
+            created: entry_meta.created_micros / 1_000_000,
+        }
+    }
+
+    /// The response to a create that added `entry` to the module `meta`
+    /// records, or replayed it. What a replacement changed is for the caller
+    /// to add: a key replay doesn't compare again.
+    fn created(
+        &self,
+        meta: ModuleMeta,
+        (entry, entry_meta): (String, EntryMeta),
+    ) -> CreateSnapshotResponse {
+        CreateSnapshotResponse {
+            snapshot: Some(self.snapshot(entry, entry_meta, &meta)),
+            check: self.with_statuses(meta.result),
+            replacement: None,
+        }
+    }
+
+    /// The response to a create of kept code, the module `meta` records,
+    /// that added no entry: the module's check, failed, for the caller to
+    /// say why.
+    fn refused(&self, meta: ModuleMeta) -> CreateSnapshotResponse {
+        let mut check = self.with_statuses(meta.result);
+        check.ok = false;
+        CreateSnapshotResponse {
+            snapshot: None,
+            check,
+            replacement: None,
         }
     }
 
@@ -897,37 +883,30 @@ impl Snapshots {
     /// Checks `job.code` by compiling it to a module and keeps the module
     /// unless Lean reported errors, with a new entry on it. Code that is
     /// already kept gets the new entry without being built again. Failures
-    /// are reported in `result`.
-    pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> SnapshotResponse {
-        let mut response = SnapshotResponse {
-            entry: None,
+    /// are reported in `check`.
+    pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> CreateSnapshotResponse {
+        let mut response = CreateSnapshotResponse {
             snapshot: None,
-            header: None,
-            version: self.version.clone(),
-            dirty: false,
-            status: None,
-            verified: false,
-            labels: Default::default(),
-            replaces: None,
-            result: CheckResult::default(),
+            check: CheckResult::default(),
+            replacement: None,
         };
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
         if let Err(e) = valid {
-            response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
+            response.check.error = Some(Error::new(ErrorKind::BadRequest, e));
             return response;
         }
         let split = split_header(&job.code);
         if let Err(e) = snapshot::imports(&split.header) {
-            response.result.error = Some(Error::new(ErrorKind::BadRequest, e));
+            response.check.error = Some(Error::new(ErrorKind::BadRequest, e));
             return response;
         }
         // Macros are allowed: `build` re-checks them through the kernel unless
         // the request opts out, which marks the snapshot as not verified.
         let rejected = pool.policy().scan(&split.body, true);
         if !rejected.is_empty() {
-            response.result.error = Some(policy_error(&rejected));
-            response.result.reasons = rejected;
+            response.check.error = Some(policy_error(&rejected));
+            response.check.reasons = rejected;
             return response;
         }
         if let Some(key) = &job.key {
@@ -935,7 +914,7 @@ impl Snapshots {
                 Ok(Some(done)) => return done,
                 Ok(None) => {}
                 Err(e) => {
-                    response.result.error = Some(e);
+                    response.check.error = Some(e);
                     return response;
                 }
             }
@@ -944,7 +923,7 @@ impl Snapshots {
             Some(r) => match self.replacing(r).await {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    response.result.error = Some(e);
+                    response.check.error = Some(e);
                     return response;
                 }
             },
@@ -960,7 +939,7 @@ impl Snapshots {
                 return done;
             }
         }
-        response.result.error = Some(internal(
+        response.check.error = Some(internal(
             "the snapshot was deleted twice while it was being created",
         ));
         response
@@ -968,14 +947,11 @@ impl Snapshots {
 
     /// The entry `r` names, with its module's declarations.
     async fn replacing(&self, r: &Replaces) -> Result<Replacing, Error> {
-        let entry = parse_entry(r.entry())?;
+        let entry = parse_entry(&r.snapshot_id)?;
         let entry_meta = self.catalog.entry(entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
         Ok(Replacing {
-            replaced: Replaced {
-                entry: entry.to_string(),
-                allow: r.allow(),
-            },
+            replaced: r.clone(),
             declarations: meta.result.declarations,
             needs: ids(&meta.modules)
                 .filter(|m| **m != entry_meta.module)
@@ -1016,7 +992,7 @@ impl Snapshots {
     /// The response to a create whose idempotency key an entry already has:
     /// that entry, unchanged, if it is on module `id`, else an error. `None` if
     /// no entry has the key.
-    async fn replay(&self, key: &str, id: &str) -> Result<Option<SnapshotResponse>, Error> {
+    async fn replay(&self, key: &str, id: &str) -> Result<Option<CreateSnapshotResponse>, Error> {
         let Some((entry, entry_meta)) = self.catalog.keyed(key).await? else {
             return Ok(None);
         };
@@ -1024,7 +1000,7 @@ impl Snapshots {
             return Err(key_in_use());
         }
         let meta = self.catalog.module(id).await?;
-        Ok(Some(self.response(id, meta, Some((entry, entry_meta)))))
+        Ok(Some(self.created(meta, (entry, entry_meta))))
     }
 
     /// [`create`](Self::create) after validation. `None` if the module was
@@ -1036,8 +1012,8 @@ impl Snapshots {
         job: &SnapshotCreateJob,
         split: &Split,
         replacing: Option<&Replacing>,
-        mut response: SnapshotResponse,
-    ) -> Option<SnapshotResponse> {
+        mut response: CreateSnapshotResponse,
+    ) -> Option<CreateSnapshotResponse> {
         let id = snapshot::id(&job.code);
         let lock = self.lock(&id);
         let building = lock.lock().await;
@@ -1050,7 +1026,7 @@ impl Snapshots {
             }
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => {
-                response.result.error = Some(e);
+                response.check.error = Some(e);
                 return Some(response);
             }
         }
@@ -1061,7 +1037,7 @@ impl Snapshots {
                     Ok((_, None)) => continue,
                     Err(e) => e,
                 };
-                response.result.error = Some(error);
+                response.check.error = Some(error);
                 return Some(response);
             }
         }
@@ -1073,13 +1049,13 @@ impl Snapshots {
         slot.finish_job();
         Some(match built {
             Ok(Some((meta, entry, replacement))) => {
-                let mut done = self.response(&id, meta, Some(entry));
-                replaced(&mut done, replacement);
+                let mut done = self.created(meta, entry);
+                replaced(&mut done, replacing, replacement);
                 done
             }
             Ok(None) => response,
             Err(outcome) => {
-                response.result = (*outcome).into();
+                response.check = (*outcome).into();
                 response
             }
         })
@@ -1087,10 +1063,10 @@ impl Snapshots {
 
     /// A create for code that is already kept: it verifies the module's chain
     /// first if the request asks for that and the module isn't verified, then
-    /// adds the entry. Its result is what is stored. If the re-check fails,
-    /// it has the error and no entry is added, as for new code that fails it.
-    /// `None` if the module is gone by the time it is needed, or was built
-    /// again during the re-check.
+    /// adds the entry. Its check is what is stored. If the re-check fails,
+    /// the check has the error and no entry is added, as for new code that
+    /// fails it. `None` if the module is gone by the time it is needed, or
+    /// was built again during the re-check.
     async fn add_to_kept(
         &self,
         pool: &Arc<Pool>,
@@ -1098,8 +1074,8 @@ impl Snapshots {
         meta: ModuleMeta,
         job: &SnapshotCreateJob,
         replacing: Option<&Replacing>,
-        mut response: SnapshotResponse,
-    ) -> Option<SnapshotResponse> {
+        mut response: CreateSnapshotResponse,
+    ) -> Option<CreateSnapshotResponse> {
         let meta = if job.verify == Some(true) && !meta.verified {
             let verified = async {
                 let (_, failure) = self.verify_chain(pool, id).await?;
@@ -1110,10 +1086,9 @@ impl Snapshots {
                 Ok((meta, None)) if !meta.verified => return None,
                 Ok((meta, None)) => meta,
                 Ok((meta, Some(failure))) => {
-                    let mut response = self.response(id, meta, None);
-                    response.result.ok = false;
-                    response.result.error = Some(failure_error(&failure));
-                    return Some(response);
+                    let mut refused = self.refused(meta);
+                    refused.check.error = Some(failure_error(&failure));
+                    return Some(refused);
                 }
                 Err(e) => {
                     let gone = e.kind == ErrorKind::NotFound
@@ -1121,7 +1096,7 @@ impl Snapshots {
                     if gone {
                         return None;
                     }
-                    response.result.error = Some(e);
+                    response.check.error = Some(e);
                     return Some(response);
                 }
             }
@@ -1134,7 +1109,7 @@ impl Snapshots {
                     Some(_) => match self.catalog.decls(id).await {
                         Ok(decls) => decls.map(|d| d.decls),
                         Err(e) => {
-                            response.result.error = Some(e);
+                            response.check.error = Some(e);
                             return Some(response);
                         }
                     },
@@ -1144,7 +1119,7 @@ impl Snapshots {
                 let swapped = match self.swapped(r, &needs, id).await {
                     Ok(swapped) => swapped,
                     Err(e) => {
-                        response.result.error = Some(e);
+                        response.check.error = Some(e);
                         return Some(response);
                     }
                 };
@@ -1152,9 +1127,8 @@ impl Snapshots {
                 match compare(r, decls, &swapped, exported.as_deref()) {
                     Ok(replacement) => Some(replacement),
                     Err(reasons) => {
-                        let mut refused = self.response(id, meta, None);
-                        refused.result.ok = false;
-                        refused.result.reasons.extend(reasons);
+                        let mut refused = self.refused(meta);
+                        refused.check.reasons.extend(reasons);
                         return Some(refused);
                     }
                 }
@@ -1164,23 +1138,23 @@ impl Snapshots {
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
-            replaces: replacement.as_ref().map(link),
+            replaces: replacing.map(|r| r.replaced.clone()),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
             Ok(None) => return None,
             Err(e) => {
-                response.result.error = Some(e);
+                response.check.error = Some(e);
                 return Some(response);
             }
         };
         // Another create took the key for other code since `create` looked.
         if added.1.module != id {
-            response.result.error = Some(key_in_use());
+            response.check.error = Some(key_in_use());
             return Some(response);
         }
-        let mut done = self.response(id, meta, Some(added));
-        replaced(&mut done, replacement);
+        let mut done = self.created(meta, added);
+        replaced(&mut done, replacing, replacement);
         Some(done)
     }
 
@@ -1386,7 +1360,7 @@ impl Snapshots {
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
-            replaces: replacement.as_ref().map(link),
+            replaces: replacing.map(|r| r.replaced.clone()),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)
@@ -1455,16 +1429,19 @@ impl Snapshots {
 
     /// Re-checks an entry's module and everything it imports through the
     /// kernel, and records each module that passes.
-    pub async fn verify(&self, pool: &Arc<Pool>, entry: &str) -> Result<SnapshotVerified, Error> {
+    pub async fn verify(
+        &self,
+        pool: &Arc<Pool>,
+        entry: &str,
+    ) -> Result<VerifySnapshotResponse, Error> {
         let entry = parse_entry(entry)?;
         let id = self.catalog.entry(entry).await?.module;
         let (checked, failure) = self.verify_chain(pool, &id).await?;
-        let meta = self.catalog.module(&id).await?;
-        Ok(SnapshotVerified {
-            entry: entry.to_string(),
-            snapshot: snapshot::module(&id),
-            verified: meta.verified,
-            dirty: meta.dirty,
+        // As the entry and its module are now.
+        let entry_meta = self.catalog.entry(entry).await?;
+        let meta = self.catalog.module(&entry_meta.module).await?;
+        Ok(VerifySnapshotResponse {
+            snapshot: self.snapshot(entry.to_string(), entry_meta, &meta),
             checked,
             failure,
         })
@@ -1479,7 +1456,7 @@ impl Snapshots {
         &self,
         pool: &Arc<Pool>,
         id: &str,
-    ) -> Result<(Vec<String>, Option<SnapshotFailure>), Error> {
+    ) -> Result<(Vec<String>, Option<VerifyFailure>), Error> {
         self.ensure_one(id).await?;
         let modules = self.catalog.module(id).await?.modules;
         let mut checked = Vec::new();
@@ -1491,8 +1468,8 @@ impl Snapshots {
                 // Whatever imports it was built again too, or is gone.
                 Recheck::Changed => break,
                 Recheck::Failed(reason) => {
-                    failure = Some(SnapshotFailure {
-                        snapshot: snapshot::module(&module.id),
+                    failure = Some(VerifyFailure {
+                        module: snapshot::module(&module.id),
                         reason,
                     });
                     break;
@@ -1623,47 +1600,39 @@ impl Snapshots {
         Ok((stored, (entry, entry_meta)))
     }
 
-    pub async fn get(&self, entry: &str) -> Result<SnapshotInfo, Error> {
+    pub async fn get(&self, entry: &str) -> Result<SnapshotDetail, Error> {
         let entry = parse_entry(entry)?;
         let entry_meta = self.catalog.entry(entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
-        let decls = self.decls(&entry_meta.module).await?;
-        let status = Some(self.module_status(&meta));
-        Ok(SnapshotInfo {
-            entry: entry.to_string(),
-            snapshot: snapshot::module(&entry_meta.module),
-            imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
-            header: meta.header,
+        let exports = self.exports(&entry_meta.module).await?;
+        let snapshot = self.snapshot(entry.to_string(), entry_meta, &meta);
+        Ok(SnapshotDetail {
+            snapshot,
             code: meta.code,
-            labels: entry_meta.labels,
-            replaces: entry_meta.replaces,
-            dirty: meta.dirty,
-            status,
-            verified: meta.verified,
-            result: self.with_statuses(meta.result),
-            created: entry_meta.created_micros / 1_000_000,
-            decls,
+            check: self.with_statuses(meta.result),
+            exports,
         })
     }
 
-    /// Module `m`'s declarations, each with the description search's leader
-    /// has recorded for it, if any.
-    async fn decls(&self, m: &str) -> Result<Vec<ModuleDecl>, Error> {
+    /// Module `m`'s exports, each with the description search's leader has
+    /// recorded for it, if any.
+    async fn exports(&self, m: &str) -> Result<Vec<Export>, Error> {
         let Some(decls) = self.catalog.decls(m).await? else {
             return Ok(Vec::new());
         };
         let mut described: HashMap<String, serde_json::Value> =
             self.catalog.described(m).await?.into_iter().collect();
-        let decls = decls.decls.into_iter().map(|d| ModuleDecl {
-            informal: described
+        let exports = decls.decls.into_iter().map(|d| Export {
+            description: described
                 .remove(&d.name)
-                .and_then(|r| serde_json::from_value(r.get("informal")?.clone()).ok()),
+                .and_then(|r| serde_json::from_value::<Informal>(r.get("informal")?.clone()).ok())
+                .map(Description::from),
             name: d.name,
             kind: d.kind,
             signature: d.signature,
             docstring: d.docstring,
         });
-        Ok(decls.collect())
+        Ok(exports.collect())
     }
 
     /// The entries, newest first, that have every label in `labels`, at most
@@ -1673,7 +1642,7 @@ impl Snapshots {
         labels: &[(String, String)],
         limit: usize,
         after: Option<&str>,
-    ) -> Result<SnapshotList, Error> {
+    ) -> Result<ListSnapshotsResponse, Error> {
         if !(1..=MAX_LIMIT).contains(&limit) || after.is_some_and(|a| !is_cursor(a)) {
             return Err(Error::new(
                 ErrorKind::BadRequest,
@@ -1691,7 +1660,7 @@ impl Snapshots {
         }
         let (listed, next) = self.catalog.list(labels, limit, after).await?;
         let mut modules: HashMap<String, Option<ModuleMeta>> = HashMap::new();
-        let mut entries = Vec::new();
+        let mut snapshots = Vec::new();
         for (entry, entry_meta) in listed {
             let id = entry_meta.module.clone();
             if !modules.contains_key(&id) {
@@ -1704,19 +1673,19 @@ impl Snapshots {
                 modules.insert(id.clone(), meta);
             }
             if let Some(meta) = &modules[&id] {
-                entries.push(summary(entry, entry_meta, meta, self.module_status(meta)));
+                snapshots.push(self.snapshot(entry, entry_meta, meta));
             }
         }
-        Ok(SnapshotList { entries, next })
+        Ok(ListSnapshotsResponse { snapshots, next })
     }
 
     /// The entries above `entry`'s module, parents first; see
-    /// [`SnapshotDependents`].
+    /// [`ListDependentsResponse`].
     pub async fn dependents(
         &self,
         entry: &str,
         labels: &[(String, String)],
-    ) -> Result<SnapshotDependents, Error> {
+    ) -> Result<ListDependentsResponse, Error> {
         let entry = parse_entry(entry)?;
         if labels.len() > MAX_LABELS {
             return Err(Error::new(
@@ -1732,7 +1701,7 @@ impl Snapshots {
         // Stable, so each level stays oldest first.
         found.sort_by_key(|(_, e)| levels.get(&e.module).copied().unwrap_or(usize::MAX));
         let mut metas: HashMap<String, Option<ModuleMeta>> = HashMap::new();
-        let mut entries = Vec::new();
+        let mut snapshots = Vec::new();
         for (entry, entry_meta) in found {
             let id = entry_meta.module.clone();
             if !metas.contains_key(&id) {
@@ -1745,10 +1714,10 @@ impl Snapshots {
                 metas.insert(id.clone(), meta);
             }
             if let Some(meta) = &metas[&id] {
-                entries.push(summary(entry, entry_meta, meta, self.module_status(meta)));
+                snapshots.push(self.snapshot(entry, entry_meta, meta));
             }
         }
-        Ok(SnapshotDependents { entries })
+        Ok(ListDependentsResponse { snapshots })
     }
 
     /// [`uses`] in module `m`, whose declarations are `decls`: from the refs
@@ -1767,8 +1736,11 @@ impl Snapshots {
     }
 
     /// Plans the creates that rebuild `job.from`'s dependents on `job.to`;
-    /// see [`RebuildResponse`].
-    pub async fn rebuild_plan(&self, job: &SnapshotRebuildJob) -> Result<RebuildResponse, Error> {
+    /// see [`RebuildSnapshotsResponse`].
+    pub async fn rebuild_plan(
+        &self,
+        job: &SnapshotRebuildJob,
+    ) -> Result<RebuildSnapshotsResponse, Error> {
         let bad = |m: &str| Error::new(ErrorKind::BadRequest, m);
         let (from, to) = (parse_entry(&job.from)?, parse_entry(&job.to)?);
         if job.labels.is_empty() {
@@ -1795,8 +1767,8 @@ impl Snapshots {
         let now = &new_meta.result.declarations;
         // `to` compared as a replacement of `from` would be.
         let replacing = |allow| Replacing {
-            replaced: Replaced {
-                entry: from.to_string(),
+            replaced: Replaces {
+                snapshot_id: from.to_string(),
                 allow,
             },
             declarations: old_meta.result.declarations.clone(),
@@ -1809,7 +1781,7 @@ impl Snapshots {
         let needs: Vec<String> = ids(&new_meta.modules).cloned().collect();
         let swapped = self.swapped(&strict, &needs, &new).await?;
         // A replacement's create compared them already.
-        let link = to_entry.replaces.filter(|r| r.entry == from);
+        let link = to_entry.replaces.filter(|r| r.snapshot_id == from);
         let changes = match link {
             Some(_) => Vec::new(),
             None => compare(&strict, now, &swapped, None)
@@ -1827,7 +1799,7 @@ impl Snapshots {
                 .collect(),
         };
         if !changes.is_empty() && !job.allow_changes {
-            return Ok(RebuildResponse {
+            return Ok(RebuildSnapshotsResponse {
                 ok: false,
                 changes,
                 changed_definitions,
@@ -1905,13 +1877,13 @@ impl Snapshots {
                 key: format!("rebuild:{old}:{new}:{}", entry.as_deref().unwrap_or(&m)),
                 // Under a link, each rebuilt entry replaces its old one, which
                 // compares what its statements depend on.
-                replaces: link.as_ref().zip(entry.as_ref()).map(|(link, e)| Replaced {
-                    entry: e.clone(),
+                replaces: link.as_ref().zip(entry.as_ref()).map(|(link, e)| Replaces {
+                    snapshot_id: e.clone(),
                     allow: link.allow,
                 }),
-                entry,
-                snapshot: snapshot::module(&m),
-                new_snapshot: snapshot::module(&id),
+                snapshot_id: entry,
+                module: snapshot::module(&m),
+                new_module: snapshot::module(&id),
                 new_header: header.clone(),
                 code: code.clone(),
                 labels,
@@ -1927,7 +1899,7 @@ impl Snapshots {
             }
         }
         plan.sort_by_key(|(created, item)| (item.level, *created));
-        Ok(RebuildResponse {
+        Ok(RebuildSnapshotsResponse {
             ok: true,
             changes,
             changed_definitions,
@@ -1937,8 +1909,11 @@ impl Snapshots {
     }
 
     /// What the entries with every label in `labels` rest on; see
-    /// [`SnapshotAudit`]. It reads records only.
-    pub async fn audit(&self, labels: &[(String, String)]) -> Result<SnapshotAudit, Error> {
+    /// [`AuditSnapshotsResponse`]. It reads records only.
+    pub async fn audit(
+        &self,
+        labels: &[(String, String)],
+    ) -> Result<AuditSnapshotsResponse, Error> {
         if labels.len() > MAX_LABELS {
             return Err(Error::new(
                 ErrorKind::BadRequest,
@@ -1961,7 +1936,7 @@ impl Snapshots {
                 None => break,
             }
         }
-        let mut audit = SnapshotAudit::default();
+        let mut audit = AuditSnapshotsResponse::default();
         let mut used_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
         for (m, entry) in &entries {
@@ -1993,7 +1968,7 @@ impl Snapshots {
                     let allowed = &self.policy.allowed_axioms;
                     audit.not_proved.push(AuditUnproved {
                         name: d.name.clone(),
-                        entry: entry.clone(),
+                        snapshot_id: entry.clone(),
                         status,
                         axioms: d
                             .axioms
@@ -2017,7 +1992,7 @@ impl Snapshots {
             let mut assumption = AuditAssumption {
                 name,
                 signature: None,
-                entry: None,
+                snapshot_id: None,
                 verified: false,
                 used_by: users,
             };
@@ -2036,7 +2011,7 @@ impl Snapshots {
                     .into_iter()
                     .find(|d| d.name == assumption.name)
                     .map(|d| d.signature);
-                assumption.entry = match entries.get(&m) {
+                assumption.snapshot_id = match entries.get(&m) {
                     Some(e) => Some(e.clone()),
                     None => {
                         let on = self
@@ -2076,25 +2051,24 @@ impl Snapshots {
         Ok(None)
     }
 
-    /// Edits an entry's labels; see [`Catalog::set_labels`].
+    /// Edits an entry's labels with a merge patch; see
+    /// [`Catalog::set_labels`].
     pub async fn set_labels(
         &self,
         entry: &str,
-        set: &BTreeMap<String, String>,
-        remove: &[String],
-    ) -> Result<SnapshotSummary, Error> {
+        labels: &BTreeMap<String, Option<String>>,
+    ) -> Result<Snapshot, Error> {
         let entry = parse_entry(entry)?;
-        let entry_meta = self.catalog.set_labels(entry, set, remove).await?;
+        let entry_meta = self.catalog.set_labels(entry, labels).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
-        let status = self.module_status(&meta);
-        Ok(summary(entry.to_string(), entry_meta, &meta, status))
+        Ok(self.snapshot(entry.to_string(), entry_meta, &meta))
     }
 
     /// Deletes an entry, then each module that nothing needs any more: the
     /// entry's own, then up the chain of imports. Once the entry is gone,
     /// the rest is best effort: what fails is logged, and a module whose
     /// record went is listed even if its files couldn't be deleted.
-    pub async fn delete(&self, entry: &str) -> Result<Deleted, Error> {
+    pub async fn delete(&self, entry: &str) -> Result<DeleteSnapshotResponse, Error> {
         let entry = parse_entry(entry)?;
         let (entry_meta, cleaned) = self.catalog.remove_entry(entry).await?;
         let mut queue = VecDeque::from_iter(cleaned.map(|m| (entry_meta.module, m)));
@@ -2116,10 +2090,7 @@ impl Snapshots {
                 }
             }
         }
-        Ok(Deleted {
-            entry: entry.to_string(),
-            removed,
-        })
+        Ok(DeleteSnapshotResponse { removed })
     }
 }
 
@@ -2155,8 +2126,8 @@ mod tests {
 
     fn replacing(old: Vec<Declaration>, allow: Option<Allow>) -> Replacing {
         Replacing {
-            replaced: Replaced {
-                entry: "e".into(),
+            replaced: Replaces {
+                snapshot_id: "e".into(),
                 allow,
             },
             declarations: old,
@@ -2180,7 +2151,7 @@ mod tests {
         // It may build on more snapshots than the replaced module does.
         let needs = Swapped::default();
         let r = compare(&replacing(old.clone(), None), &now, &needs, None).unwrap();
-        assert_eq!((r.entry.as_str(), r.filled), ("e", vec!["t".to_string()]));
+        assert_eq!(r.filled, ["t"]);
         assert!(r.changed_definitions.is_empty() && r.affected.is_empty());
 
         let retyped = [decl("t", "X", None, &[]), now[1].clone(), now[2].clone()];

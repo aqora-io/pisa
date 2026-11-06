@@ -17,11 +17,11 @@
 //!
 //! // Keep accepted code as a module, and build on it without re-checking it.
 //! let base = client.create_snapshot("import Mathlib\ndef double (n : Nat) := 2 * n").await?;
-//! let header = base.header.expect("kept");
-//! let next = client.check(&format!("{header}\nexample : double 2 = 4 := rfl")).await?;
+//! let base = base.snapshot.expect("kept");
+//! let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header)).await?;
 //! assert!(next.ok);
-//! // The entry keeps the module; deleting it lets the module go.
-//! client.delete_snapshot(&base.entry.expect("kept")).await?;
+//! // The snapshot keeps the module; deleting it lets the module go.
+//! client.delete_snapshot(&base.id).await?;
 //!
 //! // A long check as a job, which outlives the request and its proxies.
 //! let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
@@ -42,8 +42,8 @@ use std::time::Duration;
 
 use pisa_protocol::api::{
     ApplyTacticRequest, CheckBatchItem, CheckBatchRequest, CheckBatchResponse, CheckRequest,
-    CheckSessionRequest, Deleted, ErrorResponse, LabelsRequest, RebuildRequest, SnapshotRequest,
-    StartSessionRequest,
+    CheckSessionRequest, CreateSnapshotRequest, ErrorResponse, RebuildSnapshotsRequest,
+    StartSessionRequest, UpdateSnapshotRequest,
 };
 use pisa_protocol::search::{
     DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
@@ -53,16 +53,17 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditSummary, AuditUnproved,
-    CheckResult, Declaration, Detail, ErrorKind, Health, HealthStatus, JobKind, JobStatus, Message,
-    Pos, ProofStatus, RebuildItem, RebuildResponse, Replaced, Replacement, Replaces, Session,
-    Severity, SnapshotAudit, SnapshotDependents, SnapshotFailure, SnapshotInfo, SnapshotList,
-    SnapshotResponse as Snapshot, SnapshotSummary, SnapshotVerified, Sorry, State, TacticInfo,
-    TermInfo,
+    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditSnapshotsResponse,
+    AuditSummary, AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration,
+    DeleteSnapshotResponse, Detail, ErrorKind, Export, Health, HealthStatus, JobKind, JobStatus,
+    ListDependentsResponse, ListSnapshotsResponse, Message, Pos, ProofStatus, RebuildCreated,
+    RebuildFailed, RebuildItem, RebuildSkipped, RebuildSnapshotsResponse, Replacement, Replaces,
+    Session, Severity, Snapshot, SnapshotDetail, Sorry, State, TacticInfo, TermInfo, VerifyFailure,
+    VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
-    DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SearchHealth, SnapshotHit,
-    SnapshotScope, Suggestion,
+    DeclDetail, Description, Flags, Hit, Informal, Query, QueryResult, Resolution, SearchHealth,
+    SnapshotHit, SnapshotScope, Suggestion,
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;
@@ -121,31 +122,38 @@ pub struct CheckOptions {
 
 /// Options for [`Client::create_snapshot_with`].
 #[derive(Debug, Clone, Default)]
-pub struct SnapshotOptions {
-    /// Whether to run the kernel re-check; see
-    /// [`create_snapshot_with_verify`](Client::create_snapshot_with_verify).
+pub struct CreateSnapshotOptions {
+    /// Whether to run the kernel re-check. `true` also re-checks the
+    /// imports, so the snapshot ends `verified` or the check has an error.
+    /// `false` skips it even for macros, and the snapshot stays not
+    /// `verified`. By default it runs only for code that uses macros, its
+    /// own or an import's.
     pub verify: Option<bool>,
-    /// Labels for the new entry.
+    /// Labels for the new snapshot.
     pub labels: BTreeMap<String, String>,
     /// An idempotency key: a retried create with the same key returns the
-    /// entry the first one made, as it is, ignoring the other options.
+    /// snapshot the first one made, as it is, ignoring the other options.
     pub key: Option<String>,
-    /// The entry this code replaces. It is kept only if it keeps that entry's
-    /// statements; otherwise the result is not `ok`, its `reasons` say what
-    /// changed, and there is no entry.
+    /// The snapshot this code replaces. It is kept only if it keeps that
+    /// snapshot's statements; otherwise the check is not `ok`, its `reasons`
+    /// say what changed, and there is no snapshot.
     pub replaces: Option<Replaces>,
 }
 
-/// Options for [`Client::rebuild`].
+/// Options for [`Client::rebuild_snapshots`].
 #[derive(Debug, Clone, Default)]
 pub struct RebuildOptions {
+    /// Only plan: create each item's `code` with its `labels`, `key` and
+    /// `replaces`, a level at a time.
+    pub dry_run: bool,
     /// Rebuild even though `to`, created without `replaces`, changes what
     /// `from` states.
     pub allow_changes: bool,
-    /// Once every item is created, delete the old entries, from the top
+    /// Once every item is created, delete the old snapshots, from the top
     /// down, then `from`.
     pub retire: bool,
-    /// The kernel re-check for each create; see [`SnapshotOptions::verify`].
+    /// The kernel re-check for each create; see
+    /// [`CreateSnapshotOptions::verify`].
     pub verify: Option<bool>,
 }
 
@@ -455,62 +463,53 @@ impl Client {
 
     /// Checks code like [`check`](Self::check) and, unless Lean reports
     /// errors, keeps it as a module that later code can import, with a new
-    /// `entry` that holds it until the entry is deleted. Start that code with
-    /// the returned `header` to reuse the Lean process that already has the
-    /// snapshot loaded. Code with `sorry` is kept but `dirty`. The kernel
-    /// re-check runs only if the code uses macros, its own or an import's;
-    /// see [`verify_snapshot`](Self::verify_snapshot).
-    pub async fn create_snapshot(&self, code: &str) -> Result<Snapshot, Error> {
-        self.create_snapshot_with(code, &SnapshotOptions::default())
+    /// snapshot that holds it until the snapshot is deleted. Start that code
+    /// with the snapshot's `header` to reuse the Lean process that already
+    /// has the module loaded. Code with `sorry` is kept, with that `status`.
+    /// The kernel re-check runs only if the code uses macros, its own or an
+    /// import's; see [`verify_snapshot`](Self::verify_snapshot).
+    pub async fn create_snapshot(&self, code: &str) -> Result<CreateSnapshotResponse, Error> {
+        self.create_snapshot_with(code, &CreateSnapshotOptions::default())
             .await
-    }
-
-    /// Like [`create_snapshot`](Self::create_snapshot), choosing whether to
-    /// run the kernel re-check. `true` also re-checks the imports, so the
-    /// snapshot ends `verified` or the result has an error. `false` skips it
-    /// even for macros, and the snapshot stays not `verified`.
-    pub async fn create_snapshot_with_verify(
-        &self,
-        code: &str,
-        verify: bool,
-    ) -> Result<Snapshot, Error> {
-        let opts = SnapshotOptions {
-            verify: Some(verify),
-            ..Default::default()
-        };
-        self.create_snapshot_with(code, &opts).await
     }
 
     /// Like [`create_snapshot`](Self::create_snapshot), with options.
     pub async fn create_snapshot_with(
         &self,
         code: &str,
-        opts: &SnapshotOptions,
-    ) -> Result<Snapshot, Error> {
-        self.post("snapshots", &self.snapshot_request(code, opts))
+        opts: &CreateSnapshotOptions,
+    ) -> Result<CreateSnapshotResponse, Error> {
+        self.post("snapshots", &self.create_snapshot_request(code, opts))
             .await
     }
 
     /// Like [`Client::create_snapshot`], as a job.
-    pub async fn submit_snapshot(&self, code: &str) -> Result<Job<Snapshot>, Error> {
-        self.submit_snapshot_with(code, &SnapshotOptions::default())
+    pub async fn submit_create_snapshot(
+        &self,
+        code: &str,
+    ) -> Result<Job<CreateSnapshotResponse>, Error> {
+        self.submit_create_snapshot_with(code, &CreateSnapshotOptions::default())
             .await
     }
 
     /// Like [`Client::create_snapshot_with`], as a job.
-    pub async fn submit_snapshot_with(
+    pub async fn submit_create_snapshot_with(
         &self,
         code: &str,
-        opts: &SnapshotOptions,
-    ) -> Result<Job<Snapshot>, Error> {
-        let req = self.snapshot_request(code, opts);
+        opts: &CreateSnapshotOptions,
+    ) -> Result<Job<CreateSnapshotResponse>, Error> {
+        let req = self.create_snapshot_request(code, opts);
         self.endpoint
             .submit(self.endpoint.url("snapshots")?, Some(&req))
             .await
     }
 
-    fn snapshot_request(&self, code: &str, opts: &SnapshotOptions) -> SnapshotRequest {
-        SnapshotRequest {
+    fn create_snapshot_request(
+        &self,
+        code: &str,
+        opts: &CreateSnapshotOptions,
+    ) -> CreateSnapshotRequest {
+        CreateSnapshotRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
@@ -521,24 +520,27 @@ impl Client {
         }
     }
 
-    /// Re-checks an entry's module and everything it imports through the
+    /// Re-checks a snapshot's module and everything it imports through the
     /// kernel, imports first, skipping what already passed. A module the
     /// kernel rejects is reported in `failure`, not as an error.
-    pub async fn verify_snapshot(&self, entry: &str) -> Result<SnapshotVerified, Error> {
-        self.endpoint.post_url(self.verify_url(entry)?).await
+    pub async fn verify_snapshot(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
+        self.endpoint.post_url(self.verify_url(id)?).await
     }
 
     /// Like [`Client::verify_snapshot`], as a job.
-    pub async fn submit_verify(&self, entry: &str) -> Result<Job<SnapshotVerified>, Error> {
+    pub async fn submit_verify_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<Job<VerifySnapshotResponse>, Error> {
         self.endpoint
-            .submit(self.verify_url(entry)?, None::<&()>)
+            .submit(self.verify_url(id)?, None::<&()>)
             .await
     }
 
-    fn verify_url(&self, entry: &str) -> Result<Url, Error> {
-        let mut url = self.snapshot_url(entry)?;
+    fn verify_url(&self, id: &str) -> Result<Url, Error> {
+        let mut url = self.snapshot_url(id)?;
         url.path_segments_mut()
-            .map_err(|_| Error::Url(entry.to_string()))?
+            .map_err(|_| Error::Url(id.to_string()))?
             .push("verify");
         Ok(url)
     }
@@ -593,29 +595,25 @@ impl Client {
         Ok(url)
     }
 
-    /// An entry with its labels, and its module's code, imports and check
-    /// result.
-    pub async fn snapshot(&self, entry: &str) -> Result<SnapshotInfo, Error> {
-        self.endpoint.get(self.snapshot_url(entry)?).await
+    /// A snapshot with its module's code, check result and exports.
+    pub async fn get_snapshot(&self, id: &str) -> Result<SnapshotDetail, Error> {
+        self.endpoint.get(self.snapshot_url(id)?).await
     }
 
-    /// Entries newest first, as summaries without code or check results: those
-    /// with every `(key, value)` label in `labels` (up to 64), or all of them.
-    /// A page has up to `limit` (1 to 1000, default 100). Keep passing its
-    /// `next` as `after` while it has one; a full page has one, and the page
-    /// after it may be empty.
+    /// Snapshots newest first: those with every label in `labels` (up to
+    /// 64), or all of them. A page has up to `limit` (1 to 1000, default
+    /// 100). Keep passing its `next` as `after` while it has one; a full page
+    /// has one, and the page after it may be empty.
     pub async fn list_snapshots(
         &self,
-        labels: &[(&str, &str)],
+        labels: &BTreeMap<String, String>,
         limit: Option<usize>,
         after: Option<&str>,
-    ) -> Result<SnapshotList, Error> {
+    ) -> Result<ListSnapshotsResponse, Error> {
         let mut url = self.endpoint.url("snapshots")?;
+        add_labels(&mut url, labels);
         {
             let mut query = url.query_pairs_mut();
-            for (key, value) in labels {
-                query.append_pair("label", &format!("{key}:{value}"));
-            }
             if let Some(limit) = limit {
                 query.append_pair("limit", &limit.to_string());
             }
@@ -629,89 +627,67 @@ impl Client {
         self.endpoint.get(url).await
     }
 
-    /// The entries on every module that imports `entry`'s, directly or
-    /// through others, parents first: those with every `(key, value)` label
-    /// in `labels`, or all of them.
-    pub async fn dependents(
+    /// The snapshots of every module that imports snapshot `id`'s, directly
+    /// or through others, parents first: those with every label in `labels`,
+    /// or all of them.
+    pub async fn list_dependents(
         &self,
-        entry: &str,
-        labels: &[(&str, &str)],
-    ) -> Result<SnapshotDependents, Error> {
-        let mut url = self.snapshot_url(entry)?;
+        id: &str,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<ListDependentsResponse, Error> {
+        let mut url = self.snapshot_url(id)?;
         url.path_segments_mut()
-            .map_err(|_| Error::Url(entry.to_string()))?
+            .map_err(|_| Error::Url(id.to_string()))?
             .push("dependents");
-        for (key, value) in labels {
-            url.query_pairs_mut()
-                .append_pair("label", &format!("{key}:{value}"));
-        }
+        add_labels(&mut url, labels);
         self.endpoint.get(url).await
     }
 
-    /// Plans the creates that rebuild `from`'s dependents with every label
-    /// in `labels` on `to`, by level; see [`RebuildResponse`]. It only plans:
-    /// create each item's `code` with its `labels` and `key`, a level at a
-    /// time. `allow_changes` plans even though `to`, created without
-    /// `replaces`, changes what `from` states.
-    pub async fn rebuild_plan(
-        &self,
-        from: &str,
-        to: &str,
-        labels: &BTreeMap<String, String>,
-        allow_changes: bool,
-    ) -> Result<RebuildResponse, Error> {
-        let opts = RebuildOptions {
-            allow_changes,
-            ..Default::default()
-        };
-        let req = self.rebuild_request(from, to, labels, &opts, true);
-        self.post("snapshots/rebuild", &req).await
-    }
-
     /// Rebuilds `from`'s dependents with every label in `labels` on `to`:
-    /// the server runs the plan [`rebuild_plan`](Self::rebuild_plan) gives,
-    /// a level at a time, and with `retire` then deletes the old entries and
-    /// `from`. Sending it again replays the creates that are done. It can
-    /// take minutes; [`submit_rebuild`](Self::submit_rebuild) runs it as a
-    /// job.
-    pub async fn rebuild(
+    /// the server plans the creates, by level, and unless `opts.dry_run` runs
+    /// them, a level at a time, and with `retire` then deletes the old
+    /// snapshots and `from`. Sending it again replays the creates that are
+    /// done. A run can take minutes;
+    /// [`submit_rebuild_snapshots`](Self::submit_rebuild_snapshots) runs it
+    /// as a job.
+    pub async fn rebuild_snapshots(
         &self,
         from: &str,
         to: &str,
         labels: &BTreeMap<String, String>,
         opts: &RebuildOptions,
-    ) -> Result<RebuildResponse, Error> {
-        let req = self.rebuild_request(from, to, labels, opts, false);
+    ) -> Result<RebuildSnapshotsResponse, Error> {
+        let req = self.rebuild_snapshots_request(from, to, labels, opts);
         self.post("snapshots/rebuild", &req).await
     }
 
-    /// Like [`Client::rebuild`], as a job.
-    pub async fn submit_rebuild(
+    /// Like [`Client::rebuild_snapshots`], as a job. A dry run isn't one: the
+    /// server answers it at once, which is an error here.
+    pub async fn submit_rebuild_snapshots(
         &self,
         from: &str,
         to: &str,
         labels: &BTreeMap<String, String>,
         opts: &RebuildOptions,
-    ) -> Result<Job<RebuildResponse>, Error> {
-        let req = self.rebuild_request(from, to, labels, opts, false);
+    ) -> Result<Job<RebuildSnapshotsResponse>, Error> {
+        let req = self.rebuild_snapshots_request(from, to, labels, opts);
         self.endpoint
             .submit(self.endpoint.url("snapshots/rebuild")?, Some(&req))
             .await
     }
 
-    fn rebuild_request(
+    fn rebuild_snapshots_request(
         &self,
         from: &str,
         to: &str,
         labels: &BTreeMap<String, String>,
         opts: &RebuildOptions,
-        dry_run: bool,
-    ) -> RebuildRequest {
-        RebuildRequest {
+    ) -> RebuildSnapshotsRequest {
+        RebuildSnapshotsRequest {
             from: from.to_string(),
             to: to.to_string(),
             labels: labels.clone(),
-            dry_run,
+            dry_run: opts.dry_run,
             allow_changes: opts.allow_changes,
             retire: opts.retire,
             verify: opts.verify,
@@ -720,51 +696,47 @@ impl Client {
         }
     }
 
-    /// What the entries with every `(key, value)` label in `labels` rest on:
-    /// their declarations by status, each assumption with what uses it, and
-    /// what isn't proved; see [`SnapshotAudit`].
-    pub async fn audit(&self, labels: &[(&str, &str)]) -> Result<SnapshotAudit, Error> {
+    /// What the snapshots with every label in `labels` rest on: their
+    /// declarations by status, each assumption with what uses it, and what
+    /// isn't proved; see [`AuditSnapshotsResponse`].
+    pub async fn audit_snapshots(
+        &self,
+        labels: &BTreeMap<String, String>,
+    ) -> Result<AuditSnapshotsResponse, Error> {
         let mut url = self.endpoint.url("snapshots/audit")?;
-        {
-            let mut query = url.query_pairs_mut();
-            for (key, value) in labels {
-                query.append_pair("label", &format!("{key}:{value}"));
-            }
-            if let Some(v) = &self.version {
-                query.append_pair("version", v);
-            }
+        add_labels(&mut url, labels);
+        if let Some(v) = &self.version {
+            url.query_pairs_mut().append_pair("version", v);
         }
         self.endpoint.get(url).await
     }
 
-    /// Removes the labels `remove` names from an entry, then sets those in
-    /// `set`, and returns the entry's summary.
-    pub async fn set_snapshot_labels(
+    /// Changes a snapshot's labels: each label `labels` maps to `None` is
+    /// removed, each it maps to `Some` is set, and the rest stay. Returns the
+    /// snapshot.
+    pub async fn update_snapshot(
         &self,
-        entry: &str,
-        set: &BTreeMap<String, String>,
-        remove: &[String],
-    ) -> Result<SnapshotSummary, Error> {
-        let req = LabelsRequest {
-            set: set.clone(),
-            remove: remove.to_vec(),
+        id: &str,
+        labels: &BTreeMap<String, Option<String>>,
+    ) -> Result<Snapshot, Error> {
+        let req = UpdateSnapshotRequest {
+            labels: labels.clone(),
         };
-        self.endpoint.patch(self.snapshot_url(entry)?, &req).await
+        self.endpoint.patch(self.snapshot_url(id)?, &req).await
     }
 
-    /// Deletes an entry and returns the names of the modules that went with
-    /// it: its module, if no other entry or kept module needs it, and so on
-    /// up its imports.
-    pub async fn delete_snapshot(&self, entry: &str) -> Result<Vec<String>, Error> {
-        let deleted: Deleted = self.endpoint.delete(self.snapshot_url(entry)?).await?;
-        Ok(deleted.removed)
+    /// Deletes a snapshot. `removed` names the modules that went with it:
+    /// its module, if no other snapshot or kept module needs it, and so on up
+    /// its imports.
+    pub async fn delete_snapshot(&self, id: &str) -> Result<DeleteSnapshotResponse, Error> {
+        self.endpoint.delete(self.snapshot_url(id)?).await
     }
 
-    fn snapshot_url(&self, entry: &str) -> Result<Url, Error> {
+    fn snapshot_url(&self, id: &str) -> Result<Url, Error> {
         let mut url = self.endpoint.url("snapshots")?;
         url.path_segments_mut()
-            .map_err(|_| Error::Url(entry.to_string()))?
-            .push(entry);
+            .map_err(|_| Error::Url(id.to_string()))?
+            .push(id);
         if let Some(v) = &self.version {
             url.query_pairs_mut().append_pair("version", v);
         }
@@ -855,6 +827,17 @@ impl SearchClient {
             .push(name);
         let resp: DeclResponse = self.endpoint.get(url).await?;
         Ok(resp.decl)
+    }
+}
+
+/// Adds a `label=key:value` filter to `url` for each of `labels`.
+fn add_labels(url: &mut Url, labels: &BTreeMap<String, String>) {
+    if labels.is_empty() {
+        return;
+    }
+    let mut query = url.query_pairs_mut();
+    for (key, value) in labels {
+        query.append_pair("label", &format!("{key}:{value}"));
     }
 }
 

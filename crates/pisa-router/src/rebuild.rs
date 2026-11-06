@@ -1,6 +1,6 @@
 //! A rebuild that the server runs: the plan a worker makes (see
 //! `POST /snapshots/rebuild` with `dry_run`), created a level at a time
-//! through ordinary create jobs, then, if asked, the old entries retired.
+//! through ordinary create jobs, then, if asked, the old snapshots retired.
 //! Each create has the plan's idempotency key, so running the same rebuild
 //! again replays the creates that are done.
 
@@ -8,8 +8,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use pisa_protocol::api::{
-    CheckResult, Error, ErrorKind, RebuildCreated, RebuildFailed, RebuildItem, RebuildRequest,
-    RebuildResponse, RebuildSkipped, Replaces, SnapshotRequest, SnapshotResponse, VersionQuery,
+    CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, Error, ErrorKind, RebuildCreated,
+    RebuildFailed, RebuildItem, RebuildSkipped, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
+    VersionQuery,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -26,8 +27,11 @@ const PARALLEL: usize = 8;
 /// How many times a create that no worker took in time is sent again.
 const CAPACITY_RETRIES: u32 = 5;
 
-/// Plans `req` (as a dry run) and runs the plan; see [`RebuildResponse`].
-pub(crate) async fn run(app: &Arc<App>, req: &RebuildRequest) -> Result<RebuildResponse, ApiError> {
+/// Plans `req` (as a dry run) and runs the plan; see [`RebuildSnapshotsResponse`].
+pub(crate) async fn run(
+    app: &Arc<App>,
+    req: &RebuildSnapshotsRequest,
+) -> Result<RebuildSnapshotsResponse, ApiError> {
     let q = VersionQuery {
         version: req.version.clone(),
     };
@@ -54,10 +58,10 @@ pub(crate) async fn run(app: &Arc<App>, req: &RebuildRequest) -> Result<RebuildR
         let (ready, blocked): (Vec<&RebuildItem>, Vec<&RebuildItem>) =
             items.partition(|i| !builds_on(i, &missing));
         for item in blocked {
-            missing.insert(item.new_snapshot.clone());
+            missing.insert(item.new_module.clone());
             response.skipped.push(RebuildSkipped {
-                entry: item.entry.clone(),
-                snapshot: item.snapshot.clone(),
+                snapshot_id: item.snapshot_id.clone(),
+                module: item.module.clone(),
             });
         }
         for chunk in ready.chunks(PARALLEL) {
@@ -76,30 +80,30 @@ pub(crate) async fn run(app: &Arc<App>, req: &RebuildRequest) -> Result<RebuildR
                     ))
                 });
                 match made {
-                    Ok(r)
-                        if r.entry.is_some()
-                            && r.snapshot.as_deref() == Some(&item.new_snapshot) =>
-                    {
+                    Ok(CreateSnapshotResponse {
+                        snapshot: Some(made),
+                        ..
+                    }) if made.module == item.new_module => {
                         response.created.push(RebuildCreated {
-                            entry: item.entry.clone(),
-                            snapshot: item.snapshot.clone(),
-                            new_entry: r.entry.unwrap_or_default(),
-                            new_snapshot: item.new_snapshot.clone(),
+                            snapshot_id: item.snapshot_id.clone(),
+                            module: item.module.clone(),
+                            new_snapshot_id: made.id,
+                            new_module: made.module,
                         });
                     }
                     made => {
-                        missing.insert(item.new_snapshot.clone());
-                        let result = match made {
-                            Ok(r) => r.result,
+                        missing.insert(item.new_module.clone());
+                        let check = match made {
+                            Ok(r) => r.check,
                             Err(error) => CheckResult {
                                 error: Some(error),
                                 ..Default::default()
                             },
                         };
                         response.failed.push(RebuildFailed {
-                            entry: item.entry.clone(),
-                            snapshot: item.snapshot.clone(),
-                            result,
+                            snapshot_id: item.snapshot_id.clone(),
+                            module: item.module.clone(),
+                            check,
                         });
                     }
                 }
@@ -125,17 +129,17 @@ fn builds_on(item: &RebuildItem, missing: &HashSet<String>) -> bool {
 /// it in time.
 async fn create(
     app: &App,
-    req: &RebuildRequest,
+    req: &RebuildSnapshotsRequest,
     item: &RebuildItem,
-) -> Result<SnapshotResponse, Error> {
-    let create = SnapshotRequest {
+) -> Result<CreateSnapshotResponse, Error> {
+    let create = CreateSnapshotRequest {
         code: item.code.clone(),
         version: req.version.clone(),
         timeout: req.timeout,
         verify: req.verify,
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
-        replaces: item.replaces.clone().map(Replaces::With),
+        replaces: item.replaces.clone(),
     };
     let p = prepare_create(app, create);
     let mut tries = 0;
@@ -149,15 +153,15 @@ async fn create(
     }
 }
 
-/// Deletes the plan's old entries, from the top down, then `from`. One
+/// Deletes the plan's old snapshots, from the top down, then `from`. One
 /// already gone counts, as when a rebuild that retired some is sent again.
 async fn retire(
     app: &App,
-    req: &RebuildRequest,
+    req: &RebuildSnapshotsRequest,
     plan: &[RebuildItem],
     q: VersionQuery,
 ) -> Result<Vec<String>, ApiError> {
-    let old = plan.iter().rev().filter_map(|i| i.entry.clone());
+    let old = plan.iter().rev().filter_map(|i| i.snapshot_id.clone());
     let mut retired = Vec::new();
     for entry in old.chain([req.from.clone()]) {
         let job = Job::SnapshotDelete(SnapshotJob {

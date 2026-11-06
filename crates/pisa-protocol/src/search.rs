@@ -279,6 +279,35 @@ pub struct Informal {
     pub source: String,
 }
 
+/// A natural-language description of a declaration.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Description {
+    /// What the declaration is called in words, e.g. "Subadditivity of von
+    /// Neumann entropy".
+    pub title: String,
+    /// What it states, in words.
+    pub text: String,
+    /// What it states, in LaTeX.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latex: Option<String>,
+    /// Other names it goes by.
+    pub aliases: Vec<String>,
+    /// Where it came from, e.g. "lsv2-v4.28.0-rc1" or a model name.
+    pub source: String,
+}
+
+impl From<Informal> for Description {
+    fn from(i: Informal) -> Self {
+        Description {
+            title: i.informal_name,
+            text: i.statement_nl,
+            latex: i.statement_latex,
+            aliases: i.aliases,
+            source: i.source,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +322,22 @@ mod tests {
         assert_eq!(serde_json::to_value(&f).unwrap(), json!({}));
         assert_eq!(q.snapshots, SnapshotScope::None);
         assert!(serde_json::to_value(&q).unwrap().get("snapshots").is_none());
+    }
+
+    #[test]
+    fn a_description_is_an_informal_under_public_names() {
+        let informal = Informal {
+            informal_name: "Name".into(),
+            statement_nl: "Words.".into(),
+            statement_latex: Some("x = x".into()),
+            aliases: vec!["other".into()],
+            source: "model".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(Description::from(informal)).unwrap(),
+            json!({"title": "Name", "text": "Words.", "latex": "x = x",
+                   "aliases": ["other"], "source": "model"})
+        );
     }
 
     #[test]

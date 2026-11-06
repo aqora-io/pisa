@@ -9,13 +9,14 @@ import type {
   DeclDetail,
   Health,
   ListSnapshotsParams,
+  ListSnapshotsResponse,
   PisaClient,
   PisaError,
   Query,
   QueryResult,
   Resolution,
-  SnapshotInfo,
-  SnapshotList,
+  SnapshotDetail,
+  SnapshotId,
 } from "@aqora/pisa-client";
 import type { InfiniteData, QueryKey, UseInfiniteQueryOptions, UseQueryOptions } from "@tanstack/react-query";
 
@@ -48,8 +49,9 @@ export const pisaKeys = {
   all: (c: PisaClient): QueryKey => ["pisa", c.url],
   health: (c: PisaClient): QueryKey => ["pisa", c.url, "health"],
   checks: (c: PisaClient): QueryKey => ["pisa", c.url, "check"],
-  /** Every snapshot query of `version`, which a change to any entry may
-   *  affect: a module's `verified` and `dirty` are shared by its entries. */
+  /** Every snapshot query of `version`, which a change to any snapshot may
+   *  affect: a module's `verified` and `status` are shared by its
+   *  snapshots. */
   snapshots: (c: PisaClient, version?: string): QueryKey => ["pisa", c.url, "snapshots", version ?? c.version ?? null],
   search: (c: PisaClient): QueryKey => ["pisa", c.url, "search"],
 };
@@ -146,20 +148,20 @@ export interface VersionInput {
   version?: string;
 }
 
-export function snapshotOptions(client: PisaClient, entry: string, input: VersionInput = {}): PisaQueryOptions<SnapshotInfo> {
+export function snapshotOptions(client: PisaClient, id: SnapshotId, input: VersionInput = {}): PisaQueryOptions<SnapshotDetail> {
   return {
-    queryKey: [...pisaKeys.snapshots(client, input.version), "entry", entry] as QueryKey,
-    queryFn: ({ signal }) => client.getSnapshot(entry, { ...input, signal }),
+    queryKey: [...pisaKeys.snapshots(client, input.version), "snapshot", id] as QueryKey,
+    queryFn: ({ signal }) => client.getSnapshot(id, { ...input, signal }),
     retry: retryQuery,
   };
 }
 
-/** Pages of entries, newest first. The last page may be empty. */
+/** Pages of snapshots, newest first. The last page may be empty. */
 export function snapshotsOptions(
   client: PisaClient,
   params: Omit<ListSnapshotsParams, "after"> = {},
   input: VersionInput = {},
-): PisaInfiniteOptions<SnapshotList, string | undefined> {
+): PisaInfiniteOptions<ListSnapshotsResponse, string | undefined> {
   return {
     queryKey: [...pisaKeys.snapshots(client, input.version), "list", params] as QueryKey,
     queryFn: ({ pageParam, signal }) =>

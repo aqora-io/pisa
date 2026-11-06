@@ -58,7 +58,7 @@ fn comparable(v: &Value) -> Value {
     match v {
         Value::Object(o) => o
             .iter()
-            .filter(|(k, _)| !["time", "entry", "id", "created"].contains(&k.as_str()))
+            .filter(|(k, _)| !["time", "id", "created"].contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), comparable(v)))
             .collect(),
         Value::Array(a) => a.iter().map(comparable).collect(),
@@ -72,12 +72,12 @@ async fn each_long_endpoint_answers_later_as_it_would_have_at_once() {
     let (_, session) = c.post("/sessions", json!({"code": CODE})).await;
     let state = session["states"][0]["id"].as_str().unwrap();
     let session_id = session["id"].as_str().unwrap();
-    // Verifying records what it checked, so each run gets an entry of its
+    // Verifying records what it checked, so each run gets a snapshot of its
     // own, on a module of its own.
-    let mut entries = Vec::new();
+    let mut snapshots = Vec::new();
     for code in ["def kept := 1", "def kept' := 1"] {
         let (_, kept) = c.post("/snapshots", json!({"code": code})).await;
-        entries.push(kept["entry"].as_str().unwrap().to_string());
+        snapshots.push(kept["snapshot"]["id"].as_str().unwrap().to_string());
     }
     let cases = [
         ("/check", json!({"code": "#check Nat"}), "check"),
@@ -115,19 +115,19 @@ async fn each_long_endpoint_answers_later_as_it_would_have_at_once() {
         );
     }
 
-    let verify = |entry: &str| format!("/snapshots/{entry}/verify");
-    let (status, at_once) = c.post(&verify(&entries[0]), json!({})).await;
-    let job = accepted(&c, &verify(&entries[1]), json!({}), "verify_snapshot").await;
+    let verify = |id: &str| format!("/snapshots/{id}/verify");
+    let (status, at_once) = c.post(&verify(&snapshots[0]), json!({})).await;
+    let job = accepted(&c, &verify(&snapshots[1]), json!({}), "verify_snapshot").await;
     let (later_status, later) = look(&c, &c.url(&format!("/jobs/{job}")), "10").await;
     let shape = |v: &Value| {
         (
-            v["verified"].clone(),
-            v["dirty"].clone(),
+            v["snapshot"]["verified"].clone(),
+            v["snapshot"]["status"].clone(),
             v["checked"].as_array().map(Vec::len),
         )
     };
     assert_eq!((later_status, shape(&later)), (status, shape(&at_once)));
-    assert_eq!(later["checked"][0], later["snapshot"]);
+    assert_eq!(later["checked"][0], later["snapshot"]["module"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

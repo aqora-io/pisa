@@ -13,7 +13,7 @@
     assert verdict["ok"]
 
     # Keep accepted code as a module, and build on it without re-checking it.
-    base = client.create_snapshot("import Mathlib\\ndef double (n : Nat) := 2 * n")
+    base = client.create_snapshot("import Mathlib\\ndef double (n : Nat) := 2 * n")["snapshot"]
     assert client.check(base["header"] + "\\nexample : double 2 = 4 := rfl")["ok"]
 
     search = SearchClient("http://localhost:8000")

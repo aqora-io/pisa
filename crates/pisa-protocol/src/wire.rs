@@ -130,14 +130,13 @@ pub struct SnapshotRebuildJob {
     pub allow_changes: bool,
 }
 
+/// `PATCH /snapshots/{id}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotLabelsJob {
     /// The entry id.
     pub entry: String,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub set: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub remove: Vec<String>,
+    /// The request's merge patch: `None` removes a label, `Some` sets it.
+    pub labels: BTreeMap<String, Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,16 +146,16 @@ pub enum JobResult {
     SessionStarted(Result<api::Session, api::Error>),
     TacticApplied(Result<api::ApplyTacticResponse, api::Error>),
     SessionChecked(SessionChecked),
-    /// Failures are in-band, in `result.error`, as for checks.
-    SnapshotCreated(Box<api::SnapshotResponse>),
-    Snapshot(Result<Box<api::SnapshotInfo>, api::Error>),
-    SnapshotDeleted(Result<api::Deleted, api::Error>),
-    SnapshotVerified(Result<api::SnapshotVerified, api::Error>),
-    SnapshotList(Result<api::SnapshotList, api::Error>),
-    SnapshotLabels(Result<api::SnapshotSummary, api::Error>),
-    SnapshotDependents(Result<api::SnapshotDependents, api::Error>),
-    SnapshotRebuild(Result<api::RebuildResponse, api::Error>),
-    SnapshotAudit(Result<api::SnapshotAudit, api::Error>),
+    /// Failures are in-band, in `check.error`, as for checks.
+    SnapshotCreated(Box<api::CreateSnapshotResponse>),
+    Snapshot(Result<Box<api::SnapshotDetail>, api::Error>),
+    SnapshotDeleted(Result<api::DeleteSnapshotResponse, api::Error>),
+    SnapshotVerified(Result<api::VerifySnapshotResponse, api::Error>),
+    SnapshotList(Result<api::ListSnapshotsResponse, api::Error>),
+    SnapshotLabels(Result<api::Snapshot, api::Error>),
+    SnapshotDependents(Result<api::ListDependentsResponse, api::Error>),
+    SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
+    SnapshotAudit(Result<api::AuditSnapshotsResponse, api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,
@@ -229,15 +228,18 @@ mod tests {
             verify: None,
             labels: BTreeMap::new(),
             key: None,
-            replaces: Some(api::Replaces::Entry("e".into())),
+            replaces: Some(api::Replaces {
+                snapshot_id: "e".into(),
+                allow: None,
+            }),
         };
         let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();
         assert_eq!(job["kind"], "snapshot_replace");
-        assert_eq!(job["replaces"], "e");
+        assert_eq!(job["replaces"], serde_json::json!({"snapshot_id": "e"}));
         let Ok(Job::SnapshotReplace(back)) = serde_json::from_value(job) else {
             panic!("not a replace")
         };
-        assert_eq!(back.replaces.unwrap().entry(), "e");
+        assert_eq!(back.replaces.unwrap().snapshot_id, "e");
     }
 
     #[test]

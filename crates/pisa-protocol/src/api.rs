@@ -13,15 +13,15 @@
 //! | `POST /sessions` | [`StartSessionRequest`] → [`Session`] |
 //! | `POST /states/{id}/tactic` | [`ApplyTacticRequest`] → [`ApplyTacticResponse`] |
 //! | `POST /sessions/{id}/check` | [`CheckSessionRequest`] → [`CheckResult`] |
-//! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
-//! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`SnapshotList`] |
-//! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
-//! | `GET /snapshots/{entry}/dependents` | `?label=key:value` → [`SnapshotDependents`] |
-//! | `POST /snapshots/rebuild` | [`RebuildRequest`] → [`RebuildResponse`] |
-//! | `GET /snapshots/audit` | `?label=key:value` → [`SnapshotAudit`] |
-//! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
-//! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
-//! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
+//! | `POST /snapshots` | [`CreateSnapshotRequest`] → [`CreateSnapshotResponse`] |
+//! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`ListSnapshotsResponse`] |
+//! | `GET /snapshots/{id}` | → [`SnapshotDetail`] |
+//! | `GET /snapshots/{id}/dependents` | `?label=key:value` → [`ListDependentsResponse`] |
+//! | `POST /snapshots/rebuild` | [`RebuildSnapshotsRequest`] → [`RebuildSnapshotsResponse`] |
+//! | `GET /snapshots/audit` | `?label=key:value` → [`AuditSnapshotsResponse`] |
+//! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
+//! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
+//! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
 //! | `GET /jobs/{id}` | `?wait=` ([`JobWait`]) → the request's answer, or [`Job`] (202) |
 //! | `DELETE /jobs/{id}` | → [`Job`] |
 //!
@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, IntoResponses, ToSchema};
 
 use crate::repl;
-use crate::search::Informal;
+use crate::search::Description;
 pub use crate::verify::{Declaration, ProofStatus};
 
 fn default_timeout() -> u64 {
@@ -127,7 +127,7 @@ pub enum ApiErrors {
     /// `bad_request`: the request breaks the API's rules.
     #[response(status = 400)]
     BadRequest(ErrorResponse),
-    /// `not_found`: an unknown or expired job, state, session, entry or
+    /// `not_found`: an unknown or expired job, state, session, snapshot or
     /// declaration.
     #[response(status = 404)]
     NotFound(ErrorResponse),
@@ -194,7 +194,7 @@ pub enum JobKind {
     CheckSession,
     /// `POST /snapshots`
     CreateSnapshot,
-    /// `POST /snapshots/{entry}/verify`
+    /// `POST /snapshots/{id}/verify`
     VerifySnapshot,
     /// `POST /snapshots/rebuild`, run rather than planned
     RebuildSnapshots,
@@ -226,18 +226,19 @@ pub struct JobWait {
 /// What `GET /jobs/{id}` answers once the job is done: what its request
 /// would have. By `kind`: `check` and `check_session` a `CheckResult`,
 /// `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
-/// `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
-/// `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
-/// is the request's own, with its status.
+/// `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
+/// `VerifySnapshotResponse` and `rebuild_snapshots` a
+/// `RebuildSnapshotsResponse`. An error is the request's own, with its
+/// status.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum JobOutcome {
     Check(CheckResult),
     Session(Session),
     ApplyTactic(ApplyTacticResponse),
-    Snapshot(Box<SnapshotResponse>),
-    Verified(SnapshotVerified),
-    Rebuild(Box<RebuildResponse>),
+    CreateSnapshot(Box<CreateSnapshotResponse>),
+    VerifySnapshot(VerifySnapshotResponse),
+    RebuildSnapshots(Box<RebuildSnapshotsResponse>),
 }
 
 /// `GET /health`: 200, or 503 once the server is stopping.
@@ -510,11 +511,11 @@ pub struct CheckSessionRequest {
 }
 
 /// `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
-/// keeps it as a module that later code can import, with a new entry that
-/// holds the module. Code that is already kept gets a new entry on its
-/// module without being built again.
+/// keeps it as a module that later code can import, with a new snapshot of
+/// it. Code that is already kept gets a new snapshot of its module without
+/// being built again.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotRequest {
+pub struct CreateSnapshotRequest {
     pub code: String,
     #[serde(default)]
     pub version: Option<String>,
@@ -523,62 +524,50 @@ pub struct SnapshotRequest {
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     /// Whether to re-check the code through the kernel. `true` also re-checks
-    /// its imports, so the result ends [`verified`](SnapshotResponse::verified)
-    /// or has an error, except on a [`key`](Self::key) replay. `false` never
-    /// re-checks. By default, only code that uses macros, its own or an
+    /// its imports, so the snapshot ends [`verified`](Snapshot::verified) or
+    /// the check has an error, except on a [`key`](Self::key) replay. `false`
+    /// never re-checks. By default, only code that uses macros, its own or an
     /// import's, is re-checked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<bool>,
-    /// The new entry's labels; see [`check_labels`](crate::labels::check_labels)
-    /// for the rules.
+    /// The new snapshot's labels; see
+    /// [`check_labels`](crate::labels::check_labels) for the rules.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
-    /// Makes the create safe to retry: while an entry made with this key
-    /// exists, a create with it on the same code returns that entry as it is,
-    /// instead of adding another; on other code it is a `bad_request`. Such a
-    /// replay ignores the request's other fields, `labels` and `verify`
-    /// included, so it can be `verified: false` with no error after
+    /// Makes the create safe to retry: while a snapshot made with this key
+    /// exists, a create with it on the same code returns that snapshot as it
+    /// is, instead of adding another; on other code it is a `bad_request`.
+    /// Such a replay ignores the request's other fields, `labels` and
+    /// `verify` included, so it can be `verified: false` with no error after
     /// `verify: true`. Creates that keep nothing don't use the key up, and
-    /// deleting the entry frees it. See [`check_key`](crate::labels::check_key)
-    /// for the rules.
+    /// deleting the snapshot frees it. See
+    /// [`check_key`](crate::labels::check_key) for the rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
-    /// The entry this code replaces, e.g. the skeleton a proof fills in. The
-    /// code is kept only if it still declares everything that entry's module
-    /// declares, each the same kind of declaration with the same type and,
-    /// for definitions, the same value, and adds no assumptions (`axiom`s,
-    /// its own or a newly imported snapshot's); it may add other declarations
-    /// and imports. If it no longer builds on
-    /// a snapshot that module does, what the module's declarations use from
-    /// there must be unchanged in what the code builds on now. Otherwise
-    /// nothing is kept and `result.reasons` lists the changes. The new entry
-    /// records the link.
+    /// The snapshot this code replaces, e.g. the skeleton a proof fills in.
+    /// The code is kept only if it still declares everything that snapshot's
+    /// module declares, each the same kind of declaration with the same type
+    /// and, for definitions, the same value, and adds no assumptions
+    /// (`axiom`s, its own or a newly imported snapshot's); it may add other
+    /// declarations and imports. If it no longer builds on a snapshot that
+    /// module does, what the module's declarations use from there must be
+    /// unchanged in what the code builds on now. Otherwise nothing is kept
+    /// and `check.reasons` lists the changes. The new snapshot records the
+    /// link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
 }
 
-/// [`SnapshotRequest::replaces`]: an entry, or an entry and what may change.
+/// A snapshot that a create replaces, and what the replacement may change:
+/// a create's [`replaces`](CreateSnapshotRequest::replaces), the link the new
+/// snapshot keeps, and a rebuild item's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(untagged)]
-pub enum Replaces {
-    Entry(String),
-    With(Replaced),
-}
-
-impl Replaces {
-    pub fn entry(&self) -> &str {
-        match self {
-            Replaces::Entry(entry) => entry,
-            Replaces::With(r) => &r.entry,
-        }
-    }
-
-    pub fn allow(&self) -> Option<Allow> {
-        match self {
-            Replaces::Entry(_) => None,
-            Replaces::With(r) => r.allow,
-        }
-    }
+pub struct Replaces {
+    pub snapshot_id: String,
+    /// What the replacement may change besides adding declarations; by
+    /// default nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow: Option<Allow>,
 }
 
 /// What a replacement may change besides adding declarations.
@@ -592,23 +581,12 @@ pub enum Allow {
     Definitions,
 }
 
-/// An entry that another replaced, and how.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct Replaced {
-    pub entry: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow: Option<Allow>,
-}
-
-/// [`SnapshotResponse::replaces`]: the entry the create replaced, and what
-/// the replacement changed.
+/// What a replacement changed, as the create's comparison with the snapshot
+/// it [`replaces`](CreateSnapshotRequest::replaces) found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Replacement {
-    pub entry: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow: Option<Allow>,
     /// The replaced module's declarations that used `sorry` and no longer
-    /// do. Empty on a key replay, which doesn't compare again.
+    /// do.
     #[schema(required = true)]
     #[serde(default)]
     pub filled: Vec<String>,
@@ -621,87 +599,78 @@ pub struct Replacement {
     pub affected: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotResponse {
-    /// The entry, which the other snapshot endpoints take: the one this create
-    /// added, or on a [`key`](SnapshotRequest::key) replay the one the key is
-    /// on. It keeps the module until it is deleted. Absent when nothing new
-    /// was kept: the code was not kept, it changed what the entry it
-    /// [`replaces`](SnapshotRequest::replaces) states (`result.reasons` says
-    /// how), or `verify: true` found it kept but failing the re-check. For
-    /// code that was already kept, `snapshot` and `header` are then set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
-    /// The module to import, e.g. `PisaSnap.s1a2b…`, shared by every entry on
-    /// the same code. Absent when the code was not kept: Lean reported errors,
-    /// or the check could not complete.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<String>,
-    /// The header to start code on top of this snapshot with: this code's
-    /// imports with its snapshots replaced by the new one. Code with exactly
-    /// this header reuses the Lean process the snapshot's builder keeps warm.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub header: Option<String>,
-    /// The worker pool version the snapshot belongs to.
+/// Kept code: a module that later code imports, with labels. Every snapshot
+/// of the same code shares one module, which stays while a snapshot of it, or
+/// a kept module that imports it, needs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Snapshot {
+    /// Its id, which the other snapshot endpoints take.
+    pub id: String,
+    /// The worker pool version it belongs to.
     pub version: String,
-    /// Kept although a declaration uses `sorry` or another axiom outside the
-    /// allowed list; `result.reasons` says which.
-    pub dirty: bool,
-    /// The worst status among the module's declarations: `dirty` unless
-    /// `proved`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ProofStatus>,
-    /// This snapshot and everything it imports have passed the kernel
-    /// re-check.
-    pub verified: bool,
-    /// The entry's labels.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// The module to import, e.g. `PisaSnap.s1a2b…`, shared by every snapshot
+    /// of the same code.
+    pub module: String,
+    /// The header to start code on top of this snapshot with: its code's
+    /// imports with its snapshots replaced by this one. Code with exactly
+    /// this header reuses the Lean process the snapshot's builder keeps warm.
+    pub header: String,
+    /// The modules its module imports.
+    pub imports: Vec<String>,
     pub labels: BTreeMap<String, String>,
-    /// The entry it replaces, if the request named one.
+    /// The snapshot it replaced, if it was created to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<Replacement>,
+    pub replaces: Option<Replaces>,
+    /// The worst status among its module's declarations, by the build's
+    /// report or, once `verified`, the kernel re-check.
+    pub status: ProofStatus,
+    /// Its module and everything it imports have passed the kernel re-check.
+    pub verified: bool,
+    /// When it was created, in seconds since the Unix epoch.
+    pub created: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateSnapshotResponse {
+    /// The snapshot this create added, or on a
+    /// [`key`](CreateSnapshotRequest::key) replay the one the key is on.
+    /// Absent when nothing new was kept: Lean reported errors, the check
+    /// could not complete, the code changed what the snapshot it
+    /// [`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`
+    /// says how), or `verify: true` found it kept but failing the re-check
+    /// (`check.error` says why).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Snapshot>,
     /// The check, as for `/check`. It has no `sorries`, and `time` includes
     /// importing the module's imports.
-    pub result: CheckResult,
+    pub check: CheckResult,
+    /// What the replacement changed, if the request named a snapshot it
+    /// replaces and the code was kept. Absent on a key replay, which doesn't
+    /// compare again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<Replacement>,
 }
 
-/// `GET /snapshots/{entry}`: an entry and its module.
+/// `GET /snapshots/{id}`: a snapshot with its module's code, check and
+/// exports.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotInfo {
-    #[schema(required = true)]
-    #[serde(default)]
-    pub entry: String,
-    /// The entry's module.
-    pub snapshot: String,
-    /// The modules it imports.
-    pub imports: Vec<String>,
-    /// As in [`SnapshotResponse::header`].
-    pub header: String,
+pub struct SnapshotDetail {
+    #[serde(flatten)]
+    pub snapshot: Snapshot,
     pub code: String,
-    /// The entry's labels.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-    /// The entry this one replaced, if it was created to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<Replaced>,
-    pub dirty: bool,
-    /// As in [`SnapshotResponse::status`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ProofStatus>,
-    /// As in [`SnapshotResponse::verified`].
-    pub verified: bool,
-    pub result: CheckResult,
-    /// When the entry was created, in seconds since the Unix epoch.
-    pub created: u64,
-    /// The module's declarations, in order.
+    /// The module's check, as in [`CreateSnapshotResponse::check`], with the
+    /// kernel re-check's axioms once it is verified.
+    pub check: CheckResult,
+    /// The declarations that code importing the module sees, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decls: Vec<ModuleDecl>,
+    pub exports: Vec<Export>,
 }
 
-/// A declaration of a snapshot module, with its description once search has
-/// written one (with `PISA_SEARCH_DESCRIBE_MODEL`).
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ModuleDecl {
+/// A declaration of a snapshot's module, as code that imports it sees it,
+/// with its description once search has written one (with
+/// `PISA_SEARCH_DESCRIBE_MODEL`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Export {
     pub name: String,
     pub kind: String,
     /// The declaration's signature, with notation.
@@ -709,87 +678,63 @@ pub struct ModuleDecl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docstring: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub informal: Option<Informal>,
+    pub description: Option<Description>,
 }
 
-/// An entry in a listing: as [`SnapshotInfo`], without the code and the check
-/// result.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotSummary {
-    pub entry: String,
-    /// The entry's module.
-    pub snapshot: String,
-    /// The modules it imports.
-    pub imports: Vec<String>,
-    /// As in [`SnapshotResponse::header`].
-    pub header: String,
-    pub labels: BTreeMap<String, String>,
-    /// As in [`SnapshotInfo::replaces`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<Replaced>,
-    pub dirty: bool,
-    /// As in [`SnapshotResponse::status`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<ProofStatus>,
-    /// As in [`SnapshotResponse::verified`].
-    pub verified: bool,
-    /// When the entry was created, in seconds since the Unix epoch.
-    pub created: u64,
-}
-
-/// `GET /snapshots`: the version's entries, newest first, that have every
+/// `GET /snapshots`: the version's snapshots, newest first, that have every
 /// label the query names as `label=key:value` (split on the first `:`; up to
 /// 64 filters), at most `limit` of them (1 to 1000, default 100). Keep
 /// requesting with `next` as `after` while a page has it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotList {
-    pub entries: Vec<SnapshotSummary>,
+pub struct ListSnapshotsResponse {
+    pub snapshots: Vec<Snapshot>,
     /// Where the next page starts, if this page is full. The page after it
     /// may be empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
 }
 
-/// `GET /snapshots/{entry}/dependents`: the entries on every module that
-/// imports the entry's module, directly or through others, parents first: by
-/// level, where a module that imports it is at level 1 and one that imports
-/// that at 2, by its longest chain, then oldest first. With `label=key:value`
-/// filters, as in a listing, only the entries with every label.
+/// `GET /snapshots/{id}/dependents`: the snapshots of every module that
+/// imports the snapshot's module, directly or through others, parents first:
+/// by level, where a module that imports it is at level 1 and one that
+/// imports that at 2, by its longest chain, then oldest first. With
+/// `label=key:value` filters, as in a listing, only the snapshots with every
+/// label.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotDependents {
-    pub entries: Vec<SnapshotSummary>,
+pub struct ListDependentsResponse {
+    pub snapshots: Vec<Snapshot>,
 }
 
 /// `POST /snapshots/rebuild`: plans how to create the dependents of `from`
-/// (see [`SnapshotDependents`]) again on `to`, each with its imports of
+/// (see [`ListDependentsResponse`]) again on `to`, each with its imports of
 /// `from`'s module, and of the other modules it rebuilds, swapped for the new
 /// ones, and unless `dry_run` creates them: a level at a time, a level's
 /// creates side by side once the level below is done.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct RebuildRequest {
-    /// The entry being replaced.
+pub struct RebuildSnapshotsRequest {
+    /// The snapshot being replaced.
     pub from: String,
     /// Its replacement.
     pub to: String,
-    /// Which dependents to rebuild: those with an entry that has every label,
-    /// and the modules they build on above `from`. Required, so that the
-    /// caller chooses which projects follow the edit.
+    /// Which dependents to rebuild: those with a snapshot that has every
+    /// label, and the modules they build on above `from`. Required, so that
+    /// the caller chooses which projects follow the edit.
     pub labels: BTreeMap<String, String>,
     /// Only plan: the client creates the plan's items.
     #[serde(default)]
     pub dry_run: bool,
     /// Plan even though `to` changes what `from` states, when `to` wasn't
-    /// created to [`replace`](SnapshotRequest::replaces) `from`.
+    /// created to [`replace`](CreateSnapshotRequest::replaces) `from`.
     #[serde(default)]
     pub allow_changes: bool,
-    /// Once every item is created, delete the old entries, from the top
+    /// Once every item is created, delete the old snapshots, from the top
     /// down, then `from`, and with them the old modules nothing else needs.
     #[serde(default)]
     pub retire: bool,
-    /// As [`SnapshotRequest::verify`], for each create.
+    /// As [`CreateSnapshotRequest::verify`], for each create.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<bool>,
-    /// As [`SnapshotRequest::timeout`], for each create.
+    /// As [`CreateSnapshotRequest::timeout`], for each create.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     #[serde(default)]
@@ -798,16 +743,16 @@ pub struct RebuildRequest {
 
 /// What a rebuild planned and, unless it was a dry run, did. Sending the same
 /// rebuild again plans the same items with the same keys, so the creates that
-/// are done replay their entries, and the rest run.
+/// are done replay their snapshots, and the rest run.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct RebuildResponse {
+pub struct RebuildSnapshotsResponse {
     /// For a plan, whether there is one: false when `to` changes what `from`
     /// states and `allow_changes` isn't set. For a run, whether every item
     /// was created, and retired if asked.
     pub ok: bool,
     /// How `to` differs from `from`, as in a refused replacement's
-    /// `result.reasons`. Empty when `to` replaces `from`: its create
-    /// compared them.
+    /// `check.reasons`. Empty when `to` replaces `from`: its create compared
+    /// them.
     #[schema(required = true)]
     #[serde(default)]
     pub changes: Vec<String>,
@@ -829,7 +774,8 @@ pub struct RebuildResponse {
     /// failed or was skipped. Other branches go on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<RebuildSkipped>,
-    /// With `retire`, the old entries deleted, top down, `from` last.
+    /// With `retire`, the ids of the old snapshots deleted, top down, `from`
+    /// last.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired: Vec<String>,
 }
@@ -837,48 +783,52 @@ pub struct RebuildResponse {
 /// A [`RebuildItem`] created.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildCreated {
+    /// As in [`RebuildItem::snapshot_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
-    pub snapshot: String,
-    pub new_entry: String,
-    pub new_snapshot: String,
+    pub snapshot_id: Option<String>,
+    pub module: String,
+    /// The snapshot the create made, or replayed.
+    pub new_snapshot_id: String,
+    pub new_module: String,
 }
 
 /// A [`RebuildItem`] whose create kept nothing.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildFailed {
+    /// As in [`RebuildItem::snapshot_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
-    pub snapshot: String,
+    pub snapshot_id: Option<String>,
+    pub module: String,
     /// The create's check: Lean's errors, a refused replacement's
     /// `reasons`, or the `error` that stopped it.
-    pub result: CheckResult,
+    pub check: CheckResult,
 }
 
 /// A [`RebuildItem`] not created, because it builds on one that wasn't.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildSkipped {
+    /// As in [`RebuildItem::snapshot_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
-    pub snapshot: String,
+    pub snapshot_id: Option<String>,
+    pub module: String,
 }
 
-/// A create in a [`RebuildResponse`]: `POST /snapshots` with its `code`, `labels`
-/// and `key`.
+/// A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its
+/// `code`, `labels`, `key` and `replaces`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildItem {
     /// 1 for a module that imports `from`'s, 2 for one that imports that, and
     /// so on, by its longest chain.
     pub level: usize,
-    /// The entry it rebuilds. Absent for a module that only links others to
-    /// `from`, with no entry that has the labels: it gets the labels asked
-    /// for.
+    /// The snapshot it rebuilds. Absent for a module that only links others
+    /// to `from`, with no snapshot that has the labels: it gets the labels
+    /// asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
+    pub snapshot_id: Option<String>,
     /// The module it rebuilds.
-    pub snapshot: String,
+    pub module: String,
     /// The module the create makes.
-    pub new_snapshot: String,
+    pub new_module: String,
     /// The header of code on top of the new module.
     pub new_header: String,
     /// The old module's code with its imports swapped.
@@ -888,12 +838,12 @@ pub struct RebuildItem {
     /// keys, so running a plan again after a failure replays the creates
     /// that are done.
     pub key: String,
-    /// When `to` replaces `from`, the entry it rebuilds, to create it as a
-    /// replacement of, with the same `allow`. The create then checks that
+    /// When `to` replaces `from`, the snapshot it rebuilds, to create it as
+    /// a replacement of, with the same `allow`. The create then checks that
     /// nothing its statements depend on changed, and is refused if
     /// something did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<Replaced>,
+    pub replaces: Option<Replaces>,
     /// The theorems of the module whose type uses a changed definition,
     /// directly or through other definitions, here or below.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -904,22 +854,22 @@ pub struct RebuildItem {
     pub affected_unknown: bool,
 }
 
-/// `GET /snapshots/audit`: what the entries that have every label the query
-/// names (as in a listing) rest on. Statuses come from the same axiom lists
-/// as `dirty`: the build's report, or the kernel re-check once a module is
-/// verified, so a trusted audit has no `rejected` or `sorry` and
-/// `unverified_modules` 0. Whether an assumption is reasonable is for review.
+/// `GET /snapshots/audit`: what the snapshots that have every label the
+/// query names (as in a listing) rest on. Statuses come from the build's
+/// axiom report, or the kernel re-check once a module is verified, so a
+/// trusted audit has no `rejected` or `sorry` and `unverified_modules` 0.
+/// Whether an assumption is reasonable is for review.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotAudit {
+pub struct AuditSnapshotsResponse {
     pub summary: AuditSummary,
-    /// The assumptions what the entries declare uses, by name, wherever they
-    /// are declared.
+    /// The assumptions what the snapshots declare uses, by name, wherever
+    /// they are declared.
     pub assumptions: Vec<AuditAssumption>,
     /// The declarations that are `sorry` or `rejected`.
     pub not_proved: Vec<AuditUnproved>,
 }
 
-/// The entries' declarations by status, each module's once, without the
+/// The snapshots' declarations by status, each module's once, without the
 /// assumptions themselves and what Lean generated.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AuditSummary {
@@ -927,7 +877,7 @@ pub struct AuditSummary {
     pub conditional: u64,
     pub sorry: u64,
     pub rejected: u64,
-    /// The entries' modules that haven't passed the kernel re-check, so
+    /// The snapshots' modules that haven't passed the kernel re-check, so
     /// whose statuses come from the build's report.
     pub unverified_modules: u64,
 }
@@ -938,75 +888,67 @@ pub struct AuditAssumption {
     /// As written, from its module's declaration export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    /// An entry on the module that declares it: one with the labels if there
-    /// is one.
+    /// A snapshot of the module that declares it: one with the labels if
+    /// there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entry: Option<String>,
+    pub snapshot_id: Option<String>,
     /// Its module has passed the kernel re-check.
     pub verified: bool,
-    /// The entries' declarations that rest on it.
+    /// The snapshots' declarations that rest on it.
     pub used_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuditUnproved {
     pub name: String,
-    pub entry: String,
+    /// A snapshot with the labels whose module declares it.
+    pub snapshot_id: String,
     pub status: ProofStatus,
     /// Its axioms outside the allowed list.
     pub axioms: Vec<String>,
 }
 
-/// `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets
-/// those in `set`. The labels that result must follow the rules of
-/// [`check_labels`](crate::labels::check_labels).
+/// `PATCH /snapshots/{id}`: changes the snapshot's labels as a JSON merge
+/// patch, and answers the [`Snapshot`]. The labels that result must follow
+/// the rules of [`check_labels`](crate::labels::check_labels), or nothing
+/// changes.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct LabelsRequest {
-    #[serde(default)]
-    pub set: BTreeMap<String, String>,
-    #[serde(default)]
-    pub remove: Vec<String>,
+pub struct UpdateSnapshotRequest {
+    /// A label set to `null` is removed, one set to a string takes that
+    /// value, and those not named stay as they are.
+    pub labels: BTreeMap<String, Option<String>>,
 }
 
-/// `POST /snapshots/{entry}/verify`: re-checks the entry's module and
+/// `POST /snapshots/{id}/verify`: re-checks the snapshot's module and
 /// everything it imports through the kernel, imports first, skipping what
-/// already passed. A module that fails stops the run and stays usable, marked
-/// as not verified. `verified` and `dirty` belong to the module, so every
-/// entry on it shows the result.
+/// already passed. A module that fails stops the run and stays usable,
+/// marked as not verified. `verified` and `status` belong to the module, so
+/// every snapshot of it shows the result.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotVerified {
-    #[schema(required = true)]
-    #[serde(default)]
-    pub entry: String,
-    /// The entry's module.
-    pub snapshot: String,
-    /// As in [`SnapshotResponse::verified`].
-    pub verified: bool,
-    /// As in [`SnapshotResponse::dirty`], from the re-check if it got this far.
-    pub dirty: bool,
+pub struct VerifySnapshotResponse {
+    /// The snapshot, as the re-check left it.
+    pub snapshot: Snapshot,
     /// The modules this run re-checked and passed, in order.
     pub checked: Vec<String>,
     /// The module that failed, if one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure: Option<SnapshotFailure>,
+    pub failure: Option<VerifyFailure>,
 }
 
+/// A module that failed the kernel re-check.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SnapshotFailure {
-    pub snapshot: String,
+pub struct VerifyFailure {
+    pub module: String,
     /// Why the re-check failed, e.g. the kernel's error or a timeout.
     pub reason: String,
 }
 
-/// `DELETE /snapshots/{entry}`: deletes the entry. Its module goes too once
-/// no entry and no kept module needs it, and then so do the modules it
+/// `DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once
+/// no snapshot and no kept module needs it, and then so do the modules it
 /// imports, on the same terms.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct Deleted {
-    #[schema(required = true)]
-    #[serde(default)]
-    pub entry: String,
-    /// The modules removed, the entry's own first.
+pub struct DeleteSnapshotResponse {
+    /// The modules removed, the snapshot's own first.
     #[schema(required = true)]
     #[serde(default)]
     pub removed: Vec<String>,

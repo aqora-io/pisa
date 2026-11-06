@@ -145,12 +145,28 @@ fn job_of(job: &Bound<'_, PyAny>) -> PyResult<Job<Value>> {
     Ok(Job::new(job.id, job.kind))
 }
 
-/// A create's `replaces`: an entry, or `{"entry": …, "allow": "definitions"}`.
+/// A create's `replaces`: `{"snapshot_id": …}`, with `"allow":
+/// "definitions"` if it may change definitions.
 fn replaces_of(replaces: &Bound<'_, PyAny>) -> PyResult<pisa_client::Replaces> {
     serde_json::from_value(from_py(replaces)?).map_err(|_| {
         PyValueError::new_err(
-            "replaces must be an entry, or {\"entry\": ..., \"allow\": \"definitions\"}",
+            "replaces must be {\"snapshot_id\": ...}, with \"allow\": \"definitions\" to change definitions",
         )
+    })
+}
+
+/// A create's options, as its keyword arguments give them.
+fn create_snapshot_options(
+    verify: Option<bool>,
+    labels: Option<BTreeMap<String, String>>,
+    key: Option<String>,
+    replaces: Option<Bound<'_, PyAny>>,
+) -> PyResult<pisa_client::CreateSnapshotOptions> {
+    Ok(pisa_client::CreateSnapshotOptions {
+        verify,
+        labels: labels.unwrap_or_default(),
+        key,
+        replaces: replaces.as_ref().map(replaces_of).transpose()?,
     })
 }
 
@@ -259,124 +275,144 @@ impl Client {
         key: Option<String>,
         replaces: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = pisa_client::SnapshotOptions {
-            verify,
-            labels: labels.unwrap_or_default(),
-            key,
-            replaces: replaces.as_ref().map(replaces_of).transpose()?,
-        };
+        let opts = create_snapshot_options(verify, labels, key, replaces)?;
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    fn verify_snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.verify_snapshot(&entry).await })
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None))]
+    fn submit_create_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+        verify: Option<bool>,
+        labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
+        replaces: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = create_snapshot_options(verify, labels, key, replaces)?;
+        call(py, async move {
+            let job = self.inner.submit_create_snapshot_with(&code, &opts).await?;
+            Ok(queued(job))
+        })
     }
 
-    fn snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.snapshot(&entry).await })
-    }
-
-    fn delete_snapshot<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.delete_snapshot(&entry).await })
+    fn get_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.get_snapshot(&id).await })
     }
 
     #[pyo3(signature = (labels = None, *, limit = None, after = None))]
     fn list_snapshots<'py>(
         &self,
         py: Python<'py>,
-        labels: Option<Bound<'py, PyDict>>,
+        labels: Option<BTreeMap<String, String>>,
         limit: Option<usize>,
         after: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // In the dict's order: the first label is the one the server scans.
-        let labels = labels.map_or(Ok(Vec::new()), |d| {
-            d.iter()
-                .map(|(k, v)| Ok((k.extract::<String>()?, v.extract::<String>()?)))
-                .collect::<PyResult<Vec<_>>>()
-        })?;
+        let labels = labels.unwrap_or_default();
         call(py, async move {
-            let labels: Vec<(&str, &str)> = labels
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
             self.inner
                 .list_snapshots(&labels, limit, after.as_deref())
                 .await
         })
     }
 
+    fn update_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        labels: BTreeMap<String, Option<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(
+            py,
+            async move { self.inner.update_snapshot(&id, &labels).await },
+        )
+    }
+
+    fn delete_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.delete_snapshot(&id).await })
+    }
+
+    fn verify_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.verify_snapshot(&id).await })
+    }
+
+    fn submit_verify_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            Ok(queued(self.inner.submit_verify_snapshot(&id).await?))
+        })
+    }
+
+    #[pyo3(signature = (id, labels = None))]
+    fn list_dependents<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        labels: Option<BTreeMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let labels = labels.unwrap_or_default();
+        call(
+            py,
+            async move { self.inner.list_dependents(&id, &labels).await },
+        )
+    }
+
     #[pyo3(signature = (labels = None))]
-    fn audit<'py>(
+    fn audit_snapshots<'py>(
         &self,
         py: Python<'py>,
         labels: Option<BTreeMap<String, String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = labels.unwrap_or_default();
-        call(py, async move {
-            let labels: Vec<(&str, &str)> = labels
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            self.inner.audit(&labels).await
-        })
+        call(py, async move { self.inner.audit_snapshots(&labels).await })
     }
 
-    #[pyo3(signature = (entry, labels = None))]
-    fn dependents<'py>(
-        &self,
-        py: Python<'py>,
-        entry: String,
-        labels: Option<BTreeMap<String, String>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let labels = labels.unwrap_or_default();
-        call(py, async move {
-            let labels: Vec<(&str, &str)> = labels
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            self.inner.dependents(&entry, &labels).await
-        })
-    }
-
-    #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false, retire = false, verify = None))]
+    #[pyo3(signature = (from_, to, labels, *, dry_run = false, allow_changes = false, retire = false, verify = None))]
     #[allow(clippy::too_many_arguments)]
-    fn rebuild<'py>(
+    fn rebuild_snapshots<'py>(
         &self,
         py: Python<'py>,
-        from_entry: String,
-        to_entry: String,
+        from_: String,
+        to: String,
         labels: BTreeMap<String, String>,
+        dry_run: bool,
         allow_changes: bool,
         retire: bool,
         verify: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = pisa_client::RebuildOptions {
+            dry_run,
             allow_changes,
             retire,
             verify,
         };
         call(py, async move {
             self.inner
-                .rebuild(&from_entry, &to_entry, &labels, &opts)
+                .rebuild_snapshots(&from_, &to, &labels, &opts)
                 .await
         })
     }
 
-    #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false, retire = false, verify = None))]
+    #[pyo3(signature = (from_, to, labels, *, dry_run = false, allow_changes = false, retire = false, verify = None))]
     #[allow(clippy::too_many_arguments)]
-    fn submit_rebuild<'py>(
+    fn submit_rebuild_snapshots<'py>(
         &self,
         py: Python<'py>,
-        from_entry: String,
-        to_entry: String,
+        from_: String,
+        to: String,
         labels: BTreeMap<String, String>,
+        dry_run: bool,
         allow_changes: bool,
         retire: bool,
         verify: Option<bool>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = pisa_client::RebuildOptions {
+            dry_run,
             allow_changes,
             retire,
             verify,
@@ -384,25 +420,9 @@ impl Client {
         call(py, async move {
             let job = self
                 .inner
-                .submit_rebuild(&from_entry, &to_entry, &labels, &opts)
+                .submit_rebuild_snapshots(&from_, &to, &labels, &opts)
                 .await?;
             Ok(queued(job))
-        })
-    }
-
-    #[pyo3(signature = (from_entry, to_entry, labels, *, allow_changes = false))]
-    fn rebuild_plan<'py>(
-        &self,
-        py: Python<'py>,
-        from_entry: String,
-        to_entry: String,
-        labels: BTreeMap<String, String>,
-        allow_changes: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move {
-            self.inner
-                .rebuild_plan(&from_entry, &to_entry, &labels, allow_changes)
-                .await
         })
     }
 
@@ -457,33 +477,6 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None))]
-    fn submit_snapshot<'py>(
-        &self,
-        py: Python<'py>,
-        code: String,
-        verify: Option<bool>,
-        labels: Option<BTreeMap<String, String>>,
-        key: Option<String>,
-        replaces: Option<Bound<'py, PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = pisa_client::SnapshotOptions {
-            verify,
-            labels: labels.unwrap_or_default(),
-            key,
-            replaces: replaces.as_ref().map(replaces_of).transpose()?,
-        };
-        call(py, async move {
-            Ok(queued(self.inner.submit_snapshot_with(&code, &opts).await?))
-        })
-    }
-
-    fn submit_verify<'py>(&self, py: Python<'py>, entry: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move {
-            Ok(queued(self.inner.submit_verify(&entry).await?))
-        })
-    }
-
     /// Where the job stands, after waiting up to `wait` seconds: `{"done":
     /// True, "answer": …}`, or `{"done": False, "job": …}` if it isn't done
     /// yet.
@@ -520,20 +513,6 @@ impl Client {
     ) -> PyResult<Bound<'py, PyAny>> {
         let job = job_of(job)?;
         call(py, async move { self.inner.cancel_job(&job).await })
-    }
-
-    #[pyo3(signature = (entry, *, set = None, remove = None))]
-    fn set_snapshot_labels<'py>(
-        &self,
-        py: Python<'py>,
-        entry: String,
-        set: Option<BTreeMap<String, String>>,
-        remove: Option<Vec<String>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let (set, remove) = (set.unwrap_or_default(), remove.unwrap_or_default());
-        call(py, async move {
-            self.inner.set_snapshot_labels(&entry, &set, &remove).await
-        })
     }
 }
 

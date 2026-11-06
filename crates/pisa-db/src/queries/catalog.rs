@@ -120,7 +120,7 @@ async fn add(
             entries::labels.eq(to_record(&meta.labels)?),
             entries::idempotency_key.eq(meta.key.as_deref()),
             entries::created_micros.eq(meta.created_micros as i64),
-            entries::replaces.eq(meta.replaces.as_ref().map(|r| r.entry.as_str())),
+            entries::replaces.eq(meta.replaces.as_ref().map(|r| r.snapshot_id.as_str())),
             entries::replaces_allow.eq(allow.flatten()),
         ))
         .execute(conn)
@@ -442,8 +442,7 @@ pub(crate) async fn set_labels(
     db: &Handle,
     v: &str,
     e: &str,
-    set: &BTreeMap<String, String>,
-    remove: &[String],
+    labels: &BTreeMap<String, Option<String>>,
 ) -> Result<EntryMeta, Error> {
     let updated = retry(|| async {
         let mut c = conn(db).await?;
@@ -452,10 +451,12 @@ pub(crate) async fn set_labels(
             let Some(mut meta) = entry_in(conn, v, e).await? else {
                 return Err(Fail::Api(unknown_entry(e)));
             };
-            for k in remove {
-                meta.labels.remove(k);
+            for (k, v) in labels {
+                match v {
+                    Some(v) => meta.labels.insert(k.clone(), v.clone()),
+                    None => meta.labels.remove(k),
+                };
             }
-            meta.labels.extend(set.clone());
             check_labels(&meta.labels)
                 .map_err(|m| Fail::Api(Error::new(ErrorKind::BadRequest, m)))?;
             diesel::update(entries::table.find((v, e)))

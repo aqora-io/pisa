@@ -1,36 +1,39 @@
 import { PisaError, isPisaError } from "./errors.ts";
 import type {
   ApplyTacticResponse,
+  AuditSnapshotsResponse,
   CheckBatchResponse,
   CheckResult,
+  CreateSnapshotRequest,
+  CreateSnapshotResponse,
   DeclDetail,
   DeclResponse,
-  Deleted,
+  DeleteSnapshotResponse,
   Detail,
   ErrorKind,
   Health,
   Job as JobSchema,
   Labels,
+  ListDependentsResponse,
   ListSnapshotsParams,
+  ListSnapshotsResponse,
+  ModuleName,
   Pos,
   Query,
   QueryResult,
-  RebuildResponse,
-  RebuildRequest,
+  RebuildSnapshotsRequest,
+  RebuildSnapshotsResponse,
   ResolveResponse,
   Resolution,
   SearchResponse,
   Session,
   SessionId,
-  SnapshotAudit,
-  SnapshotDependents,
-  SnapshotInfo,
-  SnapshotList,
-  SnapshotRequest,
-  SnapshotResponse,
-  SnapshotSummary,
-  SnapshotVerified,
+  Snapshot,
+  SnapshotDetail,
+  SnapshotId,
   StateId,
+  UpdateSnapshotRequest,
+  VerifySnapshotResponse,
 } from "./types.ts";
 
 export interface ClientOptions {
@@ -73,14 +76,17 @@ export interface VersionOptions extends RequestOptions {
   version?: string;
 }
 
-export interface RebuildOptions extends VersionOptions {
+export interface RebuildOptions extends RunOptions {
+  /** Only plan: create each item's `code` with its `labels`, `key` and
+   *  `replaces`, a level at a time. */
+  dryRun?: boolean;
   /** Plan or rebuild even though `to`, created without `replaces`, changes
    *  what `from` states. */
   allowChanges?: boolean;
-  /** For `rebuild`: once every item is created, delete the old entries,
-   *  from the top down, then `from`. */
+  /** For a run: once every item is created, delete the old snapshots, from
+   *  the top down, then `from`. */
   retire?: boolean;
-  /** For `rebuild`: the kernel re-check for each create. */
+  /** For a run: the kernel re-check for each create. */
   verify?: boolean;
 }
 
@@ -90,11 +96,11 @@ export interface SearchOptions extends RequestOptions {
 
 export interface DeclOptions extends RequestOptions {
   /** A snapshot module to look in first, as a snapshot hit's `module`. */
-  module?: string;
+  module?: ModuleName;
 }
 
 export type CreateSnapshotOptions = RunOptions &
-  Pick<SnapshotRequest, "verify" | "labels" | "key" | "replaces">;
+  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces">;
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -218,22 +224,24 @@ export class PisaClient {
   }
 
   /** Checks code and keeps it as a snapshot that later code can import
-   *  through `header`. Failures are in `result.error`. */
-  createSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<SnapshotResponse> {
-    return this.call("POST", ["snapshots"], this.snapshotRequest(code, options), options);
+   *  through its `header`. Failures are in `check.error`, with no
+   *  `snapshot`. */
+  createSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<CreateSnapshotResponse> {
+    return this.call("POST", ["snapshots"], this.createSnapshotRequest(code, options), options);
   }
 
   /** `createSnapshot` as a job. */
-  submitSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<Job<SnapshotResponse>> {
-    return this.submit(["snapshots"], this.snapshotRequest(code, options), options);
+  submitCreateSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<Job<CreateSnapshotResponse>> {
+    return this.submit(["snapshots"], this.createSnapshotRequest(code, options), options);
   }
 
-  getSnapshot(entry: string, options: VersionOptions = {}): Promise<SnapshotInfo> {
-    return this.call("GET", ["snapshots", entry], undefined, options, this.versionQuery(options));
+  /** A snapshot, with its module's code, check and exports. */
+  getSnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<SnapshotDetail> {
+    return this.call("GET", ["snapshots", id], undefined, options, this.versionQuery(options));
   }
 
-  /** A page of entries, newest first; pass `next` back as `after`. */
-  listSnapshots(params: ListSnapshotsParams = {}, options: VersionOptions = {}): Promise<SnapshotList> {
+  /** A page of snapshots, newest first; pass `next` back as `after`. */
+  listSnapshots(params: ListSnapshotsParams = {}, options: VersionOptions = {}): Promise<ListSnapshotsResponse> {
     const query = this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
     if (params.limit !== undefined) query.set("limit", String(params.limit));
@@ -241,82 +249,85 @@ export class PisaClient {
     return this.call("GET", ["snapshots"], undefined, options, query);
   }
 
-  /** Removes the labels in `remove`, then sets those in `set`. */
-  /** What the entries with every label rest on: their declarations by
+  /** What the snapshots with every label rest on: their declarations by
    *  `status`, each assumption (an axiom declared in snapshot code) with what
    *  uses it, and what isn't proved. */
-  audit(params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<SnapshotAudit> {
+  auditSnapshots(params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<AuditSnapshotsResponse> {
     const query = this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
     return this.call("GET", ["snapshots", "audit"], undefined, options, query);
   }
 
-  /** The entries on every module that imports `entry`'s, directly or through
+  /** The snapshots of every module that imports `id`'s, directly or through
    *  others, parents first: by level, then oldest first. */
-  dependents(entry: string, params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<SnapshotDependents> {
+  listDependents(
+    id: SnapshotId,
+    params: { labels?: Labels } = {},
+    options: VersionOptions = {},
+  ): Promise<ListDependentsResponse> {
     const query = this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
-    return this.call("GET", ["snapshots", entry, "dependents"], undefined, options, query);
-  }
-
-  /** Plans the creates that rebuild `from`'s dependents with every label in
-   *  `labels` on `to`. It only plans: create each item's `code` with its
-   *  `labels` and `key`, a level at a time. */
-  rebuildPlan(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildResponse> {
-    return this.call("POST", ["snapshots", "rebuild"], this.rebuildRequest(from, to, labels, options, true), options);
+    return this.call("GET", ["snapshots", id, "dependents"], undefined, options, query);
   }
 
   /** Rebuilds `from`'s dependents with every label in `labels` on `to`: the
-   *  server runs the plan `rebuildPlan` gives, a level at a time, and with
-   *  `retire` then deletes the old entries and `from`. Sending it again
-   *  replays the creates that are done. It can take minutes: `submitRebuild`
-   *  runs it as a job. */
-  rebuild(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<RebuildResponse> {
-    return this.call("POST", ["snapshots", "rebuild"], this.rebuildRequest(from, to, labels, options, false), options);
+   *  server plans the creates, by level, and unless `dryRun` runs them, a
+   *  level at a time, then with `retire` deletes the old snapshots and
+   *  `from`. Sending it again replays the creates that are done. A run can
+   *  take minutes: `submitRebuildSnapshots` runs it as a job. */
+  rebuildSnapshots(
+    from: SnapshotId,
+    to: SnapshotId,
+    labels: Labels,
+    options: RebuildOptions = {},
+  ): Promise<RebuildSnapshotsResponse> {
+    return this.call("POST", ["snapshots", "rebuild"], this.rebuildSnapshotsRequest(from, to, labels, options), options);
   }
 
-  /** `rebuild` as a job. */
-  submitRebuild(from: string, to: string, labels: Labels, options: RebuildOptions = {}): Promise<Job<RebuildResponse>> {
-    return this.submit(["snapshots", "rebuild"], this.rebuildRequest(from, to, labels, options, false), options);
+  /** `rebuildSnapshots` as a job. A dry run isn't one: the server answers it
+   *  at once, which throws here. */
+  submitRebuildSnapshots(
+    from: SnapshotId,
+    to: SnapshotId,
+    labels: Labels,
+    options: RebuildOptions = {},
+  ): Promise<Job<RebuildSnapshotsResponse>> {
+    return this.submit(["snapshots", "rebuild"], this.rebuildSnapshotsRequest(from, to, labels, options), options);
   }
 
-  private rebuildRequest(from: string, to: string, labels: Labels, options: RebuildOptions, dryRun: boolean): RebuildRequest {
-    const version = options.version ?? this.version;
-    const body: RebuildRequest = { from, to, labels, dry_run: dryRun, ...(version !== undefined && { version }) };
+  private rebuildSnapshotsRequest(
+    from: SnapshotId,
+    to: SnapshotId,
+    labels: Labels,
+    options: RebuildOptions,
+  ): RebuildSnapshotsRequest {
+    const body: RebuildSnapshotsRequest = { from, to, labels, dry_run: options.dryRun ?? false, ...this.run(options) };
     if (options.allowChanges) body.allow_changes = true;
     if (options.retire) body.retire = true;
     if (options.verify !== undefined) body.verify = options.verify;
     return body;
   }
 
-  setSnapshotLabels(
-    entry: string,
-    change: { set?: Labels; remove?: string[] },
-    options: VersionOptions = {},
-  ): Promise<SnapshotSummary> {
-    return this.call("PATCH", ["snapshots", entry], change, options, this.versionQuery(options));
+  /** Changes a snapshot's labels as a merge patch: a label set to `null` is
+   *  removed, one set to a string takes it, and the rest stay. */
+  updateSnapshot(id: SnapshotId, update: UpdateSnapshotRequest, options: VersionOptions = {}): Promise<Snapshot> {
+    return this.call("PATCH", ["snapshots", id], update, options, this.versionQuery(options));
   }
 
-  /** Deletes an entry, and the modules nothing else needs. */
-  deleteSnapshot(entry: string, options: VersionOptions = {}): Promise<Deleted> {
-    return this.call("DELETE", ["snapshots", entry], undefined, options, this.versionQuery(options));
+  /** Deletes a snapshot, and the modules nothing else needs. */
+  deleteSnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<DeleteSnapshotResponse> {
+    return this.call("DELETE", ["snapshots", id], undefined, options, this.versionQuery(options));
   }
 
-  /** Re-checks the entry's module and its imports through the kernel. A
+  /** Re-checks the snapshot's module and its imports through the kernel. A
    *  rejection is in `failure`, not thrown. */
-  verifySnapshot(entry: string, options: VersionOptions = {}): Promise<SnapshotVerified> {
-    return this.call(
-      "POST",
-      ["snapshots", entry, "verify"],
-      undefined,
-      options,
-      this.versionQuery(options),
-    );
+  verifySnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<VerifySnapshotResponse> {
+    return this.call("POST", ["snapshots", id, "verify"], undefined, options, this.versionQuery(options));
   }
 
   /** `verifySnapshot` as a job. */
-  submitVerify(entry: string, options: VersionOptions = {}): Promise<Job<SnapshotVerified>> {
-    return this.submit(["snapshots", entry, "verify"], undefined, options, this.versionQuery(options));
+  submitVerifySnapshot(id: SnapshotId, options: VersionOptions = {}): Promise<Job<VerifySnapshotResponse>> {
+    return this.submit(["snapshots", id, "verify"], undefined, options, this.versionQuery(options));
   }
 
   /** Where `job` stands, after waiting up to `wait` seconds for it to
@@ -389,8 +400,8 @@ export class PisaClient {
     return r.decl;
   }
 
-  private snapshotRequest(code: string, options: CreateSnapshotOptions): SnapshotRequest {
-    const body: SnapshotRequest = { code, ...this.run(options) };
+  private createSnapshotRequest(code: string, options: CreateSnapshotOptions): CreateSnapshotRequest {
+    const body: CreateSnapshotRequest = { code, ...this.run(options) };
     if (options.verify !== undefined) body.verify = options.verify;
     if (options.labels !== undefined) body.labels = options.labels;
     if (options.key !== undefined) body.key = options.key;

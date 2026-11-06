@@ -14,12 +14,12 @@ export {
 export { useDecl, useResolve, useSearch } from "./hooks/search.ts";
 export {
   type CreateSnapshotInput,
-  type LabelsInput,
+  type UpdateSnapshotInput,
   useCreateSnapshot,
   useDeleteSnapshot,
-  useSetSnapshotLabels,
   useSnapshot,
   useSnapshots,
+  useUpdateSnapshot,
   useVerifySnapshot,
 } from "./hooks/snapshots.ts";
 export {

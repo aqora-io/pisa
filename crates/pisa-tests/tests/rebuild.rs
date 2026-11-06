@@ -1,32 +1,35 @@
-//! Rebuilding what builds on an entry: its dependents, and the plan to create
-//! them again on a replacement. The library is a diamond: B under C and D,
+//! Rebuilding what builds on a snapshot: its dependents, and the plan to
+//! create them again on a replacement. The library is a diamond: B under C and D,
 //! both under E, in project `p:1`, with a module of project `p:2` on B too.
 
 mod common;
 
 use common::Cluster;
-use pisa_client::{Client, SnapshotOptions};
+use pisa_client::{Client, CreateSnapshotOptions};
 use pisa_protocol::snapshot;
 use serde_json::{Value, json};
 
 async fn create(c: &Cluster, body: Value) -> Value {
     let (status, r) = c.post("/snapshots", body).await;
     assert_eq!(status, 200, "{r}");
-    assert!(r["entry"].is_string(), "{r}");
+    assert!(r["snapshot"]["id"].is_string(), "{r}");
     r
 }
 
 fn entry(r: &Value) -> &str {
-    r["entry"].as_str().unwrap()
+    r["snapshot"]["id"].as_str().unwrap()
 }
 
 fn module(r: &Value) -> &str {
-    r["snapshot"].as_str().unwrap()
+    r["snapshot"]["module"].as_str().unwrap()
 }
 
 /// `header`, a blank line, then `body`.
 fn on(snapshot: &Value, body: &str) -> String {
-    format!("{}\n\n{body}", snapshot["header"].as_str().unwrap())
+    format!(
+        "{}\n\n{body}",
+        snapshot["snapshot"]["header"].as_str().unwrap()
+    )
 }
 
 async fn get(c: &Cluster, path: &str) -> (u16, Value) {
@@ -80,10 +83,10 @@ async fn library(c: &Cluster) -> Library {
 }
 
 fn entries(list: &Value) -> Vec<&str> {
-    let entries = list["entries"].as_array().unwrap();
-    entries
+    let snapshots = list["snapshots"].as_array().unwrap();
+    snapshots
         .iter()
-        .map(|e| e["entry"].as_str().unwrap())
+        .map(|s| s["id"].as_str().unwrap())
         .collect()
 }
 
@@ -102,7 +105,7 @@ async fn dependents_come_parents_first() {
             entry(&lib.e)
         ]
     );
-    assert_eq!(all["entries"][3]["header"], lib.e["header"]);
+    assert_eq!(all["snapshots"][3]["header"], lib.e["snapshot"]["header"]);
 
     let path = format!("/snapshots/{}/dependents?label=p:1", entry(&lib.b));
     let (_, p1) = get(&c, &path).await;
@@ -126,10 +129,10 @@ async fn proved(c: &Cluster, lib: &Library) -> Value {
     let code = "import Foo\n\ntheorem b : 1 = 1 := rfl\ntheorem b2 : 6 = 6 := rfl";
     let r = create(
         c,
-        json!({"code": code, "replaces": entry(&lib.b), "labels": {"p": "1"}}),
+        json!({"code": code, "replaces": {"snapshot_id": entry(&lib.b)}, "labels": {"p": "1"}}),
     )
     .await;
-    assert!(r["replaces"].is_object(), "{r}");
+    assert!(r["replacement"].is_object(), "{r}");
     r
 }
 
@@ -154,19 +157,22 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
     assert_eq!((&p["ok"], &p["changes"]), (&json!(true), &json!([])), "{p}");
     assert_eq!(items(&p, "level"), [&json!(1), &json!(1), &json!(2)]);
     let old = [&lib.c, &lib.d, &lib.e];
-    assert_eq!(items(&p, "entry"), old.map(|e| &e["entry"]));
-    assert_eq!(items(&p, "snapshot"), old.map(|e| &e["snapshot"]));
+    assert_eq!(items(&p, "snapshot_id"), old.map(|e| &e["snapshot"]["id"]));
+    assert_eq!(items(&p, "module"), old.map(|e| &e["snapshot"]["module"]));
     let plan = p["plan"].as_array().unwrap();
     for item in plan {
         let code = item["code"].as_str().unwrap();
-        assert_eq!(item["new_snapshot"], snapshot::module(&snapshot::id(code)));
+        assert_eq!(item["new_module"], snapshot::module(&snapshot::id(code)));
         assert_eq!(item["labels"], json!({"p": "1"}));
         assert!(
             item["key"].as_str().unwrap().starts_with("rebuild:"),
             "{item}"
         );
-        // Each replaces the entry it rebuilds, as `to` replaces `from`.
-        assert_eq!(item["replaces"], json!({"entry": item["entry"]}));
+        // Each replaces the snapshot it rebuilds, as `to` replaces `from`.
+        assert_eq!(
+            item["replaces"],
+            json!({"snapshot_id": item["snapshot_id"]})
+        );
         assert!(!code.contains(id(&lib.b)), "{code}");
     }
     // C, written on B, is the same code on B′.
@@ -175,7 +181,7 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
     let e_code = plan[2]["code"].as_str().unwrap();
     for new in [&plan[0], &plan[1]] {
         assert!(
-            e_code.contains(new["new_snapshot"].as_str().unwrap()),
+            e_code.contains(new["new_module"].as_str().unwrap()),
             "{e_code}"
         );
     }
@@ -187,7 +193,7 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
         for level in [1, 2] {
             let mut jobs = Vec::new();
             for item in plan.iter().filter(|i| i["level"] == level) {
-                let opts = SnapshotOptions {
+                let opts = CreateSnapshotOptions {
                     labels: serde_json::from_value(item["labels"].clone()).unwrap(),
                     key: Some(item["key"].as_str().unwrap().into()),
                     replaces: serde_json::from_value(item["replaces"].clone()).unwrap(),
@@ -196,13 +202,16 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
                 let code = item["code"].as_str().unwrap();
                 jobs.push((
                     item,
-                    client.submit_snapshot_with(code, &opts).await.unwrap(),
+                    client
+                        .submit_create_snapshot_with(code, &opts)
+                        .await
+                        .unwrap(),
                 ));
             }
             for (item, job) in jobs {
-                let made_one = client.wait_job(&job).await.unwrap();
-                assert_eq!(made_one.snapshot.as_deref(), item["new_snapshot"].as_str());
-                made.push(made_one.entry.unwrap());
+                let made_one = client.wait_job(&job).await.unwrap().snapshot.unwrap();
+                assert_eq!(Some(made_one.module.as_str()), item["new_module"].as_str());
+                made.push(made_one.id);
             }
         }
         made
@@ -210,7 +219,8 @@ async fn a_plan_rebuilds_the_project_on_the_replacement() {
     let made = run().await;
     for (made, item) in made.iter().zip(plan) {
         let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
-        assert_eq!(info["replaces"], json!({"entry": item["entry"]}), "{info}");
+        let link = json!({"snapshot_id": item["snapshot_id"]});
+        assert_eq!(info["replaces"], link, "{info}");
     }
     let top = &plan[2];
     let r = c
@@ -294,11 +304,22 @@ async fn a_module_that_links_the_labelled_ones_is_rebuilt_with_the_labels() {
     )
     .await;
     let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
-    let b2 = create(&c, json!({"code": code, "replaces": entry(&b)})).await;
+    let b2 = create(
+        &c,
+        json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
     let body = json!({"from": entry(&b), "to": entry(&b2), "labels": {"p": "1"}, "dry_run": true});
     let (_, p) = plan(&c, body).await;
-    assert_eq!(items(&p, "entry"), [&Value::Null, &n["entry"]], "{p}");
-    assert_eq!(items(&p, "snapshot"), [&m["snapshot"], &n["snapshot"]]);
+    assert_eq!(
+        items(&p, "snapshot_id"),
+        [&Value::Null, &n["snapshot"]["id"]],
+        "{p}"
+    );
+    assert_eq!(
+        items(&p, "module"),
+        [&m["snapshot"]["module"], &n["snapshot"]["module"]]
+    );
     assert_eq!(p["plan"][0]["labels"], json!({"p": "1"}));
     let key = format!("rebuild:{}:{}:{}", id(&b), id(&b2), id(&m));
     assert_eq!(p["plan"][0]["key"], key);
@@ -324,7 +345,7 @@ async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependent
     )
     .await;
     let fixed = "import Foo\n\ndef f : Nat := 2\ntheorem b : f = f := rfl";
-    let replaces = json!({"entry": entry(&b), "allow": "definitions"});
+    let replaces = json!({"snapshot_id": entry(&b), "allow": "definitions"});
     let b2 = create(
         &c,
         json!({"code": fixed, "replaces": replaces, "labels": p1}),
@@ -336,14 +357,14 @@ async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependent
     assert_eq!(p["changed_definitions"], json!(["f"]));
     assert_eq!(items(&p, "affected"), [&Value::Null, &json!(["e"])], "{p}");
 
-    // Each create replaces its old entry the same way, and finds the same.
+    // Each create replaces its old snapshot the same way, and finds the same.
     let mut found = Vec::new();
     for item in p["plan"].as_array().unwrap() {
         let body = json!({"code": item["code"], "labels": item["labels"], "key": item["key"],
                           "replaces": item["replaces"]});
         let r = create(&c, body).await;
-        assert_eq!(r["snapshot"], item["new_snapshot"], "{r}");
-        found.push(r["replaces"]["affected"].clone());
+        assert_eq!(r["snapshot"]["module"], item["new_module"], "{r}");
+        found.push(r["replacement"]["affected"].clone());
     }
     assert_eq!(found, [Value::Null, json!(["e"])]);
 }
@@ -364,7 +385,7 @@ fn new_entries(r: &Value) -> Vec<&Value> {
         .as_array()
         .unwrap()
         .iter()
-        .map(|c| &c["new_entry"])
+        .map(|c| &c["new_snapshot_id"])
         .collect()
 }
 
@@ -385,15 +406,16 @@ async fn a_rebuild_runs_its_plan_and_replays_it_when_sent_again() {
     assert_eq!(created.len(), 3, "{r}");
     for (made, item) in created.iter().zip(plan) {
         assert_eq!(
-            (&made["entry"], &made["new_snapshot"]),
-            (&item["entry"], &item["new_snapshot"])
+            (&made["snapshot_id"], &made["module"], &made["new_module"]),
+            (&item["snapshot_id"], &item["module"], &item["new_module"])
         );
         let (_, info) = get(
             &c,
-            &format!("/snapshots/{}", made["new_entry"].as_str().unwrap()),
+            &format!("/snapshots/{}", made["new_snapshot_id"].as_str().unwrap()),
         )
         .await;
-        assert_eq!(info["replaces"], json!({"entry": item["entry"]}), "{info}");
+        let link = json!({"snapshot_id": item["snapshot_id"]});
+        assert_eq!(info["replaces"], link, "{info}");
     }
     let top = format!(
         "{}\n\nneeds b2\nneeds e",
@@ -423,18 +445,20 @@ async fn a_failed_chunk_skips_only_what_builds_on_it() {
     assert_eq!(r["ok"], false, "{r}");
     let of = |list: &str| -> Vec<Value> {
         r[list].as_array().map_or(Vec::new(), |l| {
-            l.iter().map(|i| i["entry"].clone()).collect()
+            l.iter().map(|i| i["snapshot_id"].clone()).collect()
         })
     };
-    assert_eq!(of("created"), [lib.d["entry"].clone()]);
-    assert_eq!(of("failed"), [lib.c["entry"].clone()]);
-    assert_eq!(of("skipped"), [lib.e["entry"].clone()]);
-    assert_eq!(r["failed"][0]["result"]["ok"], false);
+    assert_eq!(of("created"), [lib.d["snapshot"]["id"].clone()]);
+    assert_eq!(of("failed"), [lib.c["snapshot"]["id"].clone()]);
+    assert_eq!(of("skipped"), [lib.e["snapshot"]["id"].clone()]);
+    assert_eq!(r["failed"][0]["check"]["ok"], false);
+    assert_eq!(r["failed"][0]["module"], lib.c["snapshot"]["module"]);
+    assert_eq!(r["skipped"][0]["module"], lib.e["snapshot"]["module"]);
     assert!(r.get("retired").is_none());
 
     let again = rebuild(&c, &lib.b, &other, json!({"allow_changes": true})).await;
     assert_eq!(new_entries(&again), new_entries(&r), "D replays");
-    assert_eq!(again["failed"][0]["entry"], lib.c["entry"]);
+    assert_eq!(again["failed"][0]["snapshot_id"], lib.c["snapshot"]["id"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -444,7 +468,7 @@ async fn retire_deletes_the_old_entries_and_from() {
     let b2 = proved(&c, &lib).await;
     let r = rebuild(&c, &lib.b, &b2, json!({"retire": true})).await;
     assert_eq!(r["ok"], true, "{r}");
-    let old = [&lib.e, &lib.d, &lib.c, &lib.b].map(|e| e["entry"].clone());
+    let old = [&lib.e, &lib.d, &lib.c, &lib.b].map(|e| e["snapshot"]["id"].clone());
     assert_eq!(r["retired"], json!(old));
     for e in &old {
         let (status, _) = get(&c, &format!("/snapshots/{}", e.as_str().unwrap())).await;
@@ -459,7 +483,7 @@ async fn retire_deletes_the_old_entries_and_from() {
     expected.push(entry(&b2).into());
     expected.sort();
     assert_eq!(now, expected);
-    // The other project keeps its entry, and with it B's module.
+    // The other project keeps its snapshot, and with it B's module.
     assert_eq!(listed(&c, "p:2").await, [entry(&lib.other)]);
 }
 
@@ -475,7 +499,7 @@ async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
         json!({"code": on(&lib.e, "theorem slow : 6 = 6 := rfl\nSLEEP 800"), "labels": {"p": "1"}}),
     )
     .await;
-    assert!(slow["entry"].is_string());
+    assert!(slow["snapshot"]["id"].is_string());
     let body = json!({"from": entry(&lib.b), "to": entry(&b2), "labels": {"p": "1"}});
     let r = c
         .client

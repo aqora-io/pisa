@@ -84,66 +84,61 @@ class ApplyTacticResponse(TypedDict):
     complete: bool
     messages: list[Message]
 
-class Snapshot(TypedDict):
-    entry: NotRequired[str]
-    snapshot: NotRequired[str]
-    header: NotRequired[str]
-    version: str
-    dirty: bool
-    status: NotRequired[ProofStatus]
-    verified: bool
-    labels: NotRequired[dict[str, str]]
-    replaces: NotRequired[Replacement]
-    result: CheckResult
-
-class Replaced(TypedDict):
-    entry: str
+class Replaces(TypedDict):
+    """The snapshot a create replaces, and what the replacement may change."""
+    snapshot_id: str
     allow: NotRequired[Literal["definitions"]]
 
 class Replacement(TypedDict):
-    entry: str
-    allow: NotRequired[Literal["definitions"]]
     filled: list[str]
     changed_definitions: NotRequired[list[str]]
     affected: NotRequired[list[str]]
 
-class SnapshotInfo(TypedDict):
-    entry: str
-    snapshot: str
-    imports: list[str]
+class Snapshot(TypedDict):
+    id: str
+    version: str
+    module: str
     header: str
-    code: str
-    labels: NotRequired[dict[str, str]]
-    replaces: NotRequired[Replaced]
-    dirty: bool
-    status: NotRequired[ProofStatus]
+    imports: list[str]
+    labels: dict[str, str]
+    replaces: NotRequired[Replaces]
+    status: ProofStatus
     verified: bool
-    result: CheckResult
     created: int
-    decls: NotRequired[list[ModuleDecl]]
 
-class ModuleDecl(TypedDict):
+class CreateSnapshotResponse(TypedDict):
+    snapshot: NotRequired[Snapshot]
+    check: CheckResult
+    replacement: NotRequired[Replacement]
+
+class Description(TypedDict):
+    title: str
+    text: str
+    latex: NotRequired[str]
+    aliases: list[str]
+    source: str
+
+class Export(TypedDict):
     name: str
     kind: str
     signature: str
     docstring: NotRequired[str]
-    informal: NotRequired[Informal]
+    description: NotRequired[Description]
 
-class SnapshotSummary(TypedDict):
-    entry: str
-    snapshot: str
-    imports: list[str]
-    header: str
-    labels: dict[str, str]
-    replaces: NotRequired[Replaced]
-    dirty: bool
-    status: NotRequired[ProofStatus]
-    verified: bool
-    created: int
+class SnapshotDetail(Snapshot):
+    code: str
+    check: CheckResult
+    exports: NotRequired[list[Export]]
 
-class SnapshotList(TypedDict):
-    entries: list[SnapshotSummary]
+class ListSnapshotsResponse(TypedDict):
+    snapshots: list[Snapshot]
     next: NotRequired[str]
+
+class ListDependentsResponse(TypedDict):
+    snapshots: list[Snapshot]
+
+class DeleteSnapshotResponse(TypedDict):
+    removed: list[str]
 
 class AuditSummary(TypedDict):
     proved: int
@@ -155,53 +150,50 @@ class AuditSummary(TypedDict):
 class AuditAssumption(TypedDict):
     name: str
     signature: NotRequired[str]
-    entry: NotRequired[str]
+    snapshot_id: NotRequired[str]
     verified: bool
     used_by: list[str]
 
 class AuditUnproved(TypedDict):
     name: str
-    entry: str
+    snapshot_id: str
     status: ProofStatus
     axioms: list[str]
 
-class SnapshotAudit(TypedDict):
+class AuditSnapshotsResponse(TypedDict):
     summary: AuditSummary
     assumptions: list[AuditAssumption]
     not_proved: list[AuditUnproved]
 
-class SnapshotDependents(TypedDict):
-    entries: list[SnapshotSummary]
-
 class RebuildItem(TypedDict):
     level: int
-    entry: NotRequired[str]
-    snapshot: str
-    new_snapshot: str
+    snapshot_id: NotRequired[str]
+    module: str
+    new_module: str
     new_header: str
     code: str
     labels: dict[str, str]
     key: str
-    replaces: NotRequired[Replaced]
+    replaces: NotRequired[Replaces]
     affected: NotRequired[list[str]]
     affected_unknown: NotRequired[bool]
 
 class RebuildCreated(TypedDict):
-    entry: NotRequired[str]
-    snapshot: str
-    new_entry: str
-    new_snapshot: str
+    snapshot_id: NotRequired[str]
+    module: str
+    new_snapshot_id: str
+    new_module: str
 
 class RebuildFailed(TypedDict):
-    entry: NotRequired[str]
-    snapshot: str
-    result: CheckResult
+    snapshot_id: NotRequired[str]
+    module: str
+    check: CheckResult
 
 class RebuildSkipped(TypedDict):
-    entry: NotRequired[str]
-    snapshot: str
+    snapshot_id: NotRequired[str]
+    module: str
 
-class RebuildResponse(TypedDict):
+class RebuildSnapshotsResponse(TypedDict):
     ok: bool
     changes: list[str]
     changed_definitions: NotRequired[list[str]]
@@ -211,17 +203,14 @@ class RebuildResponse(TypedDict):
     skipped: NotRequired[list[RebuildSkipped]]
     retired: NotRequired[list[str]]
 
-class SnapshotFailure(TypedDict):
-    snapshot: str
+class VerifyFailure(TypedDict):
+    module: str
     reason: str
 
-class SnapshotVerified(TypedDict):
-    entry: str
-    snapshot: str
-    verified: bool
-    dirty: bool
+class VerifySnapshotResponse(TypedDict):
+    snapshot: Snapshot
     checked: list[str]
-    failure: NotRequired[SnapshotFailure]
+    failure: NotRequired[VerifyFailure]
 
 JobKind = Literal[
     "check", "start_session", "apply_tactic", "check_session",
@@ -251,7 +240,7 @@ class Health(TypedDict):
 
 class JobDone(TypedDict):
     done: Literal[True]
-    answer: CheckResult | Session | ApplyTacticResponse | Snapshot | SnapshotVerified | RebuildResponse
+    answer: CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse
 
 class JobPending(TypedDict):
     done: Literal[False]
@@ -311,122 +300,128 @@ class Client:
         verify: bool | None = None,
         labels: dict[str, str] | None = None,
         key: str | None = None,
-        replaces: str | Replaced | None = None,
-    ) -> Snapshot:
+        replaces: Replaces | None = None,
+    ) -> CreateSnapshotResponse:
         """Check code like `check` and, unless Lean reports errors, keep it as
-        a module (`snapshot`) that later code can import, with a new `entry`
-        carrying `labels` that keeps the module until the entry is deleted.
-        Start that code with the returned `header` to reuse the Lean process
-        that has it loaded. Code with `sorry` is kept but `dirty`. Code that is
-        already kept gets a new entry on its module without being built again.
+        a module that later code can import, with a new `snapshot` carrying
+        `labels` that keeps the module until the snapshot is deleted. Start
+        that code with the snapshot's `header` to reuse the Lean process that
+        has the module loaded. Code with `sorry` is kept, with that `status`.
+        Code that is already kept gets a new snapshot of its module without
+        being built again. When nothing is kept, there is no `snapshot`, and
+        `check` says why.
 
-        `key` makes the call safe to retry: while an entry made with the same
-        key exists, creating the same code again returns that entry as it is,
-        ignoring the call's other arguments, `labels` and `verify` included,
-        and other code is a `bad_request` in `result["error"]`. A create that
-        keeps nothing doesn't use the key up, and deleting the entry frees it.
-        A key is 1 to 256 bytes of letters, digits and `._:/-`.
+        `key` makes the call safe to retry: while a snapshot made with the
+        same key exists, creating the same code again returns that snapshot
+        as it is, ignoring the call's other arguments, `labels` and `verify`
+        included, and other code is a `bad_request` in `check["error"]`. A
+        create that keeps nothing doesn't use the key up, and deleting the
+        snapshot frees it. A key is 1 to 256 bytes of letters, digits and
+        `._:/-`.
 
         The kernel re-check runs by default only if the code uses macros, its
         own or an import's. `verify=True` always runs it and also re-checks the
-        imports, so the snapshot ends `verified` or the result has an error,
+        imports, so the snapshot ends `verified` or the check has an error,
         except on a `key` replay, which can be `verified: False` with no error.
         `verify=False` skips it, and the snapshot stays not `verified`.
 
-        `replaces` names the entry this code replaces, e.g. the skeleton a
-        proof fills in. The code is kept only if it still declares everything
-        that entry's module declares, with the same types and definitions'
-        values, and what those use from a snapshot it no longer builds on is
-        unchanged; `replaces` in the result lists what it `filled`;
-        otherwise nothing is kept and `result["reasons"]` says what changed.
-        `{"entry": …, "allow": "definitions"}` lets definitions change their
-        value, and lists the theorems that use them as `affected`."""
-    def verify_snapshot(self, entry: str) -> SnapshotVerified:
-        """Re-check an entry's module and everything it imports through the
-        kernel, imports first, skipping what already passed. A module the kernel
-        rejects is reported in `failure` and stays usable. Raises NotFoundError
-        for an unknown or deleted entry."""
-    def snapshot(self, entry: str) -> SnapshotInfo:
-        """An entry with its labels, and its module's code, imports and check
-        result. Raises NotFoundError for an unknown or deleted entry."""
-    def delete_snapshot(self, entry: str) -> list[str]:
-        """Delete an entry; returns the modules that went with it: its module,
-        if no other entry or kept module needs it, and so on up its imports."""
+        `replaces` names the snapshot this code replaces, e.g. the skeleton a
+        proof fills in, as `{"snapshot_id": …}`. The code is kept only if it
+        still declares everything that snapshot's module declares, with the
+        same types and definitions' values, and what those use from a
+        snapshot it no longer builds on is unchanged; `replacement` in the
+        result lists what it `filled`; otherwise nothing is kept and
+        `check["reasons"]` says what changed. `"allow": "definitions"` lets
+        definitions change their value, and lists the theorems that use them
+        as `affected`."""
+    def submit_create_snapshot(
+        self,
+        code: str,
+        *,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        replaces: Replaces | None = None,
+    ) -> Job:
+        """Like `create_snapshot`, as a job."""
+    def get_snapshot(self, id: str) -> SnapshotDetail:
+        """A snapshot, with its module's code, check result and exports.
+        Raises NotFoundError for an unknown or deleted snapshot."""
     def list_snapshots(
         self,
         labels: dict[str, str] | None = None,
         *,
         limit: int | None = None,
         after: str | None = None,
-    ) -> SnapshotList:
-        """Entries newest first, as summaries without code or check results:
-        those with every label in `labels` (exact matches, up to 64), or all of
-        them. A page has up to `limit` entries (1 to 1000, default 100). Keep
-        passing its `next` as `after` while it has one; a full page has one,
-        and the page after it may be empty."""
-    def audit(self, labels: dict[str, str] | None = None) -> SnapshotAudit:
-        """What the entries with every label in `labels` rest on: their
+    ) -> ListSnapshotsResponse:
+        """Snapshots newest first: those with every label in `labels` (exact
+        matches, up to 64), or all of them. A page has up to `limit` snapshots
+        (1 to 1000, default 100). Keep passing its `next` as `after` while it
+        has one; a full page has one, and the page after it may be empty."""
+    def update_snapshot(self, id: str, labels: dict[str, str | None]) -> Snapshot:
+        """Change a snapshot's labels as a merge patch: a label set to `None`
+        is removed, one set to a string takes that value, and the rest stay.
+        Returns the snapshot. Labels that break the rules raise a
+        `bad_request` PisaError, and NotFoundError means an unknown
+        snapshot."""
+    def delete_snapshot(self, id: str) -> DeleteSnapshotResponse:
+        """Delete a snapshot; `removed` lists the modules that went with it:
+        its module, if no other snapshot or kept module needs it, and so on
+        up its imports."""
+    def verify_snapshot(self, id: str) -> VerifySnapshotResponse:
+        """Re-check a snapshot's module and everything it imports through the
+        kernel, imports first, skipping what already passed. A module the
+        kernel rejects is reported in `failure` and stays usable. Raises
+        NotFoundError for an unknown or deleted snapshot."""
+    def submit_verify_snapshot(self, id: str) -> Job:
+        """Like `verify_snapshot`, as a job."""
+    def list_dependents(self, id: str, labels: dict[str, str] | None = None) -> ListDependentsResponse:
+        """The snapshots of every module that imports `id`'s, directly or
+        through others, parents first (by level, then oldest first): those
+        with every label in `labels`, or all of them."""
+    def audit_snapshots(self, labels: dict[str, str] | None = None) -> AuditSnapshotsResponse:
+        """What the snapshots with every label in `labels` rest on: their
         declarations by `status` (`proved`, `conditional` on assumptions,
         `sorry`, `rejected`), each assumption (an axiom declared in snapshot
         code) with what uses it, and what isn't proved."""
-    def dependents(self, entry: str, labels: dict[str, str] | None = None) -> SnapshotDependents:
-        """The entries on every module that imports `entry`'s, directly or
-        through others, parents first (by level, then oldest first): those
-        with every label in `labels`, or all of them."""
-    def rebuild_plan(
+    def rebuild_snapshots(
         self,
-        from_entry: str,
-        to_entry: str,
+        from_: str,
+        to: str,
         labels: dict[str, str],
         *,
-        allow_changes: bool = False,
-    ) -> RebuildResponse:
-        """Plan the creates that rebuild `from_entry`'s dependents with every
-        label in `labels` (and what links them to it) on `to_entry`: each
-        item's `code` is the old code with its imports swapped. It only plans:
-        create each item with `code`, `labels`, `key` and any `replaces`, a
-        level at a time; the keys make running the plan again safe. Unless `to_entry` was
-        created to replace `from_entry`, a `to_entry` that changes what
-        `from_entry` states gives `ok: False` and no plan, unless
-        `allow_changes`."""
-    def rebuild(
-        self,
-        from_entry: str,
-        to_entry: str,
-        labels: dict[str, str],
-        *,
+        dry_run: bool = False,
         allow_changes: bool = False,
         retire: bool = False,
         verify: bool | None = None,
-    ) -> RebuildResponse:
-        """Rebuild `from_entry`'s dependents with every label in `labels` on
-        `to_entry`: the server runs the plan `rebuild_plan` gives, a level at
-        a time, and says what it `created`, what `failed` and what it
-        `skipped` as built on those. `retire` then deletes the old entries,
-        from the top down, and `from_entry`. Calling it again replays the
-        creates that are done. It can take minutes: `submit_rebuild` runs it
-        as a job."""
-    def submit_rebuild(
+    ) -> RebuildSnapshotsResponse:
+        """Rebuild the dependents of snapshot `from_` with every label in
+        `labels` (and what links them to it) on snapshot `to`: the server
+        plans the creates, each item's `code` the old code with its imports
+        swapped, and runs them a level at a time, saying what it `created`,
+        what `failed` and what it `skipped` as built on those. `retire` then
+        deletes the old snapshots, from the top down, and `from_`. Calling it
+        again replays the creates that are done. Unless `to` was created to
+        replace `from_`, a `to` that changes what `from_` states gives `ok:
+        False` and no plan, unless `allow_changes`.
+
+        `dry_run` only plans: create each item with `code`, `labels`, `key`
+        and any `replaces`, a level at a time; the keys make running the plan
+        again safe. A run can take minutes: `submit_rebuild_snapshots` runs
+        it as a job."""
+    def submit_rebuild_snapshots(
         self,
-        from_entry: str,
-        to_entry: str,
+        from_: str,
+        to: str,
         labels: dict[str, str],
         *,
+        dry_run: bool = False,
         allow_changes: bool = False,
         retire: bool = False,
         verify: bool | None = None,
     ) -> Job:
-        """Like `rebuild`, as a job."""
-    def set_snapshot_labels(
-        self,
-        entry: str,
-        *,
-        set: dict[str, str] | None = None,
-        remove: list[str] | None = None,
-    ) -> SnapshotSummary:
-        """Remove the labels `remove` names from an entry, then set those in
-        `set`; returns the entry's summary. Labels that break the rules raise a
-        `bad_request` PisaError, and NotFoundError means an unknown entry."""
+        """Like `rebuild_snapshots`, as a job. A dry run isn't one: the
+        server answers it at once, which raises here."""
     def submit_check(
         self,
         code: str,
@@ -442,18 +437,6 @@ class Client:
         """Like `apply_tactic`, as a job."""
     def submit_check_session(self, session_id: str, code: str) -> Job:
         """Like `check_session`, as a job."""
-    def submit_snapshot(
-        self,
-        code: str,
-        *,
-        verify: bool | None = None,
-        labels: dict[str, str] | None = None,
-        key: str | None = None,
-        replaces: str | Replaced | None = None,
-    ) -> Job:
-        """Like `create_snapshot`, as a job."""
-    def submit_verify(self, entry: str) -> Job:
-        """Like `verify_snapshot`, as a job."""
     def poll_job(self, job: Job, *, wait: int = 0) -> JobPoll:
         """Where the job stands, after waiting up to `wait` seconds (at most 60)
         for it to finish: `{"done": True, "answer": …}`, or `{"done": False,
@@ -461,7 +444,7 @@ class Client:
         returned, and polling raises what it would have raised."""
     def wait_job(
         self, job: Job
-    ) -> CheckResult | Session | ApplyTacticResponse | Snapshot | SnapshotVerified | RebuildResponse:
+    ) -> CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse:
         """Wait for the job to finish, however long it takes, and return what
         its request would have returned (or raise what it would have raised).
         The server keeps the answer for an hour after the job is done."""

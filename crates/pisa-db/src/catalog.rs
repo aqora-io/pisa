@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use pisa_protocol::api::{CheckResult, Error, ErrorKind, Replaced};
+use pisa_protocol::api::{CheckResult, Error, ErrorKind, Replaces};
 use pisa_protocol::snapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,11 +37,11 @@ pub struct ModuleMeta {
     pub imports: Vec<String>,
     /// Every module it needs, its own last.
     pub modules: Vec<Module>,
-    /// See [`SnapshotResponse::header`](pisa_protocol::api::SnapshotResponse::header).
+    /// See [`Snapshot::header`](pisa_protocol::api::Snapshot::header).
     pub header: String,
     pub code: String,
     pub dirty: bool,
-    /// See [`SnapshotResponse::verified`](pisa_protocol::api::SnapshotResponse::verified).
+    /// See [`Snapshot::verified`](pisa_protocol::api::Snapshot::verified).
     #[serde(default)]
     pub verified: bool,
     /// Its code or anything it imports uses macros, which can expand in code
@@ -83,7 +83,7 @@ pub struct EntryMeta {
     pub created_micros: u64,
     /// The entry its create replaced, once it checked the statements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<Replaced>,
+    pub replaces: Option<Replaces>,
 }
 
 impl EntryMeta {
@@ -180,7 +180,7 @@ pub struct NewEntry {
     pub labels: BTreeMap<String, String>,
     pub key: Option<String>,
     /// The entry it replaces, which the caller has compared it with.
-    pub replaces: Option<Replaced>,
+    pub replaces: Option<Replaces>,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -285,8 +285,8 @@ pub(crate) type EntryRow = (
 pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail> {
     let (e, module, labels, key, created, replaces, allow) = row;
     let replaces = match replaces {
-        Some(entry) => Some(Replaced {
-            entry,
+        Some(entry) => Some(Replaces {
+            snapshot_id: entry,
             allow: allow
                 .map(Value::String)
                 .map(serde_json::from_value)
@@ -305,7 +305,7 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
 }
 
 /// What the `replaces_allow` column holds for `replaced`.
-pub(crate) fn allow_column(replaced: &Replaced) -> Result<Option<String>, Fail> {
+pub(crate) fn allow_column(replaced: &Replaces) -> Result<Option<String>, Fail> {
     Ok(
         match replaced.allow.map(serde_json::to_value).transpose()? {
             Some(Value::String(s)) => Some(s),
@@ -477,16 +477,16 @@ impl Catalog {
         dispatch!(&self.db, entries_on(&self.version, modules, &wanted))
     }
 
-    /// Removes the labels `remove` names from entry `e`, then sets those in
-    /// `set`, and returns the entry. The labels that result must follow the
-    /// rules, or nothing changes and it is a `bad_request`.
+    /// Applies the merge patch `labels` to entry `e`'s labels, removing each
+    /// label it maps to `None` and setting each it maps to `Some`, and
+    /// returns the entry. The labels that result must follow the rules, or
+    /// nothing changes and it is a `bad_request`.
     pub async fn set_labels(
         &self,
         e: &str,
-        set: &BTreeMap<String, String>,
-        remove: &[String],
+        labels: &BTreeMap<String, Option<String>>,
     ) -> Result<EntryMeta, Error> {
-        dispatch!(&self.db, set_labels(&self.version, e, set, remove))
+        dispatch!(&self.db, set_labels(&self.version, e, labels))
     }
 
     /// Removes module `m` if no entry references it and no module imports it.
@@ -722,8 +722,8 @@ mod tests {
                 .await
                 .unwrap();
             for allow in [None, Some(Allow::Definitions)] {
-                let replaces = Some(Replaced {
-                    entry: old.clone(),
+                let replaces = Some(Replaces {
+                    snapshot_id: old.clone(),
                     allow,
                 });
                 let entry = NewEntry {
@@ -942,8 +942,8 @@ mod tests {
                 .unwrap();
             assert_eq!(ids(&twice), [made[2].as_str()]);
 
-            let set = BTreeMap::from([("p".to_string(), "z".to_string())]);
-            catalog.set_labels(&made[2], &set, &[]).await.unwrap();
+            let patch = BTreeMap::from([("p".to_string(), Some("z".to_string()))]);
+            catalog.set_labels(&made[2], &patch).await.unwrap();
             let (moved, _) = catalog.list(&[pair("p", "z")], 10, None).await.unwrap();
             assert_eq!(ids(&moved), [made[2].as_str()]);
             assert!(

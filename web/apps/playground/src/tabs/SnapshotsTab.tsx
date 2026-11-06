@@ -1,10 +1,10 @@
-import type { Labels, ModuleDecl } from "@aqora/pisa-client";
+import type { Export, Labels, ProofStatus, SnapshotId } from "@aqora/pisa-client";
 import {
   useCreateSnapshot,
   useDeleteSnapshot,
-  useSetSnapshotLabels,
   useSnapshot,
   useSnapshots,
+  useUpdateSnapshot,
   useVerifySnapshot,
 } from "@aqora/pisa-react";
 import { useState } from "react";
@@ -28,10 +28,10 @@ function parseLabels(text: string): Labels {
   return labels;
 }
 
-function Flags({ dirty, verified }: { dirty: boolean; verified: boolean }) {
+function Flags({ status, verified }: { status: ProofStatus; verified: boolean }) {
   return (
     <>
-      {dirty ? <Badge tone="amber">dirty</Badge> : <Badge tone="green">clean</Badge>}
+      <Badge tone={status === "proved" ? "green" : "amber"}>{status}</Badge>
       {verified && <Badge tone="indigo">verified</Badge>}
     </>
   );
@@ -49,9 +49,9 @@ function Header({ header, onUse }: { header: string; onUse: (header: string) => 
   );
 }
 
-/** A module's declarations, described once search has written descriptions. */
-function Decls({ decls, onRefresh }: { decls: ModuleDecl[]; onRefresh: () => void }) {
-  const undescribed = decls.some((d) => d.informal === undefined);
+/** A module's exports, described once search has written descriptions. */
+function Exports({ exports, onRefresh }: { exports: Export[]; onRefresh: () => void }) {
+  const undescribed = exports.some((d) => d.description === undefined);
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
@@ -63,16 +63,16 @@ function Decls({ decls, onRefresh }: { decls: ModuleDecl[]; onRefresh: () => voi
         )}
       </div>
       <ul className="divide-y divide-slate-100">
-        {decls.map((d) => (
+        {exports.map((d) => (
           <li key={d.name} className="space-y-1 py-2">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-xs font-medium text-slate-900">{d.name}</span>
               <Badge>{d.kind}</Badge>
-              {d.informal !== undefined && <span className="text-sm font-medium text-slate-700">{d.informal.informal_name}</span>}
+              {d.description !== undefined && <span className="text-sm font-medium text-slate-700">{d.description.title}</span>}
             </div>
             <pre className="whitespace-pre-wrap font-mono text-xs text-slate-700">{d.signature}</pre>
-            {d.informal !== undefined ? (
-              <p className="text-sm text-slate-600">{d.informal.statement_nl}</p>
+            {d.description !== undefined ? (
+              <p className="text-sm text-slate-600">{d.description.text}</p>
             ) : (
               d.docstring !== undefined && <p className="text-sm text-slate-500">{d.docstring}</p>
             )}
@@ -125,19 +125,19 @@ function Create({ version, onUse }: { version: string; onUse: (header: string) =
       <div className="mt-3 space-y-3">
         <ErrorNote error={create.error} />
         {made !== undefined &&
-          (made.entry === undefined ? (
+          (made.snapshot === undefined ? (
             <div className="space-y-2">
               <p className="text-sm text-rose-800">Nothing was kept.</p>
-              <CheckResultView result={made.result} />
+              <CheckResultView result={made.check} />
             </div>
           ) : (
             <div className="space-y-2">
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-mono text-xs">{made.snapshot}</span>
-                <Flags dirty={made.dirty} verified={made.verified} />
+                <span className="font-mono text-xs">{made.snapshot.module}</span>
+                <Flags status={made.snapshot.status} verified={made.snapshot.verified} />
               </div>
-              {made.header !== undefined && <Header header={made.header} onUse={onUse} />}
-              <CheckResultView result={made.result} />
+              <Header header={made.snapshot.header} onUse={onUse} />
+              <CheckResultView result={made.check} />
             </div>
           ))}
       </div>
@@ -145,25 +145,25 @@ function Create({ version, onUse }: { version: string; onUse: (header: string) =
   );
 }
 
-function Detail({ entry, version, onUse, onGone }: { entry: string; version: string; onUse: (h: string) => void; onGone: () => void }) {
+function Detail({ id, version, onUse, onGone }: { id: SnapshotId; version: string; onUse: (h: string) => void; onGone: () => void }) {
   const input = version !== "" ? { version } : {};
-  const info = useSnapshot(entry, input);
-  const setLabels = useSetSnapshotLabels(input);
+  const info = useSnapshot(id, input);
+  const update = useUpdateSnapshot(input);
   const verify = useVerifySnapshot(input);
   const remove = useDeleteSnapshot(input);
   const [label, setLabel] = useState("");
-  if (info.isPending) return <Panel title="Entry">Loading…</Panel>;
+  if (info.isPending) return <Panel title="Snapshot">Loading…</Panel>;
   if (info.isError) return <ErrorNote error={info.error} />;
   const e = info.data;
   return (
     <Panel
-      title={<span className="font-mono text-xs">{e.snapshot}</span>}
+      title={<span className="font-mono text-xs">{e.module}</span>}
       actions={
         <>
-          <SubtleButton onClick={() => verify.mutate(entry)} disabled={verify.isPending}>
+          <SubtleButton onClick={() => verify.mutate(id)} disabled={verify.isPending}>
             {verify.isPending ? "Verifying…" : "Verify"}
           </SubtleButton>
-          <SubtleButton onClick={() => remove.mutate(entry, { onSuccess: onGone })} disabled={remove.isPending}>
+          <SubtleButton onClick={() => remove.mutate(id, { onSuccess: onGone })} disabled={remove.isPending}>
             Delete
           </SubtleButton>
         </>
@@ -171,20 +171,20 @@ function Detail({ entry, version, onUse, onGone }: { entry: string; version: str
     >
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
-          <Flags dirty={e.dirty} verified={e.verified} />
+          <Flags status={e.status} verified={e.verified} />
           <span className="text-xs text-slate-500">{new Date(e.created * 1000).toLocaleString()}</span>
         </div>
         {verify.data?.failure !== undefined && (
           <p className="text-sm text-rose-800">
-            {verify.data.failure.snapshot}: {verify.data.failure.reason}
+            {verify.data.failure.module}: {verify.data.failure.reason}
           </p>
         )}
-        <ErrorNote error={verify.error ?? remove.error ?? setLabels.error} />
+        <ErrorNote error={verify.error ?? remove.error ?? update.error} />
         <div className="flex flex-wrap items-center gap-1.5">
-          {Object.entries(e.labels ?? {}).map(([k, v]) => (
+          {Object.entries(e.labels).map(([k, v]) => (
             <span key={k} className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-0.5 font-mono text-xs">
               {k}={v}
-              <button type="button" className="text-slate-500 hover:text-rose-600" onClick={() => setLabels.mutate({ entry, remove: [k] })}>
+              <button type="button" className="text-slate-500 hover:text-rose-600" onClick={() => update.mutate({ id, labels: { [k]: null } })}>
                 ×
               </button>
             </span>
@@ -193,7 +193,7 @@ function Detail({ entry, version, onUse, onGone }: { entry: string; version: str
             className="flex gap-1"
             onSubmit={(ev) => {
               ev.preventDefault();
-              setLabels.mutate({ entry, set: parseLabels(label) });
+              update.mutate({ id, labels: parseLabels(label) });
               setLabel("");
             }}
           >
@@ -202,7 +202,7 @@ function Detail({ entry, version, onUse, onGone }: { entry: string; version: str
         </div>
         {e.imports.length > 0 && <p className="font-mono text-xs text-slate-600">imports {e.imports.join(", ")}</p>}
         <Header header={e.header} onUse={onUse} />
-        {e.decls !== undefined && e.decls.length > 0 && <Decls decls={e.decls} onRefresh={() => void info.refetch()} />}
+        {e.exports !== undefined && e.exports.length > 0 && <Exports exports={e.exports} onRefresh={() => void info.refetch()} />}
         <LeanEditor value={e.code} readOnly className="h-40" />
       </div>
     </Panel>
@@ -211,14 +211,14 @@ function Detail({ entry, version, onUse, onGone }: { entry: string; version: str
 
 export function SnapshotsTab({ version, onUse }: { version: string; onUse: (header: string) => void }) {
   const [filter, setFilter] = useState("");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<SnapshotId | null>(null);
   const list = useSnapshots({ labels: parseLabels(filter), limit: 20 }, version !== "" ? { version } : {});
-  const entries = list.data?.pages.flatMap((p) => p.entries) ?? [];
+  const snapshots = list.data?.pages.flatMap((p) => p.snapshots) ?? [];
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Create version={version} onUse={onUse} />
       <div className="space-y-4">
-        <Panel title="Entries">
+        <Panel title="Snapshots">
           <input
             className={`${inputClass} mb-3 w-full`}
             value={filter}
@@ -226,19 +226,19 @@ export function SnapshotsTab({ version, onUse }: { version: string; onUse: (head
             placeholder="filter by labels: a=1, b=2"
           />
           <ErrorNote error={list.error} onRetry={() => void list.refetch()} />
-          {entries.length === 0 && !list.isPending && <p className="text-sm text-slate-500">No entries.</p>}
+          {snapshots.length === 0 && !list.isPending && <p className="text-sm text-slate-500">No snapshots.</p>}
           <ul className="divide-y divide-slate-100">
-            {entries.map((e) => (
-              <li key={e.entry}>
+            {snapshots.map((e) => (
+              <li key={e.id}>
                 <button
                   type="button"
-                  onClick={() => setSelected(e.entry)}
+                  onClick={() => setSelected(e.id)}
                   className={`flex w-full flex-wrap items-center gap-2 px-1 py-1.5 text-left text-sm ${
-                    selected === e.entry ? "bg-indigo-50" : "hover:bg-slate-50"
+                    selected === e.id ? "bg-indigo-50" : "hover:bg-slate-50"
                   }`}
                 >
-                  <span className="font-mono text-xs text-slate-800">{e.snapshot.slice(0, 18)}…</span>
-                  <Flags dirty={e.dirty} verified={e.verified} />
+                  <span className="font-mono text-xs text-slate-800">{e.module.slice(0, 18)}…</span>
+                  <Flags status={e.status} verified={e.verified} />
                   {Object.entries(e.labels).map(([k, v]) => (
                     <span key={k} className="font-mono text-xs text-slate-500">
                       {k}={v}
@@ -254,7 +254,7 @@ export function SnapshotsTab({ version, onUse }: { version: string; onUse: (head
             </SubtleButton>
           )}
         </Panel>
-        {selected !== null && <Detail entry={selected} version={version} onUse={onUse} onGone={() => setSelected(null)} />}
+        {selected !== null && <Detail id={selected} version={version} onUse={onUse} onGone={() => setSelected(null)} />}
       </div>
     </div>
   );

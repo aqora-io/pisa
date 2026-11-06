@@ -184,9 +184,11 @@ def test_jobs(url):
     verdict = client.submit_check_session(session["id"], "theorem t : 1 = 1 := by rfl")
     assert client.wait_job(verdict)["ok"]
 
-    made = client.wait_job(client.submit_snapshot("def jobbed := 1", labels={"run": "jobs"}))
-    assert made["labels"] == {"run": "jobs"}
-    assert client.wait_job(client.submit_verify(made["entry"]))["verified"]
+    made = client.wait_job(client.submit_create_snapshot("def jobbed := 1", labels={"run": "jobs"}))
+    assert made["snapshot"]["labels"] == {"run": "jobs"}
+    verifying = client.submit_verify_snapshot(made["snapshot"]["id"])
+    assert verifying["kind"] == "verify_snapshot"
+    assert client.wait_job(verifying)["snapshot"]["verified"]
 
     slow = client.submit_check("SLEEP 1000\n#check Nat")
     pending = client.poll_job(slow)
@@ -236,128 +238,140 @@ def test_threads_share_a_client(url):
 
 def test_snapshots(url):
     client = Client(url, timeout=5)
-    base = client.create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
-    assert base["result"]["ok"] and not base["dirty"]
-    name, entry = base["snapshot"], base["entry"]
+    created = client.create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
+    assert created["check"]["ok"] and "replacement" not in created
+    base = created["snapshot"]
+    assert base["status"] == "proved" and "dirty" not in base
+    snapshot_id, name = base["id"], base["module"]
     assert base["header"] == f"import Foo\nimport {name}"
     assert client.check(base["header"] + "\nneeds base")["ok"]
 
     rejected = client.create_snapshot("theorem t : 1 = 1 := error_here")
-    assert "snapshot" not in rejected and "entry" not in rejected and not rejected["result"]["ok"]
+    assert "snapshot" not in rejected and not rejected["check"]["ok"]
 
-    info = client.snapshot(entry)
-    assert info["entry"] == entry and info["snapshot"] == name
-    assert info["header"] == base["header"] and info["imports"] == []
-    assert not base["verified"] and not info["verified"]
+    detail = client.get_snapshot(snapshot_id)
+    assert {k: detail[k] for k in base} == base
+    assert detail["imports"] == [] and not detail["verified"]
+    assert [e["name"] for e in detail["exports"]] == ["base"]
 
-    verified = client.verify_snapshot(entry)
-    assert verified["verified"] and verified["entry"] == entry and verified["checked"] == [name]
-    assert "failure" not in verified
-    assert client.snapshot(entry)["verified"]
+    verified = client.verify_snapshot(snapshot_id)
+    assert verified["snapshot"]["verified"] and verified["snapshot"]["id"] == snapshot_id
+    assert verified["checked"] == [name] and "failure" not in verified
+    assert client.get_snapshot(snapshot_id)["verified"]
     forged = client.create_snapshot("import Foo\ntheorem forge : 1 = 1 := rfl", verify=True)
     assert "snapshot" not in forged
     opted_out = client.create_snapshot('import Foo\nmacro "m" : term => `(1)', verify=False)
-    assert not opted_out["verified"]
+    assert not opted_out["snapshot"]["verified"]
 
-    labelled = client.create_snapshot("import Foo\ntheorem labelled : 1 = 1 := rfl", labels={"k": "v"})
+    labelled = client.create_snapshot("import Foo\ntheorem labelled : 1 = 1 := rfl", labels={"k": "v"})["snapshot"]
     assert labelled["labels"] == {"k": "v"}
-    assert client.snapshot(labelled["entry"])["labels"] == {"k": "v"}
+    assert client.get_snapshot(labelled["id"])["labels"] == {"k": "v"}
     code = "import Foo\ntheorem keyed : 1 = 1 := rfl"
-    keyed = client.create_snapshot(code, key="run-1")
-    assert client.create_snapshot(code, key="run-1")["entry"] == keyed["entry"]
+    keyed = client.create_snapshot(code, key="run-1")["snapshot"]
+    assert client.create_snapshot(code, key="run-1")["snapshot"]["id"] == keyed["id"]
     with pytest.raises(PisaError) as e:
-        client.snapshot(name)
+        client.get_snapshot(name)
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
-    assert client.delete_snapshot(entry) == [name]
+    assert client.delete_snapshot(snapshot_id) == {"removed": [name]}
     with pytest.raises(NotFoundError):
-        client.snapshot(entry)
+        client.get_snapshot(snapshot_id)
 
 
 def test_replaces(url):
     client = Client(url, timeout=5)
-    old = client.create_snapshot("import Foo\ntheorem replaced : 1 = 1 := sorry")["entry"]
-    proof = client.create_snapshot("import Foo\ntheorem replaced : 1 = 1 := rfl", replaces=old)
-    assert proof["replaces"] == {"entry": old, "filled": ["replaced"]}
-    assert client.snapshot(proof["entry"])["replaces"] == {"entry": old}
+    old = client.create_snapshot("import Foo\ntheorem replaced : 1 = 1 := sorry")["snapshot"]["id"]
+    link = {"snapshot_id": old}
+    proof = client.create_snapshot("import Foo\ntheorem replaced : 1 = 1 := rfl", replaces=link)
+    assert proof["replacement"] == {"filled": ["replaced"]}
+    assert proof["snapshot"]["replaces"] == link
+    assert client.get_snapshot(proof["snapshot"]["id"])["replaces"] == link
 
-    weakened = client.create_snapshot("import Foo\ntheorem replaced : True := trivial", replaces=old)
-    assert "entry" not in weakened and not weakened["result"]["ok"]
-    assert weakened["result"]["reasons"] == ["statement: replaced has a different type"]
+    weakened = client.create_snapshot("import Foo\ntheorem replaced : True := trivial", replaces=link)
+    assert "snapshot" not in weakened and not weakened["check"]["ok"]
+    assert weakened["check"]["reasons"] == ["statement: replaced has a different type"]
 
     skeleton = "import Foo\ndef g : Nat := 1\ntheorem uses_g : g = g := sorry"
-    old = client.create_snapshot(skeleton)["entry"]
+    old = client.create_snapshot(skeleton)["snapshot"]["id"]
     fixed = "import Foo\ndef g : Nat := 2\ntheorem uses_g : g = g := rfl"
-    job = client.submit_snapshot(fixed, replaces={"entry": old, "allow": "definitions"})
+    job = client.submit_create_snapshot(fixed, replaces={"snapshot_id": old, "allow": "definitions"})
+    assert job["kind"] == "create_snapshot"
     done = client.wait_job(job)
-    assert done["replaces"]["changed_definitions"] == ["g"]
-    assert done["replaces"]["affected"] == ["uses_g"]
+    assert done["replacement"]["changed_definitions"] == ["g"]
+    assert done["replacement"]["affected"] == ["uses_g"]
     with pytest.raises(ValueError):
-        client.create_snapshot(fixed, replaces={"entry": old, "allow": "everything"})
+        client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": "everything"})
+    with pytest.raises(ValueError):
+        client.create_snapshot(fixed, replaces=old)
 
 
-def test_rebuild_plan(url):
+def test_rebuild_snapshots(url):
     client = Client(url, timeout=5)
-    base = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := sorry")
-    above = client.create_snapshot(base["header"] + "\n\ntheorem on_top : 2 = 2 := rfl", labels={"suite": "rebuild"})
-    listed = client.dependents(base["entry"], {"suite": "rebuild"})
-    assert [e["entry"] for e in listed["entries"]] == [above["entry"]]
+    base = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := sorry")["snapshot"]
+    on_top = base["header"] + "\n\ntheorem on_top : 2 = 2 := rfl"
+    above = client.create_snapshot(on_top, labels={"suite": "rebuild"})["snapshot"]
+    listed = client.list_dependents(base["id"], {"suite": "rebuild"})
+    assert listed["snapshots"] == [above]
 
-    proof = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := rfl", replaces=base["entry"])
-    plan = client.rebuild_plan(base["entry"], proof["entry"], {"suite": "rebuild"})
-    assert plan["ok"] and plan["changes"] == []
+    replaces = {"snapshot_id": base["id"]}
+    proof = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := rfl", replaces=replaces)["snapshot"]
+    plan = client.rebuild_snapshots(base["id"], proof["id"], {"suite": "rebuild"}, dry_run=True)
+    assert plan["ok"] and plan["changes"] == [] and "created" not in plan
     [item] = plan["plan"]
-    assert item["entry"] == above["entry"] and item["level"] == 1
-    made = client.create_snapshot(item["code"], labels=item["labels"], key=item["key"])
-    assert made["snapshot"] == item["new_snapshot"]
-    run = client.rebuild(base["entry"], proof["entry"], {"suite": "rebuild"})
-    assert run["ok"] and run["created"][0]["new_entry"] == made["entry"]
-    done = client.wait_job(client.submit_rebuild(base["entry"], proof["entry"], {"suite": "rebuild"}, retire=True))
-    assert done["retired"] == [above["entry"], base["entry"]]
+    assert (item["snapshot_id"], item["module"], item["level"]) == (above["id"], above["module"], 1)
+    made = client.create_snapshot(item["code"], labels=item["labels"], key=item["key"])["snapshot"]
+    assert made["module"] == item["new_module"]
+    run = client.rebuild_snapshots(base["id"], proof["id"], {"suite": "rebuild"})
+    assert run["ok"] and run["created"][0]["new_snapshot_id"] == made["id"]
+    job = client.submit_rebuild_snapshots(from_=base["id"], to=proof["id"], labels={"suite": "rebuild"}, retire=True)
+    assert job["kind"] == "rebuild_snapshots"
+    assert client.wait_job(job)["retired"] == [above["id"], base["id"]]
     with pytest.raises(PisaError) as e:
-        client.rebuild_plan(base["entry"], proof["entry"], {})
+        client.rebuild_snapshots(base["id"], proof["id"], {}, dry_run=True)
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
 
 def test_audit(url):
     client = Client(url, timeout=5)
-    a = client.create_snapshot("import Foo\naxiom py_assumed : 1 = 1")
-    b = client.create_snapshot(a["header"] + "\n\ntheorem py_uses : 1 = 1 := py_assumed", labels={"suite": "audit"})
+    a = client.create_snapshot("import Foo\naxiom py_assumed : 1 = 1")["snapshot"]
+    uses = a["header"] + "\n\ntheorem py_uses : 1 = 1 := py_assumed"
+    b = client.create_snapshot(uses, labels={"suite": "audit"})["snapshot"]
     assert b["status"] == "conditional"
-    audit = client.audit({"suite": "audit"})
+    audit = client.audit_snapshots({"suite": "audit"})
     assert audit["summary"]["conditional"] == 1
     assert [x["name"] for x in audit["assumptions"]] == ["py_assumed"]
     assert audit["assumptions"][0]["used_by"] == ["py_uses"]
+    assert audit["assumptions"][0]["snapshot_id"] == a["id"]
 
 
 def test_snapshot_labels(url):
     client = Client(url, timeout=5)
     code = "import Foo\ntheorem listed : 1 = 1 := rfl"
-    first = client.create_snapshot(code, labels={"suite": "labels", "k": "v"})["entry"]
-    second = client.create_snapshot(code, labels={"suite": "labels", "k": "w"})["entry"]
+    first = client.create_snapshot(code, labels={"suite": "labels", "k": "v"})["snapshot"]["id"]
+    second = client.create_snapshot(code, labels={"suite": "labels", "k": "w"})["snapshot"]["id"]
 
-    def entries(listing):
-        return [s["entry"] for s in listing["entries"]]
+    def ids(listing):
+        return [s["id"] for s in listing["snapshots"]]
 
     found = client.list_snapshots({"suite": "labels", "k": "v"})
-    assert entries(found) == [first] and "next" not in found
-    assert found["entries"][0]["labels"] == {"suite": "labels", "k": "v"}
+    assert ids(found) == [first] and "next" not in found
+    assert found["snapshots"][0]["labels"] == {"suite": "labels", "k": "v"}
     page = client.list_snapshots({"suite": "labels"}, limit=1)
-    assert entries(page) == [second]
-    assert entries(client.list_snapshots({"suite": "labels"}, limit=1, after=page["next"])) == [first]
+    assert ids(page) == [second]
+    assert ids(client.list_snapshots({"suite": "labels"}, limit=1, after=page["next"])) == [first]
 
-    summary = client.set_snapshot_labels(first, set={"k": "u"})
-    assert summary["entry"] == first and summary["labels"] == {"suite": "labels", "k": "u"}
-    assert client.list_snapshots({"suite": "labels", "k": "v"})["entries"] == []
-    assert entries(client.list_snapshots({"suite": "labels", "k": "u"})) == [first]
-    assert client.set_snapshot_labels(first, remove=["k"])["labels"] == {"suite": "labels"}
+    updated = client.update_snapshot(first, {"k": "u"})
+    assert updated["id"] == first and updated["labels"] == {"suite": "labels", "k": "u"}
+    assert client.list_snapshots({"suite": "labels", "k": "v"})["snapshots"] == []
+    assert ids(client.list_snapshots({"suite": "labels", "k": "u"})) == [first]
+    assert client.update_snapshot(first, {"k": None, "absent": None})["labels"] == {"suite": "labels"}
     with pytest.raises(PisaError) as e:
-        client.set_snapshot_labels(first, set={"bad key": "x"})
+        client.update_snapshot(first, {"bad key": "x"})
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
     with pytest.raises(PisaError) as e:
         client.list_snapshots(limit=0)
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
-    for entry in [first, second]:
-        client.delete_snapshot(entry)
-    assert client.list_snapshots({"suite": "labels"})["entries"] == []
+    for snapshot_id in [first, second]:
+        client.delete_snapshot(snapshot_id)
+    assert client.list_snapshots({"suite": "labels"})["snapshots"] == []

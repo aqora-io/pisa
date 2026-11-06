@@ -62,7 +62,7 @@ impl Versions {
         snapshots::create,
         snapshots::list,
         snapshots::get,
-        snapshots::labels,
+        snapshots::update,
         snapshots::delete,
         snapshots::verify,
         snapshots::dependents,
@@ -84,13 +84,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/states/{id}/tactic", post(sessions::apply_tactic))
         .route("/snapshots", post(snapshots::create).get(snapshots::list))
         .route(
-            "/snapshots/{entry}",
+            "/snapshots/{id}",
             get(snapshots::get)
-                .patch(snapshots::labels)
+                .patch(snapshots::update)
                 .delete(snapshots::delete),
         )
-        .route("/snapshots/{entry}/verify", post(snapshots::verify))
-        .route("/snapshots/{entry}/dependents", get(snapshots::dependents))
+        .route("/snapshots/{id}/verify", post(snapshots::verify))
+        .route("/snapshots/{id}/dependents", get(snapshots::dependents))
         .route("/snapshots/rebuild", post(snapshots::rebuild))
         .route("/snapshots/audit", get(snapshots::audit))
         .route("/jobs/{id}", get(jobs::get).delete(jobs::cancel))

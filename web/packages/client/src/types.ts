@@ -12,6 +12,7 @@ export type {
   ApplyTacticResponse,
   AtPosition,
   AuditAssumption,
+  AuditSnapshotsResponse,
   AuditSummary,
   AuditUnproved,
   CheckBatchItem,
@@ -20,13 +21,17 @@ export type {
   CheckRequest,
   CheckResult,
   CheckSessionRequest,
+  CreateSnapshotRequest,
+  CreateSnapshotResponse,
   DeclDetail,
   DeclResponse,
   Declaration,
-  Deleted,
+  DeleteSnapshotResponse,
+  Description,
   Detail,
   ErrorKind,
   ErrorResponse,
+  Export,
   Flags,
   Health,
   HealthStatus,
@@ -36,9 +41,9 @@ export type {
   JobKind,
   JobOutcome,
   JobStatus,
-  LabelsRequest,
+  ListDependentsResponse,
+  ListSnapshotsResponse,
   Message,
-  ModuleDecl,
   Pos,
   ProofStatus,
   Query,
@@ -46,10 +51,9 @@ export type {
   RebuildCreated,
   RebuildFailed,
   RebuildItem,
-  RebuildRequest,
-  RebuildResponse,
   RebuildSkipped,
-  Replaced,
+  RebuildSnapshotsRequest,
+  RebuildSnapshotsResponse,
   Replacement,
   Replaces,
   Resolution,
@@ -60,23 +64,19 @@ export type {
   SearchResponse,
   Session,
   Severity,
-  SnapshotFailure,
-  SnapshotAudit,
-  SnapshotDependents,
+  Snapshot,
+  SnapshotDetail,
   SnapshotHit,
-  SnapshotInfo,
-  SnapshotList,
-  SnapshotRequest,
-  SnapshotResponse,
   SnapshotScope,
-  SnapshotSummary,
-  SnapshotVerified,
   Sorry,
   StartSessionRequest,
   State,
   Suggestion,
   TacticInfo,
   TermInfo,
+  UpdateSnapshotRequest,
+  VerifyFailure,
+  VerifySnapshotResponse,
 } from "./openapi.ts";
 
 /** An error's `kind` and `message`; the schema's `Error`, renamed so it
@@ -92,15 +92,15 @@ export type { Error as ApiError } from "./openapi.ts";
 export type StateId = string;
 /** A tactic session, `<version>~<header_key>~<id>`. */
 export type SessionId = string;
-/** A snapshot entry: 32 lowercase hex digits. It holds the labels. */
-export type EntryId = string;
-/** A snapshot module, `PisaSnap.s<32 hex>`, shared by every entry on the
+/** A snapshot's id: 32 lowercase hex digits. */
+export type SnapshotId = string;
+/** A snapshot module, `PisaSnap.s<32 hex>`, shared by every snapshot of the
  *  same code. */
 export type ModuleName = string;
 /** A position in a listing of snapshots: opaque. */
 export type Cursor = string;
 /** Label keys are 1–128 bytes of `[A-Za-z0-9._/-]`; values at most 512 bytes,
- *  without NUL. An entry has at most 64. */
+ *  without NUL. A snapshot has at most 64. */
 export type Labels = Record<string, string>;
 
 // ===================== What a schema doesn't say =====================
@@ -121,7 +121,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorKind, number>> = {
 
 /** `GET /snapshots`' query. */
 export interface ListSnapshotsParams {
-  /** Entries with every one of these labels. */
+  /** Snapshots with every one of these labels. */
   labels?: Labels;
   /** 1–1000; 100 by default. */
   limit?: number;

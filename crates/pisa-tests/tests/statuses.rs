@@ -11,13 +11,16 @@ use serde_json::{Value, json};
 async fn create(c: &Cluster, body: Value) -> Value {
     let (status, r) = c.post("/snapshots", body).await;
     assert_eq!(status, 200, "{r}");
-    assert!(r["entry"].is_string(), "{r}");
+    assert!(r["snapshot"]["id"].is_string(), "{r}");
     r
 }
 
 /// `header`, a blank line, then `body`.
 fn on(snapshot: &Value, body: &str) -> String {
-    format!("{}\n\n{body}", snapshot["header"].as_str().unwrap())
+    format!(
+        "{}\n\n{body}",
+        snapshot["snapshot"]["header"].as_str().unwrap()
+    )
 }
 
 async fn get(c: &Cluster, path: &str) -> (u16, Value) {
@@ -55,24 +58,17 @@ async fn statuses_tell_assumptions_from_sorry_and_the_rest() {
     )
     .await;
 
-    assert_eq!(
-        (&a["status"], &a["dirty"]),
-        (&json!("conditional"), &json!(true))
-    );
-    let thm3 = decl(&b["result"], "thm3");
+    assert_eq!(a["snapshot"]["status"], "conditional", "{a}");
+    let thm3 = decl(&b["check"], "thm3");
     assert_eq!(
         (&thm3["status"], &thm3["assumes"]),
         (&json!("conditional"), &json!(["kunneth"]))
     );
-    assert_eq!(
-        (&b["status"], &b["dirty"]),
-        (&json!("conditional"), &json!(true)),
-        "{b}"
-    );
-    assert_eq!(lem["status"], "sorry");
-    assert_eq!(nd["status"], "rejected");
+    assert_eq!(b["snapshot"]["status"], "conditional", "{b}");
+    assert_eq!(lem["snapshot"]["status"], "sorry");
+    assert_eq!(nd["snapshot"]["status"], "rejected");
     let (_, listed) = get(&c, "/snapshots?label=p:1").await;
-    let statuses: Vec<&Value> = listed["entries"]
+    let statuses: Vec<&Value> = listed["snapshots"]
         .as_array()
         .unwrap()
         .iter()
@@ -106,15 +102,15 @@ async fn statuses_tell_assumptions_from_sorry_and_the_rest() {
     assert_eq!(assumptions.len(), 1, "{audit}");
     let kunneth = &assumptions[0];
     assert_eq!(
-        (&kunneth["name"], &kunneth["entry"]),
-        (&json!("kunneth"), &a["entry"])
+        (&kunneth["name"], &kunneth["snapshot_id"]),
+        (&json!("kunneth"), &a["snapshot"]["id"])
     );
     assert_eq!(kunneth["used_by"], json!(["cor1", "thm3"]));
     assert_eq!(
         (&kunneth["verified"], kunneth["signature"].is_string()),
         (&json!(false), true)
     );
-    let mut not_proved: Vec<(String, String, Value)> = audit["not_proved"]
+    let mut not_proved: Vec<(String, String, Value, Value)> = audit["not_proved"]
         .as_array()
         .unwrap()
         .iter()
@@ -123,23 +119,33 @@ async fn statuses_tell_assumptions_from_sorry_and_the_rest() {
                 d["name"].as_str().unwrap().into(),
                 d["status"].as_str().unwrap().into(),
                 d["axioms"].clone(),
+                d["snapshot_id"].clone(),
             )
         })
         .collect();
     not_proved.sort_by(|x, y| x.0.cmp(&y.0));
+    let id = |r: &Value| r["snapshot"]["id"].clone();
     assert_eq!(
         not_proved,
         [
-            ("lem2".into(), "sorry".into(), json!(["sorryAx"])),
-            ("nd".into(), "rejected".into(), json!(["Lean.ofReduceBool"])),
+            ("lem2".into(), "sorry".into(), json!(["sorryAx"]), id(&lem)),
+            (
+                "nd".into(),
+                "rejected".into(),
+                json!(["Lean.ofReduceBool"]),
+                id(&nd)
+            ),
         ]
     );
 
     // Verifying B re-checks it and what it imports.
-    let path = format!("/snapshots/{}/verify", b["entry"].as_str().unwrap());
+    let path = format!(
+        "/snapshots/{}/verify",
+        b["snapshot"]["id"].as_str().unwrap()
+    );
     let (status, verified) = c.post(&path, json!({})).await;
     assert_eq!(
-        (status, &verified["verified"]),
+        (status, &verified["snapshot"]["verified"]),
         (200, &json!(true)),
         "{verified}"
     );

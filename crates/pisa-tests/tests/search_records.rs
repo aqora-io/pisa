@@ -14,13 +14,13 @@ async fn create(c: &Cluster, code: &str, labels: Value) -> Value {
         .post("/snapshots", json!({"code": code, "labels": labels}))
         .await;
     assert_eq!(status, 200, "{r}");
-    assert!(r["entry"].is_string(), "{r}");
+    assert!(r["snapshot"]["id"].is_string(), "{r}");
     r
 }
 
-/// The module id of a create's `snapshot`.
+/// The module id of a create's snapshot.
 fn module(r: &Value) -> String {
-    let name = r["snapshot"].as_str().unwrap();
+    let name = r["snapshot"]["module"].as_str().unwrap();
     name.strip_prefix("PisaSnap.s").unwrap().to_string()
 }
 
@@ -36,10 +36,10 @@ async fn a_create_records_declarations_and_a_change() {
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({"run": "1"})).await;
     let m = module(&r);
-    let entry = r["entry"].as_str().unwrap();
+    let entry = r["snapshot"]["id"].as_str().unwrap();
 
     let decls = catalog.decls(&m).await.unwrap().expect("declarations");
-    assert_eq!(decls.header, r["header"].as_str().unwrap());
+    assert_eq!(decls.header, r["snapshot"]["header"].as_str().unwrap());
     assert!(!decls.dirty && !decls.verified);
     let names: Vec<&str> = decls.decls.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(names, ["one", "two"]);
@@ -58,14 +58,14 @@ async fn a_create_records_declarations_and_a_change() {
     );
 }
 
-/// `GET /snapshots/{entry}`.
+/// `GET /snapshots/{id}`.
 async fn info(c: &Cluster, entry: &str) -> Value {
     let r = c.client.get(c.url(&format!("/snapshots/{entry}"))).send();
     r.await.unwrap().json().await.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_entry_lists_its_declarations_with_their_descriptions() {
+async fn a_snapshot_lists_its_exports_with_their_descriptions() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({})).await;
@@ -81,19 +81,24 @@ async fn an_entry_lists_its_declarations_with_their_descriptions() {
         .await
         .unwrap();
 
-    let decls = &info(&c, r["entry"].as_str().unwrap()).await["decls"];
+    let exports = &info(&c, r["snapshot"]["id"].as_str().unwrap()).await["exports"];
     assert_eq!(
-        decls[0],
+        exports[0],
         json!({
             "name": "one",
             "kind": "theorem",
             "signature": "one : 1 = 1",
             "docstring": "One is one.",
-            "informal": informal,
+            "description": {
+                "title": "One is one",
+                "text": "One equals one.",
+                "aliases": [],
+                "source": "test",
+            },
         })
     );
-    assert_eq!(decls[1]["name"], "two");
-    assert!(decls[1].get("informal").is_none(), "{decls}");
+    assert_eq!(exports[1]["name"], "two");
+    assert!(exports[1].get("description").is_none(), "{exports}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -112,7 +117,7 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, CODE, json!({})).await;
     let m = module(&r);
-    let entry = r["entry"].as_str().unwrap();
+    let entry = r["snapshot"]["id"].as_str().unwrap();
     assert!(
         catalog
             .put_described(&m, &[("one".into(), json!({}))])
@@ -125,7 +130,7 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
     let patched = c
         .client
         .patch(c.url(&path))
-        .json(&json!({"set": {"stage": "done"}}))
+        .json(&json!({"labels": {"stage": "done"}}))
         .send()
         .await
         .unwrap();

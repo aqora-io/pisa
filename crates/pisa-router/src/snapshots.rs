@@ -1,7 +1,7 @@
 //! Snapshot endpoints. Creating a snapshot is a check whose code later code
 //! imports, so it is routed like a check of that later code: its worker then
-//! has the snapshot warm. Reads, listings, label edits, deletes and verifies
-//! go to any worker of the version.
+//! has the snapshot warm. Reads, listings, updates, deletes and verifies go
+//! to any worker of the version.
 
 use std::sync::Arc;
 
@@ -9,9 +9,10 @@ use axum::Json;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, JobStatus, LabelsRequest, PreferAsync,
-    RebuildRequest, RebuildResponse, SnapshotAudit, SnapshotDependents, SnapshotInfo, SnapshotList,
-    SnapshotRequest, SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
+    Accepted, ApiErrors, AuditSnapshotsResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    DeleteSnapshotResponse, ErrorKind, JobKind, JobStatus, ListDependentsResponse,
+    ListSnapshotsResponse, PreferAsync, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
+    Snapshot, SnapshotDetail, UpdateSnapshotRequest, VerifySnapshotResponse, VersionQuery,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{DEFAULT_LIMIT, MAX_LABELS, MAX_LIMIT, is_cursor, parse_filter};
@@ -31,16 +32,16 @@ use crate::sessions::unexpected;
     post, path = "/snapshots", operation_id = "createSnapshot", tag = "snapshots",
     summary = "Keep code as a snapshot",
     description = "Checks code like `/check` and, if Lean accepts it, keeps it as a module that \
-        later code can import, with a new entry on it. Code that is already kept gets a new \
-        entry on its module.",
+        later code can import, with a new snapshot of it. Code that is already kept gets a new \
+        snapshot of its module.",
     params(PreferAsync),
-    request_body = SnapshotRequest,
-    responses((status = 200, description = "The entry, or why nothing was kept", body = SnapshotResponse), Accepted, ApiErrors),
+    request_body = CreateSnapshotRequest,
+    responses((status = 200, description = "The snapshot, or why nothing was kept", body = CreateSnapshotResponse), Accepted, ApiErrors),
 )]
 pub async fn create(
     State(app): State<Arc<App>>,
     prefer: Prefer,
-    Body(req): Body<SnapshotRequest>,
+    Body(req): Body<CreateSnapshotRequest>,
 ) -> Response {
     let p = prepare_create(&app, req);
     app.answer(prefer, JobKind::CreateSnapshot, p).await
@@ -48,7 +49,7 @@ pub async fn create(
 
 /// A create's job, routed to the worker that will serve code on top of the
 /// snapshot, which builds it.
-pub(crate) fn prepare_create(app: &App, req: SnapshotRequest) -> Prepared {
+pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Prepared {
     let split = split_header(&req.code);
     let next = snapshot::next_header(&split.header, &snapshot::id(&req.code));
     let route = Route {
@@ -78,7 +79,7 @@ pub(crate) fn prepare_create(app: &App, req: SnapshotRequest) -> Prepared {
     }
 }
 
-pub(crate) fn created(done: JobResult) -> Result<SnapshotResponse, ApiError> {
+pub(crate) fn created(done: JobResult) -> Result<CreateSnapshotResponse, ApiError> {
     let JobResult::SnapshotCreated(r) = done else {
         return Err(unexpected(done));
     };
@@ -86,17 +87,17 @@ pub(crate) fn created(done: JobResult) -> Result<SnapshotResponse, ApiError> {
 }
 
 #[utoipa::path(
-    get, path = "/snapshots/{entry}", operation_id = "getSnapshot", tag = "snapshots",
-    summary = "An entry and its module",
-    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
-    responses((status = 200, description = "The entry and its module", body = SnapshotInfo), ApiErrors),
+    get, path = "/snapshots/{id}", operation_id = "getSnapshot", tag = "snapshots",
+    summary = "A snapshot, with its module's code, check and exports",
+    params(("id" = String, Path, description = "The snapshot's id, 32 hex digits"), VersionQuery),
+    responses((status = 200, description = "The snapshot", body = SnapshotDetail), ApiErrors),
 )]
 pub async fn get(
     State(app): State<Arc<App>>,
-    Path(entry): Path<String>,
+    Path(id): Path<String>,
     Query(q): Query<VersionQuery>,
-) -> Result<Json<SnapshotInfo>, ApiError> {
-    let job = Job::SnapshotGet(SnapshotJob { entry });
+) -> Result<Json<SnapshotDetail>, ApiError> {
+    let job = Job::SnapshotGet(SnapshotJob { entry: id });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::Snapshot(r) => Ok(Json(*r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
@@ -105,7 +106,7 @@ pub async fn get(
 
 #[utoipa::path(
     get, path = "/snapshots", operation_id = "listSnapshots", tag = "snapshots",
-    summary = "List entries",
+    summary = "List snapshots",
     description = "Newest first, with every label given. A full page has `next`: pass it as \
         `after` for the next one.",
     params(
@@ -114,14 +115,14 @@ pub async fn get(
         ("after" = Option<String>, Query, description = "The previous page's `next`"),
         VersionQuery,
     ),
-    responses((status = 200, description = "A page of entries", body = SnapshotList), ApiErrors),
+    responses((status = 200, description = "A page of snapshots", body = ListSnapshotsResponse), ApiErrors),
 )]
 /// `GET /snapshots`. The query is parsed here rather than by
 /// [`Query`], which can't collect the repeated `label`.
 pub async fn list(
     State(app): State<Arc<App>>,
     RawQuery(query): RawQuery,
-) -> Result<Json<SnapshotList>, ApiError> {
+) -> Result<Json<ListSnapshotsResponse>, ApiError> {
     let (q, job) = list_query(query.as_deref().unwrap_or_default())
         .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
     match submit(&app, Job::SnapshotList(job), q, Priority::Interactive).await? {
@@ -185,20 +186,20 @@ fn list_query(query: &str) -> Result<(VersionQuery, SnapshotListJob), String> {
 #[utoipa::path(
     get, path = "/snapshots/audit", operation_id = "auditSnapshots", tag = "snapshots",
     summary = "What a project rests on",
-    description = "For the entries with every label: their declarations by status, each \
+    description = "For the snapshots with every label: their declarations by status, each \
         assumption (an axiom declared in snapshot code) with what uses it, wherever it is \
         declared, and the declarations that are `sorry` or `rejected`. It reads records only.",
     params(
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
         VersionQuery,
     ),
-    responses((status = 200, description = "The audit", body = SnapshotAudit), ApiErrors),
+    responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
 )]
 /// `GET /snapshots/audit`.
 pub async fn audit(
     State(app): State<Arc<App>>,
     RawQuery(query): RawQuery,
-) -> Result<Json<SnapshotAudit>, ApiError> {
+) -> Result<Json<AuditSnapshotsResponse>, ApiError> {
     let (q, labels) = label_query(query.as_deref().unwrap_or_default())
         .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
     let job = Job::SnapshotAudit(SnapshotAuditJob { labels });
@@ -209,27 +210,27 @@ pub async fn audit(
 }
 
 #[utoipa::path(
-    get, path = "/snapshots/{entry}/dependents", operation_id = "listDependents", tag = "snapshots",
-    summary = "The entries above an entry",
-    description = "The entries on every module that imports the entry's module, directly or \
-        through others, parents first: by level, then oldest first. With `label` filters, \
-        only the entries with every label.",
+    get, path = "/snapshots/{id}/dependents", operation_id = "listDependents", tag = "snapshots",
+    summary = "The snapshots above a snapshot",
+    description = "The snapshots of every module that imports the snapshot's module, directly \
+        or through others, parents first: by level, then oldest first. With `label` filters, \
+        only the snapshots with every label.",
     params(
-        ("entry" = String, Path, description = "The entry ID, 32 hex digits"),
+        ("id" = String, Path, description = "The snapshot's id, 32 hex digits"),
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
         VersionQuery,
     ),
-    responses((status = 200, description = "The entries above it", body = SnapshotDependents), ApiErrors),
+    responses((status = 200, description = "The snapshots above it", body = ListDependentsResponse), ApiErrors),
 )]
-/// `GET /snapshots/{entry}/dependents`.
+/// `GET /snapshots/{id}/dependents`.
 pub async fn dependents(
     State(app): State<Arc<App>>,
-    Path(entry): Path<String>,
+    Path(id): Path<String>,
     RawQuery(query): RawQuery,
-) -> Result<Json<SnapshotDependents>, ApiError> {
+) -> Result<Json<ListDependentsResponse>, ApiError> {
     let (q, labels) = label_query(query.as_deref().unwrap_or_default())
         .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
-    let job = Job::SnapshotDependents(SnapshotDependentsJob { entry, labels });
+    let job = Job::SnapshotDependents(SnapshotDependentsJob { entry: id, labels });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::SnapshotDependents(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
@@ -238,22 +239,22 @@ pub async fn dependents(
 
 #[utoipa::path(
     post, path = "/snapshots/rebuild", operation_id = "rebuildSnapshots", tag = "snapshots",
-    summary = "Rebuild an entry's dependents on its replacement",
-    description = "Plans the creates that make each dependent of `from` with an entry that has \
-        the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a \
-        failed chunk skipping only what builds on it, then with `retire` deleting the old \
-        entries and `from`. Unless `to` replaces `from`, `to` must not change what `from` \
+    summary = "Rebuild a snapshot's dependents on its replacement",
+    description = "Plans the creates that make each dependent of `from` with a snapshot that \
+        has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a \
+        time, a failed chunk skipping only what builds on it, then with `retire` deleting the \
+        old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` \
         states, or `allow_changes` be set. Sending the same rebuild again replays the creates \
         that are done. A run can be async; a dry run answers at once.",
     params(PreferAsync),
-    request_body = RebuildRequest,
-    responses((status = 200, description = "The plan, and what the run did", body = RebuildResponse), Accepted, ApiErrors),
+    request_body = RebuildSnapshotsRequest,
+    responses((status = 200, description = "The plan, and what the run did", body = RebuildSnapshotsResponse), Accepted, ApiErrors),
 )]
 /// `POST /snapshots/rebuild`.
 pub async fn rebuild(
     State(app): State<Arc<App>>,
     prefer: Prefer,
-    Body(req): Body<RebuildRequest>,
+    Body(req): Body<RebuildSnapshotsRequest>,
 ) -> Response {
     if req.labels.is_empty() {
         let e = ApiError::new(
@@ -304,7 +305,7 @@ pub async fn rebuild(
     accepted(job, JobKind::RebuildSnapshots, JobStatus::Running)
 }
 
-pub(crate) fn rebuilt(done: JobResult) -> Result<RebuildResponse, ApiError> {
+pub(crate) fn rebuilt(done: JobResult) -> Result<RebuildSnapshotsResponse, ApiError> {
     match done {
         JobResult::SnapshotRebuild(r) => r.map_err(ApiError),
         other => Err(unexpected(other)),
@@ -312,23 +313,24 @@ pub(crate) fn rebuilt(done: JobResult) -> Result<RebuildResponse, ApiError> {
 }
 
 #[utoipa::path(
-    patch, path = "/snapshots/{entry}", operation_id = "setSnapshotLabels", tag = "snapshots",
-    summary = "Set or remove an entry's labels",
-    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
-    request_body = LabelsRequest,
-    responses((status = 200, description = "The entry, with its labels", body = SnapshotSummary), ApiErrors),
+    patch, path = "/snapshots/{id}", operation_id = "updateSnapshot", tag = "snapshots",
+    summary = "Set or remove a snapshot's labels",
+    description = "A JSON merge patch of the labels: `null` removes a label, a string sets it, \
+        and the labels not named stay.",
+    params(("id" = String, Path, description = "The snapshot's id, 32 hex digits"), VersionQuery),
+    request_body = UpdateSnapshotRequest,
+    responses((status = 200, description = "The snapshot, with its labels", body = Snapshot), ApiErrors),
 )]
-/// `PATCH /snapshots/{entry}`.
-pub async fn labels(
+/// `PATCH /snapshots/{id}`.
+pub async fn update(
     State(app): State<Arc<App>>,
-    Path(entry): Path<String>,
+    Path(id): Path<String>,
     Query(q): Query<VersionQuery>,
-    Body(req): Body<LabelsRequest>,
-) -> Result<Json<SnapshotSummary>, ApiError> {
+    Body(req): Body<UpdateSnapshotRequest>,
+) -> Result<Json<Snapshot>, ApiError> {
     let job = Job::SnapshotLabels(SnapshotLabelsJob {
-        entry,
-        set: req.set,
-        remove: req.remove,
+        entry: id,
+        labels: req.labels,
     });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::SnapshotLabels(r) => Ok(Json(r.map_err(ApiError)?)),
@@ -337,19 +339,19 @@ pub async fn labels(
 }
 
 #[utoipa::path(
-    delete, path = "/snapshots/{entry}", operation_id = "deleteSnapshot", tag = "snapshots",
-    summary = "Delete an entry",
-    description = "Its module goes too once no entry or other module refers to it: `removed` \
-        lists the modules that went.",
-    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery),
-    responses((status = 200, description = "What went", body = Deleted), ApiErrors),
+    delete, path = "/snapshots/{id}", operation_id = "deleteSnapshot", tag = "snapshots",
+    summary = "Delete a snapshot",
+    description = "Its module goes too once no snapshot or other module refers to it: \
+        `removed` lists the modules that went.",
+    params(("id" = String, Path, description = "The snapshot's id, 32 hex digits"), VersionQuery),
+    responses((status = 200, description = "What went", body = DeleteSnapshotResponse), ApiErrors),
 )]
 pub async fn delete(
     State(app): State<Arc<App>>,
-    Path(entry): Path<String>,
+    Path(id): Path<String>,
     Query(q): Query<VersionQuery>,
-) -> Result<Json<Deleted>, ApiError> {
-    let job = Job::SnapshotDelete(SnapshotJob { entry });
+) -> Result<Json<DeleteSnapshotResponse>, ApiError> {
+    let job = Job::SnapshotDelete(SnapshotJob { entry: id });
     match submit(&app, job, q, Priority::Interactive).await? {
         JobResult::SnapshotDeleted(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
@@ -357,25 +359,25 @@ pub async fn delete(
 }
 
 #[utoipa::path(
-    post, path = "/snapshots/{entry}/verify", operation_id = "verifySnapshot", tag = "snapshots",
-    summary = "Re-check an entry's module with the kernel",
+    post, path = "/snapshots/{id}/verify", operation_id = "verifySnapshot", tag = "snapshots",
+    summary = "Re-check a snapshot's module with the kernel",
     description = "Re-checks the module and the modules it imports; `failure` says which one \
         failed and why.",
-    params(("entry" = String, Path, description = "The entry ID, 32 hex digits"), VersionQuery, PreferAsync),
-    responses((status = 200, description = "Whether the module passed", body = SnapshotVerified), Accepted, ApiErrors),
+    params(("id" = String, Path, description = "The snapshot's id, 32 hex digits"), VersionQuery, PreferAsync),
+    responses((status = 200, description = "Whether the module passed", body = VerifySnapshotResponse), Accepted, ApiErrors),
 )]
 pub async fn verify(
     State(app): State<Arc<App>>,
-    Path(entry): Path<String>,
+    Path(id): Path<String>,
     Query(q): Query<VersionQuery>,
     prefer: Prefer,
 ) -> Response {
-    let job = Job::SnapshotVerify(SnapshotJob { entry });
+    let job = Job::SnapshotVerify(SnapshotJob { entry: id });
     let p = prepare(&app, job, q, Priority::Batch);
     app.answer(prefer, JobKind::VerifySnapshot, p).await
 }
 
-pub(crate) fn verified(done: JobResult) -> Result<SnapshotVerified, ApiError> {
+pub(crate) fn verified(done: JobResult) -> Result<VerifySnapshotResponse, ApiError> {
     match done {
         JobResult::SnapshotVerified(r) => r.map_err(ApiError),
         other => Err(unexpected(other)),

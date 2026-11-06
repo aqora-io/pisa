@@ -84,37 +84,38 @@ describe("sessions", () => {
 
 describe("snapshots", () => {
   it("keeps code that later code imports, with labels and keys", async () => {
-    const base = await client.createSnapshot("import Foo\ntheorem base : 1 = 1 := rfl", { labels: { suite: "web" } });
-    expect(base).toMatchObject({ dirty: false, verified: false, labels: { suite: "web" }, version: "v" });
-    expect(base.header).toBe(`import Foo\nimport ${base.snapshot}`);
+    const created = await client.createSnapshot("import Foo\ntheorem base : 1 = 1 := rfl", { labels: { suite: "web" } });
+    const base = created.snapshot;
+    if (base === undefined) throw new Error(`not kept: ${JSON.stringify(created)}`);
+    expect(base).toMatchObject({ status: "proved", verified: false, labels: { suite: "web" }, version: "v" });
+    expect(base.header).toBe(`import Foo\nimport ${base.module}`);
     expect((await client.check(`${base.header}\nneeds base`)).ok).toBe(true);
-    const entry = base.entry ?? "";
 
-    const info = await client.getSnapshot(entry);
-    expect(info).toMatchObject({ entry, snapshot: base.snapshot, imports: [], labels: { suite: "web" } });
+    const detail = await client.getSnapshot(base.id);
+    expect(detail).toMatchObject({ ...base, imports: [], check: { ok: true } });
 
-    const verified = await client.verifySnapshot(entry);
-    expect(verified).toMatchObject({ verified: true, checked: [base.snapshot] });
+    const verified = await client.verifySnapshot(base.id);
+    expect(verified).toMatchObject({ snapshot: { id: base.id, verified: true }, checked: [base.module] });
     expect(verified.failure).toBeUndefined();
 
     const code = "import Foo\ntheorem keyed : 1 = 1 := rfl";
     const keyed = await client.createSnapshot(code, { key: "web-1" });
-    expect((await client.createSnapshot(code, { key: "web-1" })).entry).toBe(keyed.entry);
+    expect((await client.createSnapshot(code, { key: "web-1" })).snapshot?.id).toBe(keyed.snapshot?.id);
 
     const rejected = await client.createSnapshot("theorem t : 1 = 1 := error_here");
-    expect(rejected.entry).toBeUndefined();
-    expect(rejected.result.ok).toBe(false);
+    expect(rejected.snapshot).toBeUndefined();
+    expect(rejected.check.ok).toBe(false);
 
-    const relabelled = await client.setSnapshotLabels(entry, { set: { run: "a b" }, remove: ["suite"] });
-    expect(relabelled.labels).toEqual({ run: "a b" });
+    const updated = await client.updateSnapshot(base.id, { labels: { run: "a b", suite: null } });
+    expect(updated.labels).toEqual({ run: "a b" });
     const page = await client.listSnapshots({ labels: { run: "a b" }, limit: 1 });
-    expect(page.entries.map((e) => e.entry)).toEqual([entry]);
+    expect(page.snapshots.map((s) => s.id)).toEqual([base.id]);
     expect(page.next).toBeDefined();
-    expect((await client.listSnapshots({ labels: { run: "a b" }, limit: 1, after: page.next ?? "" })).entries).toEqual([]);
+    expect((await client.listSnapshots({ labels: { run: "a b" }, limit: 1, after: page.next ?? "" })).snapshots).toEqual([]);
 
-    expect((await client.deleteSnapshot(entry)).removed).toEqual([base.snapshot]);
-    expect(await client.getSnapshot(entry).catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
-    expect(await client.getSnapshot(base.snapshot ?? "").catch((e: unknown) => e)).toMatchObject({
+    expect((await client.deleteSnapshot(base.id)).removed).toEqual([base.module]);
+    expect(await client.getSnapshot(base.id).catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
+    expect(await client.getSnapshot(base.module).catch((e: unknown) => e)).toMatchObject({
       kind: "bad_request",
     });
   });
@@ -175,9 +176,9 @@ describe("jobs", () => {
     const proved = await client.submitCheckSession(session.id, "theorem t : 1 = 1 := by rfl");
     expect((await client.waitJob(proved)).ok).toBe(true);
 
-    const made = await client.waitJob(await client.submitSnapshot("def jobbed := 1"));
-    const verified = await client.waitJob(await client.submitVerify(made.entry ?? ""));
-    expect(verified.verified).toBe(true);
+    const made = await client.waitJob(await client.submitCreateSnapshot("def jobbed := 1"));
+    const verified = await client.waitJob(await client.submitVerifySnapshot(made.snapshot?.id ?? ""));
+    expect(verified.snapshot.verified).toBe(true);
     // Done: it stays as it is.
     expect((await client.cancelJob(job)).status).toBe("done");
   });

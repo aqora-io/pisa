@@ -136,14 +136,14 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List entries
+         * List snapshots
          * @description Newest first, with every label given. A full page has `next`: pass it as `after` for the next one.
          */
         get: operations["listSnapshots"];
         put?: never;
         /**
          * Keep code as a snapshot
-         * @description Checks code like `/check` and, if Lean accepts it, keeps it as a module that later code can import, with a new entry on it. Code that is already kept gets a new entry on its module.
+         * @description Checks code like `/check` and, if Lean accepts it, keeps it as a module that later code can import, with a new snapshot of it. Code that is already kept gets a new snapshot of its module.
          */
         post: operations["createSnapshot"];
         delete?: never;
@@ -161,7 +161,7 @@ export interface paths {
         };
         /**
          * What a project rests on
-         * @description For the entries with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.
+         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.
          */
         get: operations["auditSnapshots"];
         put?: never;
@@ -182,8 +182,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Rebuild an entry's dependents on its replacement
-         * @description Plans the creates that make each dependent of `from` with an entry that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old entries and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
+         * Rebuild a snapshot's dependents on its replacement
+         * @description Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
          */
         post: operations["rebuildSnapshots"];
         delete?: never;
@@ -192,29 +192,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapshots/{entry}": {
+    "/snapshots/{id}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** An entry and its module */
+        /** A snapshot, with its module's code, check and exports */
         get: operations["getSnapshot"];
         put?: never;
         post?: never;
         /**
-         * Delete an entry
-         * @description Its module goes too once no entry or other module refers to it: `removed` lists the modules that went.
+         * Delete a snapshot
+         * @description Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went.
          */
         delete: operations["deleteSnapshot"];
         options?: never;
         head?: never;
-        /** Set or remove an entry's labels */
-        patch: operations["setSnapshotLabels"];
+        /**
+         * Set or remove a snapshot's labels
+         * @description A JSON merge patch of the labels: `null` removes a label, a string sets it, and the labels not named stay.
+         */
+        patch: operations["updateSnapshot"];
         trace?: never;
     };
-    "/snapshots/{entry}/dependents": {
+    "/snapshots/{id}/dependents": {
         parameters: {
             query?: never;
             header?: never;
@@ -222,8 +225,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * The entries above an entry
-         * @description The entries on every module that imports the entry's module, directly or through others, parents first: by level, then oldest first. With `label` filters, only the entries with every label.
+         * The snapshots above a snapshot
+         * @description The snapshots of every module that imports the snapshot's module, directly or through others, parents first: by level, then oldest first. With `label` filters, only the snapshots with every label.
          */
         get: operations["listDependents"];
         put?: never;
@@ -234,7 +237,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapshots/{entry}/verify": {
+    "/snapshots/{id}/verify": {
         parameters: {
             query?: never;
             header?: never;
@@ -244,7 +247,7 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Re-check an entry's module with the kernel
+         * Re-check a snapshot's module with the kernel
          * @description Re-checks the module and the modules it imports; `failure` says which one failed and why.
          */
         post: operations["verifySnapshot"];
@@ -379,21 +382,38 @@ export interface components {
             term?: components["schemas"]["TermInfo"];
         };
         AuditAssumption: {
-            /**
-             * @description An entry on the module that declares it: one with the labels if there
-             *     is one.
-             */
-            entry?: string;
             name: string;
             /** @description As written, from its module's declaration export. */
             signature?: string;
-            /** @description The entries' declarations that rest on it. */
+            /**
+             * @description A snapshot of the module that declares it: one with the labels if
+             *     there is one.
+             */
+            snapshot_id?: string;
+            /** @description The snapshots' declarations that rest on it. */
             used_by: string[];
             /** @description Its module has passed the kernel re-check. */
             verified: boolean;
         };
         /**
-         * @description The entries' declarations by status, each module's once, without the
+         * @description `GET /snapshots/audit`: what the snapshots that have every label the
+         *     query names (as in a listing) rest on. Statuses come from the build's
+         *     axiom report, or the kernel re-check once a module is verified, so a
+         *     trusted audit has no `rejected` or `sorry` and `unverified_modules` 0.
+         *     Whether an assumption is reasonable is for review.
+         */
+        AuditSnapshotsResponse: {
+            /**
+             * @description The assumptions what the snapshots declare uses, by name, wherever
+             *     they are declared.
+             */
+            assumptions: components["schemas"]["AuditAssumption"][];
+            /** @description The declarations that are `sorry` or `rejected`. */
+            not_proved: components["schemas"]["AuditUnproved"][];
+            summary: components["schemas"]["AuditSummary"];
+        };
+        /**
+         * @description The snapshots' declarations by status, each module's once, without the
          *     assumptions themselves and what Lean generated.
          */
         AuditSummary: {
@@ -407,7 +427,7 @@ export interface components {
             sorry: number;
             /**
              * Format: int64
-             * @description The entries' modules that haven't passed the kernel re-check, so
+             * @description The snapshots' modules that haven't passed the kernel re-check, so
              *     whose statuses come from the build's report.
              */
             unverified_modules: number;
@@ -415,8 +435,9 @@ export interface components {
         AuditUnproved: {
             /** @description Its axioms outside the allowed list. */
             axioms: string[];
-            entry: string;
             name: string;
+            /** @description A snapshot with the labels whose module declares it. */
+            snapshot_id: string;
             status: components["schemas"]["ProofStatus"];
         };
         CheckBatchItem: {
@@ -493,6 +514,84 @@ export interface components {
             /** Format: int64 */
             timeout?: number;
         };
+        /**
+         * @description `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
+         *     keeps it as a module that later code can import, with a new snapshot of
+         *     it. Code that is already kept gets a new snapshot of its module without
+         *     being built again.
+         */
+        CreateSnapshotRequest: {
+            code: string;
+            /**
+             * @description Makes the create safe to retry: while a snapshot made with this key
+             *     exists, a create with it on the same code returns that snapshot as it
+             *     is, instead of adding another; on other code it is a `bad_request`.
+             *     Such a replay ignores the request's other fields, `labels` and
+             *     `verify` included, so it can be `verified: false` with no error after
+             *     `verify: true`. Creates that keep nothing don't use the key up, and
+             *     deleting the snapshot frees it. See
+             *     [`check_key`](crate::labels::check_key) for the rules.
+             */
+            key?: string;
+            /**
+             * @description The new snapshot's labels; see
+             *     [`check_labels`](crate::labels::check_labels) for the rules.
+             */
+            labels?: {
+                [key: string]: string;
+            };
+            /**
+             * @description The snapshot this code replaces, e.g. the skeleton a proof fills in.
+             *     The code is kept only if it still declares everything that snapshot's
+             *     module declares, each the same kind of declaration with the same type
+             *     and, for definitions, the same value, and adds no assumptions
+             *     (`axiom`s, its own or a newly imported snapshot's); it may add other
+             *     declarations and imports. If it no longer builds on a snapshot that
+             *     module does, what the module's declarations use from there must be
+             *     unchanged in what the code builds on now. Otherwise nothing is kept
+             *     and `check.reasons` lists the changes. The new snapshot records the
+             *     link.
+             */
+            replaces?: components["schemas"]["Replaces"];
+            /**
+             * Format: int64
+             * @description Lean's time limit in seconds, for building the module including its
+             *     imports.
+             */
+            timeout?: number;
+            /**
+             * @description Whether to re-check the code through the kernel. `true` also re-checks
+             *     its imports, so the snapshot ends [`verified`](Snapshot::verified) or
+             *     the check has an error, except on a [`key`](Self::key) replay. `false`
+             *     never re-checks. By default, only code that uses macros, its own or an
+             *     import's, is re-checked.
+             */
+            verify?: boolean;
+            version?: string;
+        };
+        CreateSnapshotResponse: {
+            /**
+             * @description The check, as for `/check`. It has no `sorries`, and `time` includes
+             *     importing the module's imports.
+             */
+            check: components["schemas"]["CheckResult"];
+            /**
+             * @description What the replacement changed, if the request named a snapshot it
+             *     replaces and the code was kept. Absent on a key replay, which doesn't
+             *     compare again.
+             */
+            replacement?: components["schemas"]["Replacement"];
+            /**
+             * @description The snapshot this create added, or on a
+             *     [`key`](CreateSnapshotRequest::key) replay the one the key is on.
+             *     Absent when nothing new was kept: Lean reported errors, the check
+             *     could not complete, the code changed what the snapshot it
+             *     [`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`
+             *     says how), or `verify: true` found it kept but failing the re-check
+             *     (`check.error` says why).
+             */
+            snapshot?: components["schemas"]["Snapshot"];
+        };
         DeclDetail: {
             /** @description Declarations it uses, in its statement and its proof or body. */
             deps: string[];
@@ -555,14 +654,29 @@ export interface components {
             value_refs?: string[];
         };
         /**
-         * @description `DELETE /snapshots/{entry}`: deletes the entry. Its module goes too once
-         *     no entry and no kept module needs it, and then so do the modules it
+         * @description `DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once
+         *     no snapshot and no kept module needs it, and then so do the modules it
          *     imports, on the same terms.
          */
-        Deleted: {
-            entry: string;
-            /** @description The modules removed, the entry's own first. */
+        DeleteSnapshotResponse: {
+            /** @description The modules removed, the snapshot's own first. */
             removed: string[];
+        };
+        /** @description A natural-language description of a declaration. */
+        Description: {
+            /** @description Other names it goes by. */
+            aliases: string[];
+            /** @description What it states, in LaTeX. */
+            latex?: string;
+            /** @description Where it came from, e.g. "lsv2-v4.28.0-rc1" or a model name. */
+            source: string;
+            /** @description What it states, in words. */
+            text: string;
+            /**
+             * @description What the declaration is called in words, e.g. "Subadditivity of von
+             *     Neumann entropy".
+             */
+            title: string;
         };
         /**
          * @description Extra detail a check can return, requested in `detail`.
@@ -578,6 +692,19 @@ export interface components {
         /** @description The body of every non-2xx response. */
         ErrorResponse: {
             error: components["schemas"]["Error"];
+        };
+        /**
+         * @description A declaration of a snapshot's module, as code that imports it sees it,
+         *     with its description once search has written one (with
+         *     `PISA_SEARCH_DESCRIBE_MODEL`).
+         */
+        Export: {
+            description?: components["schemas"]["Description"];
+            docstring?: string;
+            kind: string;
+            name: string;
+            /** @description The declaration's signature, with notation. */
+            signature: string;
         };
         Flags: {
             /** @description The `to_additive` counterpart, folded into this hit. */
@@ -661,23 +788,38 @@ export interface components {
          * @description What `GET /jobs/{id}` answers once the job is done: what its request
          *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
          *     `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
-         *     `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
-         *     `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
-         *     is the request's own, with its status.
+         *     `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
+         *     `VerifySnapshotResponse` and `rebuild_snapshots` a
+         *     `RebuildSnapshotsResponse`. An error is the request's own, with its
+         *     status.
          */
-        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotVerified"] | components["schemas"]["RebuildResponse"];
+        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"];
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
         /**
-         * @description `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets
-         *     those in `set`. The labels that result must follow the rules of
-         *     [`check_labels`](crate::labels::check_labels).
+         * @description `GET /snapshots/{id}/dependents`: the snapshots of every module that
+         *     imports the snapshot's module, directly or through others, parents first:
+         *     by level, where a module that imports it is at level 1 and one that
+         *     imports that at 2, by its longest chain, then oldest first. With
+         *     `label=key:value` filters, as in a listing, only the snapshots with every
+         *     label.
          */
-        LabelsRequest: {
-            remove?: string[];
-            set?: {
-                [key: string]: string;
-            };
+        ListDependentsResponse: {
+            snapshots: components["schemas"]["Snapshot"][];
+        };
+        /**
+         * @description `GET /snapshots`: the version's snapshots, newest first, that have every
+         *     label the query names as `label=key:value` (split on the first `:`; up to
+         *     64 filters), at most `limit` of them (1 to 1000, default 100). Keep
+         *     requesting with `next` as `after` while a page has it.
+         */
+        ListSnapshotsResponse: {
+            /**
+             * @description Where the next page starts, if this page is full. The page after it
+             *     may be empty.
+             */
+            next?: string;
+            snapshots: components["schemas"]["Snapshot"][];
         };
         Message: {
             end_pos?: components["schemas"]["Pos"];
@@ -685,18 +827,6 @@ export interface components {
             severity: components["schemas"]["Severity"];
             /** @description What Lean said. */
             text: string;
-        };
-        /**
-         * @description A declaration of a snapshot module, with its description once search has
-         *     written one (with `PISA_SEARCH_DESCRIBE_MODEL`).
-         */
-        ModuleDecl: {
-            docstring?: string;
-            informal?: components["schemas"]["Informal"];
-            kind: string;
-            name: string;
-            /** @description The declaration's signature, with notation. */
-            signature: string;
         };
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
@@ -758,24 +888,27 @@ export interface components {
         };
         /** @description A [`RebuildItem`] created. */
         RebuildCreated: {
-            entry?: string;
-            new_entry: string;
-            new_snapshot: string;
-            snapshot: string;
+            module: string;
+            new_module: string;
+            /** @description The snapshot the create made, or replayed. */
+            new_snapshot_id: string;
+            /** @description As in [`RebuildItem::snapshot_id`]. */
+            snapshot_id?: string;
         };
         /** @description A [`RebuildItem`] whose create kept nothing. */
         RebuildFailed: {
-            entry?: string;
             /**
              * @description The create's check: Lean's errors, a refused replacement's
              *     `reasons`, or the `error` that stopped it.
              */
-            result: components["schemas"]["CheckResult"];
-            snapshot: string;
+            check: components["schemas"]["CheckResult"];
+            module: string;
+            /** @description As in [`RebuildItem::snapshot_id`]. */
+            snapshot_id?: string;
         };
         /**
-         * @description A create in a [`RebuildResponse`]: `POST /snapshots` with its `code`, `labels`
-         *     and `key`.
+         * @description A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its
+         *     `code`, `labels`, `key` and `replaces`.
          */
         RebuildItem: {
             /**
@@ -791,12 +924,6 @@ export interface components {
             /** @description The old module's code with its imports swapped. */
             code: string;
             /**
-             * @description The entry it rebuilds. Absent for a module that only links others to
-             *     `from`, with no entry that has the labels: it gets the labels asked
-             *     for.
-             */
-            entry?: string;
-            /**
              * @description The idempotency key to create it with. Planning again gives the same
              *     keys, so running a plan again after a failure replays the creates
              *     that are done.
@@ -810,73 +937,85 @@ export interface components {
              *     so on, by its longest chain.
              */
             level: number;
+            /** @description The module it rebuilds. */
+            module: string;
             /** @description The header of code on top of the new module. */
             new_header: string;
             /** @description The module the create makes. */
-            new_snapshot: string;
+            new_module: string;
             /**
-             * @description When `to` replaces `from`, the entry it rebuilds, to create it as a
-             *     replacement of, with the same `allow`. The create then checks that
+             * @description When `to` replaces `from`, the snapshot it rebuilds, to create it as
+             *     a replacement of, with the same `allow`. The create then checks that
              *     nothing its statements depend on changed, and is refused if
              *     something did.
              */
-            replaces?: components["schemas"]["Replaced"];
-            /** @description The module it rebuilds. */
-            snapshot: string;
+            replaces?: components["schemas"]["Replaces"];
+            /**
+             * @description The snapshot it rebuilds. Absent for a module that only links others
+             *     to `from`, with no snapshot that has the labels: it gets the labels
+             *     asked for.
+             */
+            snapshot_id?: string;
+        };
+        /** @description A [`RebuildItem`] not created, because it builds on one that wasn't. */
+        RebuildSkipped: {
+            module: string;
+            /** @description As in [`RebuildItem::snapshot_id`]. */
+            snapshot_id?: string;
         };
         /**
          * @description `POST /snapshots/rebuild`: plans how to create the dependents of `from`
-         *     (see [`SnapshotDependents`]) again on `to`, each with its imports of
+         *     (see [`ListDependentsResponse`]) again on `to`, each with its imports of
          *     `from`'s module, and of the other modules it rebuilds, swapped for the new
          *     ones, and unless `dry_run` creates them: a level at a time, a level's
          *     creates side by side once the level below is done.
          */
-        RebuildRequest: {
+        RebuildSnapshotsRequest: {
             /**
              * @description Plan even though `to` changes what `from` states, when `to` wasn't
-             *     created to [`replace`](SnapshotRequest::replaces) `from`.
+             *     created to [`replace`](CreateSnapshotRequest::replaces) `from`.
              */
             allow_changes?: boolean;
             /** @description Only plan: the client creates the plan's items. */
             dry_run?: boolean;
-            /** @description The entry being replaced. */
+            /** @description The snapshot being replaced. */
             from: string;
             /**
-             * @description Which dependents to rebuild: those with an entry that has every label,
-             *     and the modules they build on above `from`. Required, so that the
-             *     caller chooses which projects follow the edit.
+             * @description Which dependents to rebuild: those with a snapshot that has every
+             *     label, and the modules they build on above `from`. Required, so that
+             *     the caller chooses which projects follow the edit.
              */
             labels: {
                 [key: string]: string;
             };
             /**
-             * @description Once every item is created, delete the old entries, from the top
+             * @description Once every item is created, delete the old snapshots, from the top
              *     down, then `from`, and with them the old modules nothing else needs.
              */
             retire?: boolean;
             /**
              * Format: int64
-             * @description As [`SnapshotRequest::timeout`], for each create.
+             * @description As [`CreateSnapshotRequest::timeout`], for each create.
              */
             timeout?: number;
             /** @description Its replacement. */
             to: string;
-            /** @description As [`SnapshotRequest::verify`], for each create. */
+            /** @description As [`CreateSnapshotRequest::verify`], for each create. */
             verify?: boolean;
             version?: string;
         };
         /**
          * @description What a rebuild planned and, unless it was a dry run, did. Sending the same
          *     rebuild again plans the same items with the same keys, so the creates that
-         *     are done replay their entries, and the rest run.
+         *     are done replay their snapshots, and the rest run.
          */
-        RebuildResponse: {
+        RebuildSnapshotsResponse: {
             /** @description The definitions whose value `to` changed. */
             changed_definitions?: string[];
             /**
              * @description How `to` differs from `from`, as in a refused replacement's
-             *     `result.reasons`. Empty when `to` replaces `from`: its create
-             *     compared them.
+             *     `check.reasons`. Empty when `to` replaces `from`: its create compared
+             *     them.
              */
             changes: string[];
             /** @description For a run, the items created, in plan order. */
@@ -894,7 +1033,10 @@ export interface components {
              *     be created together once the level below is done.
              */
             plan: components["schemas"]["RebuildItem"][];
-            /** @description With `retire`, the old entries deleted, top down, `from` last. */
+            /**
+             * @description With `retire`, the ids of the old snapshots deleted, top down, `from`
+             *     last.
+             */
             retired?: string[];
             /**
              * @description For a run, the items not created because they build on one that
@@ -902,19 +1044,9 @@ export interface components {
              */
             skipped?: components["schemas"]["RebuildSkipped"][];
         };
-        /** @description A [`RebuildItem`] not created, because it builds on one that wasn't. */
-        RebuildSkipped: {
-            entry?: string;
-            snapshot: string;
-        };
-        /** @description An entry that another replaced, and how. */
-        Replaced: {
-            allow?: components["schemas"]["Allow"];
-            entry: string;
-        };
         /**
-         * @description [`SnapshotResponse::replaces`]: the entry the create replaced, and what
-         *     the replacement changed.
+         * @description What a replacement changed, as the create's comparison with the snapshot
+         *     it [`replaces`](CreateSnapshotRequest::replaces) found.
          */
         Replacement: {
             /**
@@ -922,18 +1054,27 @@ export interface components {
              *     through another definition.
              */
             affected?: string[];
-            allow?: components["schemas"]["Allow"];
             /** @description With `allow: "definitions"`, the definitions whose value changed. */
             changed_definitions?: string[];
-            entry: string;
             /**
              * @description The replaced module's declarations that used `sorry` and no longer
-             *     do. Empty on a key replay, which doesn't compare again.
+             *     do.
              */
             filled: string[];
         };
-        /** @description [`SnapshotRequest::replaces`]: an entry, or an entry and what may change. */
-        Replaces: string | components["schemas"]["Replaced"];
+        /**
+         * @description A snapshot that a create replaces, and what the replacement may change:
+         *     a create's [`replaces`](CreateSnapshotRequest::replaces), the link the new
+         *     snapshot keeps, and a rebuild item's.
+         */
+        Replaces: {
+            /**
+             * @description What the replacement may change besides adding declarations; by
+             *     default nothing.
+             */
+            allow?: components["schemas"]["Allow"];
+            snapshot_id: string;
+        };
         Resolution: {
             /** @description For a deprecated name, its replacement. */
             deprecated_to?: string;
@@ -985,36 +1126,59 @@ export interface components {
         /** @enum {string} */
         Severity: "trace" | "info" | "warning" | "error";
         /**
-         * @description `GET /snapshots/audit`: what the entries that have every label the query
-         *     names (as in a listing) rest on. Statuses come from the same axiom lists
-         *     as `dirty`: the build's report, or the kernel re-check once a module is
-         *     verified, so a trusted audit has no `rejected` or `sorry` and
-         *     `unverified_modules` 0. Whether an assumption is reasonable is for review.
+         * @description Kept code: a module that later code imports, with labels. Every snapshot
+         *     of the same code shares one module, which stays while a snapshot of it, or
+         *     a kept module that imports it, needs it.
          */
-        SnapshotAudit: {
+        Snapshot: {
             /**
-             * @description The assumptions what the entries declare uses, by name, wherever they
-             *     are declared.
+             * Format: int64
+             * @description When it was created, in seconds since the Unix epoch.
              */
-            assumptions: components["schemas"]["AuditAssumption"][];
-            /** @description The declarations that are `sorry` or `rejected`. */
-            not_proved: components["schemas"]["AuditUnproved"][];
-            summary: components["schemas"]["AuditSummary"];
+            created: number;
+            /**
+             * @description The header to start code on top of this snapshot with: its code's
+             *     imports with its snapshots replaced by this one. Code with exactly
+             *     this header reuses the Lean process the snapshot's builder keeps warm.
+             */
+            header: string;
+            /** @description Its id, which the other snapshot endpoints take. */
+            id: string;
+            /** @description The modules its module imports. */
+            imports: string[];
+            labels: {
+                [key: string]: string;
+            };
+            /**
+             * @description The module to import, e.g. `PisaSnap.s1a2b…`, shared by every snapshot
+             *     of the same code.
+             */
+            module: string;
+            /** @description The snapshot it replaced, if it was created to. */
+            replaces?: components["schemas"]["Replaces"];
+            /**
+             * @description The worst status among its module's declarations, by the build's
+             *     report or, once `verified`, the kernel re-check.
+             */
+            status: components["schemas"]["ProofStatus"];
+            /** @description Its module and everything it imports have passed the kernel re-check. */
+            verified: boolean;
+            /** @description The worker pool version it belongs to. */
+            version: string;
         };
         /**
-         * @description `GET /snapshots/{entry}/dependents`: the entries on every module that
-         *     imports the entry's module, directly or through others, parents first: by
-         *     level, where a module that imports it is at level 1 and one that imports
-         *     that at 2, by its longest chain, then oldest first. With `label=key:value`
-         *     filters, as in a listing, only the entries with every label.
+         * @description `GET /snapshots/{id}`: a snapshot with its module's code, check and
+         *     exports.
          */
-        SnapshotDependents: {
-            entries: components["schemas"]["SnapshotSummary"][];
-        };
-        SnapshotFailure: {
-            /** @description Why the re-check failed, e.g. the kernel's error or a timeout. */
-            reason: string;
-            snapshot: string;
+        SnapshotDetail: components["schemas"]["Snapshot"] & {
+            /**
+             * @description The module's check, as in [`CreateSnapshotResponse::check`], with the
+             *     kernel re-check's axioms once it is verified.
+             */
+            check: components["schemas"]["CheckResult"];
+            code: string;
+            /** @description The declarations that code importing the module sees, in order. */
+            exports?: components["schemas"]["Export"][];
         };
         SnapshotHit: {
             /**
@@ -1027,157 +1191,6 @@ export interface components {
             /** @description The module and everything it imports passed the kernel re-check. */
             verified: boolean;
         };
-        /** @description `GET /snapshots/{entry}`: an entry and its module. */
-        SnapshotInfo: {
-            code: string;
-            /**
-             * Format: int64
-             * @description When the entry was created, in seconds since the Unix epoch.
-             */
-            created: number;
-            /** @description The module's declarations, in order. */
-            decls?: components["schemas"]["ModuleDecl"][];
-            dirty: boolean;
-            entry: string;
-            /** @description As in [`SnapshotResponse::header`]. */
-            header: string;
-            /** @description The modules it imports. */
-            imports: string[];
-            /** @description The entry's labels. */
-            labels?: {
-                [key: string]: string;
-            };
-            /** @description The entry this one replaced, if it was created to. */
-            replaces?: components["schemas"]["Replaced"];
-            result: components["schemas"]["CheckResult"];
-            /** @description The entry's module. */
-            snapshot: string;
-            /** @description As in [`SnapshotResponse::status`]. */
-            status?: components["schemas"]["ProofStatus"];
-            /** @description As in [`SnapshotResponse::verified`]. */
-            verified: boolean;
-        };
-        /**
-         * @description `GET /snapshots`: the version's entries, newest first, that have every
-         *     label the query names as `label=key:value` (split on the first `:`; up to
-         *     64 filters), at most `limit` of them (1 to 1000, default 100). Keep
-         *     requesting with `next` as `after` while a page has it.
-         */
-        SnapshotList: {
-            entries: components["schemas"]["SnapshotSummary"][];
-            /**
-             * @description Where the next page starts, if this page is full. The page after it
-             *     may be empty.
-             */
-            next?: string;
-        };
-        /**
-         * @description `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
-         *     keeps it as a module that later code can import, with a new entry that
-         *     holds the module. Code that is already kept gets a new entry on its
-         *     module without being built again.
-         */
-        SnapshotRequest: {
-            code: string;
-            /**
-             * @description Makes the create safe to retry: while an entry made with this key
-             *     exists, a create with it on the same code returns that entry as it is,
-             *     instead of adding another; on other code it is a `bad_request`. Such a
-             *     replay ignores the request's other fields, `labels` and `verify`
-             *     included, so it can be `verified: false` with no error after
-             *     `verify: true`. Creates that keep nothing don't use the key up, and
-             *     deleting the entry frees it. See [`check_key`](crate::labels::check_key)
-             *     for the rules.
-             */
-            key?: string;
-            /**
-             * @description The new entry's labels; see [`check_labels`](crate::labels::check_labels)
-             *     for the rules.
-             */
-            labels?: {
-                [key: string]: string;
-            };
-            /**
-             * @description The entry this code replaces, e.g. the skeleton a proof fills in. The
-             *     code is kept only if it still declares everything that entry's module
-             *     declares, each the same kind of declaration with the same type and,
-             *     for definitions, the same value, and adds no assumptions (`axiom`s,
-             *     its own or a newly imported snapshot's); it may add other declarations
-             *     and imports. If it no longer builds on
-             *     a snapshot that module does, what the module's declarations use from
-             *     there must be unchanged in what the code builds on now. Otherwise
-             *     nothing is kept and `result.reasons` lists the changes. The new entry
-             *     records the link.
-             */
-            replaces?: components["schemas"]["Replaces"];
-            /**
-             * Format: int64
-             * @description Lean's time limit in seconds, for building the module including its
-             *     imports.
-             */
-            timeout?: number;
-            /**
-             * @description Whether to re-check the code through the kernel. `true` also re-checks
-             *     its imports, so the result ends [`verified`](SnapshotResponse::verified)
-             *     or has an error, except on a [`key`](Self::key) replay. `false` never
-             *     re-checks. By default, only code that uses macros, its own or an
-             *     import's, is re-checked.
-             */
-            verify?: boolean;
-            version?: string;
-        };
-        SnapshotResponse: {
-            /**
-             * @description Kept although a declaration uses `sorry` or another axiom outside the
-             *     allowed list; `result.reasons` says which.
-             */
-            dirty: boolean;
-            /**
-             * @description The entry, which the other snapshot endpoints take: the one this create
-             *     added, or on a [`key`](SnapshotRequest::key) replay the one the key is
-             *     on. It keeps the module until it is deleted. Absent when nothing new
-             *     was kept: the code was not kept, it changed what the entry it
-             *     [`replaces`](SnapshotRequest::replaces) states (`result.reasons` says
-             *     how), or `verify: true` found it kept but failing the re-check. For
-             *     code that was already kept, `snapshot` and `header` are then set.
-             */
-            entry?: string;
-            /**
-             * @description The header to start code on top of this snapshot with: this code's
-             *     imports with its snapshots replaced by the new one. Code with exactly
-             *     this header reuses the Lean process the snapshot's builder keeps warm.
-             */
-            header?: string;
-            /** @description The entry's labels. */
-            labels?: {
-                [key: string]: string;
-            };
-            /** @description The entry it replaces, if the request named one. */
-            replaces?: components["schemas"]["Replacement"];
-            /**
-             * @description The check, as for `/check`. It has no `sorries`, and `time` includes
-             *     importing the module's imports.
-             */
-            result: components["schemas"]["CheckResult"];
-            /**
-             * @description The module to import, e.g. `PisaSnap.s1a2b…`, shared by every entry on
-             *     the same code. Absent when the code was not kept: Lean reported errors,
-             *     or the check could not complete.
-             */
-            snapshot?: string;
-            /**
-             * @description The worst status among the module's declarations: `dirty` unless
-             *     `proved`.
-             */
-            status?: components["schemas"]["ProofStatus"];
-            /**
-             * @description This snapshot and everything it imports have passed the kernel
-             *     re-check.
-             */
-            verified: boolean;
-            /** @description The worker pool version the snapshot belongs to. */
-            version: string;
-        };
         /**
          * @description Which snapshot modules a query searches: `"none"`, `"all"`, or
          *     `{"labels": {"k": "v"}}`, the modules of the entries that have every label.
@@ -1186,54 +1199,6 @@ export interface components {
             labels: {
                 [key: string]: string;
             };
-        };
-        /**
-         * @description An entry in a listing: as [`SnapshotInfo`], without the code and the check
-         *     result.
-         */
-        SnapshotSummary: {
-            /**
-             * Format: int64
-             * @description When the entry was created, in seconds since the Unix epoch.
-             */
-            created: number;
-            dirty: boolean;
-            entry: string;
-            /** @description As in [`SnapshotResponse::header`]. */
-            header: string;
-            /** @description The modules it imports. */
-            imports: string[];
-            labels: {
-                [key: string]: string;
-            };
-            /** @description As in [`SnapshotInfo::replaces`]. */
-            replaces?: components["schemas"]["Replaced"];
-            /** @description The entry's module. */
-            snapshot: string;
-            /** @description As in [`SnapshotResponse::status`]. */
-            status?: components["schemas"]["ProofStatus"];
-            /** @description As in [`SnapshotResponse::verified`]. */
-            verified: boolean;
-        };
-        /**
-         * @description `POST /snapshots/{entry}/verify`: re-checks the entry's module and
-         *     everything it imports through the kernel, imports first, skipping what
-         *     already passed. A module that fails stops the run and stays usable, marked
-         *     as not verified. `verified` and `dirty` belong to the module, so every
-         *     entry on it shows the result.
-         */
-        SnapshotVerified: {
-            /** @description The modules this run re-checked and passed, in order. */
-            checked: string[];
-            /** @description As in [`SnapshotResponse::dirty`], from the re-check if it got this far. */
-            dirty: boolean;
-            entry: string;
-            /** @description The module that failed, if one did. */
-            failure?: components["schemas"]["SnapshotFailure"];
-            /** @description The entry's module. */
-            snapshot: string;
-            /** @description As in [`SnapshotResponse::verified`]. */
-            verified: boolean;
         };
         Sorry: {
             end_pos?: components["schemas"]["Pos"];
@@ -1298,6 +1263,42 @@ export interface components {
             /** @description The term's source text. */
             term: string;
         };
+        /**
+         * @description `PATCH /snapshots/{id}`: changes the snapshot's labels as a JSON merge
+         *     patch, and answers the [`Snapshot`]. The labels that result must follow
+         *     the rules of [`check_labels`](crate::labels::check_labels), or nothing
+         *     changes.
+         */
+        UpdateSnapshotRequest: {
+            /**
+             * @description A label set to `null` is removed, one set to a string takes that
+             *     value, and those not named stay as they are.
+             */
+            labels: {
+                [key: string]: string | null;
+            };
+        };
+        /** @description A module that failed the kernel re-check. */
+        VerifyFailure: {
+            module: string;
+            /** @description Why the re-check failed, e.g. the kernel's error or a timeout. */
+            reason: string;
+        };
+        /**
+         * @description `POST /snapshots/{id}/verify`: re-checks the snapshot's module and
+         *     everything it imports through the kernel, imports first, skipping what
+         *     already passed. A module that fails stops the run and stays usable,
+         *     marked as not verified. `verified` and `status` belong to the module, so
+         *     every snapshot of it shows the result.
+         */
+        VerifySnapshotResponse: {
+            /** @description The modules this run re-checked and passed, in order. */
+            checked: string[];
+            /** @description The module that failed, if one did. */
+            failure?: components["schemas"]["VerifyFailure"];
+            /** @description The snapshot, as the re-check left it. */
+            snapshot: components["schemas"]["Snapshot"];
+        };
     };
     responses: never;
     parameters: never;
@@ -1310,6 +1311,7 @@ export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
 export type ApplyTacticResponse = components['schemas']['ApplyTacticResponse'];
 export type AtPosition = components['schemas']['AtPosition'];
 export type AuditAssumption = components['schemas']['AuditAssumption'];
+export type AuditSnapshotsResponse = components['schemas']['AuditSnapshotsResponse'];
 export type AuditSummary = components['schemas']['AuditSummary'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
 export type CheckBatchItem = components['schemas']['CheckBatchItem'];
@@ -1318,14 +1320,18 @@ export type CheckBatchResponse = components['schemas']['CheckBatchResponse'];
 export type CheckRequest = components['schemas']['CheckRequest'];
 export type CheckResult = components['schemas']['CheckResult'];
 export type CheckSessionRequest = components['schemas']['CheckSessionRequest'];
+export type CreateSnapshotRequest = components['schemas']['CreateSnapshotRequest'];
+export type CreateSnapshotResponse = components['schemas']['CreateSnapshotResponse'];
 export type DeclDetail = components['schemas']['DeclDetail'];
 export type DeclResponse = components['schemas']['DeclResponse'];
 export type Declaration = components['schemas']['Declaration'];
-export type Deleted = components['schemas']['Deleted'];
+export type DeleteSnapshotResponse = components['schemas']['DeleteSnapshotResponse'];
+export type Description = components['schemas']['Description'];
 export type Detail = components['schemas']['Detail'];
 export type Error = components['schemas']['Error'];
 export type ErrorKind = components['schemas']['ErrorKind'];
 export type ErrorResponse = components['schemas']['ErrorResponse'];
+export type Export = components['schemas']['Export'];
 export type Flags = components['schemas']['Flags'];
 export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
@@ -1335,9 +1341,9 @@ export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
 export type JobStatus = components['schemas']['JobStatus'];
-export type LabelsRequest = components['schemas']['LabelsRequest'];
+export type ListDependentsResponse = components['schemas']['ListDependentsResponse'];
+export type ListSnapshotsResponse = components['schemas']['ListSnapshotsResponse'];
 export type Message = components['schemas']['Message'];
-export type ModuleDecl = components['schemas']['ModuleDecl'];
 export type Pos = components['schemas']['Pos'];
 export type ProofStatus = components['schemas']['ProofStatus'];
 export type Query = components['schemas']['Query'];
@@ -1345,10 +1351,9 @@ export type QueryResult = components['schemas']['QueryResult'];
 export type RebuildCreated = components['schemas']['RebuildCreated'];
 export type RebuildFailed = components['schemas']['RebuildFailed'];
 export type RebuildItem = components['schemas']['RebuildItem'];
-export type RebuildRequest = components['schemas']['RebuildRequest'];
-export type RebuildResponse = components['schemas']['RebuildResponse'];
 export type RebuildSkipped = components['schemas']['RebuildSkipped'];
-export type Replaced = components['schemas']['Replaced'];
+export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];
+export type RebuildSnapshotsResponse = components['schemas']['RebuildSnapshotsResponse'];
 export type Replacement = components['schemas']['Replacement'];
 export type Replaces = components['schemas']['Replaces'];
 export type Resolution = components['schemas']['Resolution'];
@@ -1359,23 +1364,19 @@ export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
 export type Session = components['schemas']['Session'];
 export type Severity = components['schemas']['Severity'];
-export type SnapshotAudit = components['schemas']['SnapshotAudit'];
-export type SnapshotDependents = components['schemas']['SnapshotDependents'];
-export type SnapshotFailure = components['schemas']['SnapshotFailure'];
+export type Snapshot = components['schemas']['Snapshot'];
+export type SnapshotDetail = components['schemas']['SnapshotDetail'];
 export type SnapshotHit = components['schemas']['SnapshotHit'];
-export type SnapshotInfo = components['schemas']['SnapshotInfo'];
-export type SnapshotList = components['schemas']['SnapshotList'];
-export type SnapshotRequest = components['schemas']['SnapshotRequest'];
-export type SnapshotResponse = components['schemas']['SnapshotResponse'];
 export type SnapshotScope = components['schemas']['SnapshotScope'];
-export type SnapshotSummary = components['schemas']['SnapshotSummary'];
-export type SnapshotVerified = components['schemas']['SnapshotVerified'];
 export type Sorry = components['schemas']['Sorry'];
 export type StartSessionRequest = components['schemas']['StartSessionRequest'];
 export type State = components['schemas']['State'];
 export type Suggestion = components['schemas']['Suggestion'];
 export type TacticInfo = components['schemas']['TacticInfo'];
 export type TermInfo = components['schemas']['TermInfo'];
+export type UpdateSnapshotRequest = components['schemas']['UpdateSnapshotRequest'];
+export type VerifyFailure = components['schemas']['VerifyFailure'];
+export type VerifySnapshotResponse = components['schemas']['VerifySnapshotResponse'];
 export type $defs = Record<string, never>;
 export interface operations {
     check: {
@@ -1429,7 +1430,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -1513,7 +1514,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -1640,7 +1641,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -1723,7 +1724,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -1826,7 +1827,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -1932,7 +1933,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2002,13 +2003,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description A page of entries */
+            /** @description A page of snapshots */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotList"];
+                    "application/json": components["schemas"]["ListSnapshotsResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2021,7 +2022,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2088,17 +2089,17 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SnapshotRequest"];
+                "application/json": components["schemas"]["CreateSnapshotRequest"];
             };
         };
         responses: {
-            /** @description The entry, or why nothing was kept */
+            /** @description The snapshot, or why nothing was kept */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotResponse"];
+                    "application/json": components["schemas"]["CreateSnapshotResponse"];
                 };
             };
             /** @description Queued: wait for its answer at `/jobs/{id}`. */
@@ -2124,7 +2125,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2196,7 +2197,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotAudit"];
+                    "application/json": components["schemas"]["AuditSnapshotsResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2209,7 +2210,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2276,7 +2277,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RebuildRequest"];
+                "application/json": components["schemas"]["RebuildSnapshotsRequest"];
             };
         };
         responses: {
@@ -2286,7 +2287,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RebuildResponse"];
+                    "application/json": components["schemas"]["RebuildSnapshotsResponse"];
                 };
             };
             /** @description Queued: wait for its answer at `/jobs/{id}`. */
@@ -2312,7 +2313,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2372,20 +2373,20 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description The entry ID, 32 hex digits */
-                entry: string;
+                /** @description The snapshot's id, 32 hex digits */
+                id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description The entry and its module */
+            /** @description The snapshot */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotInfo"];
+                    "application/json": components["schemas"]["SnapshotDetail"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2398,7 +2399,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2458,8 +2459,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description The entry ID, 32 hex digits */
-                entry: string;
+                /** @description The snapshot's id, 32 hex digits */
+                id: string;
             };
             cookie?: never;
         };
@@ -2471,7 +2472,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Deleted"];
+                    "application/json": components["schemas"]["DeleteSnapshotResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2484,7 +2485,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2536,7 +2537,7 @@ export interface operations {
             };
         };
     };
-    setSnapshotLabels: {
+    updateSnapshot: {
         parameters: {
             query?: {
                 /** @description The worker version; the server's default when absent. */
@@ -2544,24 +2545,24 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description The entry ID, 32 hex digits */
-                entry: string;
+                /** @description The snapshot's id, 32 hex digits */
+                id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["LabelsRequest"];
+                "application/json": components["schemas"]["UpdateSnapshotRequest"];
             };
         };
         responses: {
-            /** @description The entry, with its labels */
+            /** @description The snapshot, with its labels */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotSummary"];
+                    "application/json": components["schemas"]["Snapshot"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2574,7 +2575,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2636,20 +2637,20 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description The entry ID, 32 hex digits */
-                entry: string;
+                /** @description The snapshot's id, 32 hex digits */
+                id: string;
             };
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description The entries above it */
+            /** @description The snapshots above it */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotDependents"];
+                    "application/json": components["schemas"]["ListDependentsResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2662,7 +2663,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2728,8 +2729,8 @@ export interface operations {
                 Prefer?: string;
             };
             path: {
-                /** @description The entry ID, 32 hex digits */
-                entry: string;
+                /** @description The snapshot's id, 32 hex digits */
+                id: string;
             };
             cookie?: never;
         };
@@ -2741,7 +2742,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SnapshotVerified"];
+                    "application/json": components["schemas"]["VerifySnapshotResponse"];
                 };
             };
             /** @description Queued: wait for its answer at `/jobs/{id}`. */
@@ -2767,7 +2768,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2873,7 +2874,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -2959,7 +2960,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -3043,7 +3044,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {
@@ -3127,7 +3128,7 @@ export interface operations {
                 };
             };
             /**
-             * @description `not_found`: an unknown or expired job, state, session, entry or
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
              *     declaration.
              */
             404: {

@@ -72,10 +72,6 @@
       },
       "AuditAssumption": {
         "properties": {
-          "entry": {
-            "description": "An entry on the module that declares it: one with the labels if there\nis one.",
-            "type": "string"
-          },
           "name": {
             "type": "string"
           },
@@ -83,8 +79,12 @@
             "description": "As written, from its module's declaration export.",
             "type": "string"
           },
+          "snapshot_id": {
+            "description": "A snapshot of the module that declares it: one with the labels if\nthere is one.",
+            "type": "string"
+          },
           "used_by": {
-            "description": "The entries' declarations that rest on it.",
+            "description": "The snapshots' declarations that rest on it.",
             "items": {
               "type": "string"
             },
@@ -102,8 +102,36 @@
         ],
         "type": "object"
       },
+      "AuditSnapshotsResponse": {
+        "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.",
+        "properties": {
+          "assumptions": {
+            "description": "The assumptions what the snapshots declare uses, by name, wherever\nthey are declared.",
+            "items": {
+              "$ref": "#/components/schemas/AuditAssumption"
+            },
+            "type": "array"
+          },
+          "not_proved": {
+            "description": "The declarations that are `sorry` or `rejected`.",
+            "items": {
+              "$ref": "#/components/schemas/AuditUnproved"
+            },
+            "type": "array"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AuditSummary"
+          }
+        },
+        "required": [
+          "summary",
+          "assumptions",
+          "not_proved"
+        ],
+        "type": "object"
+      },
       "AuditSummary": {
-        "description": "The entries' declarations by status, each module's once, without the\nassumptions themselves and what Lean generated.",
+        "description": "The snapshots' declarations by status, each module's once, without the\nassumptions themselves and what Lean generated.",
         "properties": {
           "conditional": {
             "format": "int64",
@@ -126,7 +154,7 @@
             "type": "integer"
           },
           "unverified_modules": {
-            "description": "The entries' modules that haven't passed the kernel re-check, so\nwhose statuses come from the build's report.",
+            "description": "The snapshots' modules that haven't passed the kernel re-check, so\nwhose statuses come from the build's report.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -150,10 +178,11 @@
             },
             "type": "array"
           },
-          "entry": {
+          "name": {
             "type": "string"
           },
-          "name": {
+          "snapshot_id": {
+            "description": "A snapshot with the labels whose module declares it.",
             "type": "string"
           },
           "status": {
@@ -162,7 +191,7 @@
         },
         "required": [
           "name",
-          "entry",
+          "snapshot_id",
           "status",
           "axioms"
         ],
@@ -351,6 +380,69 @@
         ],
         "type": "object"
       },
+      "CreateSnapshotRequest": {
+        "description": "`POST /snapshots`: checks code like `/check` and, if Lean accepts it,\nkeeps it as a module that later code can import, with a new snapshot of\nit. Code that is already kept gets a new snapshot of its module without\nbeing built again.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "key": {
+            "description": "Makes the create safe to retry: while a snapshot made with this key\nexists, a create with it on the same code returns that snapshot as it\nis, instead of adding another; on other code it is a `bad_request`.\nSuch a replay ignores the request's other fields, `labels` and\n`verify` included, so it can be `verified: false` with no error after\n`verify: true`. Creates that keep nothing don't use the key up, and\ndeleting the snapshot frees it. See\n[`check_key`](crate::labels::check_key) for the rules.",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The new snapshot's labels; see\n[`check_labels`](crate::labels::check_labels) for the rules.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "replaces": {
+            "$ref": "#/components/schemas/Replaces",
+            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value, and adds no assumptions\n(`axiom`s, its own or a newly imported snapshot's); it may add other\ndeclarations and imports. If it no longer builds on a snapshot that\nmodule does, what the module's declarations use from there must be\nunchanged in what the code builds on now. Otherwise nothing is kept\nand `check.reasons` lists the changes. The new snapshot records the\nlink."
+          },
+          "timeout": {
+            "description": "Lean's time limit in seconds, for building the module including its\nimports.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verify": {
+            "description": "Whether to re-check the code through the kernel. `true` also re-checks\nits imports, so the snapshot ends [`verified`](Snapshot::verified) or\nthe check has an error, except on a [`key`](Self::key) replay. `false`\nnever re-checks. By default, only code that uses macros, its own or an\nimport's, is re-checked.",
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "CreateSnapshotResponse": {
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/CheckResult",
+            "description": "The check, as for `/check`. It has no `sorries`, and `time` includes\nimporting the module's imports."
+          },
+          "replacement": {
+            "$ref": "#/components/schemas/Replacement",
+            "description": "What the replacement changed, if the request named a snapshot it\nreplaces and the code was kept. Absent on a key replay, which doesn't\ncompare again."
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/Snapshot",
+            "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept: Lean reported errors, the check\ncould not complete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), or `verify: true` found it kept but failing the re-check\n(`check.error` says why)."
+          }
+        },
+        "required": [
+          "check"
+        ],
+        "type": "object"
+      },
       "DeclDetail": {
         "properties": {
           "deps": {
@@ -488,14 +580,11 @@
         ],
         "type": "object"
       },
-      "Deleted": {
-        "description": "`DELETE /snapshots/{entry}`: deletes the entry. Its module goes too once\nno entry and no kept module needs it, and then so do the modules it\nimports, on the same terms.",
+      "DeleteSnapshotResponse": {
+        "description": "`DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once\nno snapshot and no kept module needs it, and then so do the modules it\nimports, on the same terms.",
         "properties": {
-          "entry": {
-            "type": "string"
-          },
           "removed": {
-            "description": "The modules removed, the entry's own first.",
+            "description": "The modules removed, the snapshot's own first.",
             "items": {
               "type": "string"
             },
@@ -503,8 +592,42 @@
           }
         },
         "required": [
-          "entry",
           "removed"
+        ],
+        "type": "object"
+      },
+      "Description": {
+        "description": "A natural-language description of a declaration.",
+        "properties": {
+          "aliases": {
+            "description": "Other names it goes by.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "latex": {
+            "description": "What it states, in LaTeX.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where it came from, e.g. \"lsv2-v4.28.0-rc1\" or a model name.",
+            "type": "string"
+          },
+          "text": {
+            "description": "What it states, in words.",
+            "type": "string"
+          },
+          "title": {
+            "description": "What the declaration is called in words, e.g. \"Subadditivity of von\nNeumann entropy\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "text",
+          "aliases",
+          "source"
         ],
         "type": "object"
       },
@@ -555,6 +678,33 @@
         },
         "required": [
           "error"
+        ],
+        "type": "object"
+      },
+      "Export": {
+        "description": "A declaration of a snapshot's module, as code that imports it sees it,\nwith its description once search has written one (with\n`PISA_SEARCH_DESCRIBE_MODEL`).",
+        "properties": {
+          "description": {
+            "$ref": "#/components/schemas/Description"
+          },
+          "docstring": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "signature": {
+            "description": "The declaration's signature, with notation.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "signature"
         ],
         "type": "object"
       },
@@ -748,7 +898,7 @@
         "type": "string"
       },
       "JobOutcome": {
-        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `SnapshotResponse`, `verify_snapshot` a\n`SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error\nis the request's own, with its status.",
+        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a\n`VerifySnapshotResponse` and `rebuild_snapshots` a\n`RebuildSnapshotsResponse`. An error is the request's own, with its\nstatus.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/CheckResult"
@@ -760,13 +910,13 @@
             "$ref": "#/components/schemas/ApplyTacticResponse"
           },
           {
-            "$ref": "#/components/schemas/SnapshotResponse"
+            "$ref": "#/components/schemas/CreateSnapshotResponse"
           },
           {
-            "$ref": "#/components/schemas/SnapshotVerified"
+            "$ref": "#/components/schemas/VerifySnapshotResponse"
           },
           {
-            "$ref": "#/components/schemas/RebuildResponse"
+            "$ref": "#/components/schemas/RebuildSnapshotsResponse"
           }
         ]
       },
@@ -779,25 +929,38 @@
         ],
         "type": "string"
       },
-      "LabelsRequest": {
-        "description": "`PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets\nthose in `set`. The labels that result must follow the rules of\n[`check_labels`](crate::labels::check_labels).",
+      "ListDependentsResponse": {
+        "description": "`GET /snapshots/{id}/dependents`: the snapshots of every module that\nimports the snapshot's module, directly or through others, parents first:\nby level, where a module that imports it is at level 1 and one that\nimports that at 2, by its longest chain, then oldest first. With\n`label=key:value` filters, as in a listing, only the snapshots with every\nlabel.",
         "properties": {
-          "remove": {
+          "snapshots": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/Snapshot"
             },
             "type": "array"
-          },
-          "set": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            },
-            "type": "object"
           }
         },
+        "required": [
+          "snapshots"
+        ],
+        "type": "object"
+      },
+      "ListSnapshotsResponse": {
+        "description": "`GET /snapshots`: the version's snapshots, newest first, that have every\nlabel the query names as `label=key:value` (split on the first `:`; up to\n64 filters), at most `limit` of them (1 to 1000, default 100). Keep\nrequesting with `next` as `after` while a page has it.",
+        "properties": {
+          "next": {
+            "description": "Where the next page starts, if this page is full. The page after it\nmay be empty.",
+            "type": "string"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/Snapshot"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "snapshots"
+        ],
         "type": "object"
       },
       "Message": {
@@ -820,33 +983,6 @@
           "severity",
           "pos",
           "text"
-        ],
-        "type": "object"
-      },
-      "ModuleDecl": {
-        "description": "A declaration of a snapshot module, with its description once search has\nwritten one (with `PISA_SEARCH_DESCRIBE_MODEL`).",
-        "properties": {
-          "docstring": {
-            "type": "string"
-          },
-          "informal": {
-            "$ref": "#/components/schemas/Informal"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "signature": {
-            "description": "The declaration's signature, with notation.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "kind",
-          "signature"
         ],
         "type": "object"
       },
@@ -973,48 +1109,51 @@
       "RebuildCreated": {
         "description": "A [`RebuildItem`] created.",
         "properties": {
-          "entry": {
+          "module": {
             "type": "string"
           },
-          "new_entry": {
+          "new_module": {
             "type": "string"
           },
-          "new_snapshot": {
+          "new_snapshot_id": {
+            "description": "The snapshot the create made, or replayed.",
             "type": "string"
           },
-          "snapshot": {
+          "snapshot_id": {
+            "description": "As in [`RebuildItem::snapshot_id`].",
             "type": "string"
           }
         },
         "required": [
-          "snapshot",
-          "new_entry",
-          "new_snapshot"
+          "module",
+          "new_snapshot_id",
+          "new_module"
         ],
         "type": "object"
       },
       "RebuildFailed": {
         "description": "A [`RebuildItem`] whose create kept nothing.",
         "properties": {
-          "entry": {
-            "type": "string"
-          },
-          "result": {
+          "check": {
             "$ref": "#/components/schemas/CheckResult",
             "description": "The create's check: Lean's errors, a refused replacement's\n`reasons`, or the `error` that stopped it."
           },
-          "snapshot": {
+          "module": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "As in [`RebuildItem::snapshot_id`].",
             "type": "string"
           }
         },
         "required": [
-          "snapshot",
-          "result"
+          "module",
+          "check"
         ],
         "type": "object"
       },
       "RebuildItem": {
-        "description": "A create in a [`RebuildResponse`]: `POST /snapshots` with its `code`, `labels`\nand `key`.",
+        "description": "A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its\n`code`, `labels`, `key` and `replaces`.",
         "properties": {
           "affected": {
             "description": "The theorems of the module whose type uses a changed definition,\ndirectly or through other definitions, here or below.",
@@ -1029,10 +1168,6 @@
           },
           "code": {
             "description": "The old module's code with its imports swapped.",
-            "type": "string"
-          },
-          "entry": {
-            "description": "The entry it rebuilds. Absent for a module that only links others to\n`from`, with no entry that has the labels: it gets the labels asked\nfor.",
             "type": "string"
           },
           "key": {
@@ -1053,27 +1188,31 @@
             "minimum": 0,
             "type": "integer"
           },
+          "module": {
+            "description": "The module it rebuilds.",
+            "type": "string"
+          },
           "new_header": {
             "description": "The header of code on top of the new module.",
             "type": "string"
           },
-          "new_snapshot": {
+          "new_module": {
             "description": "The module the create makes.",
             "type": "string"
           },
           "replaces": {
-            "$ref": "#/components/schemas/Replaced",
-            "description": "When `to` replaces `from`, the entry it rebuilds, to create it as a\nreplacement of, with the same `allow`. The create then checks that\nnothing its statements depend on changed, and is refused if\nsomething did."
+            "$ref": "#/components/schemas/Replaces",
+            "description": "When `to` replaces `from`, the snapshot it rebuilds, to create it as\na replacement of, with the same `allow`. The create then checks that\nnothing its statements depend on changed, and is refused if\nsomething did."
           },
-          "snapshot": {
-            "description": "The module it rebuilds.",
+          "snapshot_id": {
+            "description": "The snapshot it rebuilds. Absent for a module that only links others\nto `from`, with no snapshot that has the labels: it gets the labels\nasked for.",
             "type": "string"
           }
         },
         "required": [
           "level",
-          "snapshot",
-          "new_snapshot",
+          "module",
+          "new_module",
           "new_header",
           "code",
           "labels",
@@ -1081,11 +1220,27 @@
         ],
         "type": "object"
       },
-      "RebuildRequest": {
-        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`SnapshotDependents`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones, and unless `dry_run` creates them: a level at a time, a level's\ncreates side by side once the level below is done.",
+      "RebuildSkipped": {
+        "description": "A [`RebuildItem`] not created, because it builds on one that wasn't.",
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "As in [`RebuildItem::snapshot_id`].",
+            "type": "string"
+          }
+        },
+        "required": [
+          "module"
+        ],
+        "type": "object"
+      },
+      "RebuildSnapshotsRequest": {
+        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`ListDependentsResponse`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones, and unless `dry_run` creates them: a level at a time, a level's\ncreates side by side once the level below is done.",
         "properties": {
           "allow_changes": {
-            "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](SnapshotRequest::replaces) `from`.",
+            "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](CreateSnapshotRequest::replaces) `from`.",
             "type": "boolean"
           },
           "dry_run": {
@@ -1093,25 +1248,25 @@
             "type": "boolean"
           },
           "from": {
-            "description": "The entry being replaced.",
+            "description": "The snapshot being replaced.",
             "type": "string"
           },
           "labels": {
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Which dependents to rebuild: those with an entry that has every label,\nand the modules they build on above `from`. Required, so that the\ncaller chooses which projects follow the edit.",
+            "description": "Which dependents to rebuild: those with a snapshot that has every\nlabel, and the modules they build on above `from`. Required, so that\nthe caller chooses which projects follow the edit.",
             "propertyNames": {
               "type": "string"
             },
             "type": "object"
           },
           "retire": {
-            "description": "Once every item is created, delete the old entries, from the top\ndown, then `from`, and with them the old modules nothing else needs.",
+            "description": "Once every item is created, delete the old snapshots, from the top\ndown, then `from`, and with them the old modules nothing else needs.",
             "type": "boolean"
           },
           "timeout": {
-            "description": "As [`SnapshotRequest::timeout`], for each create.",
+            "description": "As [`CreateSnapshotRequest::timeout`], for each create.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1121,7 +1276,7 @@
             "type": "string"
           },
           "verify": {
-            "description": "As [`SnapshotRequest::verify`], for each create.",
+            "description": "As [`CreateSnapshotRequest::verify`], for each create.",
             "type": "boolean"
           },
           "version": {
@@ -1135,8 +1290,8 @@
         ],
         "type": "object"
       },
-      "RebuildResponse": {
-        "description": "What a rebuild planned and, unless it was a dry run, did. Sending the same\nrebuild again plans the same items with the same keys, so the creates that\nare done replay their entries, and the rest run.",
+      "RebuildSnapshotsResponse": {
+        "description": "What a rebuild planned and, unless it was a dry run, did. Sending the same\nrebuild again plans the same items with the same keys, so the creates that\nare done replay their snapshots, and the rest run.",
         "properties": {
           "changed_definitions": {
             "description": "The definitions whose value `to` changed.",
@@ -1146,7 +1301,7 @@
             "type": "array"
           },
           "changes": {
-            "description": "How `to` differs from `from`, as in a refused replacement's\n`result.reasons`. Empty when `to` replaces `from`: its create\ncompared them.",
+            "description": "How `to` differs from `from`, as in a refused replacement's\n`check.reasons`. Empty when `to` replaces `from`: its create compared\nthem.",
             "items": {
               "type": "string"
             },
@@ -1178,7 +1333,7 @@
             "type": "array"
           },
           "retired": {
-            "description": "With `retire`, the old entries deleted, top down, `from` last.",
+            "description": "With `retire`, the ids of the old snapshots deleted, top down, `from`\nlast.",
             "items": {
               "type": "string"
             },
@@ -1199,38 +1354,8 @@
         ],
         "type": "object"
       },
-      "RebuildSkipped": {
-        "description": "A [`RebuildItem`] not created, because it builds on one that wasn't.",
-        "properties": {
-          "entry": {
-            "type": "string"
-          },
-          "snapshot": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "snapshot"
-        ],
-        "type": "object"
-      },
-      "Replaced": {
-        "description": "An entry that another replaced, and how.",
-        "properties": {
-          "allow": {
-            "$ref": "#/components/schemas/Allow"
-          },
-          "entry": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "entry"
-        ],
-        "type": "object"
-      },
       "Replacement": {
-        "description": "[`SnapshotResponse::replaces`]: the entry the create replaced, and what\nthe replacement changed.",
+        "description": "What a replacement changed, as the create's comparison with the snapshot\nit [`replaces`](CreateSnapshotRequest::replaces) found.",
         "properties": {
           "affected": {
             "description": "The theorems whose type uses a changed definition, directly or\nthrough another definition.",
@@ -1239,9 +1364,6 @@
             },
             "type": "array"
           },
-          "allow": {
-            "$ref": "#/components/schemas/Allow"
-          },
           "changed_definitions": {
             "description": "With `allow: \"definitions\"`, the definitions whose value changed.",
             "items": {
@@ -1249,11 +1371,8 @@
             },
             "type": "array"
           },
-          "entry": {
-            "type": "string"
-          },
           "filled": {
-            "description": "The replaced module's declarations that used `sorry` and no longer\ndo. Empty on a key replay, which doesn't compare again.",
+            "description": "The replaced module's declarations that used `sorry` and no longer\ndo.",
             "items": {
               "type": "string"
             },
@@ -1261,21 +1380,25 @@
           }
         },
         "required": [
-          "entry",
           "filled"
         ],
         "type": "object"
       },
       "Replaces": {
-        "description": "[`SnapshotRequest::replaces`]: an entry, or an entry and what may change.",
-        "oneOf": [
-          {
-            "type": "string"
+        "description": "A snapshot that a create replaces, and what the replacement may change:\na create's [`replaces`](CreateSnapshotRequest::replaces), the link the new\nsnapshot keeps, and a rebuild item's.",
+        "properties": {
+          "allow": {
+            "$ref": "#/components/schemas/Allow",
+            "description": "What the replacement may change besides adding declarations; by\ndefault nothing."
           },
-          {
-            "$ref": "#/components/schemas/Replaced"
+          "snapshot_id": {
+            "type": "string"
           }
-        ]
+        },
+        "required": [
+          "snapshot_id"
+        ],
+        "type": "object"
       },
       "Resolution": {
         "properties": {
@@ -1445,64 +1568,103 @@
         ],
         "type": "string"
       },
-      "SnapshotAudit": {
-        "description": "`GET /snapshots/audit`: what the entries that have every label the query\nnames (as in a listing) rest on. Statuses come from the same axiom lists\nas `dirty`: the build's report, or the kernel re-check once a module is\nverified, so a trusted audit has no `rejected` or `sorry` and\n`unverified_modules` 0. Whether an assumption is reasonable is for review.",
+      "Snapshot": {
+        "description": "Kept code: a module that later code imports, with labels. Every snapshot\nof the same code shares one module, which stays while a snapshot of it, or\na kept module that imports it, needs it.",
         "properties": {
-          "assumptions": {
-            "description": "The assumptions what the entries declare uses, by name, wherever they\nare declared.",
+          "created": {
+            "description": "When it was created, in seconds since the Unix epoch.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "header": {
+            "description": "The header to start code on top of this snapshot with: its code's\nimports with its snapshots replaced by this one. Code with exactly\nthis header reuses the Lean process the snapshot's builder keeps warm.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Its id, which the other snapshot endpoints take.",
+            "type": "string"
+          },
+          "imports": {
+            "description": "The modules its module imports.",
             "items": {
-              "$ref": "#/components/schemas/AuditAssumption"
+              "type": "string"
             },
             "type": "array"
           },
-          "not_proved": {
-            "description": "The declarations that are `sorry` or `rejected`.",
-            "items": {
-              "$ref": "#/components/schemas/AuditUnproved"
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
             },
-            "type": "array"
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
           },
-          "summary": {
-            "$ref": "#/components/schemas/AuditSummary"
+          "module": {
+            "description": "The module to import, e.g. `PisaSnap.s1a2b…`, shared by every snapshot\nof the same code.",
+            "type": "string"
+          },
+          "replaces": {
+            "$ref": "#/components/schemas/Replaces",
+            "description": "The snapshot it replaced, if it was created to."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProofStatus",
+            "description": "The worst status among its module's declarations, by the build's\nreport or, once `verified`, the kernel re-check."
+          },
+          "verified": {
+            "description": "Its module and everything it imports have passed the kernel re-check.",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "The worker pool version it belongs to.",
+            "type": "string"
           }
         },
         "required": [
-          "summary",
-          "assumptions",
-          "not_proved"
+          "id",
+          "version",
+          "module",
+          "header",
+          "imports",
+          "labels",
+          "status",
+          "verified",
+          "created"
         ],
         "type": "object"
       },
-      "SnapshotDependents": {
-        "description": "`GET /snapshots/{entry}/dependents`: the entries on every module that\nimports the entry's module, directly or through others, parents first: by\nlevel, where a module that imports it is at level 1 and one that imports\nthat at 2, by its longest chain, then oldest first. With `label=key:value`\nfilters, as in a listing, only the entries with every label.",
-        "properties": {
-          "entries": {
-            "items": {
-              "$ref": "#/components/schemas/SnapshotSummary"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "entries"
-        ],
-        "type": "object"
-      },
-      "SnapshotFailure": {
-        "properties": {
-          "reason": {
-            "description": "Why the re-check failed, e.g. the kernel's error or a timeout.",
-            "type": "string"
+      "SnapshotDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Snapshot"
           },
-          "snapshot": {
-            "type": "string"
+          {
+            "properties": {
+              "check": {
+                "$ref": "#/components/schemas/CheckResult",
+                "description": "The module's check, as in [`CreateSnapshotResponse::check`], with the\nkernel re-check's axioms once it is verified."
+              },
+              "code": {
+                "type": "string"
+              },
+              "exports": {
+                "description": "The declarations that code importing the module sees, in order.",
+                "items": {
+                  "$ref": "#/components/schemas/Export"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "code",
+              "check"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "snapshot",
-          "reason"
         ],
-        "type": "object"
+        "description": "`GET /snapshots/{id}`: a snapshot with its module's code, check and\nexports."
       },
       "SnapshotHit": {
         "properties": {
@@ -1526,204 +1688,6 @@
           "entries",
           "dirty",
           "verified"
-        ],
-        "type": "object"
-      },
-      "SnapshotInfo": {
-        "description": "`GET /snapshots/{entry}`: an entry and its module.",
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "created": {
-            "description": "When the entry was created, in seconds since the Unix epoch.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "decls": {
-            "description": "The module's declarations, in order.",
-            "items": {
-              "$ref": "#/components/schemas/ModuleDecl"
-            },
-            "type": "array"
-          },
-          "dirty": {
-            "type": "boolean"
-          },
-          "entry": {
-            "type": "string"
-          },
-          "header": {
-            "description": "As in [`SnapshotResponse::header`].",
-            "type": "string"
-          },
-          "imports": {
-            "description": "The modules it imports.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "labels": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "The entry's labels.",
-            "propertyNames": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "replaces": {
-            "$ref": "#/components/schemas/Replaced",
-            "description": "The entry this one replaced, if it was created to."
-          },
-          "result": {
-            "$ref": "#/components/schemas/CheckResult"
-          },
-          "snapshot": {
-            "description": "The entry's module.",
-            "type": "string"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ProofStatus",
-            "description": "As in [`SnapshotResponse::status`]."
-          },
-          "verified": {
-            "description": "As in [`SnapshotResponse::verified`].",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "entry",
-          "snapshot",
-          "imports",
-          "header",
-          "code",
-          "dirty",
-          "verified",
-          "result",
-          "created"
-        ],
-        "type": "object"
-      },
-      "SnapshotList": {
-        "description": "`GET /snapshots`: the version's entries, newest first, that have every\nlabel the query names as `label=key:value` (split on the first `:`; up to\n64 filters), at most `limit` of them (1 to 1000, default 100). Keep\nrequesting with `next` as `after` while a page has it.",
-        "properties": {
-          "entries": {
-            "items": {
-              "$ref": "#/components/schemas/SnapshotSummary"
-            },
-            "type": "array"
-          },
-          "next": {
-            "description": "Where the next page starts, if this page is full. The page after it\nmay be empty.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "entries"
-        ],
-        "type": "object"
-      },
-      "SnapshotRequest": {
-        "description": "`POST /snapshots`: checks code like `/check` and, if Lean accepts it,\nkeeps it as a module that later code can import, with a new entry that\nholds the module. Code that is already kept gets a new entry on its\nmodule without being built again.",
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "key": {
-            "description": "Makes the create safe to retry: while an entry made with this key\nexists, a create with it on the same code returns that entry as it is,\ninstead of adding another; on other code it is a `bad_request`. Such a\nreplay ignores the request's other fields, `labels` and `verify`\nincluded, so it can be `verified: false` with no error after\n`verify: true`. Creates that keep nothing don't use the key up, and\ndeleting the entry frees it. See [`check_key`](crate::labels::check_key)\nfor the rules.",
-            "type": "string"
-          },
-          "labels": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "The new entry's labels; see [`check_labels`](crate::labels::check_labels)\nfor the rules.",
-            "propertyNames": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "replaces": {
-            "$ref": "#/components/schemas/Replaces",
-            "description": "The entry this code replaces, e.g. the skeleton a proof fills in. The\ncode is kept only if it still declares everything that entry's module\ndeclares, each the same kind of declaration with the same type and,\nfor definitions, the same value, and adds no assumptions (`axiom`s,\nits own or a newly imported snapshot's); it may add other declarations\nand imports. If it no longer builds on\na snapshot that module does, what the module's declarations use from\nthere must be unchanged in what the code builds on now. Otherwise\nnothing is kept and `result.reasons` lists the changes. The new entry\nrecords the link."
-          },
-          "timeout": {
-            "description": "Lean's time limit in seconds, for building the module including its\nimports.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "verify": {
-            "description": "Whether to re-check the code through the kernel. `true` also re-checks\nits imports, so the result ends [`verified`](SnapshotResponse::verified)\nor has an error, except on a [`key`](Self::key) replay. `false` never\nre-checks. By default, only code that uses macros, its own or an\nimport's, is re-checked.",
-            "type": "boolean"
-          },
-          "version": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "code"
-        ],
-        "type": "object"
-      },
-      "SnapshotResponse": {
-        "properties": {
-          "dirty": {
-            "description": "Kept although a declaration uses `sorry` or another axiom outside the\nallowed list; `result.reasons` says which.",
-            "type": "boolean"
-          },
-          "entry": {
-            "description": "The entry, which the other snapshot endpoints take: the one this create\nadded, or on a [`key`](SnapshotRequest::key) replay the one the key is\non. It keeps the module until it is deleted. Absent when nothing new\nwas kept: the code was not kept, it changed what the entry it\n[`replaces`](SnapshotRequest::replaces) states (`result.reasons` says\nhow), or `verify: true` found it kept but failing the re-check. For\ncode that was already kept, `snapshot` and `header` are then set.",
-            "type": "string"
-          },
-          "header": {
-            "description": "The header to start code on top of this snapshot with: this code's\nimports with its snapshots replaced by the new one. Code with exactly\nthis header reuses the Lean process the snapshot's builder keeps warm.",
-            "type": "string"
-          },
-          "labels": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "The entry's labels.",
-            "propertyNames": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "replaces": {
-            "$ref": "#/components/schemas/Replacement",
-            "description": "The entry it replaces, if the request named one."
-          },
-          "result": {
-            "$ref": "#/components/schemas/CheckResult",
-            "description": "The check, as for `/check`. It has no `sorries`, and `time` includes\nimporting the module's imports."
-          },
-          "snapshot": {
-            "description": "The module to import, e.g. `PisaSnap.s1a2b…`, shared by every entry on\nthe same code. Absent when the code was not kept: Lean reported errors,\nor the check could not complete.",
-            "type": "string"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ProofStatus",
-            "description": "The worst status among the module's declarations: `dirty` unless\n`proved`."
-          },
-          "verified": {
-            "description": "This snapshot and everything it imports have passed the kernel\nre-check.",
-            "type": "boolean"
-          },
-          "version": {
-            "description": "The worker pool version the snapshot belongs to.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "version",
-          "dirty",
-          "verified",
-          "result"
         ],
         "type": "object"
       },
@@ -1760,109 +1724,6 @@
             "type": "object"
           }
         ]
-      },
-      "SnapshotSummary": {
-        "description": "An entry in a listing: as [`SnapshotInfo`], without the code and the check\nresult.",
-        "properties": {
-          "created": {
-            "description": "When the entry was created, in seconds since the Unix epoch.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "dirty": {
-            "type": "boolean"
-          },
-          "entry": {
-            "type": "string"
-          },
-          "header": {
-            "description": "As in [`SnapshotResponse::header`].",
-            "type": "string"
-          },
-          "imports": {
-            "description": "The modules it imports.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "labels": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "propertyNames": {
-              "type": "string"
-            },
-            "type": "object"
-          },
-          "replaces": {
-            "$ref": "#/components/schemas/Replaced",
-            "description": "As in [`SnapshotInfo::replaces`]."
-          },
-          "snapshot": {
-            "description": "The entry's module.",
-            "type": "string"
-          },
-          "status": {
-            "$ref": "#/components/schemas/ProofStatus",
-            "description": "As in [`SnapshotResponse::status`]."
-          },
-          "verified": {
-            "description": "As in [`SnapshotResponse::verified`].",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "entry",
-          "snapshot",
-          "imports",
-          "header",
-          "labels",
-          "dirty",
-          "verified",
-          "created"
-        ],
-        "type": "object"
-      },
-      "SnapshotVerified": {
-        "description": "`POST /snapshots/{entry}/verify`: re-checks the entry's module and\neverything it imports through the kernel, imports first, skipping what\nalready passed. A module that fails stops the run and stays usable, marked\nas not verified. `verified` and `dirty` belong to the module, so every\nentry on it shows the result.",
-        "properties": {
-          "checked": {
-            "description": "The modules this run re-checked and passed, in order.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "dirty": {
-            "description": "As in [`SnapshotResponse::dirty`], from the re-check if it got this far.",
-            "type": "boolean"
-          },
-          "entry": {
-            "type": "string"
-          },
-          "failure": {
-            "$ref": "#/components/schemas/SnapshotFailure",
-            "description": "The module that failed, if one did."
-          },
-          "snapshot": {
-            "description": "The entry's module.",
-            "type": "string"
-          },
-          "verified": {
-            "description": "As in [`SnapshotResponse::verified`].",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "entry",
-          "snapshot",
-          "verified",
-          "dirty",
-          "checked"
-        ],
-        "type": "object"
       },
       "Sorry": {
         "properties": {
@@ -2014,6 +1875,70 @@
           "end_pos"
         ],
         "type": "object"
+      },
+      "UpdateSnapshotRequest": {
+        "description": "`PATCH /snapshots/{id}`: changes the snapshot's labels as a JSON merge\npatch, and answers the [`Snapshot`]. The labels that result must follow\nthe rules of [`check_labels`](crate::labels::check_labels), or nothing\nchanges.",
+        "properties": {
+          "labels": {
+            "additionalProperties": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": "A label set to `null` is removed, one set to a string takes that\nvalue, and those not named stay as they are.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "labels"
+        ],
+        "type": "object"
+      },
+      "VerifyFailure": {
+        "description": "A module that failed the kernel re-check.",
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the re-check failed, e.g. the kernel's error or a timeout.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "module",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "VerifySnapshotResponse": {
+        "description": "`POST /snapshots/{id}/verify`: re-checks the snapshot's module and\neverything it imports through the kernel, imports first, skipping what\nalready passed. A module that fails stops the run and stays usable,\nmarked as not verified. `verified` and `status` belong to the module, so\nevery snapshot of it shows the result.",
+        "properties": {
+          "checked": {
+            "description": "The modules this run re-checked and passed, in order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "failure": {
+            "$ref": "#/components/schemas/VerifyFailure",
+            "description": "The module that failed, if one did."
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/Snapshot",
+            "description": "The snapshot, as the re-check left it."
+          }
+        },
+        "required": [
+          "snapshot",
+          "checked"
+        ],
+        "type": "object"
       }
     }
   },
@@ -2106,7 +2031,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2198,7 +2123,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2323,7 +2248,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2435,7 +2360,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2562,7 +2487,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2698,7 +2623,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2798,11 +2723,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotList"
+                  "$ref": "#/components/schemas/ListSnapshotsResponse"
                 }
               }
             },
-            "description": "A page of entries"
+            "description": "A page of snapshots"
           },
           "400": {
             "content": {
@@ -2822,7 +2747,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2865,13 +2790,13 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "List entries",
+        "summary": "List snapshots",
         "tags": [
           "snapshots"
         ]
       },
       "post": {
-        "description": "Checks code like `/check` and, if Lean accepts it, keeps it as a module that later code can import, with a new entry on it. Code that is already kept gets a new entry on its module.",
+        "description": "Checks code like `/check` and, if Lean accepts it, keeps it as a module that later code can import, with a new snapshot of it. Code that is already kept gets a new snapshot of its module.",
         "operationId": "createSnapshot",
         "parameters": [
           {
@@ -2888,7 +2813,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SnapshotRequest"
+                "$ref": "#/components/schemas/CreateSnapshotRequest"
               }
             }
           },
@@ -2899,11 +2824,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotResponse"
+                  "$ref": "#/components/schemas/CreateSnapshotResponse"
                 }
               }
             },
-            "description": "The entry, or why nothing was kept"
+            "description": "The snapshot, or why nothing was kept"
           },
           "202": {
             "content": {
@@ -2947,7 +2872,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -2998,7 +2923,7 @@
     },
     "/snapshots/audit": {
       "get": {
-        "description": "For the entries with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.",
+        "description": "For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.",
         "operationId": "auditSnapshots",
         "parameters": [
           {
@@ -3028,7 +2953,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotAudit"
+                  "$ref": "#/components/schemas/AuditSnapshotsResponse"
                 }
               }
             },
@@ -3052,7 +2977,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3103,7 +3028,7 @@
     },
     "/snapshots/rebuild": {
       "post": {
-        "description": "Plans the creates that make each dependent of `from` with an entry that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old entries and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
+        "description": "Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
         "operationId": "rebuildSnapshots",
         "parameters": [
           {
@@ -3120,7 +3045,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RebuildRequest"
+                "$ref": "#/components/schemas/RebuildSnapshotsRequest"
               }
             }
           },
@@ -3131,7 +3056,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/RebuildResponse"
+                  "$ref": "#/components/schemas/RebuildSnapshotsResponse"
                 }
               }
             },
@@ -3179,7 +3104,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3222,21 +3147,21 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "Rebuild an entry's dependents on its replacement",
+        "summary": "Rebuild a snapshot's dependents on its replacement",
         "tags": [
           "snapshots"
         ]
       }
     },
-    "/snapshots/{entry}": {
+    "/snapshots/{id}": {
       "delete": {
-        "description": "Its module goes too once no entry or other module refers to it: `removed` lists the modules that went.",
+        "description": "Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went.",
         "operationId": "deleteSnapshot",
         "parameters": [
           {
-            "description": "The entry ID, 32 hex digits",
+            "description": "The snapshot's id, 32 hex digits",
             "in": "path",
-            "name": "entry",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -3257,7 +3182,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Deleted"
+                  "$ref": "#/components/schemas/DeleteSnapshotResponse"
                 }
               }
             },
@@ -3281,7 +3206,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3324,7 +3249,7 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "Delete an entry",
+        "summary": "Delete a snapshot",
         "tags": [
           "snapshots"
         ]
@@ -3333,9 +3258,9 @@
         "operationId": "getSnapshot",
         "parameters": [
           {
-            "description": "The entry ID, 32 hex digits",
+            "description": "The snapshot's id, 32 hex digits",
             "in": "path",
-            "name": "entry",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -3356,11 +3281,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotInfo"
+                  "$ref": "#/components/schemas/SnapshotDetail"
                 }
               }
             },
-            "description": "The entry and its module"
+            "description": "The snapshot"
           },
           "400": {
             "content": {
@@ -3380,7 +3305,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3423,18 +3348,19 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "An entry and its module",
+        "summary": "A snapshot, with its module's code, check and exports",
         "tags": [
           "snapshots"
         ]
       },
       "patch": {
-        "operationId": "setSnapshotLabels",
+        "description": "A JSON merge patch of the labels: `null` removes a label, a string sets it, and the labels not named stay.",
+        "operationId": "updateSnapshot",
         "parameters": [
           {
-            "description": "The entry ID, 32 hex digits",
+            "description": "The snapshot's id, 32 hex digits",
             "in": "path",
-            "name": "entry",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -3454,7 +3380,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/LabelsRequest"
+                "$ref": "#/components/schemas/UpdateSnapshotRequest"
               }
             }
           },
@@ -3465,11 +3391,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotSummary"
+                  "$ref": "#/components/schemas/Snapshot"
                 }
               }
             },
-            "description": "The entry, with its labels"
+            "description": "The snapshot, with its labels"
           },
           "400": {
             "content": {
@@ -3489,7 +3415,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3532,21 +3458,21 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "Set or remove an entry's labels",
+        "summary": "Set or remove a snapshot's labels",
         "tags": [
           "snapshots"
         ]
       }
     },
-    "/snapshots/{entry}/dependents": {
+    "/snapshots/{id}/dependents": {
       "get": {
-        "description": "The entries on every module that imports the entry's module, directly or through others, parents first: by level, then oldest first. With `label` filters, only the entries with every label.",
+        "description": "The snapshots of every module that imports the snapshot's module, directly or through others, parents first: by level, then oldest first. With `label` filters, only the snapshots with every label.",
         "operationId": "listDependents",
         "parameters": [
           {
-            "description": "The entry ID, 32 hex digits",
+            "description": "The snapshot's id, 32 hex digits",
             "in": "path",
-            "name": "entry",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -3579,11 +3505,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotDependents"
+                  "$ref": "#/components/schemas/ListDependentsResponse"
                 }
               }
             },
-            "description": "The entries above it"
+            "description": "The snapshots above it"
           },
           "400": {
             "content": {
@@ -3603,7 +3529,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3646,21 +3572,21 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "The entries above an entry",
+        "summary": "The snapshots above a snapshot",
         "tags": [
           "snapshots"
         ]
       }
     },
-    "/snapshots/{entry}/verify": {
+    "/snapshots/{id}/verify": {
       "post": {
         "description": "Re-checks the module and the modules it imports; `failure` says which one failed and why.",
         "operationId": "verifySnapshot",
         "parameters": [
           {
-            "description": "The entry ID, 32 hex digits",
+            "description": "The snapshot's id, 32 hex digits",
             "in": "path",
-            "name": "entry",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -3690,7 +3616,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SnapshotVerified"
+                  "$ref": "#/components/schemas/VerifySnapshotResponse"
                 }
               }
             },
@@ -3738,7 +3664,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3781,7 +3707,7 @@
             "description": "`unavailable`: e.g. search isn't ready; retry later."
           }
         },
-        "summary": "Re-check an entry's module with the kernel",
+        "summary": "Re-check a snapshot's module with the kernel",
         "tags": [
           "snapshots"
         ]
@@ -3874,7 +3800,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -3976,7 +3902,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -4068,7 +3994,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {
@@ -4160,7 +4086,7 @@
                 }
               }
             },
-            "description": "`not_found`: an unknown or expired job, state, session, entry or\ndeclaration."
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
           },
           "422": {
             "content": {

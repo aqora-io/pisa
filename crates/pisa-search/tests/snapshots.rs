@@ -787,8 +787,8 @@ async fn relabels_and_deletes_are_followed() {
     let run = |v: &str| about_doubling(labels(&[("run", v)]));
     until(&e, run("1"), |h| has(h, "double_eq")).await;
 
-    let set = BTreeMap::from([("run".to_string(), "2".to_string())]);
-    s.catalog.set_labels(&entry, &set, &[]).await.unwrap();
+    let patch = BTreeMap::from([("run".to_string(), Some("2".to_string()))]);
+    s.catalog.set_labels(&entry, &patch).await.unwrap();
     until(&e, run("2"), |h| has(h, "double_eq")).await;
     assert!(!has(&search(&e, run("1")).await, "double_eq"));
 
