@@ -567,6 +567,11 @@ export interface components {
              *     import's, is re-checked.
              */
             verify?: boolean;
+            /**
+             * @description Worker pool label or alias. By default, the version of the snapshot
+             *     `replaces` names, if any, else the server's default. A version other
+             *     than that snapshot's is a `bad_request`.
+             */
             version?: string;
         };
         CreateSnapshotResponse: {
@@ -1072,7 +1077,7 @@ export interface components {
             allow?: components["schemas"]["Allow"];
             /**
              * @description The replaced snapshot. A create's is of the create's version, and
-             *     chooses it when neither the create nor the server names one.
+             *     chooses it when the create names none, ahead of the server's default.
              */
             snapshot_id: string;
         };

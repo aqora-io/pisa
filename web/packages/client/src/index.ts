@@ -21,6 +21,7 @@ export {
   isPisaError,
   type PisaErrorKind,
 } from "./errors.ts";
+export type { Job as JobSchema } from "./types.ts";
 export { posMapper, rangeOf, type PosMapper } from "./positions.ts";
 export { proofText, type SorryProof } from "./proof.ts";
 export * from "./types.ts";

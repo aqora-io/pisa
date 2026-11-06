@@ -191,7 +191,7 @@ export class PisaClient {
 
   /** Applies a tactic to a state; the state stays valid, so this can branch.
    *  A tactic Lean rejects throws `lean`. */
-  applyTactic(state: StateId, tactic: string, options: RunOptions = {}): Promise<ApplyTacticResponse> {
+  applyTactic(state: StateId, tactic: string, options: Omit<RunOptions, "version"> = {}): Promise<ApplyTacticResponse> {
     return this.call(
       "POST",
       ["states", state, "tactic"],
@@ -201,12 +201,16 @@ export class PisaClient {
   }
 
   /** `applyTactic` as a job. */
-  submitApplyTactic(state: StateId, tactic: string, options: RunOptions = {}): Promise<Job<ApplyTacticResponse>> {
+  submitApplyTactic(
+    state: StateId,
+    tactic: string,
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<Job<ApplyTacticResponse>> {
     return this.submit(["states", state, "tactic"], { tactic, ...this.timeoutOf(options) }, options);
   }
 
   /** Checks the completed code of a session from scratch. */
-  checkSession(session: SessionId, code: string, options: RunOptions = {}): Promise<CheckResult> {
+  checkSession(session: SessionId, code: string, options: Omit<RunOptions, "version"> = {}): Promise<CheckResult> {
     return this.call(
       "POST",
       ["sessions", session, "check"],
@@ -216,7 +220,11 @@ export class PisaClient {
   }
 
   /** `checkSession` as a job. */
-  submitCheckSession(session: SessionId, code: string, options: RunOptions = {}): Promise<Job<CheckResult>> {
+  submitCheckSession(
+    session: SessionId,
+    code: string,
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<Job<CheckResult>> {
     return this.submit(["sessions", session, "check"], { code, ...this.timeoutOf(options) }, options);
   }
 

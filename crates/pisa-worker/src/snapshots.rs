@@ -1747,7 +1747,7 @@ impl Snapshots {
             .sum();
         if items > MAX_LIMIT {
             return Err(bad(&format!(
-                "the rebuild would create {items} entries, more than {MAX_LIMIT}: narrow its labels"
+                "the rebuild would create {items} snapshots, more than {MAX_LIMIT}: narrow its labels"
             )));
         }
 

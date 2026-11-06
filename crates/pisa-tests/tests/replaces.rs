@@ -243,6 +243,32 @@ async fn a_replaced_id_of_another_version_is_a_bad_request() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_replacement_without_a_version_stays_on_the_replaced_snapshots_pool() {
+    let mut cfg = common::router_config();
+    cfg.default_version = Some("va".into());
+    let c = Cluster::start_with(cfg, &[("w0", "va", 1), ("w1", "vb", 1)], |w| w).await;
+    let (va, vb) = (c.version("va"), c.version("vb"));
+
+    // Without `replaces`, the server's default applies.
+    let plain = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem u : 2 = 2 := rfl"}),
+    )
+    .await;
+    assert_eq!(plain["snapshot"]["version"], va, "{plain}");
+
+    let skeleton = create(&c, json!({"code": SKELETON, "version": "vb"})).await;
+    let old = entry(&skeleton);
+    assert!(old.starts_with(&format!("{vb}~")), "{skeleton}");
+
+    // The replaced snapshot's version beats the server's default.
+    let proof = create(&c, json!({"code": PROOF, "replaces": replacing(old)})).await;
+    assert_eq!(proof["snapshot"]["version"], vb, "{proof}");
+    assert!(entry(&proof).starts_with(&format!("{vb}~")), "{proof}");
+    assert_eq!(proof["snapshot"]["status"], "proved", "{proof}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_link_outlives_the_replaced_snapshot() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();

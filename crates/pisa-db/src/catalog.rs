@@ -83,7 +83,9 @@ pub struct EntryMeta {
     pub key: Option<String>,
     /// Microseconds since the Unix epoch.
     pub created_micros: u64,
-    /// The entry its create replaced, once it checked the statements.
+    /// The entry its create replaced, once it checked the statements. Its
+    /// `snapshot_id` is stored as the replaced entry's bare hex; the worker
+    /// turns it into a versioned id when it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
 }

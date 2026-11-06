@@ -519,6 +519,9 @@ pub struct CheckSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateSnapshotRequest {
     pub code: String,
+    /// Worker pool label or alias. By default, the version of the snapshot
+    /// `replaces` names, if any, else the server's default. A version other
+    /// than that snapshot's is a `bad_request`.
     #[serde(default)]
     pub version: Option<String>,
     /// Lean's time limit in seconds, for building the module including its
@@ -566,7 +569,7 @@ pub struct CreateSnapshotRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Replaces {
     /// The replaced snapshot. A create's is of the create's version, and
-    /// chooses it when neither the create nor the server names one.
+    /// chooses it when the create names none, ahead of the server's default.
     pub snapshot_id: String,
     /// What the replacement may change besides adding declarations; by
     /// default nothing.

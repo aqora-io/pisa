@@ -554,7 +554,7 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
 
 **How it works.**
 - **Building.** A module is its code compiled with `lean -o` to the module
-  `PisaSnap.s<id>`, where `id` is a hash of the code.
+  `PisaSnap.s<hash>`, where `hash` is a hash of the code.
 - **Using.** Later code imports it like any module, in `/check`, `/sessions`
   or another snapshot. A chunk can import several snapshots, which merges
   parallel branches.

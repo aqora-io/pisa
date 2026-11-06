@@ -166,7 +166,9 @@ pub enum Error {
     /// The server could not be reached or sent something unreadable.
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
-    /// The server refused the request; `kind` says why. Kinds `lean`,
+    /// The server refused the request; `kind` says why. A submit that the
+    /// server answered at once, not by queueing a job, is `internal` with the
+    /// answer's status. Kinds `lean`,
     /// `policy`, `timeout`, `out_of_memory` and `crash` mean the input itself
     /// failed, which during proof search is an ordinary dead end.
     #[error("{kind:?} ({status}): {message}")]
@@ -244,13 +246,26 @@ impl Endpoint {
     }
 
     /// POSTs `body`, if any, with `Prefer: respond-async`; returns the job
-    /// the server queued.
+    /// the server queued. Any other success, i.e. an answer at once, is an
+    /// [`Error::Server`] of kind [`ErrorKind::Internal`], as is an answer
+    /// that isn't pisa's.
     async fn submit<B: Serialize, T>(&self, url: Url, body: Option<&B>) -> Result<Job<T>, Error> {
         let mut req = self.http.post(url).header("prefer", "respond-async");
         if let Some(body) = body {
             req = req.json(body);
         }
-        let job: api::Job = server_error(req.send().await?).await?.json().await?;
+        let r = server_error(req.send().await?).await?;
+        let status = r.status();
+        if status != reqwest::StatusCode::ACCEPTED {
+            return Err(Error::Server {
+                status: status.as_u16(),
+                kind: ErrorKind::Internal,
+                message: "the server answered at once instead of queueing a job, as it does \
+                    for a dry run"
+                    .into(),
+            });
+        }
+        let job: api::Job = r.json().await?;
         Ok(Job::new(job.id, job.kind))
     }
 
@@ -667,7 +682,9 @@ impl Client {
     }
 
     /// Like [`Client::rebuild_snapshots`], as a job. A dry run isn't one: the
-    /// server answers it at once, which is an error here.
+    /// server answers it at once, which is an [`Error::Server`] of kind
+    /// [`ErrorKind::Internal`] here, with status 200; use
+    /// [`rebuild_snapshots`](Self::rebuild_snapshots) for one.
     pub async fn submit_rebuild_snapshots(
         &self,
         from: &str,

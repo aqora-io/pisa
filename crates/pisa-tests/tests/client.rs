@@ -271,6 +271,19 @@ async fn client_lists_dependents_and_plans_rebuilds() {
         .unwrap();
     assert!(plan.ok && plan.changes.is_empty(), "{plan:?}");
     assert!(plan.created.is_empty(), "a dry run creates nothing");
+    // A dry run isn't a job: the server answers it at once.
+    let err = client
+        .submit_rebuild_snapshots(&b.id, &new.id, &labels, &dry_run)
+        .await
+        .unwrap_err();
+    match &err {
+        Error::Server {
+            status: 200,
+            kind: ErrorKind::Internal,
+            message,
+        } => assert!(message.contains("at once"), "{message}"),
+        other => panic!("{other:?}"),
+    }
     let item = &plan.plan[0];
     assert_eq!(item.snapshot_id.as_ref(), Some(&above.id));
     let opts = CreateSnapshotOptions {

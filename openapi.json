@@ -415,6 +415,7 @@
             "type": "boolean"
           },
           "version": {
+            "description": "Worker pool label or alias. By default, the version of the snapshot\n`replaces` names, if any, else the server's default. A version other\nthan that snapshot's is a `bad_request`.",
             "type": "string"
           }
         },
@@ -1365,7 +1366,7 @@
             "description": "What the replacement may change besides adding declarations; by\ndefault nothing."
           },
           "snapshot_id": {
-            "description": "The replaced snapshot. A create's is of the create's version, and\nchooses it when neither the create nor the server names one.",
+            "description": "The replaced snapshot. A create's is of the create's version, and\nchooses it when the create names none, ahead of the server's default.",
             "type": "string"
           }
         },

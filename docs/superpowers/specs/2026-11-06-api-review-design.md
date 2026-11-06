@@ -120,6 +120,9 @@ that no longer makes sense goes.
     it is a 404. Responses report the index's version. Snapshot ids in hits
     carry the snapshots' version, so they route to the workers that hold
     them. (My call.)
+  - A search request without `version` searches the index, and the router's
+    default isn't applied there, because the default pool may differ from the
+    index.
   - Ops names stay: `PISA_SEARCH_ENV_ID`, `--env-id`, the bundle
     manifest's `env_id`.
 

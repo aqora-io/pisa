@@ -226,6 +226,7 @@ def snapshots():
     assert inherits["snapshot"]["verified"], inherits
     opted_out = post("/snapshots", {"code": "macro \"three\" : term => `((3 : Nat))", "verify": False, "timeout": 600})
     created.append(opted_out)
+    assert "snapshot" in opted_out, opted_out
     assert not opted_out["snapshot"]["verified"], opted_out
     step("snapshot: macros are re-checked unless the request opts out")
 

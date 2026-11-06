@@ -14,7 +14,7 @@ import { usePisaClient } from "../provider.tsx";
 
 /** A state of a proof session. Each `sorry` is a root, and each tactic applied
  *  is a node under the node it was applied to. Nodes have ids of their own:
- *  two tactics can reach the same state, with the same key. */
+ *  two tactics can reach the same state, with the same id. */
 export interface ProofNode {
   id: number;
   /** The node the tactic was applied to; `null` for a root. */

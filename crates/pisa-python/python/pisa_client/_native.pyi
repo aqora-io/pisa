@@ -423,7 +423,8 @@ class Client:
         verify: bool | None = None,
     ) -> Job:
         """Like `rebuild_snapshots`, as a job. A dry run isn't one: the
-        server answers it at once, which raises here."""
+        server answers it at once, which raises a `PisaError` here, of kind
+        `internal` and status 200; use `rebuild_snapshots` for one."""
     def submit_check(
         self,
         code: str,

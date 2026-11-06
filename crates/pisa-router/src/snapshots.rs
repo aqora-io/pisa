@@ -58,10 +58,13 @@ pub async fn create(
 
 /// A create's job, routed to the worker that will serve code on top of the
 /// snapshot, which builds it. The snapshot it replaces must be of its
-/// version, and names the version when neither the request nor the server
-/// does.
+/// version, and names the version when the request doesn't; only then does
+/// the server's default apply.
 pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Prepared, ApiError> {
-    let mut version = app.versions.resolve(req.version.as_deref());
+    let mut version = req
+        .version
+        .as_deref()
+        .and_then(|v| app.versions.resolve(Some(v)));
     if let Some(r) = &req.replaces {
         let replaced = parse_id(&r.snapshot_id)?.version;
         match &version {
@@ -78,6 +81,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
             None => version = Some(replaced),
         }
     }
+    let version = version.or_else(|| app.versions.resolve(None));
     let split = split_header(&req.code);
     let next = snapshot::next_header(&split.header, &snapshot::id(&req.code));
     let route = Route {
