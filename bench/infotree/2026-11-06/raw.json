@@ -1,0 +1,945 @@
+{
+ "header": "import Mathlib\nimport Lean.Elab.Command\nimport Physlib.Meta.TODO.Basic\nimport Physlib.Meta.Informal.Basic\nimport Physlib.Meta.Basic\nimport Physlib.Meta.Linters.Sorry",
+ "chain": [
+  {
+   "module": "Physlib.StatisticalMechanics.BoltzmannConstant",
+   "lines": 47,
+   "seconds": 0.16182422637939453,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Thermodynamics.Temperature.Basic",
+   "lines": 235,
+   "seconds": 1.8744125366210938,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Relativity.SpeedOfLight",
+   "lines": 91,
+   "seconds": 0.15945863723754883,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.PlanckConstant",
+   "lines": 65,
+   "seconds": 0.27927565574645996,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Blackbody.PlancksLaw",
+   "lines": 258,
+   "seconds": 1.5777974128723145,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.ForMathlib.OneParameterSubgroups.Basic",
+   "lines": 186,
+   "seconds": 4.5848400592803955,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.ForMathlib.OneParameterSubgroups.Unitary",
+   "lines": 219,
+   "seconds": 23.148512363433838,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.FiniteTarget",
+   "lines": 85,
+   "seconds": 1.6085193157196045,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.InnerProductSpace.Submodule",
+   "lines": 128,
+   "seconds": 3.100102186203003,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.ForMathlib.LinearPMap",
+   "lines": 394,
+   "seconds": 10.7319917678833,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Unbounded",
+   "lines": 999,
+   "seconds": 69.46946835517883,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Basic",
+   "lines": 287,
+   "seconds": 2.198207378387451,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Origin",
+   "lines": 64,
+   "seconds": 0.21109700202941895,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Module",
+   "lines": 761,
+   "seconds": 35.36838364601135,
+   "errors": 3
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.Basic",
+   "lines": 356,
+   "seconds": 5.773728609085083,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.SchwartzSubmodule",
+   "lines": 176,
+   "seconds": 5.818242311477661,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.Distribution.TemperedDistribution",
+   "lines": 668,
+   "seconds": 47.6083242893219,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Relativity.Tensors.RealTensor.Vector.Basic",
+   "lines": 473,
+   "seconds": 12.847681283950806,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Derivatives.Basic",
+   "lines": 505,
+   "seconds": 18.39363694190979,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Momentum",
+   "lines": 168,
+   "seconds": 19.24635672569275,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.FreeParticle.Basic",
+   "lines": 95,
+   "seconds": 0.7799665927886963,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Multiplication",
+   "lines": 593,
+   "seconds": 73.2279372215271,
+   "errors": 2
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.Basic",
+   "lines": 352,
+   "seconds": 11.104933977127075,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.InnerProductSpace.Gaussian",
+   "lines": 186,
+   "seconds": 6.788748264312744,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.ForMathlib.HasTemperateGrowth",
+   "lines": 37,
+   "seconds": 0.28792405128479004,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.KroneckerDelta.Basic",
+   "lines": 216,
+   "seconds": 2.1063051223754883,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.PolyBddSchwartzSubmodule",
+   "lines": 311,
+   "seconds": 11.893166542053223,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Norm.Regularized",
+   "lines": 87,
+   "seconds": 0.674731969833374,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Integrals.Basic",
+   "lines": 264,
+   "seconds": 4.761924982070923,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Integrals.RadialAngularMeasure",
+   "lines": 260,
+   "seconds": 7.623652696609497,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Time.Basic",
+   "lines": 88,
+   "seconds": 0.6044902801513672,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Time.InnerProductSpace",
+   "lines": 430,
+   "seconds": 4.850635766983032,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.IsDistBounded",
+   "lines": 965,
+   "seconds": 37.43782091140747,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Integrals.NormPow",
+   "lines": 204,
+   "seconds": 6.38719916343689,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Position",
+   "lines": 435,
+   "seconds": 15.910908937454224,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Commutation",
+   "lines": 242,
+   "seconds": 23.4143545627594,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.LadderOperators",
+   "lines": 238,
+   "seconds": 22.02188205718994,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.NumberOperator",
+   "lines": 304,
+   "seconds": 20.02462935447693,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.OneDimension.Basic",
+   "lines": 156,
+   "seconds": 2.328606367111206,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.OneDimension.SchwartzSubmodule",
+   "lines": 60,
+   "seconds": 1.2205872535705566,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.OneDimension.Unbounded",
+   "lines": 79,
+   "seconds": 2.4483675956726074,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.OneDimension.Parity",
+   "lines": 118,
+   "seconds": 3.0498151779174805,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.OneDimension.PlaneWaves",
+   "lines": 55,
+   "seconds": 0.7822611331939697,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.OneDimension.Momentum",
+   "lines": 148,
+   "seconds": 6.4387311935424805,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.OneDimension.PositionStates",
+   "lines": 50,
+   "seconds": 0.3687105178833008,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.Distribution.PowMul",
+   "lines": 142,
+   "seconds": 3.870915651321411,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.OneDimension.Position",
+   "lines": 111,
+   "seconds": 1.139244794845581,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.OneDimension.Basic",
+   "lines": 216,
+   "seconds": 3.2239620685577393,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.SpecialFunctions.PhysHermite",
+   "lines": 501,
+   "seconds": 12.26840329170227,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.OneDimension.Eigenfunction",
+   "lines": 303,
+   "seconds": 5.920087099075317,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.Eigenstates",
+   "lines": 391,
+   "seconds": 11.095083951950073,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.OneDimension.Gaussians",
+   "lines": 216,
+   "seconds": 2.5962536334991455,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.OneDimension.Completeness",
+   "lines": 470,
+   "seconds": 8.255609273910522,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.OneDimension.TISE",
+   "lines": 210,
+   "seconds": 5.023379802703857,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HarmonicOscillator.OneDimension.Examples",
+   "lines": 74,
+   "seconds": 0.5995893478393555,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.FiniteTarget.Basic",
+   "lines": 161,
+   "seconds": 2.349641799926758,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.DirichletSubmodule",
+   "lines": 93,
+   "seconds": 2.024378776550293,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.Fourier",
+   "lines": 97,
+   "seconds": 1.7787938117980957,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.MomentumStates",
+   "lines": 65,
+   "seconds": 1.1246850490570068,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.PositionStates",
+   "lines": 61,
+   "seconds": 0.42612743377685547,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.SpaceD.SobolevSubmodule",
+   "lines": 84,
+   "seconds": 2.2289559841156006,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.HilbertSpaces.TensorProducts.CompleteTensorProduct",
+   "lines": 275,
+   "seconds": 13.070167303085327,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.SpaceDQuantumSystem",
+   "lines": 156,
+   "seconds": 3.7629501819610596,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Hydrogen.Basic",
+   "lines": 93,
+   "seconds": 1.9375078678131104,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.Modules.CrossProductMatrix",
+   "lines": 73,
+   "seconds": 1.521960973739624,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.AngularMomentum",
+   "lines": 390,
+   "seconds": 30.431742429733276,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Hydrogen.LaplaceRungeLenzVector",
+   "lines": 540,
+   "seconds": 118.80118703842163,
+   "errors": 2
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Hydrogen.Rydberg",
+   "lines": 377,
+   "seconds": 4.223804473876953,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.InfiniteSquareWell.Basic",
+   "lines": 120,
+   "seconds": 0.5295121669769287,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.LeviCivita.Basic",
+   "lines": 186,
+   "seconds": 1.020202398300171,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.AngularMomentum.DimThree",
+   "lines": 401,
+   "seconds": 58.9466118812561,
+   "errors": 3
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.StateObservables.ExpectedValue",
+   "lines": 105,
+   "seconds": 1.5130066871643066,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.StateObservables.IsEigenvector",
+   "lines": 42,
+   "seconds": 0.4388692378997803,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.StateObservables.Variance",
+   "lines": 201,
+   "seconds": 2.5166351795196533,
+   "errors": 1
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Covariance",
+   "lines": 104,
+   "seconds": 1.164304494857788,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Examples",
+   "lines": 30,
+   "seconds": 0.18106770515441895,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.OneDimension.Commutation",
+   "lines": 62,
+   "seconds": 0.9538488388061523,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.SpectralTheory.Basic",
+   "lines": 888,
+   "seconds": 50.06934428215027,
+   "errors": 4
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.SpectralTheory.Symmetric",
+   "lines": 251,
+   "seconds": 6.839364290237427,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.SpectralTheory.SelfAdjoint",
+   "lines": 136,
+   "seconds": 2.352994680404663,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.SpectralTheory.SpectralMeasure",
+   "lines": 119,
+   "seconds": 3.6153078079223633,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Uncertainty",
+   "lines": 299,
+   "seconds": 4.791321039199829,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.Mathematics.ForMathlib.Trigonometry.Tanh",
+   "lines": 231,
+   "seconds": 1.8932733535766602,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.PoschlTeller.Basic",
+   "lines": 307,
+   "seconds": 5.883803844451904,
+   "errors": 12
+  },
+  {
+   "module": "Physlib.QuantumMechanics.QuantumSystem.Basic",
+   "lines": 139,
+   "seconds": 2.4329755306243896,
+   "errors": 0
+  },
+  {
+   "module": "Physlib.QuantumMechanics.RectangularBarrier.Basic",
+   "lines": 164,
+   "seconds": 1.72355055809021,
+   "errors": 0
+  }
+ ],
+ "runs": [
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Unbounded",
+   "lines": 999,
+   "modes": {
+    "none": {
+     "seconds": [
+      70.87063694000244,
+      72.10920715332031
+     ],
+     "bytes": 346,
+     "parse_seconds": 0.0001819133758544922,
+     "rss_mb": 8874,
+     "peak_mb": 8876
+    },
+    "original": {
+     "seconds": [
+      89.47519755363464,
+      90.29545903205872
+     ],
+     "bytes": 1555161,
+     "parse_seconds": 0.01857280731201172,
+     "rss_mb": 8789,
+     "peak_mb": 8789,
+     "nodes": {
+      "TacticInfo": 1159
+     }
+    },
+    "full": {
+     "seconds": [
+      185.0302152633667,
+      181.99401450157166
+     ],
+     "bytes": 37159277,
+     "parse_seconds": 0.39664173126220703,
+     "rss_mb": 8736,
+     "peak_mb": 8736,
+     "nodes": {
+      "CommandInfo": 269,
+      "CompletionInfo": 13210,
+      "MacroExpansionInfo": 5686,
+      "CommandInfo (synthetic)": 294,
+      "TermInfo": 22667,
+      "TermInfo (synthetic)": 13523,
+      "CustomInfo": 293,
+      "TacticInfo": 1159,
+      "TacticInfo (synthetic)": 1903,
+      "PartialTermInfo": 9,
+      "UserWidgetInfo": 10,
+      "FieldInfo": 2,
+      "FVarAliasInfo": 8
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.IsDistBounded",
+   "lines": 965,
+   "modes": {
+    "none": {
+     "seconds": [
+      40.643698930740356,
+      39.18780708312988
+     ],
+     "bytes": 318,
+     "parse_seconds": 8.559226989746094e-05,
+     "rss_mb": 9048,
+     "peak_mb": 9050
+    },
+    "original": {
+     "seconds": [
+      71.62673687934875,
+      71.49806904792786
+     ],
+     "bytes": 2262559,
+     "parse_seconds": 0.021392345428466797,
+     "rss_mb": 9004,
+     "peak_mb": 9027,
+     "nodes": {
+      "TacticInfo": 1681
+     }
+    },
+    "full": {
+     "seconds": [
+      249.14248633384705,
+      246.40738201141357
+     ],
+     "bytes": 34403126,
+     "parse_seconds": 0.23554015159606934,
+     "rss_mb": 8989,
+     "peak_mb": 9027,
+     "nodes": {
+      "CommandInfo": 242,
+      "CompletionInfo": 5053,
+      "MacroExpansionInfo": 1740,
+      "TermInfo": 11122,
+      "CustomInfo": 159,
+      "TacticInfo": 1681,
+      "TacticInfo (synthetic)": 2005,
+      "TermInfo (synthetic)": 3856,
+      "CommandInfo (synthetic)": 30,
+      "FVarAliasInfo": 42,
+      "PartialTermInfo": 6,
+      "UserWidgetInfo": 5,
+      "FieldInfo": 1
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.Mathematics.Distribution.TemperedDistribution",
+   "lines": 668,
+   "modes": {
+    "none": {
+     "seconds": [
+      48.73460650444031,
+      49.26614999771118
+     ],
+     "bytes": 12,
+     "parse_seconds": 5.221366882324219e-05,
+     "rss_mb": 9250,
+     "peak_mb": 9280
+    },
+    "original": {
+     "seconds": [
+      61.86298394203186,
+      62.163498878479004
+     ],
+     "bytes": 856062,
+     "parse_seconds": 0.00790095329284668,
+     "rss_mb": 9217,
+     "peak_mb": 9244,
+     "nodes": {
+      "TacticInfo": 526
+     }
+    },
+    "full": {
+     "seconds": [
+      115.90674996376038,
+      116.88848805427551
+     ],
+     "bytes": 11811210,
+     "parse_seconds": 0.10738849639892578,
+     "rss_mb": 9192,
+     "peak_mb": 9209,
+     "nodes": {
+      "CommandInfo": 126,
+      "CompletionInfo": 2180,
+      "MacroExpansionInfo": 716,
+      "CommandInfo (synthetic)": 32,
+      "TermInfo": 4216,
+      "CustomInfo": 75,
+      "TacticInfo": 526,
+      "TacticInfo (synthetic)": 909,
+      "TermInfo (synthetic)": 2085,
+      "PartialTermInfo": 9,
+      "UserWidgetInfo": 10,
+      "FieldInfo": 13
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Derivatives.Basic",
+   "lines": 505,
+   "modes": {
+    "none": {
+     "seconds": [
+      18.33432364463806,
+      18.384501457214355
+     ],
+     "bytes": 13,
+     "parse_seconds": 6.29425048828125e-05,
+     "rss_mb": 9344,
+     "peak_mb": 9344
+    },
+    "original": {
+     "seconds": [
+      22.79071354866028,
+      22.14283013343811
+     ],
+     "bytes": 321021,
+     "parse_seconds": 0.003488302230834961,
+     "rss_mb": 9308,
+     "peak_mb": 9323,
+     "nodes": {
+      "TacticInfo": 326
+     }
+    },
+    "full": {
+     "seconds": [
+      38.51361274719238,
+      38.946682929992676
+     ],
+     "bytes": 5883017,
+     "parse_seconds": 0.056687355041503906,
+     "rss_mb": 9305,
+     "peak_mb": 9307,
+     "nodes": {
+      "CommandInfo": 139,
+      "CompletionInfo": 1576,
+      "MacroExpansionInfo": 563,
+      "CommandInfo (synthetic)": 46,
+      "TermInfo": 3137,
+      "CustomInfo": 101,
+      "TacticInfo": 326,
+      "TermInfo (synthetic)": 1333,
+      "FieldInfo": 6,
+      "TacticInfo (synthetic)": 464,
+      "OptionInfo": 1
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.Mathematics.SpecialFunctions.PhysHermite",
+   "lines": 501,
+   "modes": {
+    "none": {
+     "seconds": [
+      12.420593738555908,
+      12.182666063308716
+     ],
+     "bytes": 13,
+     "parse_seconds": 4.029273986816406e-05,
+     "rss_mb": 9445,
+     "peak_mb": 9445
+    },
+    "original": {
+     "seconds": [
+      21.335086822509766,
+      21.66109609603882
+     ],
+     "bytes": 733896,
+     "parse_seconds": 0.006726264953613281,
+     "rss_mb": 9422,
+     "peak_mb": 9436,
+     "nodes": {
+      "TacticInfo": 693
+     }
+    },
+    "full": {
+     "seconds": [
+      75.79071545600891,
+      76.37810707092285
+     ],
+     "bytes": 13439053,
+     "parse_seconds": 0.08206915855407715,
+     "rss_mb": 9437,
+     "peak_mb": 9437,
+     "nodes": {
+      "CommandInfo": 130,
+      "CompletionInfo": 1820,
+      "MacroExpansionInfo": 958,
+      "CommandInfo (synthetic)": 37,
+      "TermInfo": 3469,
+      "CustomInfo": 151,
+      "TacticInfo": 693,
+      "TacticInfo (synthetic)": 1269,
+      "TermInfo (synthetic)": 1531,
+      "FVarAliasInfo": 6,
+      "?": 1,
+      "PartialTermInfo": 9
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.Relativity.Tensors.RealTensor.Vector.Basic",
+   "lines": 473,
+   "modes": {
+    "none": {
+     "seconds": [
+      13.472815752029419,
+      13.268930673599243
+     ],
+     "bytes": 13,
+     "parse_seconds": 4.267692565917969e-05,
+     "rss_mb": 9540,
+     "peak_mb": 9540
+    },
+    "original": {
+     "seconds": [
+      16.245954036712646,
+      16.588639736175537
+     ],
+     "bytes": 383153,
+     "parse_seconds": 0.007300853729248047,
+     "rss_mb": 9525,
+     "peak_mb": 9525,
+     "nodes": {
+      "TacticInfo": 478
+     }
+    },
+    "full": {
+     "seconds": [
+      26.47084879875183,
+      26.276687145233154
+     ],
+     "bytes": 4245842,
+     "parse_seconds": 0.05412554740905762,
+     "rss_mb": 9518,
+     "peak_mb": 9518,
+     "nodes": {
+      "CommandInfo": 159,
+      "CompletionInfo": 1322,
+      "MacroExpansionInfo": 501,
+      "TermInfo": 2950,
+      "CustomInfo": 101,
+      "TacticInfo": 478,
+      "TermInfo (synthetic)": 848,
+      "TacticInfo (synthetic)": 524,
+      "CommandInfo (synthetic)": 62,
+      "FieldInfo": 28,
+      "PartialTermInfo": 1,
+      "FVarAliasInfo": 2
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.QuantumMechanics.Operators.Momentum",
+   "lines": 168,
+   "modes": {
+    "none": {
+     "seconds": [
+      19.36780285835266,
+      18.83194065093994
+     ],
+     "bytes": 13,
+     "parse_seconds": 5.0067901611328125e-05,
+     "rss_mb": 9600,
+     "peak_mb": 9600
+    },
+    "original": {
+     "seconds": [
+      22.344334840774536,
+      21.932923316955566
+     ],
+     "bytes": 127183,
+     "parse_seconds": 0.0011305809020996094,
+     "rss_mb": 9586,
+     "peak_mb": 9590,
+     "nodes": {
+      "TacticInfo": 110
+     }
+    },
+    "full": {
+     "seconds": [
+      37.376248836517334,
+      37.00209426879883
+     ],
+     "bytes": 4032537,
+     "parse_seconds": 0.047392845153808594,
+     "rss_mb": 9587,
+     "peak_mb": 9587,
+     "nodes": {
+      "CommandInfo": 51,
+      "CompletionInfo": 802,
+      "MacroExpansionInfo": 281,
+      "CommandInfo (synthetic)": 55,
+      "TermInfo": 1015,
+      "CustomInfo": 70,
+      "TacticInfo": 110,
+      "TacticInfo (synthetic)": 205,
+      "TermInfo (synthetic)": 1381,
+      "FieldInfo": 2
+     }
+    }
+   }
+  },
+  {
+   "module": "Physlib.SpaceAndTime.Space.Basic",
+   "lines": 287,
+   "modes": {
+    "none": {
+     "seconds": [
+      2.2077107429504395,
+      2.3225231170654297
+     ],
+     "bytes": 13,
+     "parse_seconds": 3.4332275390625e-05,
+     "rss_mb": 9609,
+     "peak_mb": 9609
+    },
+    "original": {
+     "seconds": [
+      2.86926531791687,
+      2.932831287384033
+     ],
+     "bytes": 108720,
+     "parse_seconds": 0.0012211799621582031,
+     "rss_mb": 9606,
+     "peak_mb": 9607,
+     "nodes": {
+      "TacticInfo": 159
+     }
+    },
+    "full": {
+     "seconds": [
+      6.63789701461792,
+      6.402751684188843
+     ],
+     "bytes": 1552982,
+     "parse_seconds": 0.013547420501708984,
+     "rss_mb": 9608,
+     "peak_mb": 9608,
+     "nodes": {
+      "CommandInfo": 61,
+      "CompletionInfo": 420,
+      "MacroExpansionInfo": 151,
+      "CommandInfo (synthetic)": 36,
+      "TermInfo": 875,
+      "CustomInfo": 35,
+      "TermInfo (synthetic)": 342,
+      "TacticInfo": 159,
+      "FieldInfo": 18,
+      "TacticInfo (synthetic)": 357,
+      "FVarAliasInfo": 5
+     }
+    }
+   }
+  }
+ ]
+}
