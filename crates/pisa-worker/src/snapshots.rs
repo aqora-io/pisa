@@ -2154,6 +2154,7 @@ mod tests {
             docstring: None,
             deprecated_to: None,
             uses_sorry: false,
+            status: ProofStatus::Proved,
         }
     }
 

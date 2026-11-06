@@ -228,7 +228,7 @@ class Job(TypedDict):
 
 class SearchHealth(TypedDict):
     ready: bool
-    env_id: str
+    version: str
     qdrant: bool
     leader: bool
     error: NotRequired[str]
@@ -254,9 +254,10 @@ class Client:
 
     def __init__(self, url: str, *, version: str | None = None, timeout: int = 60) -> None:
         """`version` selects a worker pool label or alias for checks,
-        sessions, creates, listings and audits; session, state and snapshot
-        ids carry their own. `timeout` is Lean's limit per request in
-        seconds."""
+        sessions, creates, listings, audits and searches; session, state and
+        snapshot ids carry their own. Search answers for the version of its
+        index and of its snapshots, and raises NotFoundError for any other.
+        `timeout` is Lean's limit per request in seconds."""
     def health(self) -> Health:
         """The server's health. A draining server's 503 is returned, with
         `status` "draining", not raised."""
@@ -453,18 +454,48 @@ class Client:
     def cancel_job(self, job: Job) -> Job:
         """Withdraw the job if no worker has started it (`status` is then
         `cancelled`); one that is `running` or `done` stays as it is."""
+    def search(
+        self,
+        text: str | None = None,
+        *,
+        description: str | None = None,
+        latex: str | None = None,
+        pattern: str | None = None,
+        goal: str | None = None,
+        name: str | None = None,
+        libraries: list[str] | None = None,
+        kinds: list[str] | None = None,
+        limit: int = 5,
+        include_sorried: bool = False,
+        snapshots: SnapshotScope | None = None,
+    ) -> QueryResult:
+        """Search declarations by free `text` or by the fields that apply: a
+        description, LaTeX, a Lean pattern, a goal state or a (partial) name.
+        `snapshots` also searches snapshot modules: "all", or {"labels":
+        {...}} for the modules of the snapshots with every label. Unknown
+        names and empty results are answers, not errors."""
+    def search_batch(self, queries: list[Query]) -> list[QueryResult]:
+        """Run up to 64 queries in one request; results keep their order."""
+    def resolve(self, names: list[str]) -> list[Resolution]:
+        """Whether each name exists, with its replacement if deprecated and
+        close names if it doesn't exist."""
+    def get_declaration(self, name: str, *, module: str | None = None) -> DeclarationDetail:
+        """One declaration with its description, dependencies and users: the
+        one in snapshot module `module`, as a snapshot hit's `module` names
+        it, if it has one, else the bundle's. Raises NotFoundError for an
+        unknown name."""
 
 class Query(TypedDict, total=False):
     """One search; fill as many fields as you can, each feeds different lanes."""
-    q: str
-    nl: str
+    text: str
+    description: str
     latex: str
     pattern: str
     goal: str
     name: str
     libraries: list[str]
     kinds: list[str]
-    k: int
+    limit: int
     include_sorried: bool
     snapshots: SnapshotScope
 
@@ -486,22 +517,18 @@ class Hit(TypedDict):
     library: str
     module: str
     signature: str
-    informal_name: NotRequired[str]
+    title: NotRequired[str]
     summary: NotRequired[str]
     flags: Flags
     score: float
     source_url: NotRequired[str]
     text: str
-    snapshot: NotRequired[SnapshotHit]
-
-class SnapshotHit(TypedDict):
-    entries: list[str]
-    dirty: bool
-    verified: bool
+    snapshot_ids: NotRequired[list[str]]
+    status: NotRequired[ProofStatus]
+    verified: NotRequired[bool]
 
 class QueryResult(TypedDict):
     hits: list[Hit]
-    verification: NotRequired[str]
     warnings: NotRequired[list[str]]
     dense_pending: NotRequired[bool]
 
@@ -516,14 +543,7 @@ class Resolution(TypedDict):
     deprecated_to: NotRequired[str]
     suggestions: NotRequired[list[Suggestion]]
 
-class Informal(TypedDict):
-    informal_name: str
-    statement_nl: str
-    statement_latex: NotRequired[str]
-    aliases: NotRequired[list[str]]
-    source: str
-
-class DeclDetail(TypedDict):
+class DeclarationDetail(TypedDict):
     name: str
     kind: str
     library: str
@@ -531,44 +551,8 @@ class DeclDetail(TypedDict):
     signature: str
     type_full: str
     docstring: NotRequired[str]
-    informal: NotRequired[Informal]
+    description: NotRequired[Description]
     flags: Flags
     source_url: NotRequired[str]
-    deps: list[str]
+    dependencies: list[str]
     used_by: list[str]
-
-class SearchClient:
-    """A client for declaration search on one pisa-server. Safe to share
-    between threads; calls release the GIL while waiting."""
-
-    def __init__(self, url: str, *, env_id: str | None = None) -> None:
-        """`env_id` pins the index's environment (a worker pool version); a
-        server with another raises NotFoundError."""
-    def health(self) -> None: ...
-    def search(
-        self,
-        q: str | None = None,
-        *,
-        nl: str | None = None,
-        latex: str | None = None,
-        pattern: str | None = None,
-        goal: str | None = None,
-        name: str | None = None,
-        libraries: list[str] = [],
-        kinds: list[str] = [],
-        k: int = 5,
-        include_sorried: bool = False,
-        snapshots: SnapshotScope | None = None,
-    ) -> QueryResult:
-        """Search by free text `q` or by the fields that apply: a description,
-        LaTeX, a Lean pattern, a goal state or a (partial) name. `snapshots`
-        also searches snapshot modules: "all", or {"labels": {...}} for those
-        of the entries with every label."""
-    def search_batch(self, queries: list[Query]) -> list[QueryResult]:
-        """Run up to 64 queries in one request; results keep their order."""
-    def resolve(self, names: list[str]) -> list[Resolution]:
-        """Whether each name exists, with its replacement if deprecated and
-        close names if it doesn't exist."""
-    def decl(self, name: str) -> DeclDetail:
-        """One declaration with its description, dependencies and users.
-        Raises NotFoundError for an unknown name."""

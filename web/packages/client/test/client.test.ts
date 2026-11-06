@@ -34,13 +34,13 @@ const json = (body: unknown, status = 200) =>
 
 describe("PisaClient", () => {
   it("joins paths to a relative base and encodes each segment", async () => {
-    const { client, sent } = recording(() => json({ decl: { name: "x" } }));
-    await client.decl("Real.sqrt/x y");
-    await client.decl("double_eq", { module: "PisaSnap.sa1" });
+    const { client, sent } = recording(() => json({ version: "v1", declaration: { name: "x" } }));
+    await client.getDeclaration("Real.sqrt/x y");
+    await client.getDeclaration("double_eq", { module: "PisaSnap.sa1", version: "v2" });
     await client.getSnapshot("v2~abc");
     expect(sent.map((s) => s.url)).toEqual([
-      "/api/v1/decl/Real.sqrt%2Fx%20y",
-      "/api/v1/decl/double_eq?module=PisaSnap.sa1",
+      "/api/declarations/Real.sqrt%2Fx%20y?version=v1",
+      "/api/declarations/double_eq?version=v2&module=PisaSnap.sa1",
       "/api/snapshots/v2~abc",
     ]);
   });
@@ -145,10 +145,14 @@ describe("PisaClient", () => {
     expect(job).toMatchObject({ id: "j", kind: "rebuild_snapshots" });
   });
 
-  it("pins search to its environment", async () => {
-    const { client, sent } = recording(() => json({ env_id: "e", results: [{ hits: [] }] }));
-    expect(await client.search({ nl: "x" }, { envId: "e" })).toEqual({ hits: [] });
-    expect(sent[0]?.body).toEqual({ queries: [{ nl: "x" }], env_id: "e" });
+  it("searches the client's version, or the call's", async () => {
+    const { client, sent } = recording(() => json({ version: "v1", results: [{ hits: [] }] }));
+    expect(await client.search({ description: "x" })).toEqual({ hits: [] });
+    await client.resolve(["x"], { version: "w" });
+    expect(sent.map((s) => [s.url, s.body])).toEqual([
+      ["/api/search", { queries: [{ description: "x" }], version: "v1" }],
+      ["/api/resolve", { names: ["x"], version: "w" }],
+    ]);
   });
 
   it("throws the server's error, or bad_response for one that isn't pisa's", async () => {

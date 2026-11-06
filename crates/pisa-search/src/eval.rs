@@ -136,8 +136,8 @@ pub async fn run(
                 let queries: Vec<Query> = chunk
                     .iter()
                     .map(|(_, text)| Query {
-                        q: Some(text.to_string()),
-                        k: 50,
+                        text: Some(text.to_string()),
+                        limit: 50,
                         ..Default::default()
                     })
                     .collect();

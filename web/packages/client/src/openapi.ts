@@ -44,6 +44,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/declarations/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A declaration's details
+         * @description Its signature, description, flags, dependencies and users: a snapshot's declaration with a snapshot hit's `module`, else the bundle's.
+         */
+        get: operations["getDeclaration"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -83,6 +103,46 @@ export interface paths {
          * @description Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is.
          */
         delete: operations["cancelJob"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check names exist
+         * @description Whether each name exists, with close names for one that doesn't.
+         */
+        post: operations["resolve"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Search declarations
+         * @description Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.
+         */
+        post: operations["search"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -271,66 +331,6 @@ export interface paths {
          * @description Returns the new state. Earlier states stay valid, so a session is a tree. A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an unknown identifier, is in `messages`.
          */
         post: operations["applyTactic"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/decl/{name}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * A declaration's details
-         * @description Its signature, description, flags, dependencies and users: a snapshot's declaration with a snapshot hit's `module`, else the bundle's.
-         */
-        get: operations["decl"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/resolve": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Check names exist
-         * @description Whether each name exists, with close names for one that doesn't.
-         */
-        post: operations["resolve"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/search": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Search declarations
-         * @description Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.
-         */
-        post: operations["search"];
         delete?: never;
         options?: never;
         head?: never;
@@ -592,27 +592,6 @@ export interface components {
              */
             snapshot?: components["schemas"]["Snapshot"];
         };
-        DeclDetail: {
-            /** @description Declarations it uses, in its statement and its proof or body. */
-            deps: string[];
-            docstring?: string;
-            flags: components["schemas"]["Flags"];
-            informal?: components["schemas"]["Informal"];
-            kind: string;
-            library: string;
-            module: string;
-            name: string;
-            signature: string;
-            source_url?: string;
-            /** @description The type with full names and no notation. */
-            type_full: string;
-            /** @description Declarations that use it, most prominent first (at most 50). */
-            used_by: string[];
-        };
-        DeclResponse: {
-            decl: components["schemas"]["DeclDetail"];
-            env_id: string;
-        };
         /** @description A new declaration and the axioms it depends on. */
         Declaration: {
             /**
@@ -652,6 +631,24 @@ export interface components {
              *     recursor.
              */
             value_refs?: string[];
+        };
+        DeclarationDetail: {
+            /** @description Declarations it uses, in its statement and its proof or body. */
+            dependencies: string[];
+            /** @description What it states, in words, when a description exists. */
+            description?: components["schemas"]["Description"];
+            docstring?: string;
+            flags: components["schemas"]["Flags"];
+            kind: string;
+            library: string;
+            module: string;
+            name: string;
+            signature: string;
+            source_url?: string;
+            /** @description The type with full names and no notation. */
+            type_full: string;
+            /** @description Declarations that use it, most prominent first (at most 50). */
+            used_by: string[];
         };
         /**
          * @description `DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once
@@ -721,6 +718,11 @@ export interface components {
             /** @description Depends on `sorry`: not usable as a proof step. */
             uses_sorry?: boolean;
         };
+        GetDeclarationResponse: {
+            declaration: components["schemas"]["DeclarationDetail"];
+            /** @description The version the index was built from. */
+            version: string;
+        };
         /** @description `GET /health`: 200, or 503 once the server is stopping. */
         Health: {
             search: components["schemas"]["SearchHealth"] | null;
@@ -736,7 +738,6 @@ export interface components {
         HealthStatus: "ok" | "draining";
         Hit: {
             flags: components["schemas"]["Flags"];
-            informal_name?: string;
             kind: string;
             /** @description `PisaSnap` for a snapshot's declaration. */
             library: string;
@@ -751,23 +752,30 @@ export interface components {
             signature: string;
             /**
              * @description For a declaration of a snapshot module (named in `module`, with the
-             *     header that loads it in `flags.imports`).
+             *     header that loads it in `flags.imports`): the ids of the query's
+             *     snapshots of the module, newest first, at most 10.
              */
-            snapshot?: components["schemas"]["SnapshotHit"];
+            snapshot_ids?: string[];
             source_url?: string;
+            /**
+             * @description For a snapshot module's declaration: what its own axioms make it, as
+             *     in the snapshot API, so a proved lemma next to a `sorry` is `proved`.
+             */
+            status?: components["schemas"]["ProofStatus"];
             /** @description One or two sentences describing it, when a description exists. */
             summary?: string;
             /** @description About 150 tokens for a model's context. */
             text: string;
-        };
-        /** @description A natural-language description of a declaration. */
-        Informal: {
-            aliases?: string[];
-            informal_name: string;
-            /** @description Where it came from, e.g. "lsv2-v4.28.0-rc1" or a model name. */
-            source: string;
-            statement_latex?: string;
-            statement_nl: string;
+            /**
+             * @description What it is called in words, when a description exists, e.g.
+             *     "Subadditivity of von Neumann entropy".
+             */
+            title?: string;
+            /**
+             * @description For a snapshot module's declaration: its module and everything the
+             *     module imports passed the kernel re-check.
+             */
+            verified?: boolean;
         };
         /** @description An async request, as `/jobs/{id}` reports it until it is done. */
         Job: {
@@ -849,30 +857,28 @@ export interface components {
          *     and more fields mean better fusion.
          */
         Query: {
+            /** @description A natural-language description. */
+            description?: string;
             /** @description A pretty-printed goal state (hypotheses and `⊢ target`). */
             goal?: string;
             /** @description Also return declarations that depend on `sorry`, flagged. */
             include_sorried?: boolean;
-            /** @description Hits to return (default 5, at most 50). */
-            k?: number;
             /** @description Restrict to these kinds, e.g. `["theorem"]`. */
             kinds?: string[];
             /** @description The statement in LaTeX, e.g. `S(\rho_{AB}) \le S(\rho_A) + S(\rho_B)`. */
             latex?: string;
             /** @description Restrict to these libraries, e.g. `["Physlib"]`. */
             libraries?: string[];
+            /** @description Hits to return (default 5, at most 50). */
+            limit?: number;
             /** @description A declaration name, possibly partial or misspelled. */
             name?: string;
-            /** @description A natural-language description. */
-            nl?: string;
             /** @description A Lean expression or pattern, e.g. `Matrix.trace ?A = 1`. */
             pattern?: string;
-            /** @description Free text from a person; classified as natural language, LaTeX, Lean or a name. */
-            q?: string;
             /** @description Snapshots to search as well as the base libraries (default: none). */
             snapshots?: components["schemas"]["SnapshotScope"];
-            /** @description Check hits against `goal` on a Lean worker (not available yet). */
-            verify?: boolean;
+            /** @description Free text from a person; classified as natural language, LaTeX, Lean or a name. */
+            text?: string;
         };
         QueryResult: {
             /**
@@ -881,8 +887,6 @@ export interface components {
              */
             dense_pending?: boolean;
             hits: components["schemas"]["Hit"][];
-            /** @description Set when `verify` was asked for, e.g. "unavailable". */
-            verification?: string;
             /** @description What made this result worse than usual, e.g. a lane that failed. */
             warnings?: string[];
         };
@@ -1088,17 +1092,22 @@ export interface components {
             suggestions?: components["schemas"]["Suggestion"][];
         };
         ResolveRequest: {
-            env_id?: string;
             /** @description At most 64. */
             names: string[];
+            /**
+             * @description A version, or an alias of one: the index's, or its snapshots'. Any
+             *     other fails with `not_found`.
+             */
+            version?: string;
         };
         ResolveResponse: {
-            env_id: string;
+            /** @description One per name, in order. */
             results: components["schemas"]["Resolution"][];
+            /** @description The version the index was built from. */
+            version: string;
         };
         /** @description Search's state in a server's `GET /health`. */
         SearchHealth: {
-            env_id: string;
             /** @description Why the index isn't open yet. */
             error?: string;
             /** @description This replica leads the snapshot index. */
@@ -1107,17 +1116,23 @@ export interface components {
             qdrant: boolean;
             /** @description The index is open and Qdrant answers, so searches can be served. */
             ready: boolean;
+            /** @description The version the index was built from. */
+            version: string;
         };
         SearchRequest: {
-            /** @description Fails with `not_found` unless the server has this environment. */
-            env_id?: string;
             /** @description At most 64. */
             queries: components["schemas"]["Query"][];
+            /**
+             * @description A version, or an alias of one: the index's, or its snapshots'. Any
+             *     other fails with `not_found`.
+             */
+            version?: string;
         };
         SearchResponse: {
-            env_id: string;
             /** @description One per query, in order. */
             results: components["schemas"]["QueryResult"][];
+            /** @description The version the index was built from. */
+            version: string;
         };
         /** @description A proof session: the states that its code's `sorry`s start from. */
         Session: {
@@ -1186,20 +1201,6 @@ export interface components {
             code: string;
             /** @description The declarations that code importing the module sees, in order. */
             exports?: components["schemas"]["Export"][];
-        };
-        SnapshotHit: {
-            /**
-             * @description See the snapshot API: the module depends on `sorry` or other axioms
-             *     outside the allowed list.
-             */
-            dirty: boolean;
-            /**
-             * @description The ids of the query's snapshots of the module, newest first, at most
-             *     10.
-             */
-            entries: string[];
-            /** @description The module and everything it imports passed the kernel re-check. */
-            verified: boolean;
         };
         /**
          * @description Which snapshot modules a query searches: `"none"`, `"all"`, or
@@ -1332,9 +1333,8 @@ export type CheckResult = components['schemas']['CheckResult'];
 export type CheckSessionRequest = components['schemas']['CheckSessionRequest'];
 export type CreateSnapshotRequest = components['schemas']['CreateSnapshotRequest'];
 export type CreateSnapshotResponse = components['schemas']['CreateSnapshotResponse'];
-export type DeclDetail = components['schemas']['DeclDetail'];
-export type DeclResponse = components['schemas']['DeclResponse'];
 export type Declaration = components['schemas']['Declaration'];
+export type DeclarationDetail = components['schemas']['DeclarationDetail'];
 export type DeleteSnapshotResponse = components['schemas']['DeleteSnapshotResponse'];
 export type Description = components['schemas']['Description'];
 export type Detail = components['schemas']['Detail'];
@@ -1343,10 +1343,10 @@ export type ErrorKind = components['schemas']['ErrorKind'];
 export type ErrorResponse = components['schemas']['ErrorResponse'];
 export type Export = components['schemas']['Export'];
 export type Flags = components['schemas']['Flags'];
+export type GetDeclarationResponse = components['schemas']['GetDeclarationResponse'];
 export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
 export type Hit = components['schemas']['Hit'];
-export type Informal = components['schemas']['Informal'];
 export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
@@ -1376,7 +1376,6 @@ export type Session = components['schemas']['Session'];
 export type Severity = components['schemas']['Severity'];
 export type Snapshot = components['schemas']['Snapshot'];
 export type SnapshotDetail = components['schemas']['SnapshotDetail'];
-export type SnapshotHit = components['schemas']['SnapshotHit'];
 export type SnapshotScope = components['schemas']['SnapshotScope'];
 export type Sorry = components['schemas']['Sorry'];
 export type StartSessionRequest = components['schemas']['StartSessionRequest'];
@@ -1512,6 +1511,97 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CheckBatchResponse"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getDeclaration: {
+        parameters: {
+            query?: {
+                /** @description A snapshot module to look in first. */
+                module?: string;
+                /**
+                 * @description A version, or an alias of one: the index's, or its snapshots'. Any
+                 *     other is a 404.
+                 */
+                version?: string;
+            };
+            header?: never;
+            path: {
+                /** @description The full name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The declaration */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GetDeclarationResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -1722,6 +1812,174 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    resolve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveRequest"];
+            };
+        };
+        responses: {
+            /** @description A resolution per name, in order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolveResponse"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    search: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SearchRequest"];
+            };
+        };
+        responses: {
+            /** @description A result per query, in order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2858,260 +3116,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Job"];
-                };
-            };
-            /** @description `bad_request`: the request breaks the API's rules. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /**
-             * @description `not_found`: an unknown or expired job, state, session, snapshot or
-             *     declaration.
-             */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /**
-             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
-             *     limit was hit.
-             */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `capacity`: no worker took the job in time; retry later. */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `internal`. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-        };
-    };
-    decl: {
-        parameters: {
-            query?: {
-                /** @description A snapshot module to look in first. */
-                module?: string;
-            };
-            header?: never;
-            path: {
-                /** @description The full name */
-                name: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The declaration */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DeclResponse"];
-                };
-            };
-            /** @description `bad_request`: the request breaks the API's rules. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /**
-             * @description `not_found`: an unknown or expired job, state, session, snapshot or
-             *     declaration.
-             */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /**
-             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
-             *     limit was hit.
-             */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `capacity`: no worker took the job in time; retry later. */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `internal`. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-        };
-    };
-    resolve: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ResolveRequest"];
-            };
-        };
-        responses: {
-            /** @description A resolution per name, in order */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ResolveResponse"];
-                };
-            };
-            /** @description `bad_request`: the request breaks the API's rules. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /**
-             * @description `not_found`: an unknown or expired job, state, session, snapshot or
-             *     declaration.
-             */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /**
-             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
-             *     limit was hit.
-             */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `capacity`: no worker took the job in time; retry later. */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `internal`. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-        };
-    };
-    search: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["SearchRequest"];
-            };
-        };
-        responses: {
-            /** @description A result per query, in order */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SearchResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

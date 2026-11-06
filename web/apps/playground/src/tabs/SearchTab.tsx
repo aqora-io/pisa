@@ -1,12 +1,12 @@
 import type { Hit, Labels, Query, SnapshotScope } from "@aqora/pisa-client";
-import { useDebouncedValue, useDecl, useResolve, useSearch } from "@aqora/pisa-react";
+import { useDebouncedValue, useDeclaration, useResolve, useSearch } from "@aqora/pisa-react";
 import { type FormEvent, useEffect, useState } from "react";
 
 import { Badge, Button, ErrorNote, Field, Goals, Panel, Spinner, SubtleButton, inputClass } from "../components/ui.tsx";
 
 const MODES = {
-  q: "anything",
-  nl: "a description",
+  text: "anything",
+  description: "a description",
   name: "a name",
   latex: "LaTeX",
   pattern: "a Lean pattern",
@@ -30,19 +30,21 @@ interface Opened {
 }
 
 function HitView({ hit, onOpen }: { hit: Hit; onOpen: (open: Opened) => void }) {
-  const open = () => onOpen({ name: hit.name, ...(hit.snapshot !== undefined && { module: hit.module }) });
+  // Only a snapshot module's declaration says whether it is verified.
+  const snapshot = hit.verified !== undefined;
+  const open = () => onOpen({ name: hit.name, ...(snapshot && { module: hit.module }) });
   return (
     <li className="space-y-1 py-2">
       <div className="flex flex-wrap items-center gap-2">
         <button type="button" className="font-mono text-sm font-medium text-indigo-700 hover:underline" onClick={open}>
           {hit.name}
         </button>
-        {hit.informal_name !== undefined && <span className="text-sm text-slate-700">{hit.informal_name}</span>}
+        {hit.title !== undefined && <span className="text-sm text-slate-700">{hit.title}</span>}
         <Badge>{hit.kind}</Badge>
         <span className="text-xs text-slate-500">{hit.module}</span>
         {hit.flags.uses_sorry === true && <Badge tone="amber">uses sorry</Badge>}
         {hit.flags.deprecated_to !== undefined && <Badge tone="amber">deprecated: {hit.flags.deprecated_to}</Badge>}
-        {hit.snapshot !== undefined && <Badge tone="indigo">snapshot</Badge>}
+        {snapshot && <Badge tone="indigo">snapshot</Badge>}
         <span className="ml-auto text-xs text-slate-400">{hit.score.toFixed(3)}</span>
       </div>
       <pre className="whitespace-pre-wrap font-mono text-xs text-slate-800">{hit.signature}</pre>
@@ -69,7 +71,7 @@ function Names({ names, onOpen }: { names: string[]; onOpen: (name: string) => v
 }
 
 function DeclView({ name, module, onOpen }: { name: string; module: string | undefined; onOpen: (open: Opened) => void }) {
-  const decl = useDecl(name, module);
+  const decl = useDeclaration(name, module);
   // A snapshot declaration's dependencies may be its module's too; the
   // server falls back to the bundle's.
   const openName = (n: string) => onOpen({ name: n, ...(module !== undefined && { module }) });
@@ -87,15 +89,15 @@ function DeclView({ name, module, onOpen }: { name: string; module: string | und
         </div>
         <Goals goals={[d.type_full]} />
         {d.docstring !== undefined && <p className="text-sm text-slate-700">{d.docstring}</p>}
-        {d.informal !== undefined && (
+        {d.description !== undefined && (
           <div className="rounded bg-indigo-50 p-2 text-sm text-indigo-900">
-            <p className="font-medium">{d.informal.informal_name}</p>
-            <p>{d.informal.statement_nl}</p>
+            <p className="font-medium">{d.description.title}</p>
+            <p>{d.description.text}</p>
           </div>
         )}
-        {d.deps.length > 0 && (
+        {d.dependencies.length > 0 && (
           <Field label="Uses">
-            <Names names={d.deps} onOpen={openName} />
+            <Names names={d.dependencies} onOpen={openName} />
           </Field>
         )}
         {d.used_by.length > 0 && (
@@ -152,7 +154,7 @@ function Searching({ seconds }: { seconds: number }) {
 }
 
 export function SearchTab() {
-  const [mode, setMode] = useState<keyof typeof MODES>("q");
+  const [mode, setMode] = useState<keyof typeof MODES>("text");
   const [text, setText] = useState("");
   const [libraries, setLibraries] = useState("");
   const [kinds, setKinds] = useState("");
@@ -172,7 +174,7 @@ export function SearchTab() {
       [mode]: text,
       libraries: split(libraries),
       kinds: split(kinds),
-      k,
+      limit: k,
       include_sorried: sorried,
       snapshots,
     };

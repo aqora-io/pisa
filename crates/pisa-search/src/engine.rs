@@ -14,7 +14,8 @@ use lru::LruCache;
 use pisa_protocol::api::SnapshotId;
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::search::{
-    DeclDetail, Flags, Hit, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope, Suggestion,
+    DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SnapshotScope,
+    Suggestion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -28,12 +29,12 @@ use crate::qdrant::{Qdrant, ScoredPoint, any, is};
 use crate::symbols::Symbols;
 use crate::text::{latex_to_unicode, lean_identifiers, levenshtein, tokens};
 
-const MAX_K: usize = 50;
+const MAX_LIMIT: usize = 50;
 
 /// The most modules a label scope may cover; a broader one is refused.
 pub const MAX_SCOPE_MODULES: usize = 20_000;
 
-/// The most entries a snapshot hit names.
+/// The most snapshot ids a hit names.
 const MAX_HIT_ENTRIES: usize = 10;
 
 /// How many query vectors an engine keeps, about 2 KB each: the embedder is
@@ -228,7 +229,7 @@ fn and(filters: Vec<Value>) -> Value {
 
 const DEF_KINDS: [&str; 5] = ["def", "abbrev", "structure", "class", "inductive"];
 
-/// The payload a hit needs: everything but `/v1/decl`'s lists.
+/// The payload a hit needs: everything but `/declarations`' lists.
 fn hit_payload() -> Value {
     json!({"exclude": ["deps", "used_by"]})
 }
@@ -346,19 +347,13 @@ impl Engine {
         lanes: Lanes,
     ) -> Result<Vec<QueryResult>, SearchError> {
         let parsed: Vec<Parsed> = queries.iter().map(parse).collect();
-        let mut results: Vec<QueryResult> = queries
-            .iter()
-            .map(|q| QueryResult {
-                verification: q.verify.then(|| "unavailable".to_string()),
-                ..Default::default()
-            })
-            .collect();
+        let mut results: Vec<QueryResult> = vec![QueryResult::default(); queries.len()];
         let vectors = self.embed(queries, &parsed, lanes).await;
         let modules = self.scopes(queries).await?;
         let mut searches = Vec::new();
         let mut owners = Vec::new();
         for (i, q) in queries.iter().enumerate() {
-            if q.k == 0 {
+            if q.limit == 0 {
                 continue;
             }
             let unavailable = "dense lane unavailable, results from the other lanes only";
@@ -410,7 +405,7 @@ impl Engine {
                     .total_cmp(&a.score)
                     .then_with(|| a.payload.name.cmp(&b.payload.name))
             });
-            c.truncate(q.k.min(MAX_K));
+            c.truncate(q.limit.min(MAX_LIMIT));
             picked.push(c);
         }
         let entries = self.hit_entries(queries, &picked).await?;
@@ -419,12 +414,11 @@ impl Engine {
                 .into_iter()
                 .enumerate()
                 .map(|(n, s)| {
-                    let snapshot = s.payload.module_id.as_ref().map(|m| SnapshotHit {
-                        entries: entries.get(&(i, m.clone())).cloned().unwrap_or_default(),
-                        dirty: s.payload.dirty,
-                        verified: s.payload.verified,
-                    });
-                    hit(n + 1, s, snapshot)
+                    let snapshot_ids = match &s.payload.module_id {
+                        Some(m) => entries.get(&(i, m.clone())).cloned().unwrap_or_default(),
+                        None => Vec::new(),
+                    };
+                    hit(n + 1, s, snapshot_ids)
                 })
                 .collect();
         }
@@ -455,7 +449,7 @@ impl Engine {
             let mut cache = self.cache.lock().unwrap();
             for i in 0..queries.len() {
                 let text = &parsed[i].dense_text;
-                if queries[i].k == 0 || text.is_empty() {
+                if queries[i].limit == 0 || text.is_empty() {
                     continue;
                 }
                 match cache.get(text) {
@@ -677,7 +671,7 @@ impl Engine {
         if let Some(name) = exact {
             terms.push(json!({"mult": [w.exact, is("name", name)]}));
         }
-        let limit = (q.k.min(MAX_K) * 3).max(30).min(w.depth);
+        let limit = (q.limit.min(MAX_LIMIT) * 3).max(30).min(w.depth);
         Some(json!({
             "prefetch": [{
                 "prefetch": prefetch,
@@ -796,13 +790,16 @@ impl Engine {
         Ok(())
     }
 
-    /// For each query's snapshot hits, the ids of the query's entries on their
-    /// modules, newest first.
+    /// For each query's snapshot hits, the ids of the query's snapshots of
+    /// their modules, newest first. Without a snapshot version there are none.
     async fn hit_entries(
         &self,
         queries: &[Query],
         picked: &[Vec<Scored>],
     ) -> anyhow::Result<HashMap<(usize, String), Vec<String>>> {
+        let Some(version) = self.snapshots.as_deref() else {
+            return Ok(HashMap::new());
+        };
         let mut keys: Vec<(usize, String)> = Vec::new();
         let mut searches = Vec::new();
         for (i, hits) in picked.iter().enumerate() {
@@ -825,17 +822,20 @@ impl Engine {
             }
         }
         let found = self.q.query_batch(&self.entries, searches).await?;
+        let id = |entry: &str| {
+            SnapshotId {
+                version: version.to_string(),
+                entry: entry.to_string(),
+            }
+            .to_string()
+        };
         Ok(keys
             .into_iter()
             .zip(found)
             .map(|(k, points)| {
-                let id = |entry: &str| SnapshotId {
-                    version: self.snapshots.clone().unwrap_or_default(),
-                    entry: entry.to_string(),
-                };
                 let entries = points
                     .into_iter()
-                    .filter_map(|p| Some(id(p.payload?.get("entry")?.as_str()?).to_string()))
+                    .filter_map(|p| Some(id(p.payload?.get("entry")?.as_str()?)))
                     .collect();
                 (k, entries)
             })
@@ -931,7 +931,7 @@ impl Engine {
         &self,
         name: &str,
         module: Option<&str>,
-    ) -> anyhow::Result<Option<DeclDetail>> {
+    ) -> anyhow::Result<Option<DeclarationDetail>> {
         let mut searches = Vec::new();
         if let Some(m) = module.filter(|_| self.snapshots.is_some()) {
             let snapshot = vec![
@@ -952,7 +952,7 @@ impl Engine {
         };
         let d = s.payload;
         let stored = d.stored();
-        Ok(Some(DeclDetail {
+        Ok(Some(DeclarationDetail {
             name: d.name.clone(),
             kind: d.kind.clone(),
             library: d.library.clone(),
@@ -960,10 +960,10 @@ impl Engine {
             signature: d.signature.clone(),
             type_full: d.type_full.clone(),
             docstring: d.docstring.clone(),
-            informal: d.informal.clone(),
+            description: d.informal.clone().map(Description::from),
             flags: flags(&stored, None),
             source_url: d.source_url.clone(),
-            deps: d.deps,
+            dependencies: d.deps,
             used_by: d.used_by,
         }))
     }
@@ -987,23 +987,28 @@ fn scored(p: ScoredPoint) -> Option<Scored> {
     })
 }
 
-fn hit(n: usize, s: Scored, snapshot: Option<SnapshotHit>) -> Hit {
+/// A query's `n`th hit, from its point; `snapshot_ids` are a snapshot
+/// declaration's.
+fn hit(n: usize, s: Scored, snapshot_ids: Vec<String>) -> Hit {
     let d = s.payload.stored();
     let flags = flags(&d, s.sibling);
     let summary = summary(&d);
+    let snapshot = s.payload.module_id.is_some();
     Hit {
         name: d.name.clone(),
         kind: d.kind.clone(),
         library: d.library.clone(),
         module: d.module.clone(),
         signature: d.signature.clone(),
-        informal_name: d.informal.as_ref().map(|i| i.informal_name.clone()),
+        title: d.informal.as_ref().map(|i| i.informal_name.clone()),
         text: render(n, &d, summary.as_deref(), &flags),
         summary,
         flags,
         score: s.score,
         source_url: d.source_url.clone(),
-        snapshot,
+        snapshot_ids,
+        status: s.payload.status,
+        verified: snapshot.then_some(s.payload.verified),
     }
 }
 
@@ -1109,14 +1114,14 @@ pub fn parse(q: &Query) -> Parsed {
             .map(str::to_string)
     };
     let mut p = Parsed::default();
-    let mut nl = field(&q.nl);
+    let mut nl = field(&q.description);
     let mut latex = field(&q.latex);
     let mut lean: Vec<String> = field(&q.pattern)
         .into_iter()
         .chain(field(&q.goal))
         .collect();
     p.name = field(&q.name);
-    if let Some(text) = &field(&q.q) {
+    if let Some(text) = &field(&q.text) {
         match classify(text) {
             "lean" => lean.push(text.clone()),
             "latex" => latex = Some(latex.map_or(text.clone(), |l| format!("{l} {text}"))),
@@ -1311,7 +1316,7 @@ mod tests {
     #[test]
     fn parse_routes_fields() {
         let p = parse(&Query {
-            nl: Some("trace is one".into()),
+            description: Some("trace is one".into()),
             pattern: Some("Matrix.trace ?A = 1".into()),
             ..Default::default()
         });

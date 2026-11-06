@@ -3,14 +3,13 @@ export {
   type CheckOptions,
   type ClientOptions,
   type CreateSnapshotOptions,
-  type DeclOptions,
+  type GetDeclarationOptions,
   type Job,
   type JobOptions,
   type JobPoll,
   type RebuildOptions,
   type RequestOptions,
   type RunOptions,
-  type SearchOptions,
   type VersionOptions,
 } from "./client.ts";
 export {

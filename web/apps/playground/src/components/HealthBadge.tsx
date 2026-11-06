@@ -17,7 +17,7 @@ export function HealthBadge() {
       {search === null ? (
         <Badge>no search</Badge>
       ) : search.ready ? (
-        <Badge tone="indigo">search {search.env_id}</Badge>
+        <Badge tone="indigo">search {search.version}</Badge>
       ) : (
         <span title={search.error}>
           <Badge tone="amber">search not ready</Badge>

@@ -2,7 +2,6 @@
 //! each request's job to the workers through the database's job queue and
 //! waits for the result, so any number of servers can serve one queue.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +10,7 @@ use std::time::Duration;
 use axum::http::{HeaderValue, Method, header};
 use pisa_db::db::Db;
 use pisa_db::queue::Queue;
+use pisa_protocol::version::Versions;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -24,7 +24,7 @@ pub mod sessions;
 pub mod snapshots;
 
 use dispatch::{DispatchConfig, Dispatcher};
-use http::{App, Versions};
+use http::App;
 
 /// How often a server deletes the queue's leftovers: results nobody took,
 /// jobs nobody can claim, workers gone quiet.
@@ -55,6 +55,17 @@ pub struct RouterConfig {
     /// None by default.
     #[arg(long = "cors-origin", env = "PISA_CORS_ORIGINS", value_delimiter = ',')]
     pub cors_origins: Vec<String>,
+}
+
+impl RouterConfig {
+    /// How requests' versions resolve: through the default version and the
+    /// aliases.
+    pub fn versions(&self) -> Versions {
+        Versions {
+            default: self.default_version.clone(),
+            aliases: self.alias.iter().cloned().collect(),
+        }
+    }
 }
 
 /// The CORS layer for `origins`, if there are any.
@@ -124,7 +135,8 @@ impl Running {
 
 /// Serves the API, with its `/health`, from the queue in `db`.
 pub async fn start(cfg: RouterConfig, db: Db) -> anyhow::Result<Running> {
-    start_with(cfg, db, |app| {
+    let versions = cfg.versions();
+    start_with(cfg, versions, db, |app| {
         axum::Router::new()
             .route("/health", axum::routing::get(http::health))
             .with_state(app)
@@ -133,9 +145,12 @@ pub async fn start(cfg: RouterConfig, db: Db) -> anyhow::Result<Running> {
 }
 
 /// Serves the API and the routes `extra` makes, which must include
-/// `/health`, from the queue in `db`.
+/// `/health`, from the queue in `db`. Requests' versions resolve through
+/// `versions`, rather than `cfg`'s, so that whatever else serves with the API
+/// resolves them the same way.
 pub async fn start_with(
     cfg: RouterConfig,
+    versions: Versions,
     db: Db,
     extra: impl FnOnce(Arc<App>) -> axum::Router,
 ) -> anyhow::Result<Running> {
@@ -151,10 +166,7 @@ pub async fn start_with(
     .await;
     let app = Arc::new(App {
         dispatcher: Arc::new(dispatcher),
-        versions: Versions {
-            default: cfg.default_version.clone(),
-            aliases: cfg.alias.iter().cloned().collect::<HashMap<_, _>>(),
-        },
+        versions,
         draining: AtomicBool::new(false),
     });
 

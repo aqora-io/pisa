@@ -1,4 +1,4 @@
-"""Tests SearchClient against a real pisa-server searching a tiny corpus,
+"""Tests the client's search against a real pisa-server searching a tiny corpus,
 loaded into the Qdrant at PISA_TEST_QDRANT_URL (skipped when unset). Build
 the binaries first:
 
@@ -15,10 +15,12 @@ from pathlib import Path
 
 import pytest
 
-from pisa_client import NotFoundError, PisaError, SearchClient
+from pisa_client import Client, NotFoundError, PisaError
 
 ROOT = Path(__file__).parents[3]
 BIN = Path(os.environ.get("PISA_BIN_DIR", ROOT / "target" / "debug"))
+# The version of the test's index.
+ENV_ID = f"pytest-{os.getpid()}"
 
 DECLS = [
     {"name": "Matrix", "kind": "def", "signature": "Matrix (m n α : Type) : Type", "type_refs": []},
@@ -72,7 +74,7 @@ def url(tmp_path_factory):
     subprocess.run([exe, "build", "--corpus", tmp / "corpus", "--out", tmp / "bundle"],
                    check=True, env=env, stdout=subprocess.DEVNULL)
     # An environment of the test's own, so loading touches nothing else.
-    env_id = f"pytest-{os.getpid()}"
+    env_id = ENV_ID
     manifest = json.loads((tmp / "bundle" / "manifest.json").read_text())
     manifest["env_id"] = env_id
     (tmp / "bundle" / "manifest.json").write_text(json.dumps(manifest))
@@ -101,45 +103,52 @@ def url(tmp_path_factory):
 
 
 def test_search(url):
-    client = SearchClient(url)
-    hits = client.search(nl="trace of the identity matrix")["hits"]
+    client = Client(url)
+    hits = client.search(description="trace of the identity matrix")["hits"]
     assert hits[0]["name"] == "Matrix.trace_one"
     assert isinstance(hits[0]["score"], float)
+    assert "status" not in hits[0] and "verified" not in hits[0]
 
-    by_name = client.search(name="Real.sqrt_mul_sefl", k=1)["hits"]
+    by_name = client.search(name="Real.sqrt_mul_sefl", limit=1)["hits"]
     assert [h["name"] for h in by_name] == ["Real.sqrt_mul_self"]
+    assert client.search("Real.sqrt_mul_sefl", libraries=["Mathlib"], kinds=["theorem"])["hits"]
 
-    results = client.search_batch([{"q": "Matrix.trace"}, {"nl": "sqrt of a product", "kinds": ["theorem"]}])
+    results = client.search_batch(
+        [{"text": "Matrix.trace"}, {"description": "sqrt of a product", "kinds": ["theorem"]}]
+    )
     assert results[0]["hits"][0]["name"] == "Matrix.trace"
     assert results[1]["hits"][0]["name"] == "Real.sqrt_mul_self"
     with pytest.raises(ValueError, match="invalid query"):
-        client.search_batch([{"k": "five"}])
+        client.search_batch([{"limit": "five"}])
 
 
-def test_resolve_and_decl(url):
-    client = SearchClient(url)
+def test_resolve_and_get_declaration(url):
+    client = Client(url)
     missing, found = client.resolve(["Real.sqrt_mul_sefl", "Matrix.trace"])
     assert not missing["exists"] and missing["suggestions"][0]["name"] == "Real.sqrt_mul_self"
     assert found["exists"]
 
-    decl = client.decl("Matrix.trace")
-    assert decl["deps"] == ["Matrix"] and "Matrix.trace_one" in decl["used_by"]
+    declaration = client.get_declaration("Matrix.trace")
+    assert declaration["dependencies"] == ["Matrix"] and "Matrix.trace_one" in declaration["used_by"]
+    # No snapshot module has it, so it is the bundle's.
+    assert client.get_declaration("Matrix.trace", module="PisaSnap.s0")["library"] == "Mathlib"
     with pytest.raises(NotFoundError, match="did you mean Real.sqrt_mul_self"):
-        client.decl("Real.sqrt_mul_sefl")
+        client.get_declaration("Real.sqrt_mul_sefl")
 
 
-def test_env_pin(url):
-    with pytest.raises(NotFoundError, match="no index for env other"):
-        SearchClient(url, env_id="other").search("trace")
+def test_version(url):
+    assert Client(url, version=ENV_ID).search("trace")["hits"]
+    with pytest.raises(NotFoundError, match="no index for version other"):
+        Client(url, version="other").search("trace")
 
 
 def test_snapshot_scopes(url):
-    client = SearchClient(url)
-    assert client.search(nl="trace of the identity matrix", snapshots="none")["hits"]
+    client = Client(url)
+    assert client.search(description="trace of the identity matrix", snapshots="none")["hits"]
     # This server doesn't search snapshots, so asking for them is refused.
     for scope in ["all", {"labels": {"run": "1"}}]:
         with pytest.raises(PisaError, match="doesn't search snapshots") as e:
-            client.search(nl="trace", snapshots=scope)
+            client.search(description="trace", snapshots=scope)
         assert e.value.status == 400
     with pytest.raises(ValueError, match="invalid snapshots"):
-        client.search(nl="trace", snapshots="some")
+        client.search(description="trace", snapshots="some")

@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use pisa_protocol::api::{CheckResult, Error, ErrorKind, Replaces};
+use pisa_protocol::api::{CheckResult, Error, ErrorKind, ProofStatus, Replaces};
 use pisa_protocol::snapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -114,6 +114,14 @@ pub struct SnapshotDecl {
     /// Depends on `sorry`, by the module's check result.
     #[serde(default)]
     pub uses_sorry: bool,
+    /// What its own axioms make it, by the module's check result. The
+    /// export doesn't print it.
+    #[serde(default = "proved")]
+    pub status: ProofStatus,
+}
+
+fn proved() -> ProofStatus {
+    ProofStatus::Proved
 }
 
 /// A module's declarations for the search service, with the module's state.
@@ -121,7 +129,6 @@ pub struct SnapshotDecl {
 pub struct SnapshotDecls {
     /// See [`ModuleMeta::header`].
     pub header: String,
-    pub dirty: bool,
     pub verified: bool,
     pub decls: Vec<SnapshotDecl>,
 }
@@ -131,7 +138,6 @@ impl SnapshotDecls {
     pub fn new(meta: &ModuleMeta, decls: Vec<SnapshotDecl>) -> SnapshotDecls {
         let mut out = SnapshotDecls {
             header: meta.header.clone(),
-            dirty: false,
             verified: false,
             decls,
         };
@@ -139,16 +145,17 @@ impl SnapshotDecls {
         out
     }
 
-    /// Takes `dirty`, `verified` and each declaration's `uses_sorry` from `meta`.
+    /// Takes `verified` from `meta`, and each declaration's `uses_sorry` and
+    /// `status` from the declaration of its name in `meta`'s check result.
+    /// The export skips private and generated names, so the name is enough.
     pub(crate) fn refresh(&mut self, meta: &ModuleMeta) {
-        self.dirty = meta.dirty;
         self.verified = meta.verified;
         for d in &mut self.decls {
-            d.uses_sorry = meta
-                .result
-                .declarations
-                .iter()
-                .any(|r| r.name == d.name && r.axioms.iter().any(|a| a == "sorryAx"));
+            let checked = meta.result.declarations.iter().find(|r| r.name == d.name);
+            d.uses_sorry = checked.is_some_and(|r| r.axioms.iter().any(|a| a == "sorryAx"));
+            d.status = checked
+                .and_then(|r| r.status)
+                .unwrap_or(ProofStatus::Proved);
         }
     }
 }
@@ -619,6 +626,7 @@ mod tests {
             docstring: None,
             deprecated_to: None,
             uses_sorry: false,
+            status: ProofStatus::Proved,
         }
     }
 
@@ -691,14 +699,17 @@ mod tests {
                         name: "b".into(),
                         kind: "theorem".into(),
                         axioms: vec!["sorryAx".into()],
+                        status: Some(ProofStatus::Sorry),
                         ..Default::default()
                     }];
                 })
                 .await
                 .unwrap();
             let decls = catalog.decls("x").await.unwrap().unwrap();
-            assert!(decls.verified && decls.dirty);
+            assert!(decls.verified);
             assert!(!decls.decls[0].uses_sorry && decls.decls[1].uses_sorry);
+            let statuses: Vec<_> = decls.decls.iter().map(|d| d.status).collect();
+            assert_eq!(statuses, [ProofStatus::Proved, ProofStatus::Sorry]);
             let changes = catalog.changes(0, None, 100).await.unwrap();
             assert_eq!(changes.len(), before + 1);
             let last = &changes.last().unwrap().change;

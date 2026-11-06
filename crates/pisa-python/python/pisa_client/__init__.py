@@ -16,11 +16,10 @@
     base = client.create_snapshot("import Mathlib\\ndef double (n : Nat) := 2 * n")["snapshot"]
     assert client.check(base["header"] + "\\nexample : double 2 = 4 := rfl")["ok"]
 
-    search = SearchClient("http://localhost:8000")
-    hits = search.search(nl="trace of a density matrix is one")["hits"]
+    hits = client.search(description="trace of a density matrix is one")["hits"]
 """
 
-from ._native import Client, SearchClient
+from ._native import Client
 from .errors import CapacityError, LeanError, LimitError, NotFoundError, PisaError
 
-__all__ = ["Client", "SearchClient", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]
+__all__ = ["Client", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]

@@ -188,10 +188,11 @@ pub fn module_report(module: &str) -> String {
 const EXPORT_MARKER: &str = "PISA_EXPORT ";
 
 /// What the search service indexes of each declaration of a snapshot module:
-/// [`SnapshotDecl`]s as JSON, without `uses_sorry`. Skips what
-/// `search/exporter/PisaExport.lean` skips: internal, private and
-/// auto-generated names. Docstrings of a module-system snapshot aren't
-/// loaded in a module-system header, so they are missing there.
+/// [`SnapshotDecl`]s as JSON, without `uses_sorry` and `status`, which come
+/// from the check result. Skips what `search/exporter/PisaExport.lean`
+/// skips: internal, private and auto-generated names. Docstrings of a
+/// module-system snapshot aren't loaded in a module-system header, so they
+/// are missing there.
 const MODULE_EXPORT: &str = r#"run_cmd do
   let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
   let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError "{module} is not imported"

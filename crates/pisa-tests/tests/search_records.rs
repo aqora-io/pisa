@@ -4,7 +4,7 @@
 mod common;
 
 use common::Cluster;
-use pisa_protocol::api::SnapshotId;
+use pisa_protocol::api::{ProofStatus, SnapshotId};
 use pisa_worker::catalog::{Catalog, Change};
 use serde_json::{Value, json};
 
@@ -46,7 +46,7 @@ async fn a_create_records_declarations_and_a_change() {
 
     let decls = catalog.decls(&m).await.unwrap().expect("declarations");
     assert_eq!(decls.header, r["snapshot"]["header"].as_str().unwrap());
-    assert!(!decls.dirty && !decls.verified);
+    assert!(!decls.verified);
     let names: Vec<&str> = decls.decls.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(names, ["one", "two"]);
     assert_eq!(decls.decls[0].kind, "theorem");
@@ -113,8 +113,29 @@ async fn sorry_is_flagged() {
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let r = create(&c, "import Foo\n\ntheorem t : 1 = 2 := sorry", json!({})).await;
     let decls = catalog.decls(&module(&r)).await.unwrap().unwrap();
-    assert!(decls.dirty);
     assert!(decls.decls[0].uses_sorry);
+}
+
+/// A declaration is indexed with its own status, not its module's worst.
+/// fake-lean's theorems all use `sorry` when their code does, so the proved
+/// one is a definition.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hit_has_its_own_status_and_its_modules_ids() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let code = "import Foo\n\ndef two := 2\n\ntheorem t : 1 = 2 := sorry";
+    let r = create(&c, code, json!({})).await;
+    assert_eq!(r["snapshot"]["status"], "sorry", "{r}");
+    let decls = catalog.decls(&module(&r)).await.unwrap().unwrap();
+    let statuses: Vec<(&str, ProofStatus)> = decls
+        .decls
+        .iter()
+        .map(|d| (d.name.as_str(), d.status))
+        .collect();
+    assert_eq!(
+        statuses,
+        [("t", ProofStatus::Sorry), ("two", ProofStatus::Proved)]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

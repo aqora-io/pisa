@@ -402,7 +402,7 @@ impl Indexer {
                 };
                 let mut payload = PointPayload::new("snapshot", &stored);
                 payload.module_id = Some(m.to_string());
-                payload.dirty = decls.dirty;
+                payload.status = Some(d.status);
                 payload.verified = decls.verified;
                 payload.has_entries = module.has_entries;
                 payload.rev = Some(rev.to_string());

@@ -11,7 +11,7 @@ export {
   proofReducer,
   useProofSession,
 } from "./hooks/proof.ts";
-export { useDecl, useResolve, useSearch } from "./hooks/search.ts";
+export { useDeclaration, useResolve, useSearch } from "./hooks/search.ts";
 export {
   type CreateSnapshotInput,
   type UpdateSnapshotInput,
@@ -27,11 +27,10 @@ export {
   type Checked,
   type PisaInfiniteOptions,
   type PisaQueryOptions,
-  type SearchInput,
   type VersionInput,
   checkOptions,
   compactQuery,
-  declOptions,
+  declarationOptions,
   hasTerms,
   healthOptions,
   isTransient,

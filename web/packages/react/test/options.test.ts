@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkOptions,
   compactQuery,
-  declOptions,
+  declarationOptions,
   hasTerms,
   isTransient,
   pisaKeys,
@@ -55,21 +55,35 @@ describe("query options", () => {
   });
 
   it("drops a query's blank fields, and searches only with a term", () => {
-    expect(compactQuery({ nl: "  ", name: "x", libraries: [], snapshots: "none", k: 3 })).toEqual({ name: "x", k: 3 });
-    expect(hasTerms({ nl: " ", libraries: ["Mathlib"] })).toBe(false);
-    expect(searchOptions(client, { nl: "" }).enabled).toBe(false);
-    expect(staleTime({ nl: "trace" })).toBe(Infinity);
-    expect(staleTime({ nl: "trace", snapshots: "all" })).toBe(30_000);
+    expect(compactQuery({ description: "  ", name: "x", libraries: [], snapshots: "none", limit: 3 })).toEqual({
+      name: "x",
+      limit: 3,
+    });
+    expect(hasTerms({ description: " ", libraries: ["Mathlib"] })).toBe(false);
+    expect(hasTerms({ text: "x" })).toBe(true);
+    expect(searchOptions(client, { description: "" }).enabled).toBe(false);
+    expect(staleTime({ description: "trace" })).toBe(Infinity);
+    expect(staleTime({ description: "trace", snapshots: "all" })).toBe(30_000);
   });
 
   it("searches again for a result that left out the dense lane while it was embedded", () => {
-    expect(staleTime({ nl: "trace" }, { hits: [], dense_pending: true })).toBe(0);
-    expect(staleTime({ nl: "trace" }, { hits: [], warnings: ["dense lane unavailable"] })).toBe(Infinity);
+    expect(staleTime({ description: "trace" }, { hits: [], dense_pending: true })).toBe(0);
+    expect(staleTime({ description: "trace" }, { hits: [], warnings: ["dense lane unavailable"] })).toBe(Infinity);
   });
 
-  it("keys a declaration on the snapshot module it's looked up in", () => {
-    expect(declOptions(client, "x").queryKey).toEqual(["pisa", "http://pisa.test", "search", "decl", "x", null]);
-    expect(declOptions(client, "x", "PisaSnap.s1").queryKey).not.toEqual(declOptions(client, "x").queryKey);
+  it("keys a search on the version it asks for", () => {
+    expect(searchOptions(client, { text: "x" }).queryKey).toEqual(["pisa", "http://pisa.test", "search", "v", { text: "x" }]);
+    expect(searchOptions(client, { text: "x" }, { version: "w" }).queryKey).not.toEqual(
+      searchOptions(client, { text: "x" }).queryKey,
+    );
+  });
+
+  it("keys a declaration on the version and the snapshot module it's looked up in", () => {
+    const bare = new PisaClient({ url: "http://pisa.test" });
+    const key = (version: string | null) => ["pisa", "http://pisa.test", "search", version, "declaration", "x", null];
+    expect(declarationOptions(bare, "x").queryKey).toEqual(key(null));
+    expect(declarationOptions(client, "x").queryKey).toEqual(key("v"));
+    expect(declarationOptions(client, "x", "PisaSnap.s1").queryKey).not.toEqual(declarationOptions(client, "x").queryKey);
   });
 
   it("keys a snapshot by its id alone, and a listing by its version, under every snapshot query", () => {

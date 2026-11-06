@@ -2,9 +2,28 @@
 //! of the files that decide what gets built. Worker pools and search indexes
 //! use it, so a request names the exact environment it was meant for.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
+
+/// How a request's version resolves: the default for a request that names
+/// none, and aliases, e.g. `physlib` for `v4.35.0-1a2b3c4d`.
+#[derive(Debug, Clone, Default)]
+pub struct Versions {
+    pub default: Option<String>,
+    pub aliases: HashMap<String, String>,
+}
+
+impl Versions {
+    /// The pool label for a requested version (or the default), following aliases.
+    pub fn resolve(&self, requested: Option<&str>) -> Option<String> {
+        let v = requested
+            .map(str::to_string)
+            .or_else(|| self.default.clone())?;
+        Some(self.aliases.get(&v).cloned().unwrap_or(v))
+    }
+}
 
 /// `<toolchain tag>-<8 hex>`, e.g. `v4.35.0-1a2b3c4d`, hashing
 /// `lake-manifest.json` and `lakefile.toml` (or `lakefile.lean`).

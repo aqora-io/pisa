@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use pisa_protocol::search::{Informal, Query};
+use pisa_protocol::version::Versions;
 use pisa_search::corpus::{self, Corpus, Decl, Manifest};
 use pisa_search::engine::Engine;
 use pisa_search::qdrant::Qdrant;
@@ -315,9 +316,9 @@ impl Loaded {
     }
 }
 
-fn nl(text: &str) -> Query {
+fn description(text: &str) -> Query {
     Query {
-        nl: Some(text.into()),
+        description: Some(text.into()),
         ..Default::default()
     }
 }
@@ -325,9 +326,11 @@ fn nl(text: &str) -> Query {
 #[tokio::test(flavor = "multi_thread")]
 async fn natural_language_finds_descriptions_and_docstrings() {
     let Some(t) = engine().await else { return };
-    let hits = t.names(nl("trace of the identity matrix")).await;
+    let hits = t.names(description("trace of the identity matrix")).await;
     assert_eq!(hits[0], "Matrix.trace_one", "{hits:?}");
-    let hits = t.names(nl("uncertainty relation for observables")).await;
+    let hits = t
+        .names(description("uncertainty relation for observables"))
+        .await;
     assert_eq!(
         hits[0], "QuantumMechanics.state_uncertainty_of_raw_commutator",
         "{hits:?}"
@@ -371,7 +374,7 @@ async fn misspelled_names_resolve_with_suggestions() {
     // A free-text query that is a name goes through the name lane.
     let hits = t
         .names(Query {
-            q: Some("Real.sqrt_mul_sefl".into()),
+            text: Some("Real.sqrt_mul_sefl".into()),
             ..Default::default()
         })
         .await;
@@ -385,8 +388,8 @@ async fn folding_flags_and_filters() {
     // The deprecated alias folds into its replacement.
     let hits = t
         .names(Query {
-            q: Some("sqrt of a times a".into()),
-            k: 10,
+            text: Some("sqrt of a times a".into()),
+            limit: 10,
             ..Default::default()
         })
         .await;
@@ -399,7 +402,9 @@ async fn folding_flags_and_filters() {
     // to_additive pairs show once, naming the sibling.
     let r = t
         .engine
-        .search(&nl("commutativity of multiplication a * b = b * a"))
+        .search(&description(
+            "commutativity of multiplication a * b = b * a",
+        ))
         .await
         .unwrap();
     let comm: Vec<_> = r
@@ -416,7 +421,7 @@ async fn folding_flags_and_filters() {
     assert!(comm[0].flags.additive_sibling.is_some());
 
     // Sorried results are excluded unless asked for, then flagged.
-    let q = nl("eigenstates of the harmonic oscillator are orthonormal");
+    let q = description("eigenstates of the harmonic oscillator are orthonormal");
     assert!(
         !t.names(q.clone())
             .await
@@ -441,8 +446,8 @@ async fn folding_flags_and_filters() {
     let hits = t
         .names(Query {
             libraries: vec!["Physlib".into()],
-            k: 50,
-            ..nl("the")
+            limit: 50,
+            ..description("the")
         })
         .await;
     assert!(
@@ -453,7 +458,7 @@ async fn folding_flags_and_filters() {
     let hits = t
         .names(Query {
             kinds: vec!["def".into()],
-            ..nl("trace")
+            ..description("trace")
         })
         .await;
     assert_eq!(hits[0], "Matrix.trace");
@@ -463,7 +468,7 @@ async fn folding_flags_and_filters() {
 #[tokio::test(flavor = "multi_thread")]
 async fn results_are_deterministic_and_rendered_compactly() {
     let Some(t) = engine().await else { return };
-    let q = nl("trace matrix");
+    let q = description("trace matrix");
     assert_eq!(t.names(q.clone()).await, t.names(q.clone()).await);
     let hit = &t.engine.search(&q).await.unwrap().hits[0];
     assert!(
@@ -484,18 +489,21 @@ async fn detail_lists_dependencies_and_users() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(d.deps, ["Matrix"]);
+    assert_eq!(d.dependencies, ["Matrix"]);
     assert!(d.used_by.contains(&"Matrix.trace_one".to_string()));
     assert!(t.engine.detail("Nope", None).await.unwrap().is_none());
     t.done().await;
 }
 
-/// Serves `t`'s engine; returns its address.
-async fn serve(t: &Loaded) -> std::net::SocketAddr {
+/// Serves `t`'s engine, searching the snapshots of version `snapshots` if
+/// any; returns its address.
+async fn serve(t: &Loaded, snapshots: Option<&str>) -> std::net::SocketAddr {
     let q = t.q.clone();
     let symbols = Symbols::parse(symbols::DEFAULT).unwrap();
-    let engine = Engine::open(q, &t.env_id, symbols, None).await.unwrap();
-    let app = pisa_search::server::router(pisa_search::server::Search::ready(Arc::new(engine)));
+    let mut engine = Engine::open(q, &t.env_id, symbols, None).await.unwrap();
+    engine.snapshots = snapshots.map(str::to_string);
+    let search = pisa_search::server::Search::ready(Arc::new(engine), Versions::default());
+    let app = pisa_search::server::router(search);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -505,21 +513,27 @@ async fn serve(t: &Loaded) -> std::net::SocketAddr {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_api() {
     let Some(t) = engine().await else { return };
-    let addr = serve(&t).await;
+    let addr = serve(&t, None).await;
     let c = reqwest::Client::new();
     let url = |p: &str| format!("http://{addr}{p}");
 
     let r: serde_json::Value = c
-        .post(url("/v1/search"))
-        .json(&serde_json::json!({"queries": [{"nl": "trace of the identity matrix"}, {"name": "Nat.succ_le_succ", "verify": true}]}))
+        .post(url("/search"))
+        .json(&serde_json::json!({"queries": [{"text": "trace of the identity matrix", "limit": 3}, {"name": "Nat.succ_le_succ"}]}))
         .send().await.unwrap().json().await.unwrap();
-    assert_eq!(r["env_id"], t.env_id);
-    assert_eq!(r["results"][0]["hits"][0]["name"], "Matrix.trace_one");
+    assert_eq!(r["version"], t.env_id);
+    let hits = r["results"][0]["hits"].as_array().unwrap();
+    assert!(hits.len() <= 3, "{r}");
+    assert_eq!(hits[0]["name"], "Matrix.trace_one");
+    assert_eq!(hits[0]["title"], "Trace of the identity matrix");
+    // A bundle declaration is no snapshot's.
+    for field in ["snapshot_ids", "status", "verified"] {
+        assert!(hits[0].get(field).is_none(), "{field}: {r}");
+    }
     assert_eq!(r["results"][1]["hits"][0]["name"], "Nat.succ_le_succ");
-    assert_eq!(r["results"][1]["verification"], "unavailable");
 
     let r: serde_json::Value = c
-        .post(url("/v1/resolve"))
+        .post(url("/resolve"))
         .json(&serde_json::json!({"names": ["Real.sqrt_mul_sefl"]}))
         .send()
         .await
@@ -533,10 +547,21 @@ async fn http_api() {
         "Real.sqrt_mul_self"
     );
 
-    let r = c.get(url("/v1/decl/Matrix.trace")).send().await.unwrap();
-    assert_eq!(r.status(), 200);
+    let r: serde_json::Value = c
+        .get(url("/declarations/Matrix.trace"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["version"], t.env_id);
+    assert_eq!(
+        r["declaration"]["dependencies"],
+        serde_json::json!(["Matrix"])
+    );
     let r = c
-        .get(url("/v1/decl/Real.sqrt_mul_sefl"))
+        .get(url("/declarations/Real.sqrt_mul_sefl"))
         .send()
         .await
         .unwrap();
@@ -550,14 +575,20 @@ async fn http_api() {
     );
 
     let r = c
-        .post(url("/v1/search"))
-        .json(&serde_json::json!({"queries": [], "env_id": "other"}))
+        .post(url("/search"))
+        .json(&serde_json::json!({"queries": [], "version": "other"}))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), 404);
     let r = c
-        .post(url("/v1/search"))
+        .get(url("/declarations/Matrix.trace?version=other"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    let r = c
+        .post(url("/search"))
         .json(&serde_json::json!({"nope": 1}))
         .send()
         .await
@@ -572,21 +603,43 @@ async fn http_api() {
         .await
         .unwrap();
     assert_eq!(health["qdrant"], true);
+    assert_eq!(health["version"], t.env_id);
+    t.done().await;
+}
+
+/// A server whose snapshots are another version's answers for that
+/// version too, from its index.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_snapshot_version_is_accepted() {
+    let Some(t) = engine().await else { return };
+    let addr = serve(&t, Some("snapshots-v")).await;
+    let c = reqwest::Client::new();
+    let search = |version: &str| {
+        c.post(format!("http://{addr}/search"))
+            .json(&serde_json::json!({"queries": [{"name": "Matrix.trace"}], "version": version}))
+            .send()
+    };
+    let r = search("snapshots-v").await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(r["version"], t.env_id);
+    assert_eq!(r["results"][0]["hits"][0]["name"], "Matrix.trace");
+    assert_eq!(search("other").await.unwrap().status(), 404);
     t.done().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_client() {
-    use pisa_client::{ErrorKind, SearchClient};
+    use pisa_client::{Client, ErrorKind};
 
     let Some(t) = engine().await else { return };
-    let addr = serve(&t).await;
-    let c = SearchClient::new(&format!("http://{addr}")).unwrap();
+    let addr = serve(&t, None).await;
+    let c = Client::new(&format!("http://{addr}")).unwrap();
     c.health().await.unwrap();
 
     let r = c
         .search(&Query {
-            nl: Some("trace of the identity matrix".into()),
+            description: Some("trace of the identity matrix".into()),
             ..Default::default()
         })
         .await
@@ -612,15 +665,19 @@ async fn rust_client() {
     assert!(!r[0].exists && r[0].suggestions[0].name == "Real.sqrt_mul_self");
     assert!(r[1].exists);
 
-    let d = c.decl("Matrix.trace").await.unwrap();
-    assert_eq!(d.deps, ["Matrix"]);
-    let err = c.decl("Real.sqrt_mul_sefl").await.unwrap_err();
+    let d = c.get_declaration("Matrix.trace", None).await.unwrap();
+    assert_eq!(d.dependencies, ["Matrix"]);
+    let err = c
+        .get_declaration("Real.sqrt_mul_sefl", None)
+        .await
+        .unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
 
-    let pinned = c.clone().with_env("other");
+    let pinned = c.clone().with_version("other");
     let err = pinned.search(&Query::default()).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
-    assert!(c.with_env(&t.env_id).resolve(["Matrix"]).await.unwrap()[0].exists);
+    let pinned = c.with_version(&t.env_id);
+    assert!(pinned.resolve(["Matrix"]).await.unwrap()[0].exists);
     t.done().await;
 }
 
@@ -629,7 +686,7 @@ async fn queries_skip_blanks_noise_and_bad_filters() {
     let Some(t) = engine().await else { return };
     assert!(
         t.names(Query {
-            q: Some("   ".into()),
+            text: Some("   ".into()),
             ..Default::default()
         })
         .await
@@ -637,8 +694,8 @@ async fn queries_skip_blanks_noise_and_bad_filters() {
     );
     assert!(
         t.names(Query {
-            nl: Some("trace".into()),
-            k: 0,
+            description: Some("trace".into()),
+            limit: 0,
             ..Default::default()
         })
         .await
@@ -648,8 +705,8 @@ async fn queries_skip_blanks_noise_and_bad_filters() {
     // Generated helpers and tooling stay out of results unless named exactly.
     let trace = t
         .names(Query {
-            nl: Some("trace of a matrix".into()),
-            k: 20,
+            description: Some("trace of a matrix".into()),
+            limit: 20,
             ..Default::default()
         })
         .await;
@@ -662,8 +719,8 @@ async fn queries_skip_blanks_noise_and_bad_filters() {
     );
     let named = t
         .names(Query {
-            q: Some("Matrix.mk.injEq".into()),
-            k: 1,
+            text: Some("Matrix.mk.injEq".into()),
+            limit: 1,
             ..Default::default()
         })
         .await;
@@ -674,8 +731,8 @@ async fn queries_skip_blanks_noise_and_bad_filters() {
     let hits = t
         .engine
         .search(&Query {
-            q: Some(sorried.into()),
-            k: 1,
+            text: Some(sorried.into()),
+            limit: 1,
             ..Default::default()
         })
         .await

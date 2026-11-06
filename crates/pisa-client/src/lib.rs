@@ -28,9 +28,11 @@
 //! let result = client.wait_job(&job).await?;
 //! assert!(result.ok);
 //!
-//! let search = pisa_client::SearchClient::new("http://localhost:8000")?;
-//! let hits = search
-//!     .search(&pisa_client::Query { nl: Some("trace of a density matrix is one".into()), ..Default::default() })
+//! let hits = client
+//!     .search(&pisa_client::Query {
+//!         description: Some("trace of a density matrix is one".into()),
+//!         ..Default::default()
+//!     })
 //!     .await?
 //!     .hits;
 //! # Ok(()) }
@@ -46,7 +48,7 @@ use pisa_protocol::api::{
     StartSessionRequest, UpdateSnapshotRequest,
 };
 use pisa_protocol::search::{
-    DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
+    GetDeclarationResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
 };
 use reqwest::Url;
 use serde::Serialize;
@@ -62,8 +64,8 @@ pub use pisa_protocol::api::{
     VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
-    DeclDetail, Description, Flags, Hit, Informal, Query, QueryResult, Resolution, SearchHealth,
-    SnapshotHit, SnapshotScope, Suggestion,
+    DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
+    SnapshotScope, Suggestion,
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;
@@ -283,10 +285,11 @@ impl Client {
         })
     }
 
-    /// Checks, starts sessions, creates, lists and audits against this worker
-    /// pool version or alias instead of the server's default. Session, state
-    /// and snapshot ids carry their own version, so calls that take one
-    /// don't send it.
+    /// Checks, starts sessions, creates, lists, audits and searches against
+    /// this worker pool version or alias instead of the server's default.
+    /// Session, state and snapshot ids carry their own version, so calls that
+    /// take one don't send it. Search answers for the version of its index
+    /// and of its snapshots, and any other is [`ErrorKind::NotFound`].
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
@@ -741,51 +744,8 @@ impl Client {
         Ok(url)
     }
 
-    async fn post<B: Serialize, T: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &B,
-    ) -> Result<T, Error> {
-        self.endpoint.post(path, body).await
-    }
-}
-
-/// A client for declaration search on a `pisa-server`. Unknown names and
-/// empty results are answers, not errors.
-#[derive(Debug, Clone)]
-pub struct SearchClient {
-    endpoint: Endpoint,
-    env_id: Option<String>,
-}
-
-impl SearchClient {
-    pub fn new(base_url: &str) -> Result<Self, Error> {
-        Ok(SearchClient {
-            endpoint: Endpoint::new(base_url)?,
-            env_id: None,
-        })
-    }
-
-    /// Searches only an index built from this environment (a worker pool
-    /// version); a server with another answers [`ErrorKind::NotFound`].
-    pub fn with_env(mut self, env_id: impl Into<String>) -> Self {
-        self.env_id = Some(env_id.into());
-        self
-    }
-
-    /// Fails with a 503 while the server drains.
-    pub async fn health(&self) -> Result<(), Error> {
-        let health = self.endpoint.health().await?;
-        match health.status {
-            HealthStatus::Ok => Ok(()),
-            HealthStatus::Draining => Err(Error::Server {
-                status: 503,
-                kind: ErrorKind::Internal,
-                message: serde_json::to_string(&health).unwrap_or_default(),
-            }),
-        }
-    }
-
+    /// Searches declarations, as [`Query`] says. Unknown names and empty
+    /// results are answers, not errors.
     pub async fn search(&self, query: &Query) -> Result<QueryResult, Error> {
         let mut results = self.search_batch(vec![query.clone()]).await?;
         Ok(results.pop().unwrap_or_default())
@@ -795,9 +755,9 @@ impl SearchClient {
     pub async fn search_batch(&self, queries: Vec<Query>) -> Result<Vec<QueryResult>, Error> {
         let req = SearchRequest {
             queries,
-            env_id: self.env_id.clone(),
+            version: self.version.clone(),
         };
-        let resp: SearchResponse = self.endpoint.post("v1/search", &req).await?;
+        let resp: SearchResponse = self.post("search", &req).await?;
         Ok(resp.results)
     }
 
@@ -810,21 +770,41 @@ impl SearchClient {
     {
         let req = ResolveRequest {
             names: names.into_iter().map(Into::into).collect(),
-            env_id: self.env_id.clone(),
+            version: self.version.clone(),
         };
-        let resp: ResolveResponse = self.endpoint.post("v1/resolve", &req).await?;
+        let resp: ResolveResponse = self.post("resolve", &req).await?;
         Ok(resp.results)
     }
 
-    /// One declaration with its description, dependencies and users. An
-    /// unknown name is [`ErrorKind::NotFound`], with a suggestion if any.
-    pub async fn decl(&self, name: &str) -> Result<DeclDetail, Error> {
-        let mut url = self.endpoint.url("v1/decl")?;
+    /// One declaration with its description, dependencies and users: the
+    /// one in snapshot module `module`, as a snapshot hit's `module` names
+    /// it, if it has one, else the bundle's. An unknown name is
+    /// [`ErrorKind::NotFound`], with a suggestion if any.
+    pub async fn get_declaration(
+        &self,
+        name: &str,
+        module: Option<&str>,
+    ) -> Result<DeclarationDetail, Error> {
+        let mut url = self.endpoint.url("declarations")?;
         url.path_segments_mut()
             .map_err(|_| Error::Url(name.to_string()))?
             .push(name);
-        let resp: DeclResponse = self.endpoint.get(url).await?;
-        Ok(resp.decl)
+        if let Some(m) = module {
+            url.query_pairs_mut().append_pair("module", m);
+        }
+        if let Some(v) = &self.version {
+            url.query_pairs_mut().append_pair("version", v);
+        }
+        let resp: GetDeclarationResponse = self.endpoint.get(url).await?;
+        Ok(resp.declaration)
+    }
+
+    async fn post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, Error> {
+        self.endpoint.post(path, body).await
     }
 }
 

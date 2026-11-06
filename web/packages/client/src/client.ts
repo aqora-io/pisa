@@ -6,11 +6,11 @@ import type {
   CheckResult,
   CreateSnapshotRequest,
   CreateSnapshotResponse,
-  DeclDetail,
-  DeclResponse,
+  DeclarationDetail,
   DeleteSnapshotResponse,
   Detail,
   ErrorKind,
+  GetDeclarationResponse,
   Health,
   Job as JobSchema,
   Labels,
@@ -45,9 +45,6 @@ export interface ClientOptions {
   /** Seconds Lean may run for a request, when it says nothing (the server's
    *  default is 60). */
   timeout?: number;
-  /** The search environment to pin, so that search fails rather than answer
-   *  from another one. */
-  envId?: string;
   fetch?: typeof fetch;
   headers?: Record<string, string>;
 }
@@ -72,8 +69,9 @@ export interface CheckOptions extends RunOptions {
   at?: Pos[];
 }
 
-/** What a listing or an audit takes. Requests that take an id don't: it
- *  carries its version. */
+/** What a listing, an audit or a search takes. Requests that take an id
+ *  don't: it carries its version. Search answers for the version of its
+ *  index and of its snapshots, and any other is `not_found`. */
 export interface VersionOptions extends RequestOptions {
   version?: string;
 }
@@ -95,11 +93,7 @@ export interface RebuildOptions extends RequestOptions {
   verify?: boolean;
 }
 
-export interface SearchOptions extends RequestOptions {
-  envId?: string;
-}
-
-export interface DeclOptions extends RequestOptions {
+export interface GetDeclarationOptions extends VersionOptions {
   /** A snapshot module to look in first, as a snapshot hit's `module`. */
   module?: ModuleName;
 }
@@ -145,7 +139,6 @@ export class PisaClient {
   readonly url: string;
   readonly version: string | undefined;
   readonly timeout: number | undefined;
-  readonly envId: string | undefined;
   private readonly fetcher: typeof fetch;
   private readonly headers: Record<string, string>;
 
@@ -153,7 +146,6 @@ export class PisaClient {
     this.url = options.url.replace(/\/+$/, "");
     this.version = options.version;
     this.timeout = options.timeout;
-    this.envId = options.envId;
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.headers = options.headers ?? {};
   }
@@ -371,38 +363,31 @@ export class PisaClient {
     return this.call("DELETE", ["jobs", job.id], undefined, options);
   }
 
-  async search(query: Query, options: SearchOptions = {}): Promise<QueryResult> {
+  async search(query: Query, options: VersionOptions = {}): Promise<QueryResult> {
     const [result] = await this.searchBatch([query], options);
     if (result === undefined) throw new PisaError("bad_response", "the search returned no result");
     return result;
   }
 
   /** Runs up to 64 queries; one result each, in order. */
-  async searchBatch(queries: Query[], options: SearchOptions = {}): Promise<QueryResult[]> {
-    const r = await this.call<SearchResponse>(
-      "POST",
-      ["v1", "search"],
-      { queries, ...this.env(options) },
-      options,
-    );
+  async searchBatch(queries: Query[], options: VersionOptions = {}): Promise<QueryResult[]> {
+    const r = await this.call<SearchResponse>("POST", ["search"], { queries, ...this.versionOf(options) }, options);
     return r.results;
   }
 
   /** Whether each name exists, and close names for those that don't. */
-  async resolve(names: string[], options: SearchOptions = {}): Promise<Resolution[]> {
-    const r = await this.call<ResolveResponse>(
-      "POST",
-      ["v1", "resolve"],
-      { names, ...this.env(options) },
-      options,
-    );
+  async resolve(names: string[], options: VersionOptions = {}): Promise<Resolution[]> {
+    const r = await this.call<ResolveResponse>("POST", ["resolve"], { names, ...this.versionOf(options) }, options);
     return r.results;
   }
 
-  async decl(name: string, options: DeclOptions = {}): Promise<DeclDetail> {
-    const query = options.module === undefined ? undefined : new URLSearchParams({ module: options.module });
-    const r = await this.call<DeclResponse>("GET", ["v1", "decl", name], undefined, options, query);
-    return r.decl;
+  /** A declaration with its description, dependencies and users: the one in
+   *  snapshot module `module` if it has one, else the bundle's. */
+  async getDeclaration(name: string, options: GetDeclarationOptions = {}): Promise<DeclarationDetail> {
+    const query = this.versionQuery(options);
+    if (options.module !== undefined) query.set("module", options.module);
+    const r = await this.call<GetDeclarationResponse>("GET", ["declarations", name], undefined, options, query);
+    return r.declaration;
   }
 
   private createSnapshotRequest(code: string, options: CreateSnapshotOptions): CreateSnapshotRequest {
@@ -441,9 +426,9 @@ export class PisaClient {
     return query;
   }
 
-  private env(options: SearchOptions): { env_id?: string } {
-    const envId = options.envId ?? this.envId;
-    return envId !== undefined ? { env_id: envId } : {};
+  private versionOf(options: VersionOptions): { version?: string } {
+    const version = options.version ?? this.version;
+    return version !== undefined ? { version } : {};
   }
 
   private async call<T>(

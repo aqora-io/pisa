@@ -1,7 +1,6 @@
 //! Client-facing HTTP API; the types and conventions are in
 //! `pisa_protocol::api`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,6 +16,7 @@ use pisa_protocol::api::{
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
+use pisa_protocol::version::Versions;
 use pisa_protocol::wire::{CheckJob, Job, JobResult};
 use serde::de::DeserializeOwned;
 
@@ -30,22 +30,6 @@ pub struct App {
     /// Set when the server is about to stop: `/health` fails, so that load
     /// balancers stop sending it requests while it still serves them.
     pub draining: AtomicBool,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Versions {
-    pub default: Option<String>,
-    pub aliases: HashMap<String, String>,
-}
-
-impl Versions {
-    /// The pool label for a requested version (or the default), following aliases.
-    pub fn resolve(&self, requested: Option<&str>) -> Option<String> {
-        let v = requested
-            .map(str::to_string)
-            .or_else(|| self.default.clone())?;
-        Some(self.aliases.get(&v).cloned().unwrap_or(v))
-    }
 }
 
 /// The API's OpenAPI document, without `/health`, which whoever serves the

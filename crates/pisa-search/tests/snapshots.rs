@@ -19,7 +19,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use pisa_db::catalog::{Catalog, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls};
 use pisa_db::db::Db;
-use pisa_protocol::api::CheckResult;
+use pisa_protocol::api::{CheckResult, ProofStatus};
 use pisa_protocol::search::{Hit, Query, QueryResult, SnapshotScope};
 use pisa_search::anthropic::Client;
 use pisa_search::corpus::{Corpus, Decl, Manifest};
@@ -331,6 +331,7 @@ fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
         docstring: Some(doc.into()),
         deprecated_to: None,
         uses_sorry: false,
+        status: ProofStatus::Proved,
     }
 }
 
@@ -394,7 +395,7 @@ fn complete(r: &QueryResult) -> bool {
 
 fn about_doubling(snapshots: SnapshotScope) -> Query {
     Query {
-        nl: Some("doubling a number adds it to itself".into()),
+        description: Some("doubling a number adds it to itself".into()),
         snapshots,
         ..Default::default()
     }
@@ -464,9 +465,11 @@ async fn snapshots_are_searched_by_scope() {
         Some("import Mathlib\nimport PisaSnap.sa1")
     );
     assert!(hit.text.contains("import PisaSnap.sa1"), "{}", hit.text);
-    let snap = hit.snapshot.as_ref().unwrap();
-    assert_eq!(snap.entries, [format!("{}~{entry}", s.version)]);
-    assert!(!snap.dirty && !snap.verified);
+    assert_eq!(hit.snapshot_ids, [format!("{}~{entry}", s.version)]);
+    assert_eq!(
+        (hit.status, hit.verified),
+        (Some(ProofStatus::Proved), Some(false))
+    );
 
     let hits = search(&e, about_doubling(labels(&[("run", "1")]))).await;
     assert_eq!(hits[0].name, "double_eq");
@@ -477,7 +480,7 @@ async fn snapshots_are_searched_by_scope() {
     ] {
         let hits = search(&e, about_doubling(scope.clone())).await;
         assert!(!has(&hits, "double_eq"), "{scope:?}: {:?}", names(&hits));
-        assert!(hits.iter().all(|h| h.snapshot.is_none()));
+        assert!(hits.iter().all(|h| h.verified.is_none()));
     }
 
     // By name, exactly or misspelled, within the scope only.
@@ -561,7 +564,7 @@ async fn snapshots_only() {
     let e = s.engine().await;
     s.index(&e, false);
     let q = Query {
-        nl: Some("addition of natural numbers".into()),
+        description: Some("addition of natural numbers".into()),
         libraries: vec!["PisaSnap".into()],
         ..about_doubling(SnapshotScope::All)
     };
@@ -583,7 +586,7 @@ async fn a_query_is_embedded_once() {
     let r = result(&e, &q).await;
     assert!(complete(&r), "{r:?}");
     // Other filters, the same text.
-    search(&e, Query { k: 3, ..q }).await;
+    search(&e, Query { limit: 3, ..q }).await;
     assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), before + 1);
     s.done(e).await;
 }
@@ -633,8 +636,8 @@ async fn concurrent_searches_share_one_embedding() {
     let mut e = s.open().await;
     e.embed_wait = Duration::from_secs(3);
     let qs: Vec<Query> = (1..=5)
-        .map(|k| Query {
-            k,
+        .map(|limit| Query {
+            limit,
             ..about_doubling(SnapshotScope::None)
         })
         .collect();
@@ -647,11 +650,11 @@ async fn concurrent_searches_share_one_embedding() {
 
     // A text three times in one batch goes into its request once.
     let t = Query {
-        nl: Some("twice a number is the number plus itself".into()),
+        description: Some("twice a number is the number plus itself".into()),
         ..Default::default()
     };
     let u = Query {
-        nl: Some("one is a unit for multiplication".into()),
+        description: Some("one is a unit for multiplication".into()),
         ..Default::default()
     };
     let batch = [t.clone(), t.clone(), t, u];
@@ -689,7 +692,7 @@ async fn too_many_embeddings_skip_the_dense_lane() {
     e.embed_wait = Duration::from_millis(300);
     let qs: Vec<Query> = (0..33)
         .map(|i| Query {
-            nl: Some(format!("doubling number {i}")),
+            description: Some(format!("doubling number {i}")),
             ..Default::default()
         })
         .collect();
@@ -723,12 +726,12 @@ async fn descriptions_and_vectors_are_made_once_and_kept() {
 
     // Found by the description's words, which the docstring doesn't have.
     let q = Query {
-        nl: Some("twice a natural number".into()),
+        description: Some("twice a natural number".into()),
         ..about_doubling(SnapshotScope::All)
     };
     let hits = until(&e, q.clone(), |hits| {
         hits.first()
-            .is_some_and(|h| h.informal_name.as_deref() == Some("Twice double_eq"))
+            .is_some_and(|h| h.title.as_deref() == Some("Twice double_eq"))
     })
     .await;
     assert_eq!(hits[0].name, "double_eq");
@@ -753,7 +756,7 @@ async fn descriptions_and_vectors_are_made_once_and_kept() {
     assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), llm);
     assert_eq!(s.mocks.embed_calls.load(Ordering::SeqCst), embeds);
     let hits = search(&e, q).await;
-    assert_eq!(hits[0].informal_name.as_deref(), Some("Twice double_eq"));
+    assert_eq!(hits[0].title.as_deref(), Some("Twice double_eq"));
     s.done((e, again)).await;
 }
 
@@ -773,7 +776,7 @@ async fn without_a_model_declarations_are_embedded_from_docstrings() {
         hits.first().is_some_and(|h| h.name == "double_eq")
     })
     .await;
-    assert!(hits[0].informal_name.is_none());
+    assert!(hits[0].title.is_none());
     assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), 0);
     s.done(e).await;
 }
@@ -857,12 +860,12 @@ async fn a_module_with_many_entries() {
     let hits = until(&e, q, |h| has(h, "double_eq")).await;
     let hit = hits.iter().find(|h| h.name == "double_eq").unwrap();
     assert_eq!(
-        hit.snapshot.as_ref().unwrap().entries,
+        hit.snapshot_ids,
         [format!("{}~{}", s.version, entries[499])]
     );
     let all = search(&e, about_doubling(SnapshotScope::All)).await;
     let hit = all.iter().find(|h| h.name == "double_eq").unwrap();
-    assert_eq!(hit.snapshot.as_ref().unwrap().entries.len(), 10);
+    assert_eq!(hit.snapshot_ids.len(), 10);
     s.done(e).await;
 }
 

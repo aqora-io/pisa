@@ -55,7 +55,7 @@ async fn search_that_isnt_ready_leaves_the_api_up() {
     assert_eq!(health["search"]["ready"], false, "{health}");
     assert_eq!(health["search"]["qdrant"], false, "{health}");
 
-    let (status, body) = post(&url("/v1/search"), json!({"queries": [{"q": "x"}]})).await;
+    let (status, body) = post(&url("/search"), json!({"queries": [{"text": "x"}]})).await;
     assert_eq!(status, 503, "{body}");
     assert!(
         body["error"]["message"]
@@ -82,14 +82,21 @@ async fn without_qdrant_there_is_no_search() {
         health,
         json!({"status": "ok", "workers": 0, "search": null})
     );
-    let (status, body) = post(&url("/v1/search"), json!({"queries": []})).await;
-    assert_eq!(status, 404, "{body}");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("doesn't search")
-    );
+    let searches = [
+        post(&url("/search"), json!({"queries": []})).await,
+        post(&url("/resolve"), json!({"names": []})).await,
+        get(&url("/declarations/Nat.add_comm")).await,
+    ];
+    for (status, body) in searches {
+        assert_eq!(status, 404, "{body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("doesn't search"),
+            "{body}"
+        );
+    }
     let (status, _) = get(&url("/nope")).await;
     assert_eq!(status, 404);
     // The spec covers search all the same.

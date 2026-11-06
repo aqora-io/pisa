@@ -9,7 +9,7 @@ use common::{Cluster, url_of};
 use futures::StreamExt;
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
-use pisa_client::{Client, Error, HealthStatus, SearchClient};
+use pisa_client::{Client, HealthStatus};
 use pisa_worker::queue::LIVE;
 use serde_json::{Value, json};
 
@@ -170,25 +170,19 @@ async fn a_server_shutting_down_answers_what_it_has() {
     let health = url_of(&b, "/health");
     let base = url_of(&b, "/");
     let client = Client::new(&base).unwrap();
-    let search = SearchClient::new(&base).unwrap();
     assert_eq!(client.health().await.unwrap().status, HealthStatus::Ok);
-    search.health().await.unwrap();
     let stopping = tokio::spawn(b.shutdown(Duration::from_millis(300), Duration::from_secs(10)));
-    // Load balancers learn first, while it still serves. The clients ask
-    // first, to be early in the grace period.
-    let mut draining = client.health().await.unwrap();
+    // Load balancers learn first, while it still serves.
+    let mut draining = None;
     until("the server drains", async || {
-        draining = client.health().await.unwrap();
-        draining.status == HealthStatus::Draining
+        let health = client.health().await.unwrap();
+        let drained = health.status == HealthStatus::Draining;
+        draining = Some(health);
+        drained
     })
     .await;
-    // The client returns that health rather than failing on the 503, and
-    // search's, which has no health to return, fails.
-    assert_eq!(draining.workers, Some(1));
-    match search.health().await {
-        Err(Error::Server { status: 503, .. }) => {}
-        other => panic!("{other:?}"),
-    }
+    // The client returns that health rather than failing on the 503.
+    assert_eq!(draining.unwrap().workers, Some(1));
     let r = c.client.get(health).send().await.unwrap();
     assert_eq!(r.status(), 503);
     assert_eq!(r.json::<Value>().await.unwrap()["status"], "draining");

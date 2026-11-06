@@ -443,82 +443,6 @@
         ],
         "type": "object"
       },
-      "DeclDetail": {
-        "properties": {
-          "deps": {
-            "description": "Declarations it uses, in its statement and its proof or body.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "docstring": {
-            "type": "string"
-          },
-          "flags": {
-            "$ref": "#/components/schemas/Flags"
-          },
-          "informal": {
-            "$ref": "#/components/schemas/Informal"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "library": {
-            "type": "string"
-          },
-          "module": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "signature": {
-            "type": "string"
-          },
-          "source_url": {
-            "type": "string"
-          },
-          "type_full": {
-            "description": "The type with full names and no notation.",
-            "type": "string"
-          },
-          "used_by": {
-            "description": "Declarations that use it, most prominent first (at most 50).",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "name",
-          "kind",
-          "library",
-          "module",
-          "signature",
-          "type_full",
-          "flags",
-          "deps",
-          "used_by"
-        ],
-        "type": "object"
-      },
-      "DeclResponse": {
-        "properties": {
-          "decl": {
-            "$ref": "#/components/schemas/DeclDetail"
-          },
-          "env_id": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "env_id",
-          "decl"
-        ],
-        "type": "object"
-      },
       "Declaration": {
         "description": "A new declaration and the axioms it depends on.",
         "properties": {
@@ -577,6 +501,68 @@
           "kind",
           "axioms",
           "type_hash"
+        ],
+        "type": "object"
+      },
+      "DeclarationDetail": {
+        "properties": {
+          "dependencies": {
+            "description": "Declarations it uses, in its statement and its proof or body.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "description": {
+            "$ref": "#/components/schemas/Description",
+            "description": "What it states, in words, when a description exists."
+          },
+          "docstring": {
+            "type": "string"
+          },
+          "flags": {
+            "$ref": "#/components/schemas/Flags"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "library": {
+            "type": "string"
+          },
+          "module": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "signature": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string"
+          },
+          "type_full": {
+            "description": "The type with full names and no notation.",
+            "type": "string"
+          },
+          "used_by": {
+            "description": "Declarations that use it, most prominent first (at most 50).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "library",
+          "module",
+          "signature",
+          "type_full",
+          "flags",
+          "dependencies",
+          "used_by"
         ],
         "type": "object"
       },
@@ -733,6 +719,22 @@
         },
         "type": "object"
       },
+      "GetDeclarationResponse": {
+        "properties": {
+          "declaration": {
+            "$ref": "#/components/schemas/DeclarationDetail"
+          },
+          "version": {
+            "description": "The version the index was built from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "declaration"
+        ],
+        "type": "object"
+      },
       "Health": {
         "description": "`GET /health`: 200, or 503 once the server is stopping.",
         "properties": {
@@ -780,9 +782,6 @@
           "flags": {
             "$ref": "#/components/schemas/Flags"
           },
-          "informal_name": {
-            "type": "string"
-          },
           "kind": {
             "type": "string"
           },
@@ -805,12 +804,19 @@
             "description": "The declaration's signature, with notation.",
             "type": "string"
           },
-          "snapshot": {
-            "$ref": "#/components/schemas/SnapshotHit",
-            "description": "For a declaration of a snapshot module (named in `module`, with the\nheader that loads it in `flags.imports`)."
+          "snapshot_ids": {
+            "description": "For a declaration of a snapshot module (named in `module`, with the\nheader that loads it in `flags.imports`): the ids of the query's\nsnapshots of the module, newest first, at most 10.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "source_url": {
             "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProofStatus",
+            "description": "For a snapshot module's declaration: what its own axioms make it, as\nin the snapshot API, so a proved lemma next to a `sorry` is `proved`."
           },
           "summary": {
             "description": "One or two sentences describing it, when a description exists.",
@@ -819,6 +825,14 @@
           "text": {
             "description": "About 150 tokens for a model's context.",
             "type": "string"
+          },
+          "title": {
+            "description": "What it is called in words, when a description exists, e.g.\n\"Subadditivity of von Neumann entropy\".",
+            "type": "string"
+          },
+          "verified": {
+            "description": "For a snapshot module's declaration: its module and everything the\nmodule imports passed the kernel re-check.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -830,36 +844,6 @@
           "flags",
           "score",
           "text"
-        ],
-        "type": "object"
-      },
-      "Informal": {
-        "description": "A natural-language description of a declaration.",
-        "properties": {
-          "aliases": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "informal_name": {
-            "type": "string"
-          },
-          "source": {
-            "description": "Where it came from, e.g. \"lsv2-v4.28.0-rc1\" or a model name.",
-            "type": "string"
-          },
-          "statement_latex": {
-            "type": "string"
-          },
-          "statement_nl": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "informal_name",
-          "statement_nl",
-          "source"
         ],
         "type": "object"
       },
@@ -1019,6 +1003,10 @@
       "Query": {
         "description": "One search. Fill as many fields as you can: each feeds different lanes,\nand more fields mean better fusion.",
         "properties": {
+          "description": {
+            "description": "A natural-language description.",
+            "type": "string"
+          },
           "goal": {
             "description": "A pretty-printed goal state (hypotheses and `⊢ target`).",
             "type": "string"
@@ -1026,11 +1014,6 @@
           "include_sorried": {
             "description": "Also return declarations that depend on `sorry`, flagged.",
             "type": "boolean"
-          },
-          "k": {
-            "description": "Hits to return (default 5, at most 50).",
-            "minimum": 0,
-            "type": "integer"
           },
           "kinds": {
             "description": "Restrict to these kinds, e.g. `[\"theorem\"]`.",
@@ -1050,29 +1033,26 @@
             },
             "type": "array"
           },
+          "limit": {
+            "description": "Hits to return (default 5, at most 50).",
+            "minimum": 0,
+            "type": "integer"
+          },
           "name": {
             "description": "A declaration name, possibly partial or misspelled.",
-            "type": "string"
-          },
-          "nl": {
-            "description": "A natural-language description.",
             "type": "string"
           },
           "pattern": {
             "description": "A Lean expression or pattern, e.g. `Matrix.trace ?A = 1`.",
             "type": "string"
           },
-          "q": {
-            "description": "Free text from a person; classified as natural language, LaTeX, Lean or a name.",
-            "type": "string"
-          },
           "snapshots": {
             "$ref": "#/components/schemas/SnapshotScope",
             "description": "Snapshots to search as well as the base libraries (default: none)."
           },
-          "verify": {
-            "description": "Check hits against `goal` on a Lean worker (not available yet).",
-            "type": "boolean"
+          "text": {
+            "description": "Free text from a person; classified as natural language, LaTeX, Lean or a name.",
+            "type": "string"
           }
         },
         "type": "object"
@@ -1088,10 +1068,6 @@
               "$ref": "#/components/schemas/Hit"
             },
             "type": "array"
-          },
-          "verification": {
-            "description": "Set when `verify` was asked for, e.g. \"unavailable\".",
-            "type": "string"
           },
           "warnings": {
             "description": "What made this result worse than usual, e.g. a lane that failed.",
@@ -1426,15 +1402,16 @@
       },
       "ResolveRequest": {
         "properties": {
-          "env_id": {
-            "type": "string"
-          },
           "names": {
             "description": "At most 64.",
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "version": {
+            "description": "A version, or an alias of one: the index's, or its snapshots'. Any\nother fails with `not_found`.",
+            "type": "string"
           }
         },
         "required": [
@@ -1444,18 +1421,20 @@
       },
       "ResolveResponse": {
         "properties": {
-          "env_id": {
-            "type": "string"
-          },
           "results": {
+            "description": "One per name, in order.",
             "items": {
               "$ref": "#/components/schemas/Resolution"
             },
             "type": "array"
+          },
+          "version": {
+            "description": "The version the index was built from.",
+            "type": "string"
           }
         },
         "required": [
-          "env_id",
+          "version",
           "results"
         ],
         "type": "object"
@@ -1463,9 +1442,6 @@
       "SearchHealth": {
         "description": "Search's state in a server's `GET /health`.",
         "properties": {
-          "env_id": {
-            "type": "string"
-          },
           "error": {
             "description": "Why the index isn't open yet.",
             "type": "string"
@@ -1481,11 +1457,15 @@
           "ready": {
             "description": "The index is open and Qdrant answers, so searches can be served.",
             "type": "boolean"
+          },
+          "version": {
+            "description": "The version the index was built from.",
+            "type": "string"
           }
         },
         "required": [
           "ready",
-          "env_id",
+          "version",
           "qdrant",
           "leader"
         ],
@@ -1493,16 +1473,16 @@
       },
       "SearchRequest": {
         "properties": {
-          "env_id": {
-            "description": "Fails with `not_found` unless the server has this environment.",
-            "type": "string"
-          },
           "queries": {
             "description": "At most 64.",
             "items": {
               "$ref": "#/components/schemas/Query"
             },
             "type": "array"
+          },
+          "version": {
+            "description": "A version, or an alias of one: the index's, or its snapshots'. Any\nother fails with `not_found`.",
+            "type": "string"
           }
         },
         "required": [
@@ -1512,19 +1492,20 @@
       },
       "SearchResponse": {
         "properties": {
-          "env_id": {
-            "type": "string"
-          },
           "results": {
             "description": "One per query, in order.",
             "items": {
               "$ref": "#/components/schemas/QueryResult"
             },
             "type": "array"
+          },
+          "version": {
+            "description": "The version the index was built from.",
+            "type": "string"
           }
         },
         "required": [
-          "env_id",
+          "version",
           "results"
         ],
         "type": "object"
@@ -1663,31 +1644,6 @@
           }
         ],
         "description": "`GET /snapshots/{id}`: a snapshot with its module's code, check and\nexports."
-      },
-      "SnapshotHit": {
-        "properties": {
-          "dirty": {
-            "description": "See the snapshot API: the module depends on `sorry` or other axioms\noutside the allowed list.",
-            "type": "boolean"
-          },
-          "entries": {
-            "description": "The ids of the query's snapshots of the module, newest first, at most\n10.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "verified": {
-            "description": "The module and everything it imports passed the kernel re-check.",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "entries",
-          "dirty",
-          "verified"
-        ],
-        "type": "object"
       },
       "SnapshotScope": {
         "description": "Which snapshot modules a query searches: `\"none\"`, `\"all\"`, or\n`{\"labels\": {\"k\": \"v\"}}`, the modules of the entries that have every label.",
@@ -1941,7 +1897,7 @@
     }
   },
   "info": {
-    "description": "Checks Lean code, runs proof sessions, keeps snapshots and searches declarations. Errors are `{error: {kind, message}}`, with a status that follows the kind. `/v1/*` is a 404 on a server without search.",
+    "description": "Checks Lean code, runs proof sessions, keeps snapshots and searches declarations. Errors are `{error: {kind, message}}`, with a status that follows the kind. Search's endpoints are a 404 on a server without search.",
     "license": {
       "identifier": "MIT OR Apache-2.0",
       "name": "MIT OR Apache-2.0"
@@ -2167,6 +2123,117 @@
         "summary": "Check several pieces of code",
         "tags": [
           "checks"
+        ]
+      }
+    },
+    "/declarations/{name}": {
+      "get": {
+        "description": "Its signature, description, flags, dependencies and users: a snapshot's declaration with a snapshot hit's `module`, else the bundle's.",
+        "operationId": "getDeclaration",
+        "parameters": [
+          {
+            "description": "The full name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A snapshot module to look in first.",
+            "in": "query",
+            "name": "module",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A version, or an alias of one: the index's, or its snapshots'. Any\nother is a 404.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetDeclarationResponse"
+                }
+              }
+            },
+            "description": "The declaration"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "A declaration's details",
+        "tags": [
+          "search"
         ]
       }
     },
@@ -2404,6 +2471,190 @@
         "summary": "An async request's answer",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/resolve": {
+      "post": {
+        "description": "Whether each name exists, with close names for one that doesn't.",
+        "operationId": "resolve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResolveResponse"
+                }
+              }
+            },
+            "description": "A resolution per name, in order"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Check names exist",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/search": {
+      "post": {
+        "description": "Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.",
+        "operationId": "search",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            },
+            "description": "A result per query, in order"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Search declarations",
+        "tags": [
+          "search"
         ]
       }
     },
@@ -3799,292 +4050,6 @@
         "summary": "Apply a tactic to a state",
         "tags": [
           "sessions"
-        ]
-      }
-    },
-    "/v1/decl/{name}": {
-      "get": {
-        "description": "Its signature, description, flags, dependencies and users: a snapshot's declaration with a snapshot hit's `module`, else the bundle's.",
-        "operationId": "decl",
-        "parameters": [
-          {
-            "description": "The full name",
-            "in": "path",
-            "name": "name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "description": "A snapshot module to look in first.",
-            "in": "query",
-            "name": "module",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DeclResponse"
-                }
-              }
-            },
-            "description": "The declaration"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`bad_request`: the request breaks the API's rules."
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`capacity`: no worker took the job in time; retry later."
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`internal`."
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
-          }
-        },
-        "summary": "A declaration's details",
-        "tags": [
-          "search"
-        ]
-      }
-    },
-    "/v1/resolve": {
-      "post": {
-        "description": "Whether each name exists, with close names for one that doesn't.",
-        "operationId": "resolve",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResolveRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResolveResponse"
-                }
-              }
-            },
-            "description": "A resolution per name, in order"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`bad_request`: the request breaks the API's rules."
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`capacity`: no worker took the job in time; retry later."
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`internal`."
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
-          }
-        },
-        "summary": "Check names exist",
-        "tags": [
-          "search"
-        ]
-      }
-    },
-    "/v1/search": {
-      "post": {
-        "description": "Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.",
-        "operationId": "search",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SearchRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SearchResponse"
-                }
-              }
-            },
-            "description": "A result per query, in order"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`bad_request`: the request breaks the API's rules."
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`capacity`: no worker took the job in time; retry later."
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`internal`."
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
-          }
-        },
-        "summary": "Search declarations",
-        "tags": [
-          "search"
         ]
       }
     }

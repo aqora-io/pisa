@@ -514,50 +514,25 @@ impl Client {
         let job = job_of(job)?;
         call(py, async move { self.inner.cancel_job(&job).await })
     }
-}
-
-/// A client for one declaration search server. Safe to share between threads.
-#[pyclass(frozen, module = "pisa_client")]
-struct SearchClient {
-    inner: pisa_client::SearchClient,
-}
-
-#[pymethods]
-impl SearchClient {
-    #[new]
-    #[pyo3(signature = (url, *, env_id = None))]
-    fn new(url: &str, env_id: Option<String>) -> PyResult<Self> {
-        let mut inner = pisa_client::SearchClient::new(url)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if let Some(env) = env_id {
-            inner = inner.with_env(env);
-        }
-        Ok(SearchClient { inner })
-    }
-
-    fn health(&self, py: Python<'_>) -> PyResult<()> {
-        let result = py.detach(|| runtime().block_on(self.inner.health()));
-        result.map_err(|e| to_py_err(py, e))
-    }
 
     #[pyo3(signature = (
-        q = None, *, nl = None, latex = None, pattern = None, goal = None, name = None,
-        libraries = Vec::new(), kinds = Vec::new(), k = 5, include_sorried = false,
+        text = None, *, description = None, latex = None, pattern = None, goal = None,
+        name = None, libraries = None, kinds = None, limit = 5, include_sorried = false,
         snapshots = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search<'py>(
         &self,
         py: Python<'py>,
-        q: Option<String>,
-        nl: Option<String>,
+        text: Option<String>,
+        description: Option<String>,
         latex: Option<String>,
         pattern: Option<String>,
         goal: Option<String>,
         name: Option<String>,
-        libraries: Vec<String>,
-        kinds: Vec<String>,
-        k: usize,
+        libraries: Option<Vec<String>>,
+        kinds: Option<Vec<String>>,
+        limit: usize,
         include_sorried: bool,
         snapshots: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -567,17 +542,16 @@ impl SearchClient {
             None => Default::default(),
         };
         let query = pisa_client::Query {
-            q,
-            nl,
+            text,
+            description,
             latex,
             pattern,
             goal,
             name,
-            libraries,
-            kinds,
-            k,
+            libraries: libraries.unwrap_or_default(),
+            kinds: kinds.unwrap_or_default(),
+            limit,
             include_sorried,
-            verify: false,
             snapshots,
         };
         call(py, async move { self.inner.search(&query).await })
@@ -602,13 +576,20 @@ impl SearchClient {
         call(py, self.inner.resolve(names))
     }
 
-    fn decl<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.decl(&name).await })
+    #[pyo3(signature = (name, *, module = None))]
+    fn get_declaration<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        module: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            self.inner.get_declaration(&name, module.as_deref()).await
+        })
     }
 }
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Client>()?;
-    m.add_class::<SearchClient>()
+    m.add_class::<Client>()
 }

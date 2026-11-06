@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use pisa_protocol::api::ProofStatus;
 use pisa_protocol::search::Informal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -89,11 +90,12 @@ pub struct PointPayload {
     pub deps: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub used_by: Vec<String>,
-    /// For a snapshot declaration: its module's id, state and revision.
+    /// For a snapshot declaration: its module's id, its own status, and its
+    /// module's state and revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_id: Option<String>,
-    #[serde(default)]
-    pub dirty: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProofStatus>,
     #[serde(default)]
     pub verified: bool,
     #[serde(default)]

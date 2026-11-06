@@ -12,8 +12,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use pisa_protocol::api::{ApiErrors, Error, ErrorKind, ErrorResponse};
 use pisa_protocol::search::{
-    DeclResponse, ResolveRequest, ResolveResponse, SearchHealth, SearchRequest, SearchResponse,
+    GetDeclarationResponse, ResolveRequest, ResolveResponse, SearchHealth, SearchRequest,
+    SearchResponse,
 };
+use pisa_protocol::version::Versions;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -84,18 +86,22 @@ struct Snapshots {
 pub struct Search {
     engine: OnceLock<Arc<Engine>>,
     env_id: String,
+    /// How a request's version resolves, as the rest of the API does.
+    versions: Versions,
     q: Qdrant,
     /// Why the engine isn't open yet.
     waiting: Mutex<String>,
 }
 
 impl Search {
-    /// Starts search as `args` say, with the snapshots in `db`; `None` if
-    /// `args` name no Qdrant. Bad settings are errors now; Qdrant being down,
-    /// or the bundle not loaded yet, only delays search.
+    /// Starts search as `args` say, with the snapshots in `db`, resolving
+    /// requests' versions through `versions`; `None` if `args` name no
+    /// Qdrant. Bad settings are errors now; Qdrant being down, or the bundle
+    /// not loaded yet, only delays search.
     pub async fn start(
         args: SearchArgs,
         db: pisa_db::db::Db,
+        versions: Versions,
     ) -> anyhow::Result<Option<Arc<Search>>> {
         // Compose passes unset variables as empty ones.
         let some = |s: Option<String>| s.filter(|s| !s.is_empty());
@@ -135,6 +141,7 @@ impl Search {
         let search = Arc::new(Search {
             engine: OnceLock::new(),
             env_id,
+            versions,
             q,
             waiting: Mutex::new("opening the engine".into()),
         });
@@ -143,9 +150,10 @@ impl Search {
     }
 
     /// Search over `engine`, open already.
-    pub fn ready(engine: Arc<Engine>) -> Arc<Search> {
+    pub fn ready(engine: Arc<Engine>, versions: Versions) -> Arc<Search> {
         let search = Search {
             env_id: engine.env_id().to_string(),
+            versions,
             q: engine.q.clone(),
             engine: OnceLock::from(engine),
             waiting: Mutex::new(String::new()),
@@ -227,7 +235,7 @@ impl Search {
         let ready = engine.is_some() && qdrant;
         let health = SearchHealth {
             ready,
-            env_id: self.env_id.clone(),
+            version: self.env_id.clone(),
             qdrant,
             leader: engine.is_some_and(|e| e.leader.load(std::sync::atomic::Ordering::Acquire)),
             error: engine
@@ -242,16 +250,16 @@ impl Search {
 #[derive(utoipa::OpenApi)]
 #[openapi(
     components(schemas(ErrorResponse)),
-    paths(search_handler, resolve, decl)
+    paths(search_handler, resolve, get_declaration)
 )]
 pub struct ApiDoc;
 
 /// Search's routes, to serve next to others.
 pub fn routes(search: Arc<Search>) -> Router {
     Router::new()
-        .route("/v1/search", post(search_handler))
-        .route("/v1/resolve", post(resolve))
-        .route("/v1/decl/{name}", get(decl))
+        .route("/search", post(search_handler))
+        .route("/resolve", post(resolve))
+        .route("/declarations/{name}", get(get_declaration))
         .with_state(search)
 }
 
@@ -296,16 +304,33 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
     }
 }
 
-fn check_env(engine: &Engine, pinned: Option<&str>) -> Result<(), ApiError> {
-    match pinned {
-        Some(env) if env != engine.env_id() => Err(ApiError::new(
+impl Search {
+    /// Fails unless `requested` names this search's index or snapshots.
+    fn check_version(&self, engine: &Engine, requested: Option<&str>) -> Result<(), ApiError> {
+        let snapshots = engine.snapshots.as_deref();
+        check_version(&self.versions, engine.env_id(), snapshots, requested)
+    }
+}
+
+/// Fails with `not_found` unless `requested`, through `versions`' aliases, is
+/// the `index`'s version or the `snapshots`'. A request that names none gets
+/// the index, whatever the default version.
+fn check_version(
+    versions: &Versions,
+    index: &str,
+    snapshots: Option<&str>,
+    requested: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let version = versions.resolve(Some(requested));
+    match version.as_deref() {
+        Some(v) if v == index || Some(v) == snapshots => Ok(()),
+        _ => Err(ApiError::new(
             ErrorKind::NotFound,
-            format!(
-                "no index for env {env}; this server has {}",
-                engine.env_id()
-            ),
+            format!("no index for version {requested}"),
         )),
-        _ => Ok(()),
     }
 }
 
@@ -340,7 +365,7 @@ fn unavailable(e: impl std::fmt::Display) -> ApiError {
 }
 
 #[utoipa::path(
-    post, path = "/v1/search", operation_id = "search", tag = "search",
+    post, path = "/search", operation_id = "search", tag = "search",
     summary = "Search declarations",
     description = "Finds Mathlib and Physlib declarations, and snapshot declarations when asked \
         for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. \
@@ -353,7 +378,7 @@ async fn search_handler(
     Body(mut req): Body<SearchRequest>,
 ) -> Result<Json<SearchResponse>, ApiError> {
     let engine = search.engine()?;
-    check_env(engine, req.env_id.as_deref())?;
+    search.check_version(engine, req.version.as_deref())?;
     check_batch(req.queries.len())?;
     for q in &mut req.queries {
         engine
@@ -365,12 +390,12 @@ async fn search_handler(
         Err(SearchError::BadRequest(m)) => return Err(ApiError::new(ErrorKind::BadRequest, m)),
         Err(SearchError::Unavailable(e)) => return Err(unavailable(e)),
     };
-    let env_id = engine.env_id().to_string();
-    Ok(Json(SearchResponse { env_id, results }))
+    let version = engine.env_id().to_string();
+    Ok(Json(SearchResponse { version, results }))
 }
 
 #[utoipa::path(
-    post, path = "/v1/resolve", operation_id = "resolve", tag = "search",
+    post, path = "/resolve", operation_id = "resolve", tag = "search",
     summary = "Check names exist",
     description = "Whether each name exists, with close names for one that doesn't.",
     request_body = ResolveRequest,
@@ -381,43 +406,47 @@ async fn resolve(
     Body(req): Body<ResolveRequest>,
 ) -> Result<Json<ResolveResponse>, ApiError> {
     let engine = search.engine()?;
-    check_env(engine, req.env_id.as_deref())?;
+    search.check_version(engine, req.version.as_deref())?;
     check_batch(req.names.len())?;
     let results = engine.resolve(&req.names).await.map_err(unavailable)?;
-    let env_id = engine.env_id().to_string();
-    Ok(Json(ResolveResponse { env_id, results }))
+    let version = engine.env_id().to_string();
+    Ok(Json(ResolveResponse { version, results }))
 }
 
-/// `GET /v1/decl/{name}`'s query.
+/// `GET /declarations/{name}`'s query.
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
-struct DeclQuery {
+struct GetDeclarationQuery {
     /// A snapshot module to look in first.
     module: Option<String>,
+    /// A version, or an alias of one: the index's, or its snapshots'. Any
+    /// other is a 404.
+    version: Option<String>,
 }
 
 #[utoipa::path(
-    get, path = "/v1/decl/{name}", operation_id = "decl", tag = "search",
+    get, path = "/declarations/{name}", operation_id = "getDeclaration", tag = "search",
     summary = "A declaration's details",
     description = "Its signature, description, flags, dependencies and users: a snapshot's \
         declaration with a snapshot hit's `module`, else the bundle's.",
-    params(("name" = String, Path, description = "The full name"), DeclQuery),
-    responses((status = 200, description = "The declaration", body = DeclResponse), ApiErrors),
+    params(("name" = String, Path, description = "The full name"), GetDeclarationQuery),
+    responses((status = 200, description = "The declaration", body = GetDeclarationResponse), ApiErrors),
 )]
-async fn decl(
+async fn get_declaration(
     State(search): State<Arc<Search>>,
     Path(name): Path<String>,
-    Query(q): Query<DeclQuery>,
-) -> Result<Json<DeclResponse>, ApiError> {
+    Query(q): Query<GetDeclarationQuery>,
+) -> Result<Json<GetDeclarationResponse>, ApiError> {
     let engine = search.engine()?;
+    search.check_version(engine, q.version.as_deref())?;
     match engine
         .detail(&name, q.module.as_deref())
         .await
         .map_err(unavailable)?
     {
-        Some(decl) => Ok(Json(DeclResponse {
-            env_id: engine.env_id().to_string(),
-            decl,
+        Some(declaration) => Ok(Json(GetDeclarationResponse {
+            version: engine.env_id().to_string(),
+            declaration,
         })),
         None => {
             let r = engine
@@ -433,5 +462,41 @@ async fn decl(
                 format!("unknown declaration {name}{}", hint.unwrap_or_default()),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn a_request_names_the_index_or_the_snapshots_version() {
+        let versions = Versions {
+            default: Some("pool".into()),
+            aliases: HashMap::from([
+                ("latest".into(), "index".into()),
+                ("snaps".into(), "snapshots".into()),
+            ]),
+        };
+        let check = |requested| check_version(&versions, "index", Some("snapshots"), requested);
+        // No version is whatever the server has, the default pool's or not.
+        for ok in [
+            None,
+            Some("index"),
+            Some("snapshots"),
+            Some("latest"),
+            Some("snaps"),
+        ] {
+            assert!(check(ok).is_ok(), "{ok:?}");
+        }
+        for other in ["other", "pool"] {
+            let ApiError(e) = check(Some(other)).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::NotFound);
+            assert_eq!(e.message, format!("no index for version {other}"));
+        }
+        // Without snapshots, only the index's.
+        assert!(check_version(&versions, "index", None, Some("snapshots")).is_err());
     }
 }

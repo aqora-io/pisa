@@ -18,7 +18,7 @@ use crate::text::split_name;
 
 pub const FORMAT_VERSION: u32 = 4;
 
-/// What a hit or `/v1/decl` shows for one declaration.
+/// What a hit or `/declarations` shows for one declaration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoredDecl {
     pub name: String,

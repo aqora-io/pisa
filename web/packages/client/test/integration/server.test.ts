@@ -125,7 +125,7 @@ describe("snapshots", () => {
 describe("the server", () => {
   it("is healthy, with its worker, and doesn't search", async () => {
     expect(await client.health()).toEqual({ status: "ok", workers: 1, search: null });
-    const search = await client.search({ nl: "x" }).catch((e: unknown) => e);
+    const search = await client.search({ description: "x" }).catch((e: unknown) => e);
     expect(search).toMatchObject({ kind: "not_found", status: 404 });
   });
 

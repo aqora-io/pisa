@@ -87,11 +87,14 @@ describe.skipIf(qdrant === undefined)("search", () => {
   });
 
   it("finds declarations by description, name and batch", async () => {
-    const { hits } = await client.search({ nl: "trace of the identity matrix" });
+    const { hits } = await client.search({ description: "trace of the identity matrix" });
     expect(hits[0]?.name).toBe("Matrix.trace_one");
-    const byName = await client.search({ name: "Real.sqrt_mul_sefl", k: 1 });
+    const byName = await client.search({ name: "Real.sqrt_mul_sefl", limit: 1 });
     expect(byName.hits.map((h) => h.name)).toEqual(["Real.sqrt_mul_self"]);
-    const [trace, sqrt] = await client.searchBatch([{ q: "Matrix.trace" }, { nl: "sqrt of a product", kinds: ["theorem"] }]);
+    const [trace, sqrt] = await client.searchBatch([
+      { text: "Matrix.trace" },
+      { description: "sqrt of a product", kinds: ["theorem"] },
+    ]);
     expect(trace?.hits[0]?.name).toBe("Matrix.trace");
     expect(sqrt?.hits[0]?.name).toBe("Real.sqrt_mul_self");
   });
@@ -100,17 +103,18 @@ describe.skipIf(qdrant === undefined)("search", () => {
     const [missing, found] = await client.resolve(["Real.sqrt_mul_sefl", "Matrix.trace"]);
     expect(missing).toMatchObject({ exists: false, suggestions: [{ name: "Real.sqrt_mul_self" }] });
     expect(found?.exists).toBe(true);
-    const decl = await client.decl("Matrix.trace");
-    expect(decl.deps).toEqual(["Matrix"]);
-    expect(decl.used_by).toContain("Matrix.trace_one");
-    expect(await client.decl("Real.sqrt_mul_sefl").catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
+    const declaration = await client.getDeclaration("Matrix.trace");
+    expect(declaration.dependencies).toEqual(["Matrix"]);
+    expect(declaration.used_by).toContain("Matrix.trace_one");
+    expect(await client.getDeclaration("Real.sqrt_mul_sefl").catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
   });
 
-  it("pins the environment, and refuses snapshots it doesn't search", async () => {
-    expect(await client.search({ nl: "trace" }, { envId: "other" }).catch((e: unknown) => e)).toMatchObject({
+  it("searches only its version, and refuses snapshots it doesn't search", async () => {
+    expect(await client.search({ description: "trace" }, { version: envId }).then((r) => r.hits.length > 0)).toBe(true);
+    expect(await client.search({ description: "trace" }, { version: "other" }).catch((e: unknown) => e)).toMatchObject({
       kind: "not_found",
     });
-    expect(await client.search({ nl: "trace", snapshots: "all" }).catch((e: unknown) => e)).toMatchObject({
+    expect(await client.search({ description: "trace", snapshots: "all" }).catch((e: unknown) => e)).toMatchObject({
       kind: "bad_request",
       status: 400,
     });

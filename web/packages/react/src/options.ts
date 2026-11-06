@@ -1,15 +1,16 @@
 // Query options for every read, for `useQuery`, `useQueries` or
 // prefetching. Keys start with `["pisa", url]` and end
-// with what the request sends, so that a different version or environment
-// never reuses another's results.
+// with what the request sends, so that a different version never reuses
+// another's results.
 
 import type {
   CheckOptions,
   CheckResult,
-  DeclDetail,
+  DeclarationDetail,
   Health,
   ListSnapshotsParams,
   ListSnapshotsResponse,
+  ModuleName,
   PisaClient,
   PisaError,
   Query,
@@ -83,10 +84,6 @@ export function checkOptions(client: PisaClient, input: CheckInput): PisaQueryOp
   };
 }
 
-export interface SearchInput {
-  envId?: string;
-}
-
 /** `query` without its blank fields, which the server ignores anyway. */
 export function compactQuery(query: Query): Query {
   const out: Record<string, unknown> = {};
@@ -100,19 +97,18 @@ export function compactQuery(query: Query): Query {
   return out as Query;
 }
 
-const TERMS = ["q", "nl", "latex", "pattern", "goal", "name"] as const;
+const TERMS = ["text", "description", "latex", "pattern", "goal", "name"] as const;
 
 /** Whether `query` asks for anything. */
 export function hasTerms(query: Query): boolean {
   return TERMS.some((t) => (query[t] ?? "").trim() !== "");
 }
 
-export function searchOptions(client: PisaClient, query: Query, input: SearchInput = {}): PisaQueryOptions<QueryResult> {
+export function searchOptions(client: PisaClient, query: Query, input: VersionInput = {}): PisaQueryOptions<QueryResult> {
   const compact = compactQuery(query);
-  const envId = input.envId ?? client.envId;
   return {
-    queryKey: [...pisaKeys.search(client), envId ?? null, compact] as QueryKey,
-    queryFn: ({ signal }) => client.search(compact, { ...(envId !== undefined && { envId }), signal }),
+    queryKey: [...pisaKeys.search(client), input.version ?? client.version ?? null, compact] as QueryKey,
+    queryFn: ({ signal }) => client.search(compact, { ...input, signal }),
     // Snapshots keep being indexed; the libraries don't change. A query still
     // being embedded gets the dense lane if asked again.
     staleTime: (q) => (q.state.data?.dense_pending === true ? 0 : compact.snapshots === undefined ? Infinity : 30_000),
@@ -121,11 +117,10 @@ export function searchOptions(client: PisaClient, query: Query, input: SearchInp
   };
 }
 
-export function resolveOptions(client: PisaClient, names: string[], input: SearchInput = {}): PisaQueryOptions<Resolution[]> {
-  const envId = input.envId ?? client.envId;
+export function resolveOptions(client: PisaClient, names: string[], input: VersionInput = {}): PisaQueryOptions<Resolution[]> {
   return {
-    queryKey: [...pisaKeys.search(client), envId ?? null, "resolve", names] as QueryKey,
-    queryFn: ({ signal }) => client.resolve(names, { ...(envId !== undefined && { envId }), signal }),
+    queryKey: [...pisaKeys.search(client), input.version ?? client.version ?? null, "resolve", names] as QueryKey,
+    queryFn: ({ signal }) => client.resolve(names, { ...input, signal }),
     staleTime: Infinity,
     enabled: names.length > 0,
     retry: retryQuery,
@@ -134,10 +129,10 @@ export function resolveOptions(client: PisaClient, names: string[], input: Searc
 
 /** Declaration `name`: the one in snapshot module `module` if it has it, else
  *  the bundle's. */
-export function declOptions(client: PisaClient, name: string, module?: string): PisaQueryOptions<DeclDetail> {
+export function declarationOptions(client: PisaClient, name: string, module?: ModuleName): PisaQueryOptions<DeclarationDetail> {
   return {
-    queryKey: [...pisaKeys.search(client), "decl", name, module ?? null] as QueryKey,
-    queryFn: ({ signal }) => client.decl(name, { ...(module !== undefined && { module }), signal }),
+    queryKey: [...pisaKeys.search(client), client.version ?? null, "declaration", name, module ?? null] as QueryKey,
+    queryFn: ({ signal }) => client.getDeclaration(name, { ...(module !== undefined && { module }), signal }),
     staleTime: Infinity,
     retry: retryQuery,
   };

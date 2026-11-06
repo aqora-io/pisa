@@ -49,7 +49,9 @@ pub async fn start(cfg: ServerConfig) -> anyhow::Result<Server> {
 
 /// Serves from `db`, ignoring `cfg.database_url`.
 pub async fn start_on(cfg: ServerConfig, db: Db) -> anyhow::Result<Server> {
-    let search = Search::start(cfg.search, db.clone()).await?;
+    // Search takes a request's version as the rest of the API does.
+    let versions = cfg.router.versions();
+    let search = Search::start(cfg.search, db.clone(), versions.clone()).await?;
     let searching = search.clone();
     let extra = move |app: Arc<App>| {
         let health = Router::new()
@@ -58,10 +60,13 @@ pub async fn start_on(cfg: ServerConfig, db: Db) -> anyhow::Result<Server> {
             .with_state((app, searching.clone()));
         match searching {
             Some(search) => health.merge(pisa_search::server::routes(search)),
-            None => health.route("/v1/{*path}", any(no_search)),
+            None => health
+                .route("/search", any(no_search))
+                .route("/resolve", any(no_search))
+                .route("/declarations/{*name}", any(no_search)),
         }
     };
-    let running = pisa_router::start_with(cfg.router, db, extra).await?;
+    let running = pisa_router::start_with(cfg.router, versions, db, extra).await?;
     Ok(Server { running, search })
 }
 
@@ -96,7 +101,7 @@ pub fn openapi() -> Value {
             title = "pisa",
             description = "Checks Lean code, runs proof sessions, keeps snapshots and searches \
                 declarations. Errors are `{error: {kind, message}}`, with a status that follows \
-                the kind. `/v1/*` is a 404 on a server without search.",
+                the kind. Search's endpoints are a 404 on a server without search.",
         ),
         paths(health),
         tags(

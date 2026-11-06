@@ -726,8 +726,8 @@ async fn main() -> anyhow::Result<()> {
             // Answering without the dense lane would skew what it shows.
             engine.embed_wait = engine::EMBED_TIMEOUT + std::time::Duration::from_secs(1);
             let q = pisa_protocol::search::Query {
-                q: Some(text),
-                k,
+                text: Some(text),
+                limit: k,
                 ..Default::default()
             };
             let started = std::time::Instant::now();
