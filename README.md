@@ -65,8 +65,8 @@ next to Garage for S3.
 the workers keep their data in two places, chosen by environment variables
 that Compose and the chart set:
 - **The job queue and the metadata**, the sessions, the records that make
-  proof states loadable, and the snapshot entries and module records, are in
-  a database, which every server and worker share. `PISA_DATABASE_URL` is
+  proof states loadable, and the snapshots and module records, are in a
+  database, which every server and worker share. `PISA_DATABASE_URL` is
   a PostgreSQL URL (`postgres://user:password@host/db`) or the path of a
   SQLite file, which only one host can use. It is required.
   - Each process creates or updates the tables when it starts, one process
@@ -74,8 +74,8 @@ that Compose and the chart set:
   - Jobs and workers are kept apart by `PISA_QUEUE` (default `pisa`), which
     the servers and their workers must agree on. Deployments that share a
     database need queues of their own.
-  - PostgreSQL holds the only copy of the snapshot entries and module
-    records, which never expire, so run it durably and back it up.
+  - PostgreSQL holds the only copy of the snapshots and module records,
+    which never expire, so run it durably and back it up.
   - `sslmode=require` in the URL connects with TLS and checks the server's
     certificate against the system's roots; for a private CA, set
     `SSL_CERT_FILE` to its certificate. Other modes connect without TLS.
@@ -108,14 +108,14 @@ on the same Lean version.
 own KEDA, which reads the job queue from the database (see Scaling below).
 
 **Storage.** The job queue and the metadata (sessions, proof-state records,
-snapshot entries and module records) live in PostgreSQL, and blobs (pickled
+snapshots and module records) live in PostgreSQL, and blobs (pickled
 proof states, snapshot modules) in an S3-compatible bucket.
 - The chart doesn't deploy PostgreSQL. Put the URL of one you run, for
   example with [CloudNativePG](https://cloudnative-pg.io) or a managed
   service, in a Secret, and name it in `metadata.database.urlSecret.name`
   (`metadata.database.urlSecret.key` names the key, `url` by default). It is
   required, for the servers, the workers and KEDA. PostgreSQL holds the only
-  copy of the snapshot entries and module records, which never expire, so it
+  copy of the snapshots and module records, which never expire, so it
   must be durable and backed up. The release's servers and workers share the
   queue `queue` (the release's name unless set).
 - Give the bucket's credentials as an existing Secret, or leave
@@ -182,7 +182,7 @@ search snapshots too, unless `search.snapshots` is false. Set `search.envId`,
 and give API keys as an existing Secret (`search.secret.name`). Load each
 bundle once, e.g. through `kubectl port-forward svc/<release>-qdrant 6333`,
 with `pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2`
-(the server image has `pisa-search`). Until it has, `/v1/search` answers 503
+(the server image has `pisa-search`). Until it has, `/search` answers 503
 and the rest of the API works.
 
 **Not covered by the chart:**
@@ -219,21 +219,21 @@ pnpm -C web generate
 | Endpoint | Request → response |
 | --- | --- |
 | `POST /check` | `{code, version?, timeout?, detail?, at?}` → check result |
-| `POST /check/batch` | `{items: [{id, code}], version?, timeout?, detail?, at?}` → `{results: [...]}`, in order |
-| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
-| `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
-| `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?}` → `{entry?, snapshot?, header?, version, dirty, verified, labels?, replaces?, result}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
-| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{entries: [{entry, snapshot, imports, header, labels, replaces?, dirty, verified, created}], next?}`, newest first; see [Labels](#labels) |
-| `GET /snapshots/{entry}` | `?version=` → `{entry, snapshot, imports, header, code, labels?, replaces?, dirty, verified, result, created, decls?}` |
-| `GET /snapshots/{entry}/dependents` | `?label=k:v` (repeated), `version?` → `{entries: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
-| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?, version?}` → `{ok, changes, changed_definitions?, plan: [{level, entry?, snapshot, new_snapshot, new_header, code, labels, key, replaces?, affected?, affected_unknown?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, entry?, verified, used_by}], not_proved: [{name, entry, status, axioms}]}`; see [Statuses](#statuses) |
-| `PATCH /snapshots/{entry}` | `{set?, remove?}`, `?version=` → the entry as in a listing; see [Labels](#labels) |
-| `DELETE /snapshots/{entry}` | `?version=` → `{entry, removed: [...]}`, the modules that went with the entry; see [Retention](#retention) |
-| `POST /snapshots/{entry}/verify` | `?version=` → `{entry, snapshot, verified, dirty, checked, failure?}`; see [Verifying](#verifying) |
-| `GET /jobs/{job}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{job, kind, status}`; see [Async requests](#async-requests) |
-| `DELETE /jobs/{job}` | → `{job, kind, status}`, `cancelled` if no worker had started it |
+| `POST /check/batch` | `{items: [{code}], version?, timeout?, detail?, at?}` → `{results: [...]}`, in order |
+| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}` |
+| `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid |
+| `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?}` → `{snapshot?, check, replacement?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
+| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
+| `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
+| `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; see [Statuses](#statuses) |
+| `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
+| `DELETE /snapshots/{id}` | → `{removed: [...]}`, the modules that went with the snapshot; see [Retention](#retention) |
+| `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
+| `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
+| `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
 | `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
 Browsers may call the API from other origins only when the server allows
@@ -245,25 +245,26 @@ takes a comma-separated list of origins, or `*`. It is empty by default.
 snapshot's create or verify, and a rebuild can take minutes: a wait for a worker, loading the
 imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
 requests off at 60 s, or over a network that drops, send them with
-`Prefer: respond-async`. The server then answers `202 {job, kind, status:
-"queued"}` at once, with `Location: /jobs/{job}`, and runs the request as it
+`Prefer: respond-async`. The server then answers `202 {id, kind, status:
+"queued"}` at once, with `Location: /jobs/{id}`, and runs the request as it
 would have:
-- `GET /jobs/{job}?wait=30` waits up to `wait` seconds (at most 60) and, once
+- `GET /jobs/{id}?wait=30` waits up to `wait` seconds (at most 60) and, once
   the job is done, answers exactly as the request would have: its status and
   body, errors included, e.g. a 429 when no worker took it in time. Until then
   it answers 202 with `status` `queued` or `running`. Any server answers for
   any job.
 - An answer is kept for an hour after its job is done; then the job is a 404.
-- `DELETE /jobs/{job}` withdraws a job no worker has started (`cancelled`); a
+- `DELETE /jobs/{id}` withdraws a job no worker has started (`cancelled`); a
   `running` or `done` one stays as it is.
 - Anyone with a job's id can read its answer or cancel it, so keep it secret.
-  Build its URL from `job` rather than `Location`, which is relative to the
+  Build its URL from `id` rather than `Location`, which is relative to the
   server's root.
 - `/check/batch`, and the snapshot reads and edits, answer at once whatever
   `Prefer` says: send a batch's items to `/check` instead.
 
 A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
 - `ok` is the verdict.
+- `messages` are Lean's, each `{severity, pos, end_pos?, text}`.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
 - `declarations` lists each new declaration with the axioms it uses.
 
@@ -307,8 +308,9 @@ kept between checks, so ask about every position in one: each check
 elaborates the code again.
 
 `version` selects a worker pool, by label (such as `v4.35.0-1a2b3c4d`) or by
-an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds
-(default 60).
+an alias set with `PISA_ALIASES`. Session, state and snapshot ids carry their
+version, so the requests that take one take no `version`. `timeout` is Lean's
+limit in seconds (default 60).
 
 **Errors** always look like `{"error": {"kind", "message"}}`.
 - **Checks report failures in-band.** A check that times out, crashes or is
@@ -321,7 +323,7 @@ an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds
 | `lean`, `policy` | 422 | Lean or the policy refused the input, e.g. an unknown tactic |
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
-| `bad_request`, `not_found` | 400, 404 | Malformed request, unknown state, session or snapshot entry |
+| `bad_request`, `not_found` | 400, 404 | Malformed request; unknown or expired job, state or session; unknown snapshot or declaration |
 | `internal` | 500 | A bug |
 
 ## Snapshots
@@ -332,78 +334,83 @@ keeps each accepted chunk as a snapshot and builds on it:
 
 ```text
 POST /snapshots {"code": "import Mathlib\n\ndef double (n : ℕ) := 2 * n", "labels": {"run": "7"}}
-  → {"entry": "9c0e…", "snapshot": "PisaSnap.s1f…", "header": "import Mathlib\nimport PisaSnap.s1f…",
-     "dirty": false, "verified": false, "labels": {"run": "7"}, "result": {"ok": true, …}}
+  → {"snapshot": {"id": "v4.35.0-1a2b3c4d~9c0e…", "version": "v4.35.0-1a2b3c4d", "module": "PisaSnap.s1f…",
+                  "header": "import Mathlib\nimport PisaSnap.s1f…", "imports": [], "labels": {"run": "7"},
+                  "status": "proved", "verified": false, "created": 1762387200},
+     "check": {"ok": true, …}}
 POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double 2 = 4 := rfl"}
 ```
 
-**Entries and modules.** A create returns two names:
-- **The module** (`snapshot`, e.g. `PisaSnap.s1f…`) is what code imports. It
+**Snapshots and modules.** A snapshot has two names:
+- **The module** (`module`, e.g. `PisaSnap.s1f…`) is what code imports. It
   comes from a hash of the code, so the same code is the same module, and its
-  check result, `dirty` and `verified` belong to it.
-- **The entry** (`entry`, 32 hex digits) is what this create added: a
-  reference to the module with its own `labels` and `created` time. Creating
-  the same code again adds another entry on the same module without building
-  it again. `GET`, `PATCH`, `DELETE` and `verify` take the entry; a module
-  name there is a `bad_request`.
+  check, `status` and `verified` belong to it.
+- **The id** (`id`, `<version>~<32 hex>`) is the snapshot's own: a reference
+  to the module with its own `labels` and `created` time. Creating the same
+  code again adds another snapshot of the same module without building it
+  again. `GET`, `PATCH`, `DELETE` and `verify` take the id, which carries the
+  version, so they take no `version`; a module name there is a `bad_request`.
 
-A create that keeps nothing has no `entry`. Neither does `verify: true` on code
-that is already kept but fails the re-check: the response then has its
-`snapshot` and `header` with the error, as new code that fails the re-check
-isn't kept.
+A create that keeps nothing has no `snapshot`, and its `check` says why. That
+includes `verify: true` on code that is already kept but fails the re-check:
+`check.error` has the reason, as new code that fails the re-check isn't kept.
 
-`GET /snapshots/{entry}` lists the module's declarations in `decls`, each
-`{name, kind, signature, docstring?, informal?}`. `informal` is the description
-that search writes when it has a describe model (`PISA_SEARCH_DESCRIBE_MODEL`;
-see [Snapshot search](#snapshot-search)), a little after the create.
+`GET /snapshots/{id}` adds the module's `code`, its `check`, and its
+`exports`: the declarations that code importing it sees, each `{name, kind,
+signature, docstring?, description?}`. `description` is `{title, text,
+latex?, aliases, source}`, which search writes when it has a describe model
+(`PISA_SEARCH_DESCRIBE_MODEL`; see [Snapshot search](#snapshot-search)), a
+little after the create.
 
 <a id="labels"></a>
-**Labels.** An entry's labels are string key/value pairs, at most 64 of them. A
-key is 1–128 bytes of letters, digits, `.`, `_`, `/` and `-`; a value is up to
-512 bytes of UTF-8 without NUL characters. Labels that break these rules are a `bad_request`: in
-`result.error` on a create, which then keeps nothing, and a 400 on a `PATCH`,
-which then changes nothing.
-- **Editing.** `PATCH /snapshots/{entry}` with `{"set": {"stage": "done"},
-  "remove": ["draft"]}` removes the `remove` keys, then sets the `set` pairs,
-  and returns the entry as a listing shows it.
+**Labels.** A snapshot's labels are string key/value pairs, at most 64 of
+them. A key is 1–128 bytes of letters, digits, `.`, `_`, `/` and `-`; a value
+is up to 512 bytes of UTF-8 without NUL characters. Labels that break these
+rules are a `bad_request`: in `check.error` on a create, which then keeps
+nothing, and a 400 on a `PATCH`, which then changes nothing.
+- **Editing.** `PATCH /snapshots/{id}` with `{"labels": {"stage": "done",
+  "draft": null}}` is a JSON merge patch: it sets `stage`, removes `draft`,
+  keeps the other labels, and returns the snapshot as a listing shows it.
 - **Filtering.** `GET /snapshots?label=project:foo&label=kind:lemma` lists the
-  entries that have every label given, each an exact match of `key:value`
+  snapshots that have every label given, each an exact match of `key:value`
   split on the first `:`, so a value can contain `:`. Without `label` it lists
-  every entry of the version. There is no OR or prefix matching. Two values for
-  the same key match nothing, as an entry has one value per key.
-- **Order and pages.** Entries come newest first, as summaries: what
-  `GET /snapshots/{entry}` returns without `code`, `result` and `decls`.
+  every snapshot of the version. There is no OR or prefix matching. Two values for
+  the same key match nothing, as a snapshot has one value per key.
+- **Order and pages.** Snapshots come newest first, as summaries: what
+  `GET /snapshots/{id}` returns without `code`, `check` and `exports`.
   `limit` is 1–1000 (default 100), and a listing takes up to 64 `label`s. Keep
   requesting while a page has `next`, an opaque cursor, passing it as `after`:
   a full page has `next`, and the page after it may be empty. A cursor is a position, so it
-  keeps working when its entry is deleted.
+  keeps working when its snapshot is deleted.
 - **Speed.** On PostgreSQL, labels are matched through an index (GIN), so the
   order of the `label`s doesn't matter.
 
 **Retrying a create.** A create can carry an idempotency `key`, 1–256 bytes of
 letters, digits, `.`, `_`, `:`, `/` and `-` (anything else is a `bad_request`
-in `result.error`), so that a retry is safe:
-- While an entry made with the key exists, creating the same code with it
-  returns that entry as it is, without building anything. The retry's other
+in `check.error`), so that a retry is safe:
+- While a snapshot made with the key exists, creating the same code with it
+  returns that snapshot as it is, without building anything. The retry's other
   fields are ignored, `labels` and `verify` included, so a retry with
   `verify: true` can return `verified: false` with no error.
-- Different code under a used key is a `bad_request` in `result.error`, and
+- Different code under a used key is a `bad_request` in `check.error`, and
   nothing is kept.
 - A create that keeps nothing, e.g. when Lean reports errors or a `verify: true`
   re-check fails, doesn't use the key up, so a later create can.
-- Deleting an entry frees its key.
+- Deleting the snapshot frees its key.
 
 <a id="replacing"></a>
-**Replacing an entry.** A create can name the entry it `replaces`, e.g. the
-skeleton with `sorry`s that a proof fills in. The code is kept only if it
-still declares everything the replaced entry's module declares, each the same
-kind of declaration with the same type and, for definitions, the same value;
-it may add declarations, such as helper lemmas, and may still use `sorry`. So
-filling a `sorry` can't quietly change what is proved:
+**Replacing a snapshot.** A create can name the snapshot of its version that
+it `replaces`, e.g. the skeleton with `sorry`s that a proof fills in. The code
+is kept only if it still declares everything the replaced snapshot's module
+declares, each the same kind of declaration with the same type and, for
+definitions, the same value; it may add declarations, such as helper lemmas,
+and may still use `sorry`. So filling a `sorry` can't quietly change what is
+proved:
 
 ```text
-POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
-  → {"entry": "4b7a…", …, "replaces": {"entry": "9c0e…", "filled": ["t"]}}
+POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_id": "v4.35.0-1a2b3c4d~9c0e…"}}
+  → {"snapshot": {"id": "v4.35.0-1a2b3c4d~4b7a…", …, "replaces": {"snapshot_id": "v4.35.0-1a2b3c4d~9c0e…"}},
+     "check": {"ok": true, …}, "replacement": {"filled": ["t"]}}
 ```
 
 - **No new assumptions.** A replacement can't fill a `sorry` by assuming it:
@@ -413,12 +420,12 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
   it no longer builds on (`statement: the code adds the assumption helper`).
   The replaced module's own assumptions may stay. To add one on purpose,
   create the code without `replaces`.
-- **Refused.** Code that changes a statement is not kept, and has no `entry`:
-  `result.ok` is false and `result.reasons` says what changed, e.g.
+- **Refused.** Code that changes a statement is not kept, and has no
+  `snapshot`: `check.ok` is false and `check.reasons` says what changed, e.g.
   `statement: t has a different type`. To change a statement on purpose,
   create the code without `replaces`.
 - **Imports.** The code may import more, and may build on other snapshots
-  than the replaced entry's module does. A type names the constants it uses,
+  than the replaced snapshot's module does. A type names the constants it uses,
   such as a definition from an imported snapshot, without saying what they
   are, so swapping that snapshot could change what a statement means while
   every hash stays the same. So for each snapshot the code no longer builds
@@ -429,22 +436,21 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": "9c0e…"}
   stops at Lean's and Mathlib's constants, which the version fixes.
 - **What declarations use.** Each declaration in a check result records the
   constants of the code and of its snapshots that its type and value use
-  (`type_refs`, `value_refs`). A module kept before they were recorded can't
-  be followed: a replacement that no longer builds on one of its snapshots is
-  refused until `POST /snapshots/{entry}/verify` records them. Private names
-  are compared without the module they were declared in, and what Lean makes
-  on demand, such as equation lemmas (`generated`), needn't stay.
-- **Definitions.** `"replaces": {"entry": "9c0e…", "allow": "definitions"}`
-  lets definitions change their value but not their type, e.g. to add a
-  missing hypothesis. A theorem's type only names a definition, so its
-  meaning can change while its type matches: `replaces` in the response lists
-  the `changed_definitions` and the theorems of the new module whose type uses
-  one, directly or through another definition (`affected`).
-- **The link.** `filled` lists the declarations that used `sorry` and no
-  longer do. The new entry records `replaces: {entry, allow?}`, which listings
-  and `GET /snapshots/{entry}` show. Only a create that passed the comparison
-  sets it, so it can be trusted, and it stays after the replaced entry is
-  deleted. A key replay returns the entry as it is, with `filled` empty.
+  (`type_refs`, `value_refs`). Private names are compared without the module
+  they were declared in, and what Lean makes on demand, such as equation
+  lemmas (`generated`), needn't stay.
+- **Definitions.** `"replaces": {"snapshot_id": "…~9c0e…", "allow":
+  "definitions"}` lets definitions change their value but not their type,
+  e.g. to add a missing hypothesis. A theorem's type only names a definition,
+  so its meaning can change while its type matches: `replacement` in the
+  response lists the `changed_definitions` and the theorems of the new module
+  whose type uses one, directly or through another definition (`affected`).
+- **The link.** `replacement.filled` lists the declarations that used `sorry`
+  and no longer do. The new snapshot records `replaces: {snapshot_id,
+  allow?}`, which listings and `GET /snapshots/{id}` show. Only a create that
+  passed the comparison sets it, so it can be trusted, and it stays after the
+  replaced snapshot is deleted. A key replay returns the snapshot as it is,
+  without `replacement`.
 
 <a id="statuses"></a>
 **Statuses and assumptions.** An `axiom` declared in snapshot code, or in the
@@ -459,78 +465,77 @@ and `assumes` lists the assumptions it uses:
 | `sorry` | `sorryAx`, with or without assumptions |
 | `rejected` | Any other: the one `native_decide` declares, `Lean.trustCompiler`, a library's |
 
-A snapshot's `status`, on creates, listings and `GET /snapshots/{entry}`, is
-the worst of its declarations', in that order. `dirty` and `ok` mean what they
-did: true, and false, for anything not `proved`.
+A snapshot's `status`, on creates, listings and `GET /snapshots/{id}`, is the
+worst of its module's declarations', in that order, and its check is `ok` only
+if that is `proved`.
 
-`GET /snapshots/audit?label=project:foo` says what the entries with the labels
-rest on, from their records, without running Lean:
+`GET /snapshots/audit?label=project:foo` says what the snapshots with the
+labels rest on, from their records, without running Lean:
 - `summary` counts their declarations by status, each module's once, without
   the assumptions themselves and what Lean generates, and `unverified_modules`
   counts the modules not yet re-checked by the kernel, whose statuses come
   from the build's report.
 - `assumptions` lists each assumption they use, wherever it is declared, with
-  its `signature`, an `entry` on its module, whether it is `verified`, and
-  `used_by`.
-- `not_proved` lists the declarations that are `sorry` or `rejected`, with
-  their axioms.
+  its `signature`, a snapshot of its module (`snapshot_id`), whether it is
+  `verified`, and `used_by`.
+- `not_proved` lists the declarations that are `sorry` or `rejected`, each
+  with a snapshot of its module (`snapshot_id`) and its axioms.
 
 A trusted audit has no `rejected` or `sorry` and no `unverified_modules`.
 Whether each assumption is reasonable is for review: `axiom oops : False`
-makes everything above it `conditional`. A module kept before declarations
-recorded `assumes` reads its declared axioms as `rejected` until
-`POST /snapshots/{entry}/verify` records them again.
+makes everything above it `conditional`.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports
 included, so replacing B with B′ leaves every chunk above B importing B.
-`GET /snapshots/{entry}/dependents?label=project:foo` lists the entries on
-every module that imports the entry's module, directly or through others,
+`GET /snapshots/{id}/dependents?label=project:foo` lists the snapshots of
+every module that imports the snapshot's module, directly or through others,
 parents first: by level (1 imports it, 2 imports a level 1, and so on, by the
 longest chain), then oldest first. With `label` filters, as in a listing, only
-the entries with every label.
+the snapshots with every label.
 
 `POST /snapshots/rebuild` creates them again on the replacement, or with
 `"dry_run": true` only plans how:
 
 ```text
-POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project": "foo"}, "dry_run": true}
+POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {"project": "foo"}, "dry_run": true}
   → {"ok": true, "changes": [], "plan": [
-       {"level": 1, "entry": "…", "snapshot": "PisaSnap.sC…", "new_snapshot": "PisaSnap.sC′…",
+       {"level": 1, "snapshot_id": "…", "module": "PisaSnap.sC…", "new_module": "PisaSnap.sC′…",
         "new_header": "…", "code": "…", "labels": {…}, "key": "rebuild:…"}, …]}
 ```
 
-- **What it rebuilds.** The dependents with an entry that has every label
+- **What it rebuilds.** The dependents with a snapshot that has every label
   (`labels` is required, so the caller chooses which projects follow the
   edit), and any module between them and `from`, which gets an item without
-  `entry`, with the labels asked for. Each item's `code` is the old code with
+  `snapshot_id`, with the labels asked for. Each item's `code` is the old code with
   its imports of `from`'s module, and of the other modules the plan rebuilds,
-  swapped for the new ones; lines and columns stay where they were.
+  swapped for the new ones; lines and columns stay where they were. `from`
+  and `to` are of one version, which the rebuild runs on.
 - **Running it.** Without `dry_run`, the server runs the plan: a level at a
   time, up to 8 of a level's creates side by side once the level below is
   done, each with the item's `code`, `labels`, `key` and `replaces`, and the
   request's `verify` and `timeout`. A create no worker takes in time is sent
   again, up to 5 times. The response adds what it did: `created` (each old
-  `entry` and `snapshot` with its `new_entry` and `new_snapshot`), `failed`
-  (with the create's `result`), and `skipped`, the items that build on one
+  `snapshot_id` and `module` with its `new_snapshot_id` and `new_module`),
+  `failed` (with the create's `check`), and `skipped`, the items that build on one
   that failed or was skipped; other branches go on, and `ok` says whether
   every item was created.
 - **Retiring.** With `"retire": true`, once every item is created, the server
-  deletes the old entries from the top down, then `from`, and with them the
-  old modules nothing else needs; `retired` lists them.
+  deletes the old snapshots from the top down, then `from`, and with them the
+  old modules nothing else needs; `retired` lists the snapshots' ids.
 - **Sending it again.** The keys come from the plan, so sending the same
   rebuild again, after a failure, a timeout or a lost server, replays the
   creates that are done and runs the rest.
 - **Async.** A run can take minutes, so it takes `Prefer: respond-async` (see
   [Async requests](#async-requests)): the 202's job, of kind
   `rebuild_snapshots`, is run by the server that answered, and
-  `GET /jobs/{job}` on any server answers with the response once it is done.
+  `GET /jobs/{id}` on any server answers with the response once it is done.
   If that server stops first, the job reads as lost (503): send the rebuild
-  again. `DELETE /jobs/{job}` leaves a running rebuild running. A dry run
+  again. `DELETE /jobs/{id}` leaves a running rebuild running. A dry run
   answers at once.
 - **Running it yourself.** Or take the plan and send each item as
   `POST /snapshots {code, labels, key, replaces?}`, a level at a time, the
-  same way; each create's `snapshot` is the item's `new_snapshot`.
+  same way; each create's `snapshot.module` is the item's `new_module`.
 - **Statements.** If `to` replaces `from` (see [Replacing](#replacing)), its
   create compared them, so `changes` is empty. Otherwise the rebuild compares
   them the same way and, if `to` changes what `from` states, answers `ok:
@@ -539,11 +544,9 @@ POST /snapshots/rebuild {"from": "9c0e…", "to": "4b7a…", "labels": {"project
   `allow: "definitions"`, or `allow_changes`), `changed_definitions` lists
   them, and each item lists its theorems whose type uses one, directly or
   through definitions here or below, as `affected`. That is read from what
-  the modules' declarations use, or their declaration exports for modules
-  kept before those were recorded; `affected_unknown` marks an item where
-  neither says.
-- **Links.** When `to` replaces `from`, each item with an entry has
-  `replaces`, to send with its create: the rebuilt entry then replaces its
+  the modules' declarations use.
+- **Links.** When `to` replaces `from`, each item with a `snapshot_id` has
+  `replaces`, to send with its create: the rebuilt snapshot then replaces its
   old one, with the same `allow`, which checks that nothing its statements
   use changed through the rebuild, and the history follows it. A dependent
   whose statements did change meaning is refused rather than kept.
@@ -577,10 +580,11 @@ sections. Re-open what a chunk needs.
 
 **Results.**
 - Code is kept only if Lean reports no errors and, when it runs, the kernel
-  re-check passes (see [Verifying](#verifying)). `result` is a check result, as
+  re-check passes (see [Verifying](#verifying)). `check` is a check result, as
   for `/check`, without `sorries`.
-- A chunk with `sorry` or another axiom outside the allowed list is kept but
-  `dirty`, and checks that use it report the axiom.
+- A chunk with `sorry` or another axiom outside the allowed list is kept, with
+  that `status` (see [Statuses](#statuses)), and checks that use it report the
+  axiom.
 - Imports of an unknown or deleted snapshot are `not_found`.
 
 <a id="verifying"></a>
@@ -593,45 +597,43 @@ end. It depends on `verify` in the request:
 | --- | --- |
 | omitted, no macros | None |
 | omitted, the code uses macros or imports a snapshot that does | This chunk; if the kernel rejects it, it isn't kept |
-| `true` | This chunk and any unverified imports; the result is `verified`, or has an `error` |
+| `true` | This chunk and any unverified imports; the snapshot is `verified`, or `check` has an `error` |
 | `false` | None, even with macros |
 
 `verified` means the snapshot and everything it imports have passed the
 re-check. So a macro chunk on top of unverified snapshots is re-checked but not
 yet `verified`.
 
-`POST /snapshots/{entry}/verify` re-checks the entry's module and everything it
+`POST /snapshots/{id}/verify` re-checks the snapshot's module and everything it
 imports, imports first, and records each module that passes. A later run only
 covers new chunks, and a retry resumes where the last one stopped. `verified`
-and `dirty` belong to modules, so every entry on a module shows the result.
-- `checked` lists the modules this run re-checked and passed.
+and `status` belong to modules, so every snapshot of a module shows the result.
+- `snapshot` is the snapshot as the re-check left it, and `checked` lists the
+  modules this run re-checked and passed.
 - If the kernel rejects a module or the re-check times out (60 s per module),
   the run stops, still with a 200, and `failure` has the module and the reason.
   Nothing is deleted, because other code may import it: the module stays usable
-  and not `verified`. Delete its entries if you don't want it.
-- `dirty` and `result` are updated from the re-check, whose axioms don't depend
-  on the build being honest.
-- A module kept before declarations recorded what they use (`type_refs`,
-  `value_refs`) is re-checked even if it is `verified`, to record them; see
-  [Replacing](#replacing).
+  and not `verified`. Delete its snapshots if you don't want it.
+- `status` and the module's `check` are updated from the re-check, whose axioms
+  don't depend on the build being honest.
 
 Check results don't say whether the snapshots they import are verified: look
 at the snapshot, or verify it, when that matters.
 
 <a id="retention"></a>
-**Retention.** An entry is kept until it is deleted. A module is kept while an
-entry points at it or a kept module imports it: deleting an entry removes its
-module once nothing else needs it, then each of that module's imports on the
-same terms, and `removed` lists them. So deleting the entry of a snapshot that
-others build on removes nothing yet, and the code on top keeps working. Each
-worker checks a module it has cached against the store at most every
-`PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere within
-that time.
+**Retention.** A snapshot is kept until it is deleted. A module is kept while
+a snapshot of it exists or a kept module imports it: deleting a snapshot
+removes its module once nothing else needs it, then each of that module's
+imports on the same terms, and `removed` lists them. So deleting a snapshot
+whose module others build on removes nothing yet, and the code on top keeps
+working. Each worker checks a module it has cached against the store at most
+every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere
+within that time.
 
 **Trust.** A snapshot that isn't `verified` has the same guarantee as a
 `/check`: the policy scan and an axiom report from the process that imported
 it. Macros go beyond that, because what they expand into isn't in the text the
-scan sees, so with `verify: false`, `ok` and `dirty` can be wrong until the
+scan sees, so with `verify: false`, `ok` and `status` can be wrong until the
 snapshot is verified. A `verified` snapshot's own declarations and those of
 everything it imports have been re-checked through the kernel, so a forged
 proof is caught.
@@ -657,29 +659,31 @@ let at = vec![pisa_client::Pos { line: 2, column: 30 }]; // `Detail::Terms` in `
 let opts = pisa_client::CheckOptions { at, ..Default::default() };
 let goals = client.check_with("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num", &opts).await?.at;
 let session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry").await?;
-let step = client.tactic(&session.states[0].state, "simp").await?; // Error::Server { kind: Lean, .. } if it fails
-let verdict = client.check_session(&session.session, "theorem t (n : Nat) : n + 0 = n := by simp").await?;
+let step = client.apply_tactic(&session.states[0].id, "simp").await?; // Error::Server { kind: Lean, .. } if it fails
+let verdict = client.check_session(&session.id, "theorem t (n : Nat) : n + 0 = n := by simp").await?;
 let base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n").await?;
-let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header.unwrap())).await?;
-let entry = base.entry.unwrap();
-let page = client.list_snapshots(&[("run", "7")], Some(50), None).await?; // newest first
-let more = client.list_snapshots(&[("run", "7")], Some(50), page.next.as_deref()).await?;
-let done = std::collections::BTreeMap::from([("stage".to_string(), "done".to_string())]);
-let summary = client.set_snapshot_labels(&entry, &done, &[]).await?;
-let verified = client.verify_snapshot(&entry).await?;
-// Kept only if it keeps the replaced entry's statements; see Replacing.
-let replaces = Some(pisa_client::Replaces::Entry(entry.clone()));
-let opts = pisa_client::SnapshotOptions { replaces, ..Default::default() };
+let base = base.snapshot.expect("kept"); // none if nothing was kept: `check` says why
+let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header)).await?;
+let run = std::collections::BTreeMap::from([("run".to_string(), "7".to_string())]);
+let page = client.list_snapshots(&run, Some(50), None).await?; // newest first
+let more = client.list_snapshots(&run, Some(50), page.next.as_deref()).await?;
+// A merge patch: `Some` sets a label, `None` removes it, and the rest stay.
+let done = std::collections::BTreeMap::from([("stage".to_string(), Some("done".to_string()))]);
+let snapshot = client.update_snapshot(&base.id, &done).await?;
+let verified = client.verify_snapshot(&base.id).await?;
+// Kept only if it keeps the replaced snapshot's statements; see Replacing.
+let replaces = Some(pisa_client::Replaces { snapshot_id: base.id.clone(), allow: None });
+let opts = pisa_client::CreateSnapshotOptions { replaces, ..Default::default() };
 let lemma = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl";
-let extended = client.create_snapshot_with(lemma, &opts).await?;
-let above = client.dependents(&entry, &[("run", "7")]).await?; // parents first
-let audit = client.audit(&[("run", "7")]).await?; // statuses, assumptions, what isn't proved
-let labels = std::collections::BTreeMap::from([("run".to_string(), "7".to_string())]);
-let plan = client.rebuild_plan(&entry, extended.entry.as_deref().unwrap(), &labels, false).await?;
-let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old entries after
-let job = client.submit_rebuild(&entry, extended.entry.as_deref().unwrap(), &labels, &opts).await?;
+let extended = client.create_snapshot_with(lemma, &opts).await?.snapshot.expect("kept");
+let above = client.list_dependents(&base.id, &run).await?; // parents first
+let audit = client.audit_snapshots(&run).await?; // statuses, assumptions, what isn't proved
+let opts = pisa_client::RebuildOptions { dry_run: true, ..Default::default() };
+let plan = client.rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?.plan;
+let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old snapshots after
+let job = client.submit_rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?;
 let done = client.wait_job(&job).await?; // the server ran the plan: done.created, done.failed
-let removed = client.delete_snapshot(&entry).await?; // the modules that went with it
+let removed = client.delete_snapshot(&base.id).await?.removed; // the modules that went with it
 // A long request as a job (see Async requests), answered however long it takes.
 let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
 let result = client.wait_job(&job).await?; // what check would have returned
@@ -694,20 +698,20 @@ client = Client("http://localhost:8000", timeout=60)
 client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")["ok"]
 client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num", at=[(2, 30)])["at"]   # norm_num's goals; detail=["terms"] adds terms
 session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry")
-step = client.tactic(session["states"][0]["state"], "simp")   # raises LeanError if it fails
-client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]
-base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n", labels={"run": "7"})
+step = client.apply_tactic(session["states"][0]["id"], "simp")   # raises LeanError if it fails
+client.check_session(session["id"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]
+base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n", labels={"run": "7"})["snapshot"]
 client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
 page = client.list_snapshots({"run": "7"}, limit=50)   # newest first; pass page["next"] as after=
-client.set_snapshot_labels(base["entry"], set={"stage": "done"}, remove=["run"])
-client.verify_snapshot(base["entry"])["verified"]
+client.update_snapshot(base["id"], {"stage": "done", "run": None})   # a merge patch: None removes a label
+client.verify_snapshot(base["id"])["snapshot"]["verified"]
 more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl"
-extended = client.create_snapshot(more, replaces=base["entry"])   # or {"entry": …, "allow": "definitions"}
-client.dependents(base["entry"], {"run": "7"})   # parents first
-client.audit({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
-plan = client.rebuild_plan(base["entry"], extended["entry"], {"run": "7"})   # create each item, a level at a time
-done = client.wait_job(client.submit_rebuild(base["entry"], extended["entry"], {"run": "7"}))   # retire=True deletes the old entries
-client.delete_snapshot(base["entry"])   # the modules that went with it
+extended = client.create_snapshot(more, replaces={"snapshot_id": base["id"]})["snapshot"]   # "allow": "definitions" lets definitions change
+client.list_dependents(base["id"], {"run": "7"})["snapshots"]   # parents first
+client.audit_snapshots({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
+plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time
+done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the old snapshots
+client.delete_snapshot(base["id"])["removed"]   # the modules that went with it
 job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
 client.wait_job(job)["ok"]   # what check would have returned, or raised
 ```
@@ -718,7 +722,8 @@ Exceptions carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
 - `LimitError`: the input hit a timeout, the memory limit, or crashed Lean.
 - `CapacityError`: no worker was free, or the server is unavailable; retry later.
-- `NotFoundError`: unknown or expired state or session, or unknown snapshot entry.
+- `NotFoundError`: unknown or expired job, state or session, or unknown
+  snapshot or declaration.
 - `PisaError`: the base class; also raised for transport failures, with no
   `kind` or `status`.
 
@@ -740,13 +745,13 @@ const result = await client.check("theorem t : 2 + 2 = 4 := by decide");
 const session = await client.startSession("theorem t (n : Nat) : n + 0 = n := by sorry");
 // Throws a PisaError (kind "lean") if the tactic doesn't parse; an error Lean
 // recovers from, like an unknown identifier, is in step.messages instead.
-const step = await client.tactic(session.states[0]!.state, "simp");
+const step = await client.applyTactic(session.states[0]!.id, "simp");
 ```
 
 React (`@aqora/pisa-react`, in `web/packages/react`) has hooks over TanStack
 Query: `useCheck` and `useLiveCheck` for an editor, `useProofSession` for a
 tree of tactics, the snapshot queries and mutations, `useSearch`, `useResolve`
-and `useDecl`. The packages' READMEs have examples.
+and `useDeclaration`. The packages' READMEs have examples.
 
 The playground (`web/apps/playground`) uses the hooks for checks, proofs,
 snapshots and search. `vite dev` proxies `/api` to `PISA_URL`, by default the
@@ -780,7 +785,7 @@ Search finds Mathlib and Physlib declarations from a description,
 LaTeX, a Lean pattern or goal, or a partial or misspelled name. It is meant for
 agents that know what they need but not what it is called. Its index is built
 from the same pinned project as the workers, and every response carries that
-project's version label as `env_id`, so the declarations it returns exist in
+project's version label as `version`, so the declarations it returns exist in
 the matching worker pool.
 
 **How it runs.** The index lives in [Qdrant](https://qdrant.tech) (≥ 1.19.1):
@@ -790,7 +795,7 @@ ENV` (`PISA_SEARCH_QDRANT`, `PISA_SEARCH_ENV_ID`), and hold nothing, so any
 number of replicas serve one environment. Each collection has one shard, as
 Qdrant's IDF is per shard; for availability, run Qdrant as a cluster and load
 with `--replication 2`. A server opens its index in the background, so until
-Qdrant answers with the bundle, `/v1/search` answers 503, `/health` says why,
+Qdrant answers with the bundle, `/search` answers 503, `/health` says why,
 and the rest of the API works.
 
 **How it ranks.** Each of four lanes is a Qdrant query, and Qdrant fuses them
@@ -909,21 +914,23 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /v1/search` | `{queries: [{q?, nl?, latex?, pattern?, goal?, name?, libraries?, kinds?, k?, include_sorried?, snapshots?}], env_id?}` → `{env_id, results: [{hits}]}`, at most 64 queries |
-| `POST /v1/resolve` | `{names, env_id?}` → `{env_id, results: [{name, exists, deprecated_to?, suggestions}]}` |
-| `GET /v1/decl/{name}` | `?module=` → `{env_id, decl}`: signature, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
+| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, libraries?, kinds?, limit?, include_sorried?, snapshots?}], version?}` → `{version, results: [{hits, warnings?, dense_pending?}]}`, at most 64 queries |
+| `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, suggestions}]}` |
+| `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 
 Each hit carries:
 - name, kind, library, module and signature;
-- a description, when one exists;
+- a description's `title` and `summary`, when one exists;
 - flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
 - a score, comparable only within one query, and a source link;
 - `text`, about 150 tokens ready for a model's context;
-- for a snapshot declaration, `snapshot` (see [below](#snapshot-search)).
+- for a snapshot declaration, `snapshot_ids`, `status` and `verified` (see
+  [below](#snapshot-search)).
 
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists
-the known ones. Pinning an `env_id` the server doesn't have is a 404. If the
+the known ones. A `version` names the index's version or its snapshots', or
+an alias of one; any other is a 404. If the
 embedding API fails, or hasn't answered within 10 s, the query still returns
 results from the other lanes and says so in the result's `warnings`. A slow
 embedding goes on in the background, for up to 60 s, and the result has
@@ -935,15 +942,15 @@ false; the server stays ready, as the rest of its API works and every replica
 shares the one Qdrant.
 
 ```python
-from pisa_client import SearchClient
+from pisa_client import Client
 
-search = SearchClient("http://localhost:8000")
-for hit in search.search(nl="trace of a density matrix is one", libraries=["Physlib"])["hits"]:
+client = Client("http://localhost:8000")
+for hit in client.search(description="trace of a density matrix is one", libraries=["Physlib"])["hits"]:
     print(hit["text"])
-search.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqrt_mul_self"
+client.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqrt_mul_self"
 ```
 
-The Rust `pisa_client::SearchClient` has the same methods. The search tests,
+The Rust and TypeScript clients have the same methods. The search tests,
 Rust and Python, need a Qdrant at `PISA_TEST_QDRANT_URL` and are skipped
 without one; for the Python ones, first run
 `cargo build -p pisa-server -p pisa-search`.
@@ -953,20 +960,22 @@ without one; for the Python ones, first run
 [snapshots](#snapshots), from the database they share with the workers, ranked with
 the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
 - **Scope.** A query's `snapshots` says which: `"none"` (the default), `"all"`,
-  or `{"labels": {"run": "7"}}`, the modules of the entries that have every
+  or `{"labels": {"run": "7"}}`, the modules of the snapshots that have every
   label, as `GET /snapshots?label=` matches them. The snapshots those import
   aren't included. Snapshot declarations are in the library `PisaSnap`, so
   adding `"libraries": ["PisaSnap"]` searches snapshots only.
-- **Hits.** A hit's `module` is the snapshot, e.g. `PisaSnap.s1f…`, and
-  `flags.imports` the header that loads it. `snapshot` lists the scope's
-  entries on that module, newest first, at most 10, with the module's
-  `dirty` and `verified`. Names can repeat across snapshots, and each is a hit
-  of its own. `/v1/resolve` and `/v1/decl` cover the bundle only.
+- **Hits.** A hit's `module` is the snapshot's module, e.g. `PisaSnap.s1f…`,
+  and `flags.imports` the header that loads it. `snapshot_ids` lists the
+  scope's snapshots of that module, newest first, at most 10. `status` is the
+  declaration's own, so a proved lemma next to a `sorry` is `proved`, and
+  `verified` is the module's. Names can repeat across snapshots, and each is a
+  hit of its own. `/resolve` covers the bundle only, and so does
+  `/declarations/{name}` without `module`.
 - **The leader.** One server at a time, holding a lease in the database
   (30 s, renewed every 10 s), indexes snapshots: it writes each module's
-  declarations to Qdrant, and each entry to `pisa-<env_id>-entries`, which a
-  label scope is resolved against. So a module can have any number of
-  entries, but a label scope may cover at most 20,000 modules. When the
+  declarations to Qdrant, and each snapshot to `pisa-<env_id>-entries`, which
+  a label scope is resolved against. So a module can have any number of
+  snapshots, but a label scope may cover at most 20,000 modules. When the
   leader goes, another server takes the lease, makes Qdrant match the
   catalog, and carries on; `/health`'s `search.leader` says which leads.
 - **Freshness.** Workers export a module's declarations when they build it,
@@ -996,8 +1005,8 @@ the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
   bundle's `env_id`; `PISA_SEARCH_SNAPSHOT_VERSION` names another.
 
 ```python
-hits = search.search(nl="doubling adds a number to itself", snapshots={"labels": {"run": "7"}})["hits"]
-hits[0]["module"], hits[0]["snapshot"]["entries"]  # "PisaSnap.s1f…", ["9c0e…"]
+hits = client.search(description="doubling adds a number to itself", snapshots={"labels": {"run": "7"}})["hits"]
+hits[0]["module"], hits[0]["snapshot_ids"], hits[0]["status"]  # "PisaSnap.s1f…", ["v4.35.0-1a2b3c4d~9c0e…"], "proved"
 ```
 
 **Quality.** Two reports track it:
@@ -1056,7 +1065,7 @@ don't produce a module to re-check, keep the scan as-is.
 - The REPL never frees environments, so workers replace each process after
   `PISA_MAX_USES` jobs or at a memory high-water mark.
 - REPL tactic mode can't write a finished tactic script back into the `sorry`.
-  Clients submit the assembled proof to `/sessions/{session}/check`.
+  Clients submit the assembled proof to `/sessions/{id}/check`.
 - Scoped extensions, such as scoped notation, don't survive pickling.
 - Not built yet: auth and per-tenant fairness, `/jobs` async batches, and
   human workspaces (stage 4).

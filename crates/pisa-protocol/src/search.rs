@@ -71,7 +71,7 @@ pub struct Query {
 }
 
 /// Which snapshot modules a query searches: `"none"`, `"all"`, or
-/// `{"labels": {"k": "v"}}`, the modules of the entries that have every label.
+/// `{"labels": {"k": "v"}}`, the modules of the snapshots that have every label.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotScope {

@@ -32,7 +32,8 @@ class CapacityError(PisaError):
 
 
 class NotFoundError(PisaError):
-    """Unknown session or proof state, e.g. one that expired."""
+    """Unknown or expired job, session or proof state, or an unknown
+    snapshot or declaration."""
 
 
 _CLASSES = {

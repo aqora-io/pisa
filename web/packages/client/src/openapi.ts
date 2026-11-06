@@ -1197,7 +1197,7 @@ export interface components {
         };
         /**
          * @description Which snapshot modules a query searches: `"none"`, `"all"`, or
-         *     `{"labels": {"k": "v"}}`, the modules of the entries that have every label.
+         *     `{"labels": {"k": "v"}}`, the modules of the snapshots that have every label.
          */
         SnapshotScope: "none" | "all" | {
             labels: {

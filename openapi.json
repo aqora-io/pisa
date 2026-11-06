@@ -1646,7 +1646,7 @@
         "description": "`GET /snapshots/{id}`: a snapshot with its module's code, check and\nexports."
       },
       "SnapshotScope": {
-        "description": "Which snapshot modules a query searches: `\"none\"`, `\"all\"`, or\n`{\"labels\": {\"k\": \"v\"}}`, the modules of the entries that have every label.",
+        "description": "Which snapshot modules a query searches: `\"none\"`, `\"all\"`, or\n`{\"labels\": {\"k\": \"v\"}}`, the modules of the snapshots that have every label.",
         "oneOf": [
           {
             "enum": [

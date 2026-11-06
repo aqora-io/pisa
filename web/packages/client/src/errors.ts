@@ -44,7 +44,8 @@ export function isCapacityError(e: unknown): e is PisaError {
   return isPisaError(e, "capacity", "unavailable");
 }
 
-/** An unknown or expired state or session, or an unknown snapshot entry. */
-export function isNotFound(e: unknown): e is PisaError {
+/** An unknown or expired job, state or session, or an unknown snapshot or
+ *  declaration. */
+export function isNotFoundError(e: unknown): e is PisaError {
   return isPisaError(e, "not_found");
 }

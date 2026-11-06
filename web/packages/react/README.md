@@ -29,7 +29,7 @@ function Editor({ code }: { code: string }) {
   server is up or draining, how many workers are live (with none, checks wait
   and then get a 429), and whether search can serve.
 - **Checks.**
-  - `useCheck({ code, version?, timeout?, detail? } | null)` checks the code.
+  - `useCheck({ code, version?, timeout?, detail?, at? } | null)` checks the code.
     Its `data` is `{ code, result }`, so an editor draws diagnostics only while
     its text is still the code that was checked. `cancel()` stops waiting.
   - `useLiveCheck(code, { delayMs? })` checks as the code is edited. It keeps at
@@ -50,17 +50,17 @@ function Editor({ code }: { code: string }) {
 - **Snapshots.**
   - `useSnapshots({ labels?, limit? })` is an infinite query; page with
     `fetchNextPage`.
-  - `useSnapshot(entry)` reads one entry.
-  - `useCreateSnapshot()`, `useSetSnapshotLabels()`, `useDeleteSnapshot()` and
-    `useVerifySnapshot()` change entries. Each invalidates every snapshot query
-    of its version, as a module's `verified` and `dirty` are shared by all its
-    entries.
+  - `useSnapshot(id)` reads one snapshot.
+  - `useCreateSnapshot()`, `useUpdateSnapshot()`, `useDeleteSnapshot()` and
+    `useVerifySnapshot()` change snapshots; `useUpdateSnapshot` takes `{ id,
+    labels }`, a merge patch. Each invalidates every snapshot query, as a
+    module's `verified` and `status` are shared by all its snapshots.
 - **Search.**
   - `useSearch(query)` runs once the query has a term, and keeps the last hits
     while new ones load. A result with `dense_pending` is stale at once, so
     `refetch()` or asking again gets the dense lane once it's embedded.
-  - `useResolve(names)`, and `useDecl(name, module?)`, where `module` is a
-    snapshot hit's, to open that snapshot's declaration.
+  - `useResolve(names)`, and `useDeclaration(name, module?)`, where `module`
+    is a snapshot hit's, to open that snapshot's declaration.
   - `useDebouncedValue` debounces typed input.
 
 **Query options.** `checkOptions`, `searchOptions` and the like give the same

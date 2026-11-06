@@ -15,36 +15,43 @@ result.ok; // the verdict; a check that couldn't complete has `error` set
 const { at } = await pisa.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num", { at: [{ line: 2, column: 30 }] });
 
 const code = "theorem t (n : Nat) : n + 0 = n := by sorry";
-const { session, states } = await pisa.startSession(code);
-const step = await pisa.tactic(states[0]!.state, "simp"); // states stay valid: branch freely
-const proof = proofText(code, [{ sorry: states[0]!, tactics: ["simp"] }]);
-(await pisa.checkSession(session, proof)).ok;
+const session = await pisa.startSession(code);
+const sorry = session.states[0]!;
+const step = await pisa.applyTactic(sorry.id, "simp"); // states stay valid: branch freely
+const proof = proofText(code, [{ sorry, tactics: ["simp"] }]);
+(await pisa.checkSession(session.id, proof)).ok;
 
-const base = await pisa.createSnapshot("import Mathlib\ndef double (n : Nat) := 2 * n");
-// Kept only if it keeps the statements of the entry it replaces.
+const { snapshot: base, check } = await pisa.createSnapshot("import Mathlib\ndef double (n : Nat) := 2 * n");
+// `snapshot` is absent when nothing was kept, and `check` says why.
+await pisa.check(`${base!.header}\nexample : double 2 = 4 := rfl`);
+// A merge patch: `null` removes a label, and the rest stay.
+await pisa.updateSnapshot(base!.id, { labels: { project: "p", draft: null } });
+// Kept only if it keeps the statements of the snapshot it replaces.
 const more = "import Mathlib\ndef double (n : Nat) := 2 * n\ntheorem double_two : double 2 = 4 := rfl";
-const replacement = await pisa.createSnapshot(more, { replaces: base.entry! });
-// What builds on an entry, and the creates that move it onto a replacement.
-const { entries } = await pisa.dependents(base.entry!, { labels: { project: "p" } });
+const { snapshot: replacement } = await pisa.createSnapshot(more, { replaces: { snapshot_id: base!.id } });
+// What builds on a snapshot, and the creates that move it onto a replacement.
+const { snapshots } = await pisa.listDependents(base!.id, { labels: { project: "p" } });
 // What the project rests on: declarations by status, assumptions and what uses them.
-const { summary, assumptions } = await pisa.audit({ labels: { project: "p" } });
-const { plan } = await pisa.rebuildPlan(base.entry!, replacement.entry!, { project: "p" });
-// Or let the server run it, retiring the old entries; as a job, since it can take minutes.
-const done = await pisa.waitJob(await pisa.submitRebuild(base.entry!, replacement.entry!, { project: "p" }, { retire: true }));
-await pisa.check(`${base.header}\nexample : double 2 = 4 := rfl`);
+const { summary, assumptions } = await pisa.auditSnapshots({ labels: { project: "p" } });
+const { plan } = await pisa.rebuildSnapshots(base!.id, replacement!.id, { project: "p" }, { dryRun: true });
+// Or let the server run it, retiring the old snapshots; as a job, since it can take minutes.
+const done = await pisa.waitJob(
+  await pisa.submitRebuildSnapshots(base!.id, replacement!.id, { project: "p" }, { retire: true }),
+);
 
-const { hits } = await pisa.search({ nl: "trace of a density matrix is one" });
+const { hits } = await pisa.search({ description: "trace of a density matrix is one" });
 ```
 
 - **Errors.** Every method throws a `PisaError` whose `kind` is one of the
   server's error kinds, or `network`, `aborted` or `bad_response`. The helpers
-  `isLeanError`, `isLimitError`, `isCapacityError` and `isNotFound` group the
-  kinds.
+  `isLeanError`, `isLimitError`, `isCapacityError` and `isNotFoundError` group
+  the kinds.
 - **Cancelling.** Every method takes a `signal`. Aborting gives the job up only
   if no worker has claimed it yet.
 - **Long requests.** Behind a proxy that cuts requests off, `submitCheck`,
-  `submitSession`, `submitTactic`, `submitSessionCheck`, `submitSnapshot` and
-  `submitVerify` ask for an async request and return its `Job` at once.
+  `submitStartSession`, `submitApplyTactic`, `submitCheckSession`,
+  `submitCreateSnapshot`, `submitVerifySnapshot` and `submitRebuildSnapshots`
+  ask for an async request and return its `Job` at once.
   `waitJob(job)` then returns what the call would have, or throws what it would
   have thrown; `pollJob(job, { wait })` looks once, and `cancelJob(job)`
   withdraws a job no worker has started. A job's answer is kept for an hour.
@@ -52,8 +59,9 @@ const { hits } = await pisa.search({ nl: "trace of a density matrix is one" });
   const job = await pisa.submitCheck("import Mathlib\nexample : 2 + 2 = 4 := by norm_num");
   (await pisa.waitJob(job)).ok;
   ```
-- **Options.** `version`, `timeout` and `envId` can be set per call, or for the
-  whole client.
+- **Options.** `version` and `timeout` can be set per call, or for the whole
+  client. Session, state and snapshot ids carry their version, so the calls
+  that take one take no `version`.
 - **Positions.** Lean's columns count code points. `posMapper(code)` converts
   them to string offsets and back, and `rangeOf(code, message)` gives the range
   a message covers.

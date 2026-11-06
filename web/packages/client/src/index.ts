@@ -17,7 +17,7 @@ export {
   isCapacityError,
   isLeanError,
   isLimitError,
-  isNotFound,
+  isNotFoundError,
   isPisaError,
   type PisaErrorKind,
 } from "./errors.ts";

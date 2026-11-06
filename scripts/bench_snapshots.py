@@ -354,10 +354,10 @@ def chunk_code(m, src, snaps, chunked, as_modules):
     if as_modules:
         def to_snapshot(i):
             name = i.group(1)
-            return i.group(0).replace(name, snaps[name]["snapshot"]) if name in chunked else i.group(0)
+            return i.group(0).replace(name, snaps[name]["module"]) if name in chunked else i.group(0)
         return IMPORT.sub(to_snapshot, src[m])
     deps = [d for d in IMPORT.findall(src[m]) if d in chunked]
-    header = "\n".join(f"import {snaps[d]['snapshot']}" for d in deps) if deps else HEADER
+    header = "\n".join(f"import {snaps[d]['module']}" for d in deps) if deps else HEADER
     return header + "\n\n" + "\n".join(plain_lines(src[m]))
 
 
@@ -379,16 +379,16 @@ def phase_api(src, order, url, checks, out, as_modules=False):
         status, r = api(url, "POST", "/snapshots", {"code": code, "timeout": 1200})
         dt = time.time() - t
         assert status == 200, r
-        result = r["result"]
+        result = r["check"]
         row = {"module": m, "seconds": dt, "build_seconds": result["time"], "imports": len(deps),
-               "kept": "snapshot" in r, "dirty": r.get("dirty"), "lines": lines_of(code)}
+               "kept": "snapshot" in r, "status": r.get("snapshot", {}).get("status"), "lines": lines_of(code)}
         if "snapshot" not in r:
-            row["error"] = result.get("error") or [x["data"][:300] for x in result["messages"] if x["severity"] == "error"][:3]
+            row["error"] = result.get("error") or [x["text"][:300] for x in result["messages"] if x["severity"] == "error"][:3]
             res["api"]["creates"].append(row)
             print(f"API create {i + 1}/{len(order)} {m}: NOT KEPT {row['error']}", flush=True)
             return res
-        snaps[m] = r
-        hits = [timed_check(url, f"{r['header']}\n\n{hit}") for _ in range(checks)]
+        snaps[m] = r["snapshot"]
+        hits = [timed_check(url, f"{snaps[m]['header']}\n\n{hit}") for _ in range(checks)]
         assert all(h["ok"] for h, _ in hits), hits
         row["checks"] = [dt for _, dt in hits]
         res["api"]["creates"].append(row)
@@ -399,14 +399,15 @@ def phase_api(src, order, url, checks, out, as_modules=False):
     # One snapshot that imports every leaf holds the whole library.
     imported = {d for m in order for d in IMPORT.findall(src[m])}
     leaves = [m for m in order if m not in imported]
-    imports = "\n".join(f"{'public ' if as_modules else ''}import {snaps[m]['snapshot']}" for m in leaves)
+    imports = "\n".join(f"{'public ' if as_modules else ''}import {snaps[m]['module']}" for m in leaves)
     code = ("module\n" if as_modules else "") + imports + \
         f"\n\n{'public ' if as_modules else ''}theorem pisa_bench_library : True := trivial"
     t = time.time()
-    status, final = api(url, "POST", "/snapshots", {"code": code, "timeout": 1200})
-    assert status == 200 and "snapshot" in final, final
-    res["api"]["library"] = {"snapshot": final["snapshot"], "leaves": len(leaves), "seconds": time.time() - t,
-                             "build_seconds": final["result"]["time"]}
+    status, r = api(url, "POST", "/snapshots", {"code": code, "timeout": 1200})
+    assert status == 200 and "snapshot" in r, r
+    final = r["snapshot"]
+    res["api"]["library"] = {"snapshot_id": final["id"], "module": final["module"], "leaves": len(leaves),
+                             "seconds": time.time() - t, "build_seconds": r["check"]["time"]}
     print(f"API library of {len(leaves)} leaves: {res['api']['library']['seconds']:.1f}s", flush=True)
     hits = [timed_check(url, f"{final['header']}\n\n{hit}") for _ in range(10)]
     res["api"]["hits"] = [dt for _, dt in hits]
@@ -419,7 +420,7 @@ def phase_api(src, order, url, checks, out, as_modules=False):
         assert r["ok"], r
         misses.append(dt)
     res["api"]["misses"] = misses
-    print(f"API final {final['snapshot']}: hits {statistics.median(res['api']['hits']):.2f}s median, "
+    print(f"API final {final['module']}: hits {statistics.median(res['api']['hits']):.2f}s median, "
           f"misses {', '.join(f'{x:.1f}' for x in misses)}s", flush=True)
     return res
 
@@ -434,9 +435,10 @@ def phase_restart(url, out, as_modules=False):
     on the whole-library snapshot of the api phase; and reads the memory of
     every REPL process."""
     raw = json.loads((out / f"raw-api{suffix(as_modules)}.json").read_text())
-    lib = raw["api"]["library"]["snapshot"]
+    lib = raw["api"]["library"]["snapshot_id"]
     hit = MODULE_HIT if as_modules else HIT
-    _, info = api(url, "GET", f"/snapshots/{lib}")
+    status, info = api(url, "GET", f"/snapshots/{lib}")
+    assert status == 200, info
     sh("docker", "compose", "restart", "worker")
     for _ in range(120):
         try:
