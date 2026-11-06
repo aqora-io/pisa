@@ -408,8 +408,9 @@ pub struct AtPosition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tactic: Option<TacticInfo>,
     /// With `detail: ["terms"]`, the term at the position that Lean
-    /// elaborated against an expected type. In `f x`, `f` alone has none, so
-    /// on `f` this is all of `f x`.
+    /// elaborated against an expected type. Lean gives the head of an
+    /// application the application's: on `f` in `f x`, this is `f`,
+    /// expecting what `f x` was expected to be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub term: Option<TermInfo>,
 }

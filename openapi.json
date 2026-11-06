@@ -21,7 +21,7 @@
           },
           "term": {
             "$ref": "#/components/schemas/TermInfo",
-            "description": "With `detail: [\"terms\"]`, the term at the position that Lean\nelaborated against an expected type. In `f x`, `f` alone has none, so\non `f` this is all of `f x`."
+            "description": "With `detail: [\"terms\"]`, the term at the position that Lean\nelaborated against an expected type. Lean gives the head of an\napplication the application's: on `f` in `f x`, this is `f`,\nexpecting what `f x` was expected to be."
           }
         },
         "required": [

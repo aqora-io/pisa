@@ -356,8 +356,9 @@ export interface components {
             tactic?: components["schemas"]["TacticInfo"];
             /**
              * @description With `detail: ["terms"]`, the term at the position that Lean
-             *     elaborated against an expected type. In `f x`, `f` alone has none, so
-             *     on `f` this is all of `f x`.
+             *     elaborated against an expected type. Lean gives the head of an
+             *     application the application's: on `f` in `f x`, this is `f`,
+             *     expecting what `f x` was expected to be.
              */
             term?: components["schemas"]["TermInfo"];
         };

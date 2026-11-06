@@ -380,8 +380,9 @@ position in request order, as `{pos, tactic?, term?}`:
 - With `detail: ["terms"]` too, `term` is the term at the position that Lean
   elaborated against an expected type, as `{term, expected_type, expr, pos,
   end_pos}`, where `term` is the source text and `expr` the term as Lean
-  elaborated it. In `f x`, `f` alone has no expected type, so on `f` this is
-  all of `f x`.
+  elaborated it. Lean gives the head of an application the application's
+  expected type: on `f` in `f x`, `term` is `f`, expecting what `f x` was
+  expected to be.
 - Both are the innermost of their kind written in the code: the range that
   starts last, then ends first. Of two nodes on one range, such as `rfl` and
   its head `@rfl`, the outer one is reported.
