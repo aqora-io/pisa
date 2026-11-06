@@ -227,6 +227,7 @@ impl Sessions {
                 code: job.code,
                 timeout_secs: job.timeout_secs,
                 detail: Vec::new(),
+                at: Vec::new(),
             },
         )
         .await;

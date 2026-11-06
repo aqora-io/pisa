@@ -41,6 +41,9 @@ pub struct CheckJob {
     pub timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<api::Detail>,
+    /// Positions in `code`, not in its body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at: Vec<api::Pos>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,10 +177,11 @@ pub struct CheckOutcome {
 
 impl From<CheckOutcome> for api::CheckResult {
     fn from(o: CheckOutcome) -> Self {
-        let (messages, sorries, tactics) = o.response.map_or_else(Default::default, |r| {
+        let (messages, sorries, tactics, at) = o.response.map_or_else(Default::default, |r| {
             let sorries = r.sorries.into_iter().map(Into::into).collect();
             let tactics = r.tactics.into_iter().map(Into::into).collect();
-            (api::messages(r.messages), sorries, tactics)
+            let at = r.at.into_iter().map(Into::into).collect();
+            (api::messages(r.messages), sorries, tactics, at)
         });
         let (verified, reasons, declarations) =
             o.verification.map_or((false, Vec::new(), Vec::new()), |v| {
@@ -193,6 +197,7 @@ impl From<CheckOutcome> for api::CheckResult {
             reasons,
             declarations,
             tactics,
+            at,
         }
     }
 }

@@ -8,6 +8,9 @@
 //! - `needs NAME` errors unless `NAME` is declared (see `pisa_tests`)
 //! - with `infotree: "original"`, every indented line is a tactic that
 //!   closes `⊢ goal <line>`, inside one `by` node
+//! - with `infotree: "full"`, the same in a command node, and under each
+//!   tactic a synthetic one on its first character; for `exact X`, the
+//!   term `X` expecting `goal <line>`, over its head `@X` on the same range
 //!
 //! Without `env`, a command is an import header; `import Missing` fails, and
 //! `import Clash` silently yields an empty environment, like the real REPL
@@ -101,7 +104,7 @@ fn respond(s: &mut State, input: &Value) -> Value {
         None => import(s, cmd),
         Some(env) => match s.envs.get(env as usize).cloned() {
             None => json!({"message": "Unknown environment."}),
-            Some(prev) => run(s, &prev, cmd, input["infotree"] == "original"),
+            Some(prev) => run(s, &prev, cmd, input["infotree"].as_str()),
         },
     }
 }
@@ -156,7 +159,8 @@ fn import(s: &mut State, header: &str) -> Value {
     json!({"env": s.envs.len() - 1})
 }
 
-fn run(s: &mut State, prev: &Env, cmd: &str, infotree: bool) -> Value {
+fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
+    let full = infotree == Some("full");
     for (marker, report) in [
         ("PISA_DECLS", declarations as fn(&str) -> String),
         ("PISA_EXPORT", exports),
@@ -186,9 +190,26 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: bool) -> Value {
     for (i, line) in cmd.lines().enumerate() {
         let n = i + 1;
         let tactic = line.trim_start();
-        if infotree && !tactic.is_empty() && tactic.len() < line.len() {
-            let range = ((n, line.len() - tactic.len()), (n, line.len()));
-            tactics.push(info_node("Lean.Parser.Tactic.fake", range, n, vec![]));
+        if infotree.is_some() && !tactic.is_empty() && tactic.len() < line.len() {
+            let column = line.len() - tactic.len();
+            let mut children = Vec::new();
+            if full {
+                let first = ((n, column), (n, column + 1));
+                let mut synthetic = info_node("Lean.Parser.Tactic.fake", first, n, vec![]);
+                synthetic["node"]["stx"]["range"]["synthetic"] = true.into();
+                synthetic["node"]["goalsBefore"] = json!(["⊢ synthetic"]);
+                children.push(synthetic);
+                if let Some(term) = tactic.strip_prefix("exact ") {
+                    let range = ((n, line.len() - term.len()), (n, line.len()));
+                    let completion =
+                        json!({"kind": "CompletionInfo", "node": null, "children": []});
+                    let head = term_node(&format!("@{term}"), range, n, vec![completion]);
+                    let hole = json!({"goalState": format!("⊢ goal {n}")});
+                    children.push(term_node(term, range, n, vec![head, hole]));
+                }
+            }
+            let range = ((n, column), (n, line.len()));
+            tactics.push(info_node("Lean.Parser.Tactic.fake", range, n, children));
         }
         if let Some(ms) = line.split("SLEEP ").nth(1) {
             let ms: u64 = ms.trim().parse().unwrap_or(1000);
@@ -243,23 +264,39 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: bool) -> Value {
             start,
             tactics,
         );
-        out["infotree"] = json!([by]);
+        out["infotree"] = if full {
+            json!([{"kind": "CommandInfo",
+                    "node": {"elaborator": null, "stx": {"range": range(((1, 0), (finish, 0)))}},
+                    "children": [by]}])
+        } else {
+            json!([by])
+        };
     }
     out
 }
 
+type Range = ((usize, usize), (usize, usize));
+
+fn range(((line, column), (end_line, end_column)): Range) -> Value {
+    json!({"synthetic": false, "start": {"line": line, "column": column},
+           "finish": {"line": end_line, "column": end_column}})
+}
+
 /// A `TacticInfo` node shaped like the REPL's, closing `⊢ goal <goal>`.
-fn info_node(
-    name: &str,
-    ((line, column), (end_line, end_column)): ((usize, usize), (usize, usize)),
-    goal: usize,
-    children: Vec<Value>,
-) -> Value {
+fn info_node(name: &str, at: Range, goal: usize, children: Vec<Value>) -> Value {
     json!({"kind": "TacticInfo", "node": {
         "name": name,
-        "stx": {"range": {"synthetic": false, "start": {"line": line, "column": column},
-                          "finish": {"line": end_line, "column": end_column}}},
+        "stx": {"range": range(at)},
         "goalsBefore": [format!("⊢ goal {goal}")], "goalsAfter": []},
+        "children": children})
+}
+
+/// A `TermInfo` node shaped like the REPL's, expecting `goal <goal>`.
+fn term_node(expr: &str, at: Range, goal: usize, children: Vec<Value>) -> Value {
+    json!({"kind": "TermInfo", "node": {
+        "elaborator": null,
+        "stx": {"range": range(at)},
+        "expectedType": format!("goal {goal}"), "expr": expr, "isBinder": false},
         "children": children})
 }
 

@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use futures::future::join_all;
 use pisa_protocol::api::{
     self, Accepted, ApiErrors, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail,
-    ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, PreferAsync,
+    ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, Pos, PreferAsync,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -182,10 +182,11 @@ async fn check(
     State(app): State<Arc<App>>,
     prefer: Prefer,
     Body(req): Body<CheckRequest>,
-) -> Response {
+) -> Result<Response, ApiError> {
+    check_positions(&req.detail, &req.at)?;
     let version = app.versions.resolve(req.version.as_deref());
-    let p = prepare_check(req.code, req.timeout, req.detail, version);
-    app.answer(prefer, JobKind::Check, p).await
+    let p = prepare_check(req.code, req.timeout, req.detail, req.at, version);
+    Ok(app.answer(prefer, JobKind::Check, p).await)
 }
 
 #[utoipa::path(
@@ -200,14 +201,16 @@ async fn check(
 async fn check_batch(
     State(app): State<Arc<App>>,
     Body(req): Body<BatchRequest>,
-) -> Json<BatchResponse> {
+) -> Result<Json<BatchResponse>, ApiError> {
+    check_positions(&req.detail, &req.at)?;
     let version = app.versions.resolve(req.version.as_deref());
     let items = req.items.into_iter().map(|item| {
         let app = &app;
         let version = version.clone();
-        let detail = req.detail.clone();
+        let (detail, at) = (req.detail.clone(), req.at.clone());
         async move {
-            let mut result = match check_one(app, item.code, req.timeout, detail, version).await {
+            let checked = check_one(app, item.code, req.timeout, detail, at, version).await;
+            let mut result = match checked {
                 Ok(r) => r,
                 Err(e) => CheckResult {
                     error: Some(e.into()),
@@ -218,9 +221,22 @@ async fn check_batch(
             result
         }
     });
-    Json(BatchResponse {
+    Ok(Json(BatchResponse {
         results: join_all(items).await,
-    })
+    }))
+}
+
+/// A check asks about at most [`MAX_AT`] positions, and for terms only at
+/// some.
+fn check_positions(detail: &[Detail], at: &[Pos]) -> Result<(), ApiError> {
+    let wrong = if at.len() > MAX_AT {
+        format!("`at` has {} positions; the most is {MAX_AT}", at.len())
+    } else if at.is_empty() && detail.contains(&Detail::Terms) {
+        "`terms` needs positions in `at`".to_string()
+    } else {
+        return Ok(());
+    };
+    Err(ApiError::new(ErrorKind::BadRequest, wrong))
 }
 
 async fn check_one(
@@ -228,9 +244,10 @@ async fn check_one(
     code: String,
     timeout_secs: u64,
     detail: Vec<Detail>,
+    at: Vec<Pos>,
     version: Option<String>,
 ) -> Result<CheckResult, DispatchError> {
-    let p = prepare_check(code, timeout_secs, detail, version);
+    let p = prepare_check(code, timeout_secs, detail, at, version);
     Ok(check_result(app.dispatcher.submit(p).await?))
 }
 
@@ -238,6 +255,7 @@ fn prepare_check(
     code: String,
     timeout_secs: u64,
     detail: Vec<Detail>,
+    at: Vec<Pos>,
     version: Option<String>,
 ) -> Prepared {
     let split = split_header(&code);
@@ -251,6 +269,7 @@ fn prepare_check(
         code,
         timeout_secs,
         detail,
+        at,
     });
     Prepared {
         job,

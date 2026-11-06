@@ -67,7 +67,7 @@ struct Warm {
 #[derive(Debug)]
 pub enum HeaderFailure {
     /// The header elaborated with errors (e.g. an unknown module).
-    Lean(CommandResponse),
+    Lean(Box<CommandResponse>),
     Timeout,
     /// The process failed to start or died.
     Failed(Error),
@@ -280,7 +280,7 @@ impl Lease {
             Ok(ReplResponse::Command(r)) if !r.has_errors() => r,
             Ok(ReplResponse::Command(r)) => {
                 self.retire("header_error");
-                return Err(HeaderFailure::Lean(r));
+                return Err(HeaderFailure::Lean(Box::new(r)));
             }
             Ok(other) => {
                 self.retire("header_error");
@@ -308,13 +308,14 @@ impl Lease {
                     });
                 }
                 self.retire("header_error");
-                return Err(HeaderFailure::Lean(CommandResponse {
+                return Err(HeaderFailure::Lean(Box::new(CommandResponse {
                     env: r.env,
                     messages,
                     sorries: Vec::new(),
                     tactics: Vec::new(),
+                    at: Vec::new(),
                     infotree: None,
-                }));
+                })));
             }
             Err(e) => return Err(self.header_failed(e)),
         }

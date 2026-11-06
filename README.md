@@ -192,6 +192,11 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release with goals and types at positions, upgrade the workers before
+clients send `at` or `detail: ["terms"]`. An older worker answers a check with
+`at` as if it had none, and can't read one with `terms`: its result has an
+`internal` error saying so.
+
 To the release with statuses and the audit, upgrade the workers before the
 servers, and rebuild the worker image: the kernel verifier reports
 assumptions too. An older worker answers `GET /snapshots/audit` with a 500.
@@ -303,8 +308,8 @@ pnpm -C web generate
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /check` | `{code, version?, timeout?, detail?}` → check result |
-| `POST /check/batch` | `{items: [{id, code}], version?, timeout?, detail?}` → `{results: [...]}`, in order |
+| `POST /check` | `{code, version?, timeout?, detail?, at?}` → check result |
+| `POST /check/batch` | `{items: [{id, code}], version?, timeout?, detail?, at?}` → `{results: [...]}`, in order |
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{session, states: [{state, goal, pos, end_pos}], messages}` |
 | `POST /states/{state}/tactic` | `{tactic, timeout?}` → `{state, goals, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{session}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
@@ -362,6 +367,33 @@ ran them, as `{tactic, goals_before, goals_after, pos, end_pos}`:
 - A tactic run on several goals, e.g. under `all_goals` or `<;>`, appears once
   per run, and so does every alternative `first` tried. One that failed has
   the same goals after as before.
+
+<a id="positions"></a>
+**Goals and types at positions.** `at` takes up to 64 positions in the code,
+as `{line, column}` like those of `messages`: lines count from 1, and columns
+from 0 in Unicode code points. A check result then has `at`, one entry per
+position in request order, as `{pos, tactic?, term?}`:
+- `tactic` is the tactic at the position, as an entry of `tactics`: its
+  `goals_before` and `goals_after` are the goals there. There is none outside
+  a tactic proof, nor on structure such as `by` or the space between two
+  tactics; the earlier one's `goals_after` are the goals in that space.
+- With `detail: ["terms"]` too, `term` is the term at the position that Lean
+  elaborated against an expected type, as `{term, expected_type, expr, pos,
+  end_pos}`, where `term` is the source text and `expr` the term as Lean
+  elaborated it. In `f x`, `f` alone has no expected type, so on `f` this is
+  all of `f x`.
+- Both are the innermost of their kind written in the code: the range that
+  starts last, then ends first. Of two nodes on one range, such as `rfl` and
+  its head `@rfl`, the outer one is reported.
+- On a batch, `at` applies to every item. `terms` without `at`, or more than
+  64 positions, is a `bad_request`.
+
+Goals cost what `detail: ["tactics"]` does: 16–79% more than a plain check on
+the bench library. Terms make Lean print every term of the code, 1.9 to 6.2
+times the check: seconds for a statement, but minutes for a 1,000-line chunk,
+and within `timeout` (see `bench/infotree/2026-11-06/report.md`). Nothing is
+kept between checks, so ask about every position in one: each check
+elaborates the code again.
 
 `version` selects a worker pool, by label (such as `v4.35.0-1a2b3c4d`) or by
 an alias set with `PISA_ALIASES`. `timeout` is Lean's limit in seconds

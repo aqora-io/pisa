@@ -8,6 +8,7 @@ import type { ErrorKind } from "./openapi.ts";
 
 export type {
   Allow,
+  AtPosition,
   AuditAssumption,
   AuditSummary,
   AuditUnproved,
@@ -75,6 +76,7 @@ export type {
   TacticInfo,
   TacticRequest,
   TacticResponse,
+  TermInfo,
 } from "./openapi.ts";
 
 /** An error's `kind` and `message`; the schema's `Error`, renamed so it

@@ -45,6 +45,18 @@ class Tactic(TypedDict):
     pos: Pos
     end_pos: Pos
 
+class TermInfo(TypedDict):
+    term: str
+    expected_type: str
+    expr: str
+    pos: Pos
+    end_pos: Pos
+
+class AtPosition(TypedDict):
+    pos: Pos
+    tactic: NotRequired[Tactic]
+    term: NotRequired[TermInfo]
+
 class CheckResult(TypedDict):
     id: NotRequired[str]
     ok: bool
@@ -55,6 +67,7 @@ class CheckResult(TypedDict):
     reasons: list[str]
     declarations: list[Declaration]
     tactics: NotRequired[list[Tactic]]
+    at: NotRequired[list[AtPosition]]
 
 class StateInfo(TypedDict):
     state: str

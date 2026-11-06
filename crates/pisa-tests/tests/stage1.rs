@@ -63,6 +63,93 @@ async fn check_reports_tactics_only_when_asked() {
     assert_eq!(r["error"]["kind"], "bad_request", "{r}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn check_answers_positions_in_the_submitted_code() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    // The fake's goals are named by the body's lines, one less than these.
+    let code = "import Foo\n\ntheorem t : True := by\n  exact foo\n  trivial";
+    let pos = |line, column| json!({"line": line, "column": column});
+    let at = json!([pos(4, 9), pos(4, 2), pos(5, 3), pos(1, 3), pos(3, 0)]);
+    let exact = json!({"tactic": "exact foo", "goals_before": ["⊢ goal 3"], "goals_after": [],
+                       "pos": pos(4, 2), "end_pos": pos(4, 11)});
+    let trivial = json!({"tactic": "trivial", "goals_before": ["⊢ goal 4"], "goals_after": [],
+                         "pos": pos(5, 2), "end_pos": pos(5, 9)});
+    let goals = json!([
+        {"pos": pos(4, 9), "tactic": exact},
+        {"pos": pos(4, 2), "tactic": exact},
+        {"pos": pos(5, 3), "tactic": trivial},
+        // In the header, and before the proof.
+        {"pos": pos(1, 3)},
+        {"pos": pos(3, 0)},
+    ]);
+    let r = check(&c, json!({"code": code, "at": at})).await;
+    assert_eq!(r["at"], goals, "{r}");
+    assert!(r.get("tactics").is_none(), "{r}");
+    // Code without tactics has no tree, and still an entry per position.
+    let r = check(
+        &c,
+        json!({"code": "theorem u : True := trivial", "at": [pos(1, 22)]}),
+    )
+    .await;
+    assert_eq!(r["at"], json!([{"pos": pos(1, 22)}]), "{r}");
+
+    // From the full tree: `foo` with what it was expected to be, and the
+    // same tactics. Its synthetic tactic on `exact`'s `e` is left out.
+    let mut terms = goals.clone();
+    terms[0]["term"] = json!({"term": "foo", "expected_type": "goal 3", "expr": "foo",
+                              "pos": pos(4, 8), "end_pos": pos(4, 11)});
+    let r = check(
+        &c,
+        json!({"code": code, "at": at, "detail": ["tactics", "terms"]}),
+    )
+    .await;
+    assert_eq!(r["at"], terms, "{r}");
+    assert_eq!(r["tactics"], json!([exact, trivial]), "{r}");
+
+    // A batch's positions apply to each item, in its own lines.
+    let items = json!([{"id": "a", "code": code}, {"id": "b", "code": "theorem u : True := by\n  trivial"}]);
+    let (status, r) = c
+        .post("/check/batch", json!({"items": items, "at": [pos(2, 2)]}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["results"][0]["at"], json!([{"pos": pos(2, 2)}]), "{r}");
+    assert_eq!(
+        r["results"][1]["at"][0]["tactic"]["goals_before"],
+        json!(["⊢ goal 2"]),
+        "{r}"
+    );
+
+    let many = vec![pos(4, 9); 65];
+    for (path, body, says) in [
+        (
+            "/check",
+            json!({"code": code, "detail": ["terms"]}),
+            "needs positions",
+        ),
+        (
+            "/check",
+            json!({"code": code, "at": many}),
+            "the most is 64",
+        ),
+        (
+            "/check/batch",
+            json!({"items": items, "at": many}),
+            "the most is 64",
+        ),
+    ] {
+        let (status, r) = c.post(path, body).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{r}"
+        );
+        assert!(
+            r["error"]["message"].as_str().unwrap().contains(says),
+            "{r}"
+        );
+    }
+}
+
 /// A worker's one slot keeps the header it imported, and says so.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_header_stays_warm_across_checks() {
@@ -142,6 +229,7 @@ async fn worker_publishes_a_new_warm_header_before_the_result() {
             code,
             timeout_secs: 5,
             detail: Vec::new(),
+            at: Vec::new(),
         });
         run_raw(&queue, serde_json::to_value(job).unwrap()).await;
         let warm = &queue.registry("v", LIVE).await.unwrap()[0].warm;
@@ -181,6 +269,7 @@ async fn a_job_that_does_not_decode_fails_alone() {
         code: "theorem t : 1 = 1 := rfl".into(),
         timeout_secs: 5,
         detail: Vec::new(),
+        at: Vec::new(),
     });
     let r = result(serde_json::to_value(job).unwrap()).await;
     assert!(

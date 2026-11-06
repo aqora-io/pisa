@@ -8,6 +8,27 @@
         ],
         "type": "string"
       },
+      "AtPosition": {
+        "description": "What Lean recorded at a position asked about in `at`. Each part is\nabsent when no syntax of its kind written in the code contains the\nposition; the innermost one is reported, the range that starts last,\nthen ends first.",
+        "properties": {
+          "pos": {
+            "$ref": "#/components/schemas/Pos",
+            "description": "The position asked about."
+          },
+          "tactic": {
+            "$ref": "#/components/schemas/TacticInfo",
+            "description": "The tactic at the position, with the goals before and after it."
+          },
+          "term": {
+            "$ref": "#/components/schemas/TermInfo",
+            "description": "With `detail: [\"terms\"]`, the term at the position that Lean\nelaborated against an expected type. In `f x`, `f` alone has none, so\non `f` this is all of `f x`."
+          }
+        },
+        "required": [
+          "pos"
+        ],
+        "type": "object"
+      },
       "AuditAssumption": {
         "properties": {
           "entry": {
@@ -124,6 +145,13 @@
       "BatchRequest": {
         "description": "`POST /check/batch`",
         "properties": {
+          "at": {
+            "description": "Applies to every item.",
+            "items": {
+              "$ref": "#/components/schemas/Pos"
+            },
+            "type": "array"
+          },
           "detail": {
             "description": "Applies to every item.",
             "items": {
@@ -169,6 +197,13 @@
       "CheckRequest": {
         "description": "`POST /check`",
         "properties": {
+          "at": {
+            "description": "Up to 64 positions in the code to report on: [`CheckResult::at`].",
+            "items": {
+              "$ref": "#/components/schemas/Pos"
+            },
+            "type": "array"
+          },
           "code": {
             "type": "string"
           },
@@ -196,6 +231,13 @@
       },
       "CheckResult": {
         "properties": {
+          "at": {
+            "description": "With `at`, what Lean recorded at each position, in request order.",
+            "items": {
+              "$ref": "#/components/schemas/AtPosition"
+            },
+            "type": "array"
+          },
           "declarations": {
             "description": "Declarations the code added, with the axioms each depends on.",
             "items": {
@@ -418,7 +460,8 @@
       "Detail": {
         "description": "Extra detail a check can return, requested in `detail`.",
         "enum": [
-          "tactics"
+          "tactics",
+          "terms"
         ],
         "type": "string"
       },
@@ -1944,6 +1987,36 @@
           "goals",
           "complete",
           "messages"
+        ],
+        "type": "object"
+      },
+      "TermInfo": {
+        "description": "A term written in the code, and the type Lean expected it to have.",
+        "properties": {
+          "end_pos": {
+            "$ref": "#/components/schemas/Pos"
+          },
+          "expected_type": {
+            "type": "string"
+          },
+          "expr": {
+            "description": "The term as Lean elaborated it.",
+            "type": "string"
+          },
+          "pos": {
+            "$ref": "#/components/schemas/Pos"
+          },
+          "term": {
+            "description": "The term's source text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term",
+          "expected_type",
+          "expr",
+          "pos",
+          "end_pos"
         ],
         "type": "object"
       }

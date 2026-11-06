@@ -310,6 +310,7 @@ impl Client {
             version: self.version.clone(),
             timeout: self.timeout,
             detail: detail.to_vec(),
+            at: Vec::new(),
         }
     }
 
@@ -347,6 +348,7 @@ impl Client {
             version: self.version.clone(),
             timeout: self.timeout,
             detail: detail.to_vec(),
+            at: Vec::new(),
         };
         let resp: BatchResponse = self.post("check/batch", &req).await?;
         Ok(resp.results)

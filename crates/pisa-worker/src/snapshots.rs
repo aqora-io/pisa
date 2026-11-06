@@ -1247,6 +1247,7 @@ impl Snapshots {
             messages: compiled.messages,
             sorries: Vec::new(),
             tactics: Vec::new(),
+            at: Vec::new(),
             infotree: None,
         };
         let errors = response.has_errors();

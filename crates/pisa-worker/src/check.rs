@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use pisa_protocol::api::{Detail, Error, ErrorKind};
 use pisa_protocol::header::split_header;
-use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity, tactics};
+use pisa_protocol::repl::{
+    CommandResponse, Pos, ReplCommand, ReplResponse, Severity, at_positions, tactics,
+};
 use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
@@ -44,7 +46,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
             // Header positions are already those of the submitted code, and
             // its error messages say what went wrong.
             outcome.verification = Some(slot.policy().judge(&r, None));
-            outcome.response = Some(r);
+            outcome.response = Some(*r);
             return outcome;
         }
         Err(other) => {
@@ -58,10 +60,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         env: Some(env),
         all_tactics: None,
         root_goals: None,
-        infotree: job
-            .detail
-            .contains(&Detail::Tactics)
-            .then(|| "original".to_string()),
+        infotree: infotree(&job).map(str::to_string),
     };
     let start = Instant::now();
     let result = run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await;
@@ -71,13 +70,15 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         Ok(ReplResponse::Command(mut r)) => {
             let report = axiom_report(&mut slot, &r).await;
             outcome.verification = Some(slot.policy().judge(&r, report.as_ref()));
-            if let Some(tree) = r.infotree.take() {
-                match tactics(&tree, &split.body) {
-                    Ok(t) => r.tactics = t,
-                    Err(e) => tracing::warn!("unreadable info tree: {e}"),
-                }
-            }
+            read_tree(&mut r, &job, &split.body, split.header_lines);
             r.shift_lines(split.header_lines);
+            // Positions in the header were asked about on line 0 of the body.
+            for (at, asked) in r.at.iter_mut().zip(&job.at) {
+                at.pos = Pos {
+                    line: asked.line,
+                    column: asked.column,
+                };
+            }
             outcome.response = Some(r);
         }
         Ok(ReplResponse::Error(e)) => outcome.error = Some(Error::new(ErrorKind::Lean, e.message)),
@@ -91,6 +92,48 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     }
     slot.finish_job();
     outcome
+}
+
+/// Reads what `job` asked for from the info tree of the response to `body`,
+/// then drops the tree: `tactics`, and an entry for each position in `at`,
+/// which is in the lines of the code, `header_lines` more than the body's.
+fn read_tree(r: &mut CommandResponse, job: &CheckJob, body: &str, header_lines: u64) {
+    // The REPL leaves out a tree with nothing in it.
+    let tree = r.infotree.take().unwrap_or_else(|| serde_json::json!([]));
+    if job.detail.contains(&Detail::Tactics) {
+        match tactics(&tree, body) {
+            Ok(t) => r.tactics = t,
+            Err(e) => tracing::warn!("unreadable info tree: {e}"),
+        }
+    }
+    if job.at.is_empty() {
+        return;
+    }
+    let positions: Vec<Pos> = job
+        .at
+        .iter()
+        .map(|p| Pos {
+            line: p.line.saturating_sub(header_lines),
+            column: p.column,
+        })
+        .collect();
+    let terms = job.detail.contains(&Detail::Terms);
+    match at_positions(&tree, body, &positions, terms) {
+        Ok(at) => r.at = at,
+        Err(e) => tracing::warn!("unreadable info tree: {e}"),
+    }
+}
+
+/// What of the info tree the REPL prints: every node for terms, which costs
+/// several times the check; the original tactics for tactics and goals.
+fn infotree(job: &CheckJob) -> Option<&'static str> {
+    if job.at.is_empty() && !job.detail.contains(&Detail::Tactics) {
+        None
+    } else if job.detail.contains(&Detail::Terms) {
+        Some("full")
+    } else {
+        Some("original")
+    }
 }
 
 pub fn policy_error(reasons: &[String]) -> Error {
@@ -176,4 +219,28 @@ pub async fn axiom_report(slot: &mut Lease, body: &CommandResponse) -> Option<Co
 
 fn round6(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pisa_protocol::api;
+
+    #[test]
+    fn only_terms_ask_for_the_full_tree() {
+        let job = |detail: &[Detail], at: usize| CheckJob {
+            code: String::new(),
+            timeout_secs: 1,
+            detail: detail.to_vec(),
+            at: vec![api::Pos { line: 1, column: 0 }; at],
+        };
+        assert_eq!(infotree(&job(&[], 0)), None);
+        assert_eq!(infotree(&job(&[Detail::Tactics], 0)), Some("original"));
+        assert_eq!(infotree(&job(&[], 2)), Some("original"));
+        assert_eq!(infotree(&job(&[Detail::Terms], 2)), Some("full"));
+        let both = [Detail::Tactics, Detail::Terms];
+        assert_eq!(infotree(&job(&both, 2)), Some("full"));
+        // The server refuses terms without positions; a worker prints none.
+        assert_eq!(infotree(&job(&[Detail::Terms], 0)), None);
+    }
 }

@@ -302,7 +302,14 @@ pub struct Sorry {
 pub enum Detail {
     /// Every tactic Lean ran, with the goals before it: [`CheckResult::tactics`].
     Tactics,
+    /// With `at`, also the term at each position and the type Lean expected
+    /// it to have: [`AtPosition::term`]. Lean then prints every term of the
+    /// code, which can take several times as long as the check.
+    Terms,
 }
+
+/// The most positions a check can ask about in `at`.
+pub const MAX_AT: usize = 64;
 
 /// `POST /check`
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -316,6 +323,9 @@ pub struct CheckRequest {
     pub timeout: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<Detail>,
+    /// Up to 64 positions in the code to report on: [`CheckResult::at`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at: Vec<Pos>,
 }
 
 /// `POST /check/batch`
@@ -329,6 +339,9 @@ pub struct BatchRequest {
     /// Applies to every item.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<Detail>,
+    /// Applies to every item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at: Vec<Pos>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -378,6 +391,39 @@ pub struct CheckResult {
     /// alternative `first` tried.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tactics: Vec<TacticInfo>,
+    /// With `at`, what Lean recorded at each position, in request order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at: Vec<AtPosition>,
+}
+
+/// What Lean recorded at a position asked about in `at`. Each part is
+/// absent when no syntax of its kind written in the code contains the
+/// position; the innermost one is reported, the range that starts last,
+/// then ends first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AtPosition {
+    /// The position asked about.
+    pub pos: Pos,
+    /// The tactic at the position, with the goals before and after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tactic: Option<TacticInfo>,
+    /// With `detail: ["terms"]`, the term at the position that Lean
+    /// elaborated against an expected type. In `f x`, `f` alone has none, so
+    /// on `f` this is all of `f x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<TermInfo>,
+}
+
+/// A term written in the code, and the type Lean expected it to have.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct TermInfo {
+    /// The term's source text.
+    pub term: String,
+    pub expected_type: String,
+    /// The term as Lean elaborated it.
+    pub expr: String,
+    pub pos: Pos,
+    pub end_pos: Pos,
 }
 
 /// One run of a tactic, with the goals before and after it.
@@ -1053,6 +1099,22 @@ impl From<repl::Tactic> for TacticInfo {
             goals_after: t.goals_after,
             pos: t.pos.into(),
             end_pos: t.end_pos.into(),
+        }
+    }
+}
+
+impl From<repl::At> for AtPosition {
+    fn from(a: repl::At) -> Self {
+        AtPosition {
+            pos: a.pos.into(),
+            tactic: a.tactic.map(Into::into),
+            term: a.term.map(|t| TermInfo {
+                term: t.term,
+                expected_type: t.expected_type,
+                expr: t.expr,
+                pos: t.pos.into(),
+                end_pos: t.end_pos.into(),
+            }),
         }
     }
 }

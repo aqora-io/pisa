@@ -343,6 +343,24 @@ export interface components {
          * @enum {string}
          */
         Allow: "definitions";
+        /**
+         * @description What Lean recorded at a position asked about in `at`. Each part is
+         *     absent when no syntax of its kind written in the code contains the
+         *     position; the innermost one is reported, the range that starts last,
+         *     then ends first.
+         */
+        AtPosition: {
+            /** @description The position asked about. */
+            pos: components["schemas"]["Pos"];
+            /** @description The tactic at the position, with the goals before and after it. */
+            tactic?: components["schemas"]["TacticInfo"];
+            /**
+             * @description With `detail: ["terms"]`, the term at the position that Lean
+             *     elaborated against an expected type. In `f x`, `f` alone has none, so
+             *     on `f` this is all of `f x`.
+             */
+            term?: components["schemas"]["TermInfo"];
+        };
         AuditAssumption: {
             /**
              * @description An entry on the module that declares it: one with the labels if there
@@ -391,6 +409,8 @@ export interface components {
         /** @description `POST /check/batch` */
         BatchRequest: {
             /** @description Applies to every item. */
+            at?: components["schemas"]["Pos"][];
+            /** @description Applies to every item. */
             detail?: components["schemas"]["Detail"][];
             items: components["schemas"]["BatchItem"][];
             /** Format: int64 */
@@ -403,6 +423,8 @@ export interface components {
         };
         /** @description `POST /check` */
         CheckRequest: {
+            /** @description Up to 64 positions in the code to report on: [`CheckResult::at`]. */
+            at?: components["schemas"]["Pos"][];
             code: string;
             detail?: components["schemas"]["Detail"][];
             /**
@@ -414,6 +436,8 @@ export interface components {
             version?: string;
         };
         CheckResult: {
+            /** @description With `at`, what Lean recorded at each position, in request order. */
+            at?: components["schemas"]["AtPosition"][];
             /** @description Declarations the code added, with the axioms each depends on. */
             declarations: components["schemas"]["Declaration"][];
             /** @description Why the check could not complete (timeout, crash, policy, ...). */
@@ -519,7 +543,7 @@ export interface components {
          * @description Extra detail a check can return, requested in `detail`.
          * @enum {string}
          */
-        Detail: "tactics";
+        Detail: "tactics" | "terms";
         Error: {
             kind: components["schemas"]["ErrorKind"];
             message: string;
@@ -1251,6 +1275,16 @@ export interface components {
             /** @description The new state. Earlier states stay valid, so a session is a tree. */
             state: string;
         };
+        /** @description A term written in the code, and the type Lean expected it to have. */
+        TermInfo: {
+            end_pos: components["schemas"]["Pos"];
+            expected_type: string;
+            /** @description The term as Lean elaborated it. */
+            expr: string;
+            pos: components["schemas"]["Pos"];
+            /** @description The term's source text. */
+            term: string;
+        };
     };
     responses: never;
     parameters: never;
@@ -1259,6 +1293,7 @@ export interface components {
     pathItems: never;
 }
 export type Allow = components['schemas']['Allow'];
+export type AtPosition = components['schemas']['AtPosition'];
 export type AuditAssumption = components['schemas']['AuditAssumption'];
 export type AuditSummary = components['schemas']['AuditSummary'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
@@ -1327,6 +1362,7 @@ export type Suggestion = components['schemas']['Suggestion'];
 export type TacticInfo = components['schemas']['TacticInfo'];
 export type TacticRequest = components['schemas']['TacticRequest'];
 export type TacticResponse = components['schemas']['TacticResponse'];
+export type TermInfo = components['schemas']['TermInfo'];
 export type $defs = Record<string, never>;
 export interface operations {
     check: {
