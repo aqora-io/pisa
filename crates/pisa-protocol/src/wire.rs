@@ -188,7 +188,6 @@ impl From<CheckOutcome> for api::CheckResult {
                 (v.ok, v.reasons, v.declarations)
             });
         api::CheckResult {
-            id: None,
             ok: verified && o.error.is_none(),
             time: o.time,
             error: o.error,

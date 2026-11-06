@@ -15,12 +15,11 @@ describe("checks", () => {
     expect(ok.ok).toBe(true);
     expect(ok.declarations[0]?.name).toBe("t");
 
-    const [nat, cheat] = await client.checkBatch([
-      { id: "a", code: "#check Nat" },
-      { id: "b", code: "theorem t : False := sorry" },
-    ]);
-    expect(nat).toMatchObject({ id: "a", messages: [{ data: "Nat : Type", pos: { line: 1, column: 0 } }] });
-    expect(cheat).toMatchObject({ id: "b", reasons: ["axiom: t uses sorryAx"] });
+    const [nat, cheat, ...rest] = await client.checkBatch(["#check Nat", "theorem t : False := sorry"]);
+    expect(rest).toEqual([]);
+    expect(nat).toMatchObject({ messages: [{ text: "Nat : Type", pos: { line: 1, column: 0 } }] });
+    expect(nat).not.toHaveProperty("id");
+    expect(cheat).toMatchObject({ reasons: ["axiom: t uses sorryAx"] });
 
     const code = "import Foo\ntheorem t : True := by\n  trivial";
     expect((await client.check(code)).tactics).toBeUndefined();

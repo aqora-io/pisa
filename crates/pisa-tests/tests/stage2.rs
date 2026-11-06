@@ -95,7 +95,7 @@ async fn sandboxed_worker_runs_jobs() {
     .await;
     let r = check(&c, "theorem t : 1 = 1 := rfl\n#check Nat").await;
     assert_eq!(r["ok"], true, "{r}");
-    assert_eq!(r["messages"][0]["data"], "Nat : Type");
+    assert_eq!(r["messages"][0]["text"], "Nat : Type");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -105,7 +105,7 @@ async fn imports_that_fail_to_load_together_are_reported() {
     assert_eq!(r["ok"], false, "{r}");
     assert_eq!(r["messages"][0]["severity"], "error", "{r}");
     assert_eq!(
-        r["messages"][0]["data"],
+        r["messages"][0]["text"],
         "import Clash failed, environment already contains 'dup' from Other"
     );
     assert_eq!(r["messages"][0]["pos"]["line"], 2);

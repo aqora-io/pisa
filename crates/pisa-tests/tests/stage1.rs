@@ -19,7 +19,7 @@ async fn check_reports_messages_at_submitted_positions() {
     assert_eq!(
         r["messages"],
         json!([{"severity": "info", "pos": {"line": 3, "column": 0},
-                "end_pos": {"line": 3, "column": 6}, "data": "Nat : Type"}])
+                "end_pos": {"line": 3, "column": 6}, "text": "Nat : Type"}])
     );
 }
 
@@ -50,7 +50,7 @@ async fn check_reports_tactics_only_when_asked() {
     let (status, r) = c
         .post(
             "/check/batch",
-            json!({"items": [{"id": "a", "code": code}], "detail": ["tactics"]}),
+            json!({"items": [{"code": code}], "detail": ["tactics"]}),
         )
         .await;
     assert_eq!(status, 200, "{r}");
@@ -107,7 +107,7 @@ async fn check_answers_positions_in_the_submitted_code() {
     assert_eq!(r["tactics"], json!([exact, trivial]), "{r}");
 
     // A batch's positions apply to each item, in its own lines.
-    let items = json!([{"id": "a", "code": code}, {"id": "b", "code": "theorem u : True := by\n  trivial"}]);
+    let items = json!([{"code": code}, {"code": "theorem u : True := by\n  trivial"}]);
     let (status, r) = c
         .post("/check/batch", json!({"items": items, "at": [pos(2, 2)]}))
         .await;
@@ -281,23 +281,15 @@ async fn a_job_that_does_not_decode_fails_alone() {
 #[tokio::test(flavor = "multi_thread")]
 async fn batch_results_keep_order() {
     let c = Cluster::start(&[("w0", "v", 2), ("w1", "v", 2)]).await;
-    let items: Vec<_> = (0..6)
-        .map(|i| {
-            let body = if i % 2 == 0 {
-                "#check Nat"
-            } else {
-                "error_here"
-            };
-            json!({"id": format!("s{i}"), "code": format!("import A{}\n{body}", i % 3)})
-        })
-        .collect();
+    let items = json!([{"code": "import A0\n#check Nat"}, {"code": "import A1\nerror_here"}]);
     let (status, body) = c.post("/check/batch", json!({"items": items})).await;
     assert_eq!(status, 200);
-    for (i, r) in body["results"].as_array().unwrap().iter().enumerate() {
-        assert_eq!(r["id"], format!("s{i}"));
-        let severity = &r["messages"][0]["severity"];
-        assert_eq!(severity, if i % 2 == 0 { "info" } else { "error" });
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    for (r, severity) in results.iter().zip(["info", "error"]) {
+        assert_eq!(r["messages"][0]["severity"], severity);
         assert_eq!(r["messages"][0]["pos"]["line"], 2);
+        assert!(r.get("id").is_none(), "{r}");
     }
 }
 
@@ -348,12 +340,11 @@ async fn versions_route_to_matching_pools() {
     let (status, body) = c
         .post(
             "/check/batch",
-            json!({"version": "v2", "items": [{"id": "a", "code": "#check Nat"}]}),
+            json!({"version": "v2", "items": [{"code": "#check Nat"}]}),
         )
         .await;
     assert_eq!(status, 200);
     assert_eq!(body["results"][0]["error"]["kind"], "capacity");
-    assert_eq!(body["results"][0]["id"], "a");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -406,7 +397,7 @@ async fn draining_worker_finishes_its_jobs_and_exits() {
     };
     let slow = slow.await.unwrap();
     assert!(slow.get("error").is_none(), "{slow}");
-    assert_eq!(slow["messages"][0]["data"], "Nat : Type");
+    assert_eq!(slow["messages"][0]["text"], "Nat : Type");
 
     // w0 exits once its job is answered.
     let w0 = c.workers.remove(0);

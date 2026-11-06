@@ -210,17 +210,17 @@ impl Client {
         )
     }
 
-    #[pyo3(signature = (items, *, detail = Vec::new(), at = Vec::new()))]
+    #[pyo3(signature = (codes, *, detail = Vec::new(), at = Vec::new()))]
     fn check_batch<'py>(
         &self,
         py: Python<'py>,
-        items: Vec<(String, String)>,
+        codes: Vec<String>,
         detail: Vec<String>,
         at: Vec<(u64, u64)>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let options = check_options(detail, at)?;
         call(py, async move {
-            self.inner.check_batch_with(items, &options).await
+            self.inner.check_batch_with(codes, &options).await
         })
     }
 

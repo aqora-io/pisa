@@ -33,7 +33,7 @@ async fn any_server_serves_any_request() {
             .post_to(server, "/check", json!({"code": "#check Nat"}))
             .await;
         assert_eq!(status, 200, "{r}");
-        assert_eq!(r["messages"][0]["data"], "Nat : Type");
+        assert_eq!(r["messages"][0]["text"], "Nat : Type");
     }
     let (status, s) = c.post("/sessions", json!({"code": CODE})).await;
     assert_eq!(status, 200, "{s}");

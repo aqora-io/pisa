@@ -12,8 +12,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::future::join_all;
 use pisa_protocol::api::{
-    self, Accepted, ApiErrors, BatchRequest, BatchResponse, CheckRequest, CheckResult, Detail,
-    ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, Pos, PreferAsync,
+    self, Accepted, ApiErrors, CheckBatchRequest, CheckBatchResponse, CheckRequest, CheckResult,
+    Detail, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, Pos, PreferAsync,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -193,15 +193,15 @@ async fn check(
     post, path = "/check/batch", operation_id = "checkBatch", tag = "checks",
     summary = "Check several pieces of code",
     description = "Each item gets a result, as from `/check`, with its own failure in `error`.",
-    request_body = BatchRequest,
-    responses((status = 200, description = "A result per item, in order", body = BatchResponse), ApiErrors),
+    request_body = CheckBatchRequest,
+    responses((status = 200, description = "A result per item, in order", body = CheckBatchResponse), ApiErrors),
 )]
 /// Every item gets a result; failures, including running out of capacity,
 /// are reported in that item's `error`.
 async fn check_batch(
     State(app): State<Arc<App>>,
-    Body(req): Body<BatchRequest>,
-) -> Result<Json<BatchResponse>, ApiError> {
+    Body(req): Body<CheckBatchRequest>,
+) -> Result<Json<CheckBatchResponse>, ApiError> {
     check_positions(&req.detail, &req.at)?;
     let version = app.versions.resolve(req.version.as_deref());
     let items = req.items.into_iter().map(|item| {
@@ -210,18 +210,16 @@ async fn check_batch(
         let (detail, at) = (req.detail.clone(), req.at.clone());
         async move {
             let checked = check_one(app, item.code, req.timeout, detail, at, version).await;
-            let mut result = match checked {
+            match checked {
                 Ok(r) => r,
                 Err(e) => CheckResult {
                     error: Some(e.into()),
                     ..Default::default()
                 },
-            };
-            result.id = Some(item.id);
-            result
+            }
         }
     });
-    Ok(Json(BatchResponse {
+    Ok(Json(CheckBatchResponse {
         results: join_all(items).await,
     }))
 }

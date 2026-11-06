@@ -76,9 +76,9 @@ def test_check(url):
     assert ok["declarations"][0]["name"] == "t"
     assert isinstance(ok["time"], float) and isinstance(ok["ok"], bool)
 
-    results = client.check_batch([("a", "#check Nat"), ("b", "theorem t : False := sorry")])
-    assert [r["id"] for r in results] == ["a", "b"]
-    assert results[0]["messages"][0]["data"] == "Nat : Type"
+    results = client.check_batch(["#check Nat", "theorem t : False := sorry"])
+    assert len(results) == 2 and all("id" not in r for r in results)
+    assert results[0]["messages"][0]["text"] == "Nat : Type"
     assert results[0]["messages"][0]["pos"] == {"line": 1, "column": 0}
     assert results[1]["reasons"] == ["axiom: t uses sorryAx"]
 
@@ -87,7 +87,7 @@ def test_check(url):
     [tactic] = client.check(code, detail=["tactics"])["tactics"]
     assert tactic["tactic"] == "trivial" and tactic["pos"] == {"line": 3, "column": 2}
     assert tactic["goals_before"] == ["⊢ goal 2"] and tactic["goals_after"] == []
-    [result] = client.check_batch([("a", code)], detail=["tactics"])
+    [result] = client.check_batch([code], detail=["tactics"])
     assert result["tactics"] == [tactic]
     with pytest.raises(ValueError):
         client.check(code, detail=["bogus"])
@@ -97,7 +97,7 @@ def test_check(url):
     assert at["pos"] == {"line": 3, "column": 9}
     assert at["tactic"]["tactic"] == "exact foo" and at["tactic"]["goals_before"] == ["⊢ goal 2"]
     assert at["term"]["term"] == "foo" and at["term"]["expected_type"] == "goal 2"
-    [result] = client.check_batch([("a", code)], detail=["terms"], at=[(3, 9)])
+    [result] = client.check_batch([code], detail=["terms"], at=[(3, 9)])
     assert result["at"] == [at]
     # Without terms, the tactic alone.
     job = client.submit_check(code, at=[(3, 9)])

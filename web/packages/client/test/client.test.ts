@@ -48,20 +48,20 @@ describe("PisaClient", () => {
   it("sends positions only when there are some", async () => {
     const { client, sent } = recording(() => json({ results: [] }));
     await client.check("x", { detail: ["terms"], at: [{ line: 2, column: 4 }] });
-    await client.checkBatch([{ id: "a", code: "x" }], { at: [] });
+    await client.checkBatch(["x"], { at: [] });
     expect(sent[0]?.body).toEqual({ code: "x", version: "v1", detail: ["terms"], at: [{ line: 2, column: 4 }] });
-    expect(sent[1]?.body).toEqual({ items: [{ id: "a", code: "x" }], version: "v1" });
+    expect(sent[1]?.body).toEqual({ items: [{ code: "x" }], version: "v1" });
   });
 
   it("puts the version in the body or the query, as the server reads it", async () => {
     const { client, sent } = recording(() => json({ entries: [], results: [] }));
     await client.check("#check Nat", { detail: ["tactics"], timeout: 5 });
-    await client.checkBatch([{ id: "a", code: "x" }], { version: "v2" });
+    await client.checkBatch(["x"], { version: "v2" });
     await client.listSnapshots({ labels: { run: "a b", "k.x": "1:2" }, limit: 1, after: "c" });
     await client.tactic("v1~h~s", "simp");
     expect(sent[0]?.body).toEqual({ code: "#check Nat", version: "v1", timeout: 5, detail: ["tactics"] });
     expect(sent[0]?.headers["content-type"]).toBe("application/json");
-    expect(sent[1]?.body).toEqual({ items: [{ id: "a", code: "x" }], version: "v2" });
+    expect(sent[1]?.body).toEqual({ items: [{ code: "x" }], version: "v2" });
     const list = new URL(sent[2]?.url ?? "", "http://h");
     expect(list.searchParams.getAll("label")).toEqual(["run:a b", "k.x:1:2"]);
     expect([list.searchParams.get("version"), list.searchParams.get("limit"), list.searchParams.get("after")]).toEqual([

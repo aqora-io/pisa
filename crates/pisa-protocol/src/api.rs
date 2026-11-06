@@ -9,7 +9,7 @@
 //! | Endpoint | Request → response |
 //! | --- | --- |
 //! | `POST /check` | [`CheckRequest`] → [`CheckResult`] |
-//! | `POST /check/batch` | [`BatchRequest`] → [`BatchResponse`] |
+//! | `POST /check/batch` | [`CheckBatchRequest`] → [`CheckBatchResponse`] |
 //! | `POST /sessions` | [`StartRequest`] → [`StartResponse`] |
 //! | `POST /states/{state}/tactic` | [`TacticRequest`] → [`TacticResponse`] |
 //! | `POST /sessions/{session}/check` | [`SessionCheckRequest`] → [`CheckResult`] |
@@ -284,7 +284,8 @@ pub struct Message {
     pub pos: Pos,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_pos: Option<Pos>,
-    pub data: String,
+    /// What Lean said.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -330,8 +331,9 @@ pub struct CheckRequest {
 
 /// `POST /check/batch`
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct BatchRequest {
-    pub items: Vec<BatchItem>,
+pub struct CheckBatchRequest {
+    /// The code to check; each item gets a result, in this order.
+    pub items: Vec<CheckBatchItem>,
     #[serde(default)]
     pub version: Option<String>,
     #[serde(default = "default_timeout")]
@@ -345,22 +347,18 @@ pub struct BatchRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct BatchItem {
-    pub id: String,
+pub struct CheckBatchItem {
     pub code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct BatchResponse {
+pub struct CheckBatchResponse {
     /// In request order.
     pub results: Vec<CheckResult>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct CheckResult {
-    /// The item's id, in batch results.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
     /// True when the code elaborated without errors and passed every policy
     /// check: only standard axioms, no metaprogramming, allowed options, and
     /// for session checks, the session's original statements.
@@ -1077,7 +1075,7 @@ impl From<repl::Message> for Message {
             severity: m.severity.into(),
             pos: m.pos.into(),
             end_pos: m.end_pos.map(Into::into),
-            data: m.data,
+            text: m.data,
         }
     }
 }
@@ -1156,7 +1154,7 @@ mod tests {
                 "ok": false, "time": 1.0,
                 "error": {"kind": "timeout", "message": "Lean ran for more than 1s"},
                 "messages": [{"severity": "info", "pos": {"line": 1, "column": 0},
-                              "end_pos": {"line": 1, "column": 6}, "data": "Nat : Type"}],
+                              "end_pos": {"line": 1, "column": 6}, "text": "Nat : Type"}],
                 "sorries": [], "reasons": [], "declarations": []
             })
         );

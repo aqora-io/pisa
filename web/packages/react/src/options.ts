@@ -69,6 +69,7 @@ export function checkOptions(client: PisaClient, input: CheckInput): PisaQueryOp
     version: input.version ?? client.version ?? null,
     timeout: input.timeout ?? client.timeout ?? null,
     detail: input.detail ?? [],
+    at: input.at ?? [],
   };
   return {
     queryKey: [...pisaKeys.checks(client), request] as QueryKey,

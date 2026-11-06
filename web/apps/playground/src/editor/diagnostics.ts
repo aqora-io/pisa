@@ -13,6 +13,6 @@ const SEVERITY: Record<Message["severity"], Diagnostic["severity"]> = {
 export function toDiagnostics(code: string, messages: Message[]): Diagnostic[] {
   return messages.map((m) => {
     const { from, to } = rangeOf(code, m);
-    return { from, to, severity: SEVERITY[m.severity], message: m.data };
+    return { from, to, severity: SEVERITY[m.severity], message: m.text };
   });
 }

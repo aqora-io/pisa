@@ -49,7 +49,7 @@ describe("useProofSession", () => {
     }
     // Lean recovers from an elaboration error: the step succeeds, with the error.
     if (tactic === "exact nope") {
-      const error = { severity: "error", pos: { line: 0, column: 0 }, data: "Unknown identifier `nope`" };
+      const error = { severity: "error", pos: { line: 0, column: 0 }, text: "Unknown identifier `nope`" };
       return { state: "k-nope", goals: [], complete: false, messages: [error] };
     }
     // `skip` leaves the state as it was, with the same key.

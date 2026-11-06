@@ -403,22 +403,22 @@ export interface components {
             name: string;
             status: components["schemas"]["ProofStatus"];
         };
-        BatchItem: {
+        CheckBatchItem: {
             code: string;
-            id: string;
         };
         /** @description `POST /check/batch` */
-        BatchRequest: {
+        CheckBatchRequest: {
             /** @description Applies to every item. */
             at?: components["schemas"]["Pos"][];
             /** @description Applies to every item. */
             detail?: components["schemas"]["Detail"][];
-            items: components["schemas"]["BatchItem"][];
+            /** @description The code to check; each item gets a result, in this order. */
+            items: components["schemas"]["CheckBatchItem"][];
             /** Format: int64 */
             timeout?: number;
             version?: string;
         };
-        BatchResponse: {
+        CheckBatchResponse: {
             /** @description In request order. */
             results: components["schemas"]["CheckResult"][];
         };
@@ -443,8 +443,6 @@ export interface components {
             declarations: components["schemas"]["Declaration"][];
             /** @description Why the check could not complete (timeout, crash, policy, ...). */
             error?: components["schemas"]["Error"];
-            /** @description The item's id, in batch results. */
-            id?: string;
             /** @description Lean's messages, with positions in the submitted code. */
             messages: components["schemas"]["Message"][];
             /**
@@ -656,10 +654,11 @@ export interface components {
             };
         };
         Message: {
-            data: string;
             end_pos?: components["schemas"]["Pos"];
             pos: components["schemas"]["Pos"];
             severity: components["schemas"]["Severity"];
+            /** @description What Lean said. */
+            text: string;
         };
         /**
          * @description A declaration of a snapshot module, with its description once search has
@@ -1298,9 +1297,9 @@ export type AtPosition = components['schemas']['AtPosition'];
 export type AuditAssumption = components['schemas']['AuditAssumption'];
 export type AuditSummary = components['schemas']['AuditSummary'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
-export type BatchItem = components['schemas']['BatchItem'];
-export type BatchRequest = components['schemas']['BatchRequest'];
-export type BatchResponse = components['schemas']['BatchResponse'];
+export type CheckBatchItem = components['schemas']['CheckBatchItem'];
+export type CheckBatchRequest = components['schemas']['CheckBatchRequest'];
+export type CheckBatchResponse = components['schemas']['CheckBatchResponse'];
 export type CheckRequest = components['schemas']['CheckRequest'];
 export type CheckResult = components['schemas']['CheckResult'];
 export type DeclDetail = components['schemas']['DeclDetail'];
@@ -1478,7 +1477,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["BatchRequest"];
+                "application/json": components["schemas"]["CheckBatchRequest"];
             };
         };
         responses: {
@@ -1488,7 +1487,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BatchResponse"];
+                    "application/json": components["schemas"]["CheckBatchResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

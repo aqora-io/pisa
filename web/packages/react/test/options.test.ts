@@ -33,9 +33,12 @@ describe("query options", () => {
       "pisa",
       "http://pisa.test",
       "check",
-      { code: "x", version: "v", timeout: null, detail: [] },
+      { code: "x", version: "v", timeout: null, detail: [], at: [] },
     ]);
     expect(checkOptions(client, { code: "x", version: "w" }).queryKey).not.toEqual(
+      checkOptions(client, { code: "x" }).queryKey,
+    );
+    expect(checkOptions(client, { code: "x", at: [{ line: 1, column: 0 }] }).queryKey).not.toEqual(
       checkOptions(client, { code: "x" }).queryKey,
     );
   });

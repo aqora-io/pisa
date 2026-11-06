@@ -41,8 +41,9 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use pisa_protocol::api::{
-    BatchItem, BatchRequest, BatchResponse, CheckRequest, Deleted, ErrorResponse, LabelsRequest,
-    RebuildRequest, SessionCheckRequest, SnapshotRequest, StartRequest, TacticRequest,
+    CheckBatchItem, CheckBatchRequest, CheckBatchResponse, CheckRequest, Deleted, ErrorResponse,
+    LabelsRequest, RebuildRequest, SessionCheckRequest, SnapshotRequest, StartRequest,
+    TacticRequest,
 };
 use pisa_protocol::search::{
     DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
@@ -116,15 +117,6 @@ pub struct CheckOptions {
     /// expected it to have. Ask about them all in one check: each check
     /// elaborates the code again.
     pub at: Vec<Pos>,
-}
-
-impl CheckOptions {
-    fn detail(detail: &[Detail]) -> Self {
-        CheckOptions {
-            detail: detail.to_vec(),
-            at: Vec::new(),
-        }
-    }
 }
 
 /// Options for [`Client::create_snapshot_with`].
@@ -296,17 +288,7 @@ impl Client {
     /// Checks one piece of code. `ok` is the verdict; a check that could not
     /// complete has `error` set rather than failing.
     pub async fn check(&self, code: &str) -> Result<CheckResult, Error> {
-        self.check_with_detail(code, &[]).await
-    }
-
-    /// Like [`Client::check`], also returning the `detail` asked for, e.g.
-    /// [`Detail::Tactics`] for the goals before and after every tactic.
-    pub async fn check_with_detail(
-        &self,
-        code: &str,
-        detail: &[Detail],
-    ) -> Result<CheckResult, Error> {
-        self.check_with(code, &CheckOptions::detail(detail)).await
+        self.check_with(code, &CheckOptions::default()).await
     }
 
     /// Like [`Client::check`], also returning what `options` asks for.
@@ -320,17 +302,7 @@ impl Client {
 
     /// Like [`Client::check`], as a job: see [`Client::wait_job`].
     pub async fn submit_check(&self, code: &str) -> Result<Job<CheckResult>, Error> {
-        self.submit_check_with_detail(code, &[]).await
-    }
-
-    /// Like [`Client::check_with_detail`], as a job.
-    pub async fn submit_check_with_detail(
-        &self,
-        code: &str,
-        detail: &[Detail],
-    ) -> Result<Job<CheckResult>, Error> {
-        self.submit_check_with(code, &CheckOptions::detail(detail))
-            .await
+        self.submit_check_with(code, &CheckOptions::default()).await
     }
 
     /// Like [`Client::check_with`], as a job.
@@ -355,51 +327,32 @@ impl Client {
         }
     }
 
-    /// Checks `(id, code)` pairs in one request. Results come back in order;
-    /// each item's failures are in its own `error`.
-    pub async fn check_batch<I, S, C>(&self, items: I) -> Result<Vec<CheckResult>, Error>
+    /// Checks several pieces of code in one request. Results come back in
+    /// the order of `codes`; each one's failures are in its own `error`.
+    pub async fn check_batch<I, C>(&self, codes: I) -> Result<Vec<CheckResult>, Error>
     where
-        I: IntoIterator<Item = (S, C)>,
-        S: Into<String>,
-        C: Into<String>,
+        I: IntoIterator<Item = C>,
+        C: AsRef<str>,
     {
-        self.check_batch_with_detail(items, &[]).await
-    }
-
-    /// Like [`Client::check_batch`], returning the `detail` asked for with
-    /// every item.
-    pub async fn check_batch_with_detail<I, S, C>(
-        &self,
-        items: I,
-        detail: &[Detail],
-    ) -> Result<Vec<CheckResult>, Error>
-    where
-        I: IntoIterator<Item = (S, C)>,
-        S: Into<String>,
-        C: Into<String>,
-    {
-        self.check_batch_with(items, &CheckOptions::detail(detail))
-            .await
+        self.check_batch_with(codes, &CheckOptions::default()).await
     }
 
     /// Like [`Client::check_batch`], returning what `options` asks for with
-    /// every item, its positions in that item's code.
-    pub async fn check_batch_with<I, S, C>(
+    /// every piece of code, its positions in that code.
+    pub async fn check_batch_with<I, C>(
         &self,
-        items: I,
+        codes: I,
         options: &CheckOptions,
     ) -> Result<Vec<CheckResult>, Error>
     where
-        I: IntoIterator<Item = (S, C)>,
-        S: Into<String>,
-        C: Into<String>,
+        I: IntoIterator<Item = C>,
+        C: AsRef<str>,
     {
-        let req = BatchRequest {
-            items: items
+        let req = CheckBatchRequest {
+            items: codes
                 .into_iter()
-                .map(|(id, code)| BatchItem {
-                    id: id.into(),
-                    code: code.into(),
+                .map(|code| CheckBatchItem {
+                    code: code.as_ref().to_string(),
                 })
                 .collect(),
             version: self.version.clone(),
@@ -407,7 +360,7 @@ impl Client {
             detail: options.detail.clone(),
             at: options.at.clone(),
         };
-        let resp: BatchResponse = self.post("check/batch", &req).await?;
+        let resp: CheckBatchResponse = self.post("check/batch", &req).await?;
         Ok(resp.results)
     }
 

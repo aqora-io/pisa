@@ -115,7 +115,7 @@ export function Messages({ messages }: { messages: Message[] }) {
           <Badge tone={SEVERITY_TONE[m.severity]}>
             {m.pos.line}:{m.pos.column}
           </Badge>
-          <pre className="whitespace-pre-wrap font-mono text-xs text-slate-800">{m.data}</pre>
+          <pre className="whitespace-pre-wrap font-mono text-xs text-slate-800">{m.text}</pre>
         </li>
       ))}
     </ul>

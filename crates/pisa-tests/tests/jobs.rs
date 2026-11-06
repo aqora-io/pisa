@@ -272,7 +272,7 @@ async fn a_job_whose_worker_is_lost_says_so() {
 #[tokio::test(flavor = "multi_thread")]
 async fn other_endpoints_answer_at_once() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let body = json!({"items": [{"id": "a", "code": "#check Nat"}]});
+    let body = json!({"items": [{"code": "#check Nat"}]});
     let (status, headers, r) = submit(&c, &c.url("/check/batch"), body).await;
     assert_eq!(status, 200, "{r}");
     assert!(headers.get("preference-applied").is_none());

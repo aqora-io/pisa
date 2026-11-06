@@ -1,7 +1,6 @@
 import { PisaError, isPisaError } from "./errors.ts";
 import type {
-  BatchItem,
-  BatchResponse,
+  CheckBatchResponse,
   CheckResult,
   DeclDetail,
   DeclResponse,
@@ -170,10 +169,10 @@ export class PisaClient {
     return this.submit(["check"], { code, ...this.run(options), ...asked(options) }, options);
   }
 
-  /** Checks several pieces of code; every item gets a result, in order. */
-  async checkBatch(items: BatchItem[], options: CheckOptions = {}): Promise<CheckResult[]> {
-    const body = { items, ...this.run(options), ...asked(options) };
-    const r = await this.call<BatchResponse>("POST", ["check", "batch"], body, options);
+  /** Checks several pieces of code; every one gets a result, in order. */
+  async checkBatch(codes: string[], options: CheckOptions = {}): Promise<CheckResult[]> {
+    const body = { items: codes.map((code) => ({ code })), ...this.run(options), ...asked(options) };
+    const r = await this.call<CheckBatchResponse>("POST", ["check", "batch"], body, options);
     return r.results;
   }
 

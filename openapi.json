@@ -127,22 +127,18 @@
         ],
         "type": "object"
       },
-      "BatchItem": {
+      "CheckBatchItem": {
         "properties": {
           "code": {
-            "type": "string"
-          },
-          "id": {
             "type": "string"
           }
         },
         "required": [
-          "id",
           "code"
         ],
         "type": "object"
       },
-      "BatchRequest": {
+      "CheckBatchRequest": {
         "description": "`POST /check/batch`",
         "properties": {
           "at": {
@@ -160,8 +156,9 @@
             "type": "array"
           },
           "items": {
+            "description": "The code to check; each item gets a result, in this order.",
             "items": {
-              "$ref": "#/components/schemas/BatchItem"
+              "$ref": "#/components/schemas/CheckBatchItem"
             },
             "type": "array"
           },
@@ -179,7 +176,7 @@
         ],
         "type": "object"
       },
-      "BatchResponse": {
+      "CheckBatchResponse": {
         "properties": {
           "results": {
             "description": "In request order.",
@@ -248,10 +245,6 @@
           "error": {
             "$ref": "#/components/schemas/Error",
             "description": "Why the check could not complete (timeout, crash, policy, ...)."
-          },
-          "id": {
-            "description": "The item's id, in batch results.",
-            "type": "string"
           },
           "messages": {
             "description": "Lean's messages, with positions in the submitted code.",
@@ -751,9 +744,6 @@
       },
       "Message": {
         "properties": {
-          "data": {
-            "type": "string"
-          },
           "end_pos": {
             "$ref": "#/components/schemas/Pos"
           },
@@ -762,12 +752,16 @@
           },
           "severity": {
             "$ref": "#/components/schemas/Severity"
+          },
+          "text": {
+            "description": "What Lean said.",
+            "type": "string"
           }
         },
         "required": [
           "severity",
           "pos",
-          "data"
+          "text"
         ],
         "type": "object"
       },
@@ -2168,7 +2162,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BatchRequest"
+                "$ref": "#/components/schemas/CheckBatchRequest"
               }
             }
           },
@@ -2179,7 +2173,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BatchResponse"
+                  "$ref": "#/components/schemas/CheckBatchResponse"
                 }
               }
             },

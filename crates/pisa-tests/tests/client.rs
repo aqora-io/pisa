@@ -24,10 +24,11 @@ async fn client_covers_checks_and_sessions() {
     assert!(r.ok, "{r:?}");
 
     let results = client
-        .check_batch([("a", "#check Nat"), ("b", "theorem t : False := sorry")])
+        .check_batch(["#check Nat", "theorem t : False := sorry"])
         .await
         .unwrap();
-    assert_eq!(results[0].id.as_deref(), Some("a"));
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].messages[0].text, "Nat : Type");
     assert!(!results[1].ok);
     assert_eq!(results[1].reasons, ["axiom: t uses sorryAx"]);
 
@@ -75,10 +76,7 @@ async fn client_asks_about_positions() {
 
     let job = client.submit_check_with(code, &options).await.unwrap();
     assert_eq!(client.wait_job(&job).await.unwrap().at, r.at);
-    let results = client
-        .check_batch_with([("a", code)], &options)
-        .await
-        .unwrap();
+    let results = client.check_batch_with([code], &options).await.unwrap();
     assert_eq!(results[0].at, r.at);
 
     let terms_alone = CheckOptions {

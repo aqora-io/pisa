@@ -17,7 +17,7 @@ class Message(TypedDict):
     severity: Literal["trace", "info", "warning", "error"]
     pos: Pos
     end_pos: NotRequired[Pos]
-    data: str
+    text: str
 
 class Sorry(TypedDict):
     goal: str
@@ -58,7 +58,6 @@ class AtPosition(TypedDict):
     term: NotRequired[TermInfo]
 
 class CheckResult(TypedDict):
-    id: NotRequired[str]
     ok: bool
     time: float
     error: NotRequired[Error]
@@ -261,13 +260,13 @@ class Client:
         the code again."""
     def check_batch(
         self,
-        items: list[tuple[str, str]],
+        codes: list[str],
         *,
         detail: list[Literal["tactics", "terms"]] = [],
         at: list[tuple[int, int]] = [],
     ) -> list[CheckResult]:
-        """Check `(id, code)` pairs in one request; results keep their order.
-        `detail` and `at` apply to every item."""
+        """Check several pieces of code in one request; results keep the order
+        of `codes`. `detail` and `at` apply to every one."""
     def start_session(self, code: str) -> Session:
         """Run code containing `sorry`; returns one proof state per `sorry`."""
     def tactic(self, state: str, tactic: str) -> Step:
