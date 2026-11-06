@@ -45,6 +45,14 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("sends positions only when there are some", async () => {
+    const { client, sent } = recording(() => json({ results: [] }));
+    await client.check("x", { detail: ["terms"], at: [{ line: 2, column: 4 }] });
+    await client.checkBatch([{ id: "a", code: "x" }], { at: [] });
+    expect(sent[0]?.body).toEqual({ code: "x", version: "v1", detail: ["terms"], at: [{ line: 2, column: 4 }] });
+    expect(sent[1]?.body).toEqual({ items: [{ id: "a", code: "x" }], version: "v1" });
+  });
+
   it("puts the version in the body or the query, as the server reads it", async () => {
     const { client, sent } = recording(() => json({ entries: [], results: [] }));
     await client.check("#check Nat", { detail: ["tactics"], timeout: 5 });

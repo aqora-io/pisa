@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    Client, Error, ErrorKind, Job, JobKind, JobPoll, JobState, ProofStatus, RebuildOptions,
-    Replaces, SnapshotList, SnapshotOptions,
+    CheckOptions, Client, Detail, Error, ErrorKind, Job, JobKind, JobPoll, JobState, Pos,
+    ProofStatus, RebuildOptions, Replaces, SnapshotList, SnapshotOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -50,6 +50,44 @@ async fn client_covers_checks_and_sessions() {
     match client.tactic("not-a-key", "rfl").await {
         Err(Error::Server { status, kind, .. }) => {
             assert_eq!((status, kind), (400, ErrorKind::BadRequest))
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_asks_about_positions() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_timeout(5);
+    let code = "theorem t : True := by\n  exact foo";
+    let options = CheckOptions {
+        detail: vec![Detail::Terms],
+        at: vec![Pos { line: 2, column: 9 }],
+    };
+    let r = client.check_with(code, &options).await.unwrap();
+    let at = &r.at[0];
+    assert_eq!(at.tactic.as_ref().unwrap().goals_before, ["⊢ goal 2"]);
+    let term = at.term.as_ref().unwrap();
+    assert_eq!(
+        (term.term.as_str(), term.expected_type.as_str()),
+        ("foo", "goal 2")
+    );
+
+    let job = client.submit_check_with(code, &options).await.unwrap();
+    assert_eq!(client.wait_job(&job).await.unwrap().at, r.at);
+    let results = client
+        .check_batch_with([("a", code)], &options)
+        .await
+        .unwrap();
+    assert_eq!(results[0].at, r.at);
+
+    let terms_alone = CheckOptions {
+        detail: vec![Detail::Terms],
+        at: Vec::new(),
+    };
+    match client.check_with(code, &terms_alone).await {
+        Err(Error::Server { status, kind, .. }) => {
+            assert_eq!((status, kind), (400, ErrorKind::BadRequest));
         }
         other => panic!("{other:?}"),
     }

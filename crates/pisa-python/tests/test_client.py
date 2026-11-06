@@ -92,6 +92,20 @@ def test_check(url):
     with pytest.raises(ValueError):
         client.check(code, detail=["bogus"])
 
+    code = "import Foo\ntheorem t : True := by\n  exact foo"
+    [at] = client.check(code, detail=["terms"], at=[(3, 9)])["at"]
+    assert at["pos"] == {"line": 3, "column": 9}
+    assert at["tactic"]["tactic"] == "exact foo" and at["tactic"]["goals_before"] == ["⊢ goal 2"]
+    assert at["term"]["term"] == "foo" and at["term"]["expected_type"] == "goal 2"
+    [result] = client.check_batch([("a", code)], detail=["terms"], at=[(3, 9)])
+    assert result["at"] == [at]
+    # Without terms, the tactic alone.
+    job = client.submit_check(code, at=[(3, 9)])
+    assert client.wait_job(job)["at"] == [{"pos": at["pos"], "tactic": at["tactic"]}]
+    with pytest.raises(PisaError) as e:
+        client.check(code, detail=["terms"])
+    assert e.value.kind == "bad_request"
+
     timed_out = Client(url, timeout=1).check("SLEEP 3000")
     assert not timed_out["ok"] and timed_out["error"]["kind"] == "timeout"
 

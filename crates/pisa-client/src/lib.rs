@@ -52,12 +52,12 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    Allow, AuditAssumption, AuditSummary, AuditUnproved, CheckResult, Declaration, Detail,
-    ErrorKind, JobKind, JobState, JobStatus, Message, Pos, ProofStatus, RebuildItem,
+    Allow, AtPosition, AuditAssumption, AuditSummary, AuditUnproved, CheckResult, Declaration,
+    Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos, ProofStatus, RebuildItem,
     RebuildResponse, Replaced, Replacement, Replaces, Severity, SnapshotAudit, SnapshotDependents,
     SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary,
     SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
-    TacticResponse as Step,
+    TacticResponse as Step, TermInfo,
 };
 pub use pisa_protocol::search::{
     DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope,
@@ -103,6 +103,28 @@ pub enum JobPoll<T> {
     Pending(JobStatus),
     /// Done: what its request would have answered.
     Done(T),
+}
+
+/// Options for [`Client::check_with`].
+#[derive(Debug, Clone, Default)]
+pub struct CheckOptions {
+    /// Extra detail, e.g. [`Detail::Tactics`] for the goals before and after
+    /// every tactic.
+    pub detail: Vec<Detail>,
+    /// Up to 64 positions to report on, in [`CheckResult::at`]: the tactic
+    /// at each, and with [`Detail::Terms`] the term there and the type Lean
+    /// expected it to have. Ask about them all in one check: each check
+    /// elaborates the code again.
+    pub at: Vec<Pos>,
+}
+
+impl CheckOptions {
+    fn detail(detail: &[Detail]) -> Self {
+        CheckOptions {
+            detail: detail.to_vec(),
+            at: Vec::new(),
+        }
+    }
 }
 
 /// Options for [`Client::create_snapshot_with`].
@@ -284,7 +306,16 @@ impl Client {
         code: &str,
         detail: &[Detail],
     ) -> Result<CheckResult, Error> {
-        self.post("check", &self.check_request(code, detail)).await
+        self.check_with(code, &CheckOptions::detail(detail)).await
+    }
+
+    /// Like [`Client::check`], also returning what `options` asks for.
+    pub async fn check_with(
+        &self,
+        code: &str,
+        options: &CheckOptions,
+    ) -> Result<CheckResult, Error> {
+        self.post("check", &self.check_request(code, options)).await
     }
 
     /// Like [`Client::check`], as a job: see [`Client::wait_job`].
@@ -298,19 +329,29 @@ impl Client {
         code: &str,
         detail: &[Detail],
     ) -> Result<Job<CheckResult>, Error> {
-        let req = self.check_request(code, detail);
+        self.submit_check_with(code, &CheckOptions::detail(detail))
+            .await
+    }
+
+    /// Like [`Client::check_with`], as a job.
+    pub async fn submit_check_with(
+        &self,
+        code: &str,
+        options: &CheckOptions,
+    ) -> Result<Job<CheckResult>, Error> {
+        let req = self.check_request(code, options);
         self.endpoint
             .submit(self.endpoint.url("check")?, Some(&req))
             .await
     }
 
-    fn check_request(&self, code: &str, detail: &[Detail]) -> CheckRequest {
+    fn check_request(&self, code: &str, options: &CheckOptions) -> CheckRequest {
         CheckRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
-            detail: detail.to_vec(),
-            at: Vec::new(),
+            detail: options.detail.clone(),
+            at: options.at.clone(),
         }
     }
 
@@ -337,6 +378,22 @@ impl Client {
         S: Into<String>,
         C: Into<String>,
     {
+        self.check_batch_with(items, &CheckOptions::detail(detail))
+            .await
+    }
+
+    /// Like [`Client::check_batch`], returning what `options` asks for with
+    /// every item, its positions in that item's code.
+    pub async fn check_batch_with<I, S, C>(
+        &self,
+        items: I,
+        options: &CheckOptions,
+    ) -> Result<Vec<CheckResult>, Error>
+    where
+        I: IntoIterator<Item = (S, C)>,
+        S: Into<String>,
+        C: Into<String>,
+    {
         let req = BatchRequest {
             items: items
                 .into_iter()
@@ -347,8 +404,8 @@ impl Client {
                 .collect(),
             version: self.version.clone(),
             timeout: self.timeout,
-            detail: detail.to_vec(),
-            at: Vec::new(),
+            detail: options.detail.clone(),
+            at: options.at.clone(),
         };
         let resp: BatchResponse = self.post("check/batch", &req).await?;
         Ok(resp.results)

@@ -11,6 +11,8 @@ const pisa = new PisaClient({ url: "http://localhost:8000", version: "v4.35.0-da
 
 const result = await pisa.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num");
 result.ok; // the verdict; a check that couldn't complete has `error` set
+// The tactic at line 2, column 30 (`norm_num`) and its goals; `detail: ["terms"]` adds terms and their expected types.
+const { at } = await pisa.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num", { at: [{ line: 2, column: 30 }] });
 
 const code = "theorem t (n : Nat) : n + 0 = n := by sorry";
 const { session, states } = await pisa.startSession(code);

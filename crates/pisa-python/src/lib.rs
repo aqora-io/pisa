@@ -159,6 +159,17 @@ fn parse_detail(detail: Vec<String>) -> PyResult<Vec<pisa_client::Detail>> {
         .map_err(|e| PyValueError::new_err(format!("invalid detail: {e}")))
 }
 
+/// A check's `detail` and `at`, given as `(line, column)` pairs.
+fn check_options(detail: Vec<String>, at: Vec<(u64, u64)>) -> PyResult<pisa_client::CheckOptions> {
+    Ok(pisa_client::CheckOptions {
+        detail: parse_detail(detail)?,
+        at: at
+            .into_iter()
+            .map(|(line, column)| pisa_client::Pos { line, column })
+            .collect(),
+    })
+}
+
 /// A client for one pisa server. Safe to share between threads.
 #[pyclass(frozen, module = "pisa_client")]
 struct Client {
@@ -184,29 +195,32 @@ impl Client {
         result.map_err(|e| to_py_err(py, e))
     }
 
-    #[pyo3(signature = (code, *, detail = Vec::new()))]
+    #[pyo3(signature = (code, *, detail = Vec::new(), at = Vec::new()))]
     fn check<'py>(
         &self,
         py: Python<'py>,
         code: String,
         detail: Vec<String>,
+        at: Vec<(u64, u64)>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let detail = parse_detail(detail)?;
-        call(py, async move {
-            self.inner.check_with_detail(&code, &detail).await
-        })
+        let options = check_options(detail, at)?;
+        call(
+            py,
+            async move { self.inner.check_with(&code, &options).await },
+        )
     }
 
-    #[pyo3(signature = (items, *, detail = Vec::new()))]
+    #[pyo3(signature = (items, *, detail = Vec::new(), at = Vec::new()))]
     fn check_batch<'py>(
         &self,
         py: Python<'py>,
         items: Vec<(String, String)>,
         detail: Vec<String>,
+        at: Vec<(u64, u64)>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let detail = parse_detail(detail)?;
+        let options = check_options(detail, at)?;
         call(py, async move {
-            self.inner.check_batch_with_detail(items, &detail).await
+            self.inner.check_batch_with(items, &options).await
         })
     }
 
@@ -391,16 +405,17 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, detail = Vec::new()))]
+    #[pyo3(signature = (code, *, detail = Vec::new(), at = Vec::new()))]
     fn submit_check<'py>(
         &self,
         py: Python<'py>,
         code: String,
         detail: Vec<String>,
+        at: Vec<(u64, u64)>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let detail = parse_detail(detail)?;
+        let options = check_options(detail, at)?;
         call(py, async move {
-            let job = self.inner.submit_check_with_detail(&code, &detail).await?;
+            let job = self.inner.submit_check_with(&code, &options).await?;
             Ok(queued(job))
         })
     }

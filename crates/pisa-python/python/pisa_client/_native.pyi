@@ -241,16 +241,33 @@ class Client:
         """`version` selects a worker pool label or alias; `timeout` is Lean's
         limit per request in seconds."""
     def health(self) -> None: ...
-    def check(self, code: str, *, detail: list[Literal["tactics"]] = []) -> CheckResult:
+    def check(
+        self,
+        code: str,
+        *,
+        detail: list[Literal["tactics", "terms"]] = [],
+        at: list[tuple[int, int]] = [],
+    ) -> CheckResult:
         """Check one piece of code. `ok` is the verdict; a check that could not
         complete (timeout, policy, ...) has `error` set instead of raising.
         `detail=["tactics"]` adds `tactics`: each tactic Lean ran, with the
-        goals before and after it."""
+        goals before and after it.
+
+        `at` takes up to 64 `(line, column)` positions in the code, lines from
+        1 and columns from 0, and adds `at`: the tactic at each, with its
+        goals. With `detail=["terms"]` too, each also has the term there and
+        the type Lean expected it to have, which costs several times the
+        check. Ask about every position in one check: each check elaborates
+        the code again."""
     def check_batch(
-        self, items: list[tuple[str, str]], *, detail: list[Literal["tactics"]] = []
+        self,
+        items: list[tuple[str, str]],
+        *,
+        detail: list[Literal["tactics", "terms"]] = [],
+        at: list[tuple[int, int]] = [],
     ) -> list[CheckResult]:
         """Check `(id, code)` pairs in one request; results keep their order.
-        `detail` applies to every item."""
+        `detail` and `at` apply to every item."""
     def start_session(self, code: str) -> Session:
         """Run code containing `sorry`; returns one proof state per `sorry`."""
     def tactic(self, state: str, tactic: str) -> Step:
@@ -382,7 +399,13 @@ class Client:
         """Remove the labels `remove` names from an entry, then set those in
         `set`; returns the entry's summary. Labels that break the rules raise a
         `bad_request` PisaError, and NotFoundError means an unknown entry."""
-    def submit_check(self, code: str, *, detail: list[Literal["tactics"]] = []) -> JobStatus:
+    def submit_check(
+        self,
+        code: str,
+        *,
+        detail: list[Literal["tactics", "terms"]] = [],
+        at: list[tuple[int, int]] = [],
+    ) -> JobStatus:
         """Like `check`, as a job the server runs without the request waiting
         for it, which outlives proxies' time limits: see `wait_job`."""
     def submit_session(self, code: str) -> JobStatus:

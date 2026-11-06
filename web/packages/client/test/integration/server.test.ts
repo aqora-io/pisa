@@ -28,6 +28,16 @@ describe("checks", () => {
     expect(detailed.tactics).toEqual([
       { tactic: "trivial", goals_before: ["⊢ goal 2"], goals_after: [], pos: { line: 3, column: 2 }, end_pos: expect.anything() },
     ]);
+
+    const exact = "import Foo\ntheorem t : True := by\n  exact foo";
+    const at = await client.check(exact, { detail: ["terms"], at: [{ line: 3, column: 9 }] });
+    expect(at.at).toEqual([
+      {
+        pos: { line: 3, column: 9 },
+        tactic: expect.objectContaining({ tactic: "exact foo", goals_before: ["⊢ goal 2"] }),
+        term: expect.objectContaining({ term: "foo", expected_type: "goal 2" }),
+      },
+    ]);
   });
 
   it("sends the timeout and the version", async () => {

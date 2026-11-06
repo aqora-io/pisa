@@ -741,6 +741,10 @@ Rust (`pisa-client`):
 let client = pisa_client::Client::new("http://localhost:8000")?.with_timeout(60);
 let result = client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
 assert!(result.ok);
+// The tactic at line 2, column 30 (`norm_num`) and its goals; see Goals and types at positions.
+let at = vec![pisa_client::Pos { line: 2, column: 30 }]; // `Detail::Terms` in `detail` adds terms
+let opts = pisa_client::CheckOptions { at, ..Default::default() };
+let goals = client.check_with("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num", &opts).await?.at;
 let session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry").await?;
 let step = client.tactic(&session.states[0].state, "simp").await?; // Error::Server { kind: Lean, .. } if it fails
 let verdict = client.check_session(&session.session, "theorem t (n : Nat) : n + 0 = n := by simp").await?;
@@ -777,6 +781,7 @@ from pisa_client import Client, LeanError
 
 client = Client("http://localhost:8000", timeout=60)
 client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")["ok"]
+client.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num", at=[(2, 30)])["at"]   # norm_num's goals; detail=["terms"] adds terms
 session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry")
 step = client.tactic(session["states"][0]["state"], "simp")   # raises LeanError if it fails
 client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")["ok"]

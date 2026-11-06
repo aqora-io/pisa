@@ -12,6 +12,7 @@ import type {
   JobStatus,
   Labels,
   ListSnapshotsParams,
+  Pos,
   Query,
   QueryResult,
   RebuildResponse,
@@ -62,6 +63,11 @@ export interface RunOptions extends RequestOptions {
 
 export interface CheckOptions extends RunOptions {
   detail?: Detail[];
+  /** Up to 64 positions in the code to report on, in the result's `at`: the
+   *  tactic at each, and with `detail: ["terms"]` the term there and the type
+   *  Lean expected it to have. Ask about them all in one check: each check
+   *  elaborates the code again. */
+  at?: Pos[];
 }
 
 export interface VersionOptions extends RequestOptions {
@@ -155,18 +161,18 @@ export class PisaClient {
   /** Checks one piece of code. `ok` is the verdict; a check that couldn't
    *  complete has `error` set rather than throwing. */
   check(code: string, options: CheckOptions = {}): Promise<CheckResult> {
-    return this.call("POST", ["check"], { code, ...this.run(options), ...detail(options) }, options);
+    return this.call("POST", ["check"], { code, ...this.run(options), ...asked(options) }, options);
   }
 
   /** `check` as a job, which outlives the request and its proxies: wait for
    *  it with `waitJob`. */
   submitCheck(code: string, options: CheckOptions = {}): Promise<Job<CheckResult>> {
-    return this.submit(["check"], { code, ...this.run(options), ...detail(options) }, options);
+    return this.submit(["check"], { code, ...this.run(options), ...asked(options) }, options);
   }
 
   /** Checks several pieces of code; every item gets a result, in order. */
   async checkBatch(items: BatchItem[], options: CheckOptions = {}): Promise<CheckResult[]> {
-    const body = { items, ...this.run(options), ...detail(options) };
+    const body = { items, ...this.run(options), ...asked(options) };
     const r = await this.call<BatchResponse>("POST", ["check", "batch"], body, options);
     return r.results;
   }
@@ -462,8 +468,12 @@ export class PisaClient {
   }
 }
 
-function detail(options: CheckOptions): { detail?: Detail[] } {
-  return options.detail !== undefined && options.detail.length > 0 ? { detail: options.detail } : {};
+/** What a check asks for beyond its verdict. */
+function asked(options: CheckOptions): { detail?: Detail[]; at?: Pos[] } {
+  return {
+    ...(options.detail !== undefined && options.detail.length > 0 ? { detail: options.detail } : {}),
+    ...(options.at !== undefined && options.at.length > 0 ? { at: options.at } : {}),
+  };
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
