@@ -25,10 +25,14 @@ def free_port():
 
 
 @pytest.fixture(scope="module")
-def url(tmp_path_factory):
+def db(tmp_path_factory):
+    return str(tmp_path_factory.mktemp("db") / "pisa.db")
+
+
+@pytest.fixture(scope="module")
+def url(db):
     http = free_port()
     # The server and the worker share the job queue in this file.
-    db = str(tmp_path_factory.mktemp("db") / "pisa.db")
     env = {**os.environ, "RUST_LOG": "warn"}
     server = subprocess.Popen(
         [BIN / "pisa-server", "--http", f"127.0.0.1:{http}", "--database-url", db,
@@ -67,6 +71,28 @@ def health(url):
 
     with urllib.request.urlopen(url + "/health") as r:
         return json.load(r)
+
+
+def test_health(url, db):
+    assert Client(url).health()["status"] == "ok"
+
+    # A server told to stop keeps serving for a few seconds, its /health
+    # failing with a 503 that carries its health.
+    http = free_port()
+    server = subprocess.Popen(
+        [BIN / "pisa-server", "--http", f"127.0.0.1:{http}", "--database-url", db],
+        env={**os.environ, "RUST_LOG": "warn"},
+    )
+    client = Client(f"http://127.0.0.1:{http}")
+    try:
+        wait_for(lambda: client.health()["status"] == "ok")
+        server.terminate()
+        seen = []
+        wait_for(lambda: seen.append(client.health()) or seen[-1]["status"] == "draining")
+        assert seen[-1]["workers"] == 1 and seen[-1]["search"] is None
+    finally:
+        server.terminate()
+        server.wait(timeout=30)
 
 
 def test_check(url):

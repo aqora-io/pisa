@@ -60,6 +60,29 @@ async fn client_covers_checks_and_sessions() {
     }
 }
 
+/// A 503 that isn't a draining server's health, such as a proxy's, is an
+/// error.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_fails_on_a_503_that_is_not_a_servers() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = socket.read(&mut [0; 1024]).await.unwrap();
+        assert!(request > 0);
+        let reply = "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 11\r\nconnection: close\r\n\r\nno upstream";
+        socket.write_all(reply.as_bytes()).await.unwrap();
+    });
+    match Client::new(&url).unwrap().health().await {
+        Err(Error::Server {
+            status, message, ..
+        }) => assert_eq!((status, message.as_str()), (503, "no upstream")),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn client_asks_about_positions() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;

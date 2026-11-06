@@ -204,7 +204,14 @@ impl Endpoint {
 
     async fn health(&self) -> Result<Health, Error> {
         let r = self.http.get(self.url("health")?).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        let status = r.status();
+        if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return Ok(server_error(r).await?.json().await?);
+        }
+        // A draining server answers 503 with its health: an answer, where a
+        // 503 from anything else, such as a proxy, is an error.
+        let text = r.text().await?;
+        serde_json::from_str(&text).map_err(|_| server_failure(status, &text))
     }
 
     async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
@@ -281,7 +288,8 @@ impl Client {
         self
     }
 
-    /// The server's health: whether it is up or draining, and its workers.
+    /// The server's health: whether it is up or draining, and its workers. A
+    /// draining server's 503 is returned, not an error.
     pub async fn health(&self) -> Result<Health, Error> {
         self.endpoint.health().await
     }
@@ -847,15 +855,20 @@ async fn server_error(r: reqwest::Response) -> Result<reqwest::Response, Error> 
         return Ok(r);
     }
     let text = r.text().await.unwrap_or_default();
-    let (kind, message) = match serde_json::from_str::<ErrorResponse>(&text) {
+    Err(server_failure(status, &text))
+}
+
+/// The error for a non-2xx response with this body.
+fn server_failure(status: reqwest::StatusCode, text: &str) -> Error {
+    let (kind, message) = match serde_json::from_str::<ErrorResponse>(text) {
         Ok(e) => (e.error.kind, e.error.message),
-        Err(_) => (ErrorKind::Internal, text),
+        Err(_) => (ErrorKind::Internal, text.to_string()),
     };
-    Err(Error::Server {
+    Error::Server {
         status: status.as_u16(),
         kind,
         message,
-    })
+    }
 }
 
 #[cfg(test)]

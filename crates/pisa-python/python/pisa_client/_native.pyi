@@ -267,7 +267,8 @@ class Client:
         """`version` selects a worker pool label or alias; `timeout` is Lean's
         limit per request in seconds."""
     def health(self) -> Health:
-        """The server's health. A draining server raises PisaError: a 503."""
+        """The server's health. A draining server's 503 is returned, with
+        `status` "draining", not raised."""
     def check(
         self,
         code: str,
