@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use pisa_protocol::api::{self, Error, ErrorKind, Key, StartResponse, StateInfo, TacticResponse};
+use pisa_protocol::api::{self, ApplyTacticResponse, Error, ErrorKind, Key, Session, State};
 use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{ReplCommand, ReplResponse};
 use pisa_protocol::verify::statement_changes;
@@ -62,11 +62,7 @@ impl Sessions {
     }
 
     /// Runs code containing `sorry` and stores one proof state per `sorry`.
-    pub async fn start(
-        &self,
-        pool: &Arc<Pool>,
-        job: SessionStartJob,
-    ) -> Result<StartResponse, Error> {
+    pub async fn start(&self, pool: &Arc<Pool>, job: SessionStartJob) -> Result<Session, Error> {
         let split = split_header(&job.code);
         let mut slot = pool.acquire(&split.header_key, None).await;
         let rejected = slot.policy().scan(&split.body, false);
@@ -83,7 +79,7 @@ impl Sessions {
         slot: &mut Lease,
         job: SessionStartJob,
         split: pisa_protocol::header::Split,
-    ) -> Result<StartResponse, Error> {
+    ) -> Result<Session, Error> {
         let (env, _) = slot
             .warm_up(&split.header, &split.header_key)
             .await
@@ -117,9 +113,9 @@ impl Sessions {
                 created: now_secs(),
             };
             let hash = self.save(slot, proof_state, &meta).await?;
-            states.push(StateInfo {
-                state: self.key(&split.header_key, &hash),
-                goal: sorry.goal.clone(),
+            states.push(State {
+                id: self.key(&split.header_key, &hash),
+                goals: vec![sorry.goal.clone()],
                 pos: sorry.pos.map(Into::into),
                 end_pos: sorry.end_pos.map(Into::into),
             });
@@ -133,8 +129,8 @@ impl Sessions {
             .put_session(&session_id, &meta)
             .await
             .map_err(store_error)?;
-        Ok(StartResponse {
-            session,
+        Ok(Session {
+            id: session,
             states,
             messages: api::messages(r.messages),
         })
@@ -145,7 +141,7 @@ impl Sessions {
         &self,
         pool: &Arc<Pool>,
         job: SessionTacticJob,
-    ) -> Result<TacticResponse, Error> {
+    ) -> Result<ApplyTacticResponse, Error> {
         let key = self.parse(&job.state)?;
         let mut slot = pool.acquire(&key.header_key, Some(&key.id)).await;
         let rejected = slot.policy().scan(&job.tactic, false);
@@ -162,7 +158,7 @@ impl Sessions {
         slot: &mut Lease,
         key: &Key,
         job: SessionTacticJob,
-    ) -> Result<TacticResponse, Error> {
+    ) -> Result<ApplyTacticResponse, Error> {
         let resident = match slot.resident(&key.id) {
             Some(r) => r,
             None => self.load(slot, key).await?,
@@ -185,10 +181,14 @@ impl Sessions {
             created: now_secs(),
         };
         let hash = self.save(slot, step.proof_state, &meta).await?;
-        Ok(TacticResponse {
-            state: self.key(&key.header_key, &hash),
+        Ok(ApplyTacticResponse {
+            state: State {
+                id: self.key(&key.header_key, &hash),
+                goals: step.goals,
+                pos: None,
+                end_pos: None,
+            },
             complete: step.proof_status == "Completed",
-            goals: step.goals,
             messages: api::messages(step.messages),
         })
     }

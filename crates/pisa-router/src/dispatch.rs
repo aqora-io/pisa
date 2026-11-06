@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::{DbError, Notice};
 use pisa_db::queue::{LIVE, NewJob, Poll, Queue, Stage};
-use pisa_protocol::api::{JobKind, JobState};
+use pisa_protocol::api::{JobKind, JobStatus};
 use pisa_protocol::wire::{Job, JobResult};
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
@@ -50,7 +50,7 @@ pub struct Looked {
 #[derive(Debug, Clone)]
 pub enum Looking {
     /// `Queued` or `Running`.
-    Pending(JobState),
+    Pending(JobStatus),
     /// What its request would have got.
     Done(Box<Result<JobResult, DispatchError>>),
 }
@@ -106,7 +106,7 @@ const HELD: &str = "(run by a server)";
 
 /// An async job this server runs itself, such as a rebuild, which sends
 /// workers jobs of its own. Its row holds the server's claim, renewed while
-/// it runs, and then its answer, so `/jobs/{job}` reads it from any server.
+/// it runs, and then its answer, so `/jobs/{id}` reads it from any server.
 /// If the server stops first, the claim lapses and the job reads as lost.
 pub struct Held {
     pub token: String,
@@ -361,12 +361,12 @@ impl Dispatcher {
                 Stage::GaveUp { attempts } => {
                     Looking::Done(Box::new(Err(DispatchError::WorkerLost(attempts))))
                 }
-                Stage::Running => Looking::Pending(JobState::Running),
+                Stage::Running => Looking::Pending(JobStatus::Running),
                 Stage::Queued { give_up_at } => {
                     // Then the next look closes it.
                     let left = (give_up_at - now_micros()).max(0) as u64;
                     sleep = sleep.min(Duration::from_micros(left));
-                    Looking::Pending(JobState::Queued)
+                    Looking::Pending(JobStatus::Queued)
                 }
             };
             let now = tokio::time::Instant::now();
@@ -386,19 +386,19 @@ impl Dispatcher {
 
     /// Withdraws the async job `token` if no worker holds it. Returns its
     /// kind and what became of it, or `None` if there's no such job.
-    pub async fn cancel(&self, token: &str) -> Result<Option<(JobKind, JobState)>, DispatchError> {
+    pub async fn cancel(&self, token: &str) -> Result<Option<(JobKind, JobStatus)>, DispatchError> {
         let Some(status) = self.queue.status(token).await? else {
             return Ok(None);
         };
         let kind = kind_of(&status.kind)?;
         if self.queue.cancel(token).await?.is_some() {
-            return Ok(Some((kind, JobState::Cancelled)));
+            return Ok(Some((kind, JobStatus::Cancelled)));
         }
         let state = match self.queue.status(token).await?.map(|s| s.stage) {
-            None => JobState::Cancelled,
-            Some(Stage::Queued { .. }) => JobState::Queued,
-            Some(Stage::Running) => JobState::Running,
-            Some(Stage::Done(_) | Stage::GaveUp { .. }) => JobState::Done,
+            None => JobStatus::Cancelled,
+            Some(Stage::Queued { .. }) => JobStatus::Queued,
+            Some(Stage::Running) => JobStatus::Running,
+            Some(Stage::Done(_) | Stage::GaveUp { .. }) => JobStatus::Done,
         };
         Ok(Some((kind, state)))
     }
@@ -487,7 +487,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert!(matches!(
             looked(token.clone()).await,
-            Looking::Pending(JobState::Running)
+            Looking::Pending(JobStatus::Running)
         ));
         held.finish(&JobResult::Failed {
             error: "done".into(),

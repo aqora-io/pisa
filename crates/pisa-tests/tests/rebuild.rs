@@ -491,7 +491,7 @@ async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
         (&accepted["kind"], &accepted["status"]),
         (&json!("rebuild_snapshots"), &json!("running"))
     );
-    let job = accepted["job"].as_str().unwrap();
+    let job = accepted["id"].as_str().unwrap();
 
     let look = |wait: &str| {
         let url = common::url_of(&other_server, &format!("/jobs/{job}?wait={wait}"));

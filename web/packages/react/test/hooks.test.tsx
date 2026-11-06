@@ -38,8 +38,8 @@ describe("useProofSession", () => {
   const route = (call: Call): unknown => {
     if (call.path === "/sessions") {
       return {
-        session: "s",
-        states: [{ state: "k1", goal: "⊢ g", pos: { line: 1, column: 23 }, end_pos: { line: 1, column: 28 } }],
+        id: "s",
+        states: [{ id: "k1", goals: ["⊢ g"], pos: { line: 1, column: 23 }, end_pos: { line: 1, column: 28 } }],
         messages: [],
       };
     }
@@ -50,11 +50,11 @@ describe("useProofSession", () => {
     // Lean recovers from an elaboration error: the step succeeds, with the error.
     if (tactic === "exact nope") {
       const error = { severity: "error", pos: { line: 0, column: 0 }, text: "Unknown identifier `nope`" };
-      return { state: "k-nope", goals: [], complete: false, messages: [error] };
+      return { state: { id: "k-nope", goals: [] }, complete: false, messages: [error] };
     }
     // `skip` leaves the state as it was, with the same key.
-    if (tactic === "skip") return { state: "k1", goals: ["⊢ g"], complete: false, messages: [] };
-    return { state: `k-${String(tactic)}`, goals: [], complete: true, messages: [] };
+    if (tactic === "skip") return { state: { id: "k1", goals: ["⊢ g"] }, complete: false, messages: [] };
+    return { state: { id: `k-${String(tactic)}`, goals: [] }, complete: true, messages: [] };
   };
 
   it("branches, keeps nodes that share a state apart, and marks failed tactics", async () => {

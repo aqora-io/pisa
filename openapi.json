@@ -8,6 +8,47 @@
         ],
         "type": "string"
       },
+      "ApplyTacticRequest": {
+        "description": "`POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`.",
+        "properties": {
+          "tactic": {
+            "type": "string"
+          },
+          "timeout": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tactic"
+        ],
+        "type": "object"
+      },
+      "ApplyTacticResponse": {
+        "properties": {
+          "complete": {
+            "description": "No goals remain for this state's `sorry`. This says nothing about the\nrest of the proof; check the assembled proof with the session check.",
+            "type": "boolean"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/State",
+            "description": "The new state. Earlier states stay valid, so a session is a tree."
+          }
+        },
+        "required": [
+          "state",
+          "complete",
+          "messages"
+        ],
+        "type": "object"
+      },
       "AtPosition": {
         "description": "What Lean recorded at a position asked about in `at`. Each part is\nabsent when no syntax of its kind written in the code contains the\nposition; the innermost one is reported, the range that starts last,\nthen ends first.",
         "properties": {
@@ -290,6 +331,23 @@
           "sorries",
           "reasons",
           "declarations"
+        ],
+        "type": "object"
+      },
+      "CheckSessionRequest": {
+        "description": "`POST /sessions/{id}/check`: re-checks completed code from scratch\nand confirms it proves the statements the session started from, with the\nsame imports.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "timeout": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code"
         ],
         "type": "object"
       },
@@ -655,12 +713,33 @@
         ],
         "type": "object"
       },
+      "Job": {
+        "description": "An async request, as `/jobs/{id}` reports it until it is done.",
+        "properties": {
+          "id": {
+            "description": "Its id: 32 hex digits, to keep secret, as anyone who has it can read\nthe answer or cancel the job.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
       "JobKind": {
         "description": "The endpoint an async request ran.",
         "enum": [
           "check",
           "start_session",
-          "tactic",
+          "apply_tactic",
           "check_session",
           "create_snapshot",
           "verify_snapshot",
@@ -669,16 +748,16 @@
         "type": "string"
       },
       "JobOutcome": {
-        "description": "What `GET /jobs/{job}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `StartResponse`, `tactic` a `TacticResponse`,\n`create_snapshot` a `SnapshotResponse`, `verify_snapshot` a\n`SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error\nis the request's own, with its status.",
+        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `SnapshotResponse`, `verify_snapshot` a\n`SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error\nis the request's own, with its status.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/CheckResult"
           },
           {
-            "$ref": "#/components/schemas/StartResponse"
+            "$ref": "#/components/schemas/Session"
           },
           {
-            "$ref": "#/components/schemas/TacticResponse"
+            "$ref": "#/components/schemas/ApplyTacticResponse"
           },
           {
             "$ref": "#/components/schemas/SnapshotResponse"
@@ -691,7 +770,7 @@
           }
         ]
       },
-      "JobState": {
+      "JobStatus": {
         "enum": [
           "queued",
           "running",
@@ -699,27 +778,6 @@
           "cancelled"
         ],
         "type": "string"
-      },
-      "JobStatus": {
-        "description": "An async request, as `/jobs/{job}` reports it until it is done.",
-        "properties": {
-          "job": {
-            "description": "Its id: 32 hex digits, to keep secret, as anyone who has it can read\nthe answer or cancel the job.",
-            "type": "string"
-          },
-          "kind": {
-            "$ref": "#/components/schemas/JobKind"
-          },
-          "status": {
-            "$ref": "#/components/schemas/JobState"
-          }
-        },
-        "required": [
-          "job",
-          "kind",
-          "status"
-        ],
-        "type": "object"
       },
       "LabelsRequest": {
         "description": "`PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets\nthose in `set`. The labels that result must follow the rules of\n[`check_labels`](crate::labels::check_labels).",
@@ -1350,20 +1408,31 @@
         ],
         "type": "object"
       },
-      "SessionCheckRequest": {
-        "description": "`POST /sessions/{session}/check`: re-checks completed code from scratch\nand confirms it proves the statements the session started from, with the\nsame imports.",
+      "Session": {
+        "description": "A proof session: the states that its code's `sorry`s start from.",
         "properties": {
-          "code": {
+          "id": {
+            "description": "Its id, for checking the finished proof at `/sessions/{id}/check`.",
             "type": "string"
           },
-          "timeout": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          },
+          "states": {
+            "description": "One per `sorry`, in source order.",
+            "items": {
+              "$ref": "#/components/schemas/State"
+            },
+            "type": "array"
           }
         },
         "required": [
-          "code"
+          "id",
+          "states",
+          "messages"
         ],
         "type": "object"
       },
@@ -1812,7 +1881,7 @@
         ],
         "type": "object"
       },
-      "StartRequest": {
+      "StartSessionRequest": {
         "description": "`POST /sessions`: runs code containing `sorry`; each `sorry` becomes a\nproof state that tactics can be applied to.",
         "properties": {
           "code": {
@@ -1833,51 +1902,31 @@
         ],
         "type": "object"
       },
-      "StartResponse": {
-        "properties": {
-          "messages": {
-            "items": {
-              "$ref": "#/components/schemas/Message"
-            },
-            "type": "array"
-          },
-          "session": {
-            "type": "string"
-          },
-          "states": {
-            "description": "One per `sorry`, in source order.",
-            "items": {
-              "$ref": "#/components/schemas/StateInfo"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "session",
-          "states",
-          "messages"
-        ],
-        "type": "object"
-      },
-      "StateInfo": {
+      "State": {
+        "description": "A proof state: the goals still to prove. A state stays valid after\ntactics are applied to it.",
         "properties": {
           "end_pos": {
             "$ref": "#/components/schemas/Pos"
           },
-          "goal": {
+          "goals": {
+            "description": "The goals left, as Lean prints them. A session's first states have\ntheir `sorry`'s goal; a tactic can leave more, or none.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "Its id, for applying a tactic at `/states/{id}/tactic`.",
             "type": "string"
           },
           "pos": {
             "$ref": "#/components/schemas/Pos",
-            "description": "Where the `sorry` is in the code."
-          },
-          "state": {
-            "type": "string"
+            "description": "Where the `sorry` is in the code. Only a session's first states have\nit, not the states that tactics lead to."
           }
         },
         "required": [
-          "state",
-          "goal"
+          "id",
+          "goals"
         ],
         "type": "object"
       },
@@ -1936,54 +1985,6 @@
         ],
         "type": "object"
       },
-      "TacticRequest": {
-        "description": "`POST /states/{state}/tactic`. A failing tactic is a 422 with kind `lean`.",
-        "properties": {
-          "tactic": {
-            "type": "string"
-          },
-          "timeout": {
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "tactic"
-        ],
-        "type": "object"
-      },
-      "TacticResponse": {
-        "properties": {
-          "complete": {
-            "description": "No goals remain for this state's `sorry`. This says nothing about the\nrest of the proof; check the assembled proof with the session check.",
-            "type": "boolean"
-          },
-          "goals": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "messages": {
-            "items": {
-              "$ref": "#/components/schemas/Message"
-            },
-            "type": "array"
-          },
-          "state": {
-            "description": "The new state. Earlier states stay valid, so a session is a tree.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "state",
-          "goals",
-          "complete",
-          "messages"
-        ],
-        "type": "object"
-      },
       "TermInfo": {
         "description": "A term written in the code, and the type Lean expected it to have.",
         "properties": {
@@ -2033,7 +2034,7 @@
         "operationId": "check",
         "parameters": [
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -2067,14 +2068,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }
@@ -2278,15 +2279,15 @@
         ]
       }
     },
-    "/jobs/{job}": {
+    "/jobs/{id}": {
       "delete": {
         "description": "Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is.",
         "operationId": "cancelJob",
         "parameters": [
           {
-            "description": "The job, from the 202",
+            "description": "The job's id, from the 202",
             "in": "path",
-            "name": "job",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -2298,7 +2299,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
@@ -2375,9 +2376,9 @@
         "operationId": "getJob",
         "parameters": [
           {
-            "description": "The job, from the 202",
+            "description": "The job's id, from the 202",
             "in": "path",
-            "name": "job",
+            "name": "id",
             "required": true,
             "schema": {
               "type": "string"
@@ -2410,7 +2411,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
@@ -2489,7 +2490,7 @@
         "operationId": "startSession",
         "parameters": [
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -2502,7 +2503,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/StartRequest"
+                "$ref": "#/components/schemas/StartSessionRequest"
               }
             }
           },
@@ -2513,7 +2514,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StartResponse"
+                  "$ref": "#/components/schemas/Session"
                 }
               }
             },
@@ -2523,14 +2524,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }
@@ -2616,7 +2617,7 @@
         "operationId": "checkSession",
         "parameters": [
           {
-            "description": "The session ID",
+            "description": "A session's id",
             "in": "path",
             "name": "id",
             "required": true,
@@ -2625,7 +2626,7 @@
             }
           },
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -2638,7 +2639,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SessionCheckRequest"
+                "$ref": "#/components/schemas/CheckSessionRequest"
               }
             }
           },
@@ -2659,14 +2660,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }
@@ -2874,7 +2875,7 @@
         "operationId": "createSnapshot",
         "parameters": [
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -2908,14 +2909,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }
@@ -3106,7 +3107,7 @@
         "operationId": "rebuildSnapshots",
         "parameters": [
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -3140,14 +3141,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }
@@ -3675,7 +3676,7 @@
             }
           },
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -3699,14 +3700,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }
@@ -3789,10 +3790,10 @@
     "/states/{id}/tactic": {
       "post": {
         "description": "Returns the new state. Earlier states stay valid, so a session is a tree. A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an unknown identifier, is in `messages`.",
-        "operationId": "tactic",
+        "operationId": "applyTactic",
         "parameters": [
           {
-            "description": "A state key, from a session or an earlier tactic",
+            "description": "A state's id, from a session or an earlier tactic",
             "in": "path",
             "name": "id",
             "required": true,
@@ -3801,7 +3802,7 @@
             }
           },
           {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{job}`, rather than the answer.",
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
             "required": false,
@@ -3814,7 +3815,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/TacticRequest"
+                "$ref": "#/components/schemas/ApplyTacticRequest"
               }
             }
           },
@@ -3825,7 +3826,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TacticResponse"
+                  "$ref": "#/components/schemas/ApplyTacticResponse"
                 }
               }
             },
@@ -3835,14 +3836,14 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobStatus"
+                  "$ref": "#/components/schemas/Job"
                 }
               }
             },
-            "description": "Queued: wait for its answer at `/jobs/{job}`.",
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
             "headers": {
               "Location": {
-                "description": "`/jobs/{job}`, relative to the server's root",
+                "description": "`/jobs/{id}`, relative to the server's root",
                 "schema": {
                   "type": "string"
                 }

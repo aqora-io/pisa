@@ -57,7 +57,7 @@ impl Versions {
         check,
         check_batch,
         sessions::start,
-        sessions::tactic,
+        sessions::apply_tactic,
         sessions::check,
         snapshots::create,
         snapshots::list,
@@ -81,7 +81,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/check/batch", post(check_batch))
         .route("/sessions", post(sessions::start))
         .route("/sessions/{id}/check", post(sessions::check))
-        .route("/states/{id}/tactic", post(sessions::tactic))
+        .route("/states/{id}/tactic", post(sessions::apply_tactic))
         .route("/snapshots", post(snapshots::create).get(snapshots::list))
         .route(
             "/snapshots/{entry}",
@@ -93,7 +93,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/snapshots/{entry}/dependents", get(snapshots::dependents))
         .route("/snapshots/rebuild", post(snapshots::rebuild))
         .route("/snapshots/audit", get(snapshots::audit))
-        .route("/jobs/{job}", get(jobs::get).delete(jobs::cancel))
+        .route("/jobs/{id}", get(jobs::get).delete(jobs::cancel))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
 }

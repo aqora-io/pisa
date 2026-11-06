@@ -1,5 +1,6 @@
 import { PisaError, isPisaError } from "./errors.ts";
 import type {
+  ApplyTacticResponse,
   CheckBatchResponse,
   CheckResult,
   DeclDetail,
@@ -8,7 +9,7 @@ import type {
   Detail,
   ErrorKind,
   Health,
-  JobStatus,
+  Job as JobSchema,
   Labels,
   ListSnapshotsParams,
   Pos,
@@ -19,6 +20,7 @@ import type {
   ResolveResponse,
   Resolution,
   SearchResponse,
+  Session,
   SessionId,
   SnapshotAudit,
   SnapshotDependents,
@@ -28,9 +30,7 @@ import type {
   SnapshotResponse,
   SnapshotSummary,
   SnapshotVerified,
-  StartResponse,
-  StateKey,
-  TacticResponse,
+  StateId,
 } from "./types.ts";
 
 export interface ClientOptions {
@@ -99,13 +99,13 @@ export type CreateSnapshotOptions = RunOptions &
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
  *  secret; the server keeps the answer for an hour after the job is done. */
-export interface Job<T> extends JobStatus {
+export interface Job<T> extends JobSchema {
   /** The answer's type; never set. */
   readonly answer?: T;
 }
 
 /** Where a job stands: done with its request's answer, or not yet. */
-export type JobPoll<T> = { done: true; answer: T } | { done: false; status: JobStatus };
+export type JobPoll<T> = { done: true; answer: T } | { done: false; job: JobSchema };
 
 export interface JobOptions extends RequestOptions {
   /** Seconds to wait for the job to finish, at most 60; by default none. */
@@ -177,18 +177,18 @@ export class PisaClient {
   }
 
   /** Starts a session on code with `sorry`s, each of which becomes a state. */
-  startSession(code: string, options: RunOptions = {}): Promise<StartResponse> {
+  startSession(code: string, options: RunOptions = {}): Promise<Session> {
     return this.call("POST", ["sessions"], { code, ...this.run(options) }, options);
   }
 
   /** `startSession` as a job. */
-  submitSession(code: string, options: RunOptions = {}): Promise<Job<StartResponse>> {
+  submitStartSession(code: string, options: RunOptions = {}): Promise<Job<Session>> {
     return this.submit(["sessions"], { code, ...this.run(options) }, options);
   }
 
   /** Applies a tactic to a state; the state stays valid, so this can branch.
    *  A tactic Lean rejects throws `lean`. */
-  tactic(state: StateKey, tactic: string, options: RunOptions = {}): Promise<TacticResponse> {
+  applyTactic(state: StateId, tactic: string, options: RunOptions = {}): Promise<ApplyTacticResponse> {
     return this.call(
       "POST",
       ["states", state, "tactic"],
@@ -197,8 +197,8 @@ export class PisaClient {
     );
   }
 
-  /** `tactic` as a job. */
-  submitTactic(state: StateKey, tactic: string, options: RunOptions = {}): Promise<Job<TacticResponse>> {
+  /** `applyTactic` as a job. */
+  submitApplyTactic(state: StateId, tactic: string, options: RunOptions = {}): Promise<Job<ApplyTacticResponse>> {
     return this.submit(["states", state, "tactic"], { tactic, ...this.timeoutOf(options) }, options);
   }
 
@@ -213,7 +213,7 @@ export class PisaClient {
   }
 
   /** `checkSession` as a job. */
-  submitSessionCheck(session: SessionId, code: string, options: RunOptions = {}): Promise<Job<CheckResult>> {
+  submitCheckSession(session: SessionId, code: string, options: RunOptions = {}): Promise<Job<CheckResult>> {
     return this.submit(["sessions", session, "check"], { code, ...this.timeoutOf(options) }, options);
   }
 
@@ -325,9 +325,9 @@ export class PisaClient {
   async pollJob<T>(job: Job<T>, options: JobOptions = {}): Promise<JobPoll<T>> {
     const query = new URLSearchParams();
     if (options.wait !== undefined) query.set("wait", String(options.wait));
-    const r = await this.send("GET", ["jobs", job.job], undefined, query, options.signal);
+    const r = await this.send("GET", ["jobs", job.id], undefined, query, options.signal);
     const body = await readJson(r);
-    if (r.status === 202) return { done: false, status: body as JobStatus };
+    if (r.status === 202) return { done: false, job: body as JobSchema };
     return { done: true, answer: ok<T>(r, body) };
   }
 
@@ -351,8 +351,8 @@ export class PisaClient {
 
   /** Withdraws `job` if no worker has started it (`cancelled`); one that is
    *  `running` or `done` stays as it is. */
-  cancelJob(job: JobStatus, options: RequestOptions = {}): Promise<JobStatus> {
-    return this.call("DELETE", ["jobs", job.job], undefined, options);
+  cancelJob(job: JobSchema, options: RequestOptions = {}): Promise<JobSchema> {
+    return this.call("DELETE", ["jobs", job.id], undefined, options);
   }
 
   async search(query: Query, options: SearchOptions = {}): Promise<QueryResult> {

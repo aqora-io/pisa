@@ -9,12 +9,12 @@ use std::future::Future;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use pisa_client::{Error, Job, JobPoll, JobState, JobStatus};
+use pisa_client::{Error, Job, JobPoll, JobStatus, api};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -129,20 +129,20 @@ fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     })
 }
 
-/// A submitted job as Python sees it: the status a submit returned.
-fn queued<T>(job: Job<T>) -> JobStatus {
-    JobStatus {
-        job: job.id,
+/// A submitted job as Python sees it: the job a submit returned.
+fn queued<T>(job: Job<T>) -> api::Job {
+    api::Job {
+        id: job.id,
         kind: job.kind,
-        status: JobState::Queued,
+        status: JobStatus::Queued,
     }
 }
 
-/// The job a status dict, as a submit returned it, names.
-fn job_of(status: &Bound<'_, PyAny>) -> PyResult<Job<Value>> {
-    let status: JobStatus = serde_json::from_value(from_py(status)?)
+/// The job that a dict, as a submit returned it, names.
+fn job_of(job: &Bound<'_, PyAny>) -> PyResult<Job<Value>> {
+    let job: api::Job = serde_json::from_value(from_py(job)?)
         .map_err(|e| PyValueError::new_err(format!("not a job a submit returned: {e}")))?;
-    Ok(Job::new(status.job, status.kind))
+    Ok(Job::new(job.id, job.kind))
 }
 
 /// A create's `replaces`: an entry, or `{"entry": …, "allow": "definitions"}`.
@@ -190,9 +190,8 @@ impl Client {
         Ok(Client { inner })
     }
 
-    fn health(&self, py: Python<'_>) -> PyResult<()> {
-        let result = py.detach(|| runtime().block_on(self.inner.health()));
-        result.map_err(|e| to_py_err(py, e))
+    fn health<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        call(py, self.inner.health())
     }
 
     #[pyo3(signature = (code, *, detail = Vec::new(), at = Vec::new()))]
@@ -228,23 +227,25 @@ impl Client {
         call(py, async move { self.inner.start_session(&code).await })
     }
 
-    fn tactic<'py>(
+    fn apply_tactic<'py>(
         &self,
         py: Python<'py>,
-        state: String,
+        state_id: String,
         tactic: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.tactic(&state, &tactic).await })
+        call(py, async move {
+            self.inner.apply_tactic(&state_id, &tactic).await
+        })
     }
 
     fn check_session<'py>(
         &self,
         py: Python<'py>,
-        session: String,
+        session_id: String,
         code: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         call(py, async move {
-            self.inner.check_session(&session, &code).await
+            self.inner.check_session(&session_id, &code).await
         })
     }
 
@@ -420,32 +421,38 @@ impl Client {
         })
     }
 
-    fn submit_session<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
+    fn submit_start_session<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         call(py, async move {
-            Ok(queued(self.inner.submit_session(&code).await?))
+            Ok(queued(self.inner.submit_start_session(&code).await?))
         })
     }
 
-    fn submit_tactic<'py>(
+    fn submit_apply_tactic<'py>(
         &self,
         py: Python<'py>,
-        state: String,
+        state_id: String,
         tactic: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         call(py, async move {
-            Ok(queued(self.inner.submit_tactic(&state, &tactic).await?))
+            Ok(queued(
+                self.inner.submit_apply_tactic(&state_id, &tactic).await?,
+            ))
         })
     }
 
-    fn submit_session_check<'py>(
+    fn submit_check_session<'py>(
         &self,
         py: Python<'py>,
-        session: String,
+        session_id: String,
         code: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         call(py, async move {
             Ok(queued(
-                self.inner.submit_session_check(&session, &code).await?,
+                self.inner.submit_check_session(&session_id, &code).await?,
             ))
         })
     }
@@ -477,8 +484,9 @@ impl Client {
         })
     }
 
-    /// The job's answer if it is done, after waiting up to `wait` seconds;
-    /// `None` if it isn't yet.
+    /// Where the job stands, after waiting up to `wait` seconds: `{"done":
+    /// True, "answer": …}`, or `{"done": False, "job": …}` if it isn't done
+    /// yet.
     #[pyo3(signature = (job, *, wait = 0))]
     fn poll_job<'py>(
         &self,
@@ -490,8 +498,8 @@ impl Client {
         call(py, async move {
             let wait = Duration::from_secs(wait);
             Ok(match self.inner.poll_job(&job, wait).await? {
-                JobPoll::Done(answer) => answer,
-                JobPoll::Pending(_) => Value::Null,
+                JobPoll::Done(answer) => json!({"done": true, "answer": answer}),
+                JobPoll::Pending(job) => json!({"done": false, "job": job}),
             })
         })
     }

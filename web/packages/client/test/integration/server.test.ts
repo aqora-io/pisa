@@ -54,30 +54,31 @@ describe("sessions", () => {
   it("branches from any state, and checks the proof against the session", async () => {
     const session = await client.startSession("theorem t : 1 = 1 := by sorry");
     const root = session.states[0];
-    expect(root?.goal).toBe("⊢ goal 1");
+    expect(root?.goals).toEqual(["⊢ goal 1"]);
     expect(root?.pos).toEqual({ line: 1, column: 24 });
 
-    const step = await client.tactic(root?.state ?? "", "simp");
+    const step = await client.applyTactic(root?.id ?? "", "simp");
     expect(step.complete).toBe(false);
-    const done = await client.tactic(step.state, "rfl");
-    expect(done).toMatchObject({ complete: true, goals: [] });
+    expect(step.state.pos).toBeUndefined();
+    const done = await client.applyTactic(step.state.id, "rfl");
+    expect(done).toMatchObject({ complete: true, state: { goals: [] } });
     // The root is still there to branch from.
-    const failed = await client.tactic(root?.state ?? "", "fail").catch((e: unknown) => e);
+    const failed = await client.applyTactic(root?.id ?? "", "fail").catch((e: unknown) => e);
     expect(failed).toMatchObject({ kind: "lean", status: 422 });
-    const forbidden = await client.tactic(root?.state ?? "", "run_tac pure ()").catch((e: unknown) => e);
+    const forbidden = await client.applyTactic(root?.id ?? "", "run_tac pure ()").catch((e: unknown) => e);
     expect(isPisaError(forbidden, "policy")).toBe(true);
 
-    expect((await client.checkSession(session.session, "theorem t : 1 = 1 := by rfl")).ok).toBe(true);
-    const weaker = await client.checkSession(session.session, "theorem t : 2 = 2 := by rfl");
+    expect((await client.checkSession(session.id, "theorem t : 1 = 1 := by rfl")).ok).toBe(true);
+    const weaker = await client.checkSession(session.id, "theorem t : 2 = 2 := by rfl");
     expect(weaker.reasons).toEqual(["statement: t has a different type"]);
   });
 
   it("raises bad and unknown keys", async () => {
-    expect(await client.tactic("not-a-key", "rfl").catch((e: unknown) => e)).toMatchObject({
+    expect(await client.applyTactic("not-a-key", "rfl").catch((e: unknown) => e)).toMatchObject({
       kind: "bad_request",
       status: 400,
     });
-    expect(await client.tactic("v~abc~0123", "rfl").catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
+    expect(await client.applyTactic("v~abc~0123", "rfl").catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
   });
 });
 
@@ -164,12 +165,14 @@ describe("jobs", () => {
     expect(job).toMatchObject({ kind: "check", status: "queued" });
     expect((await client.waitJob(job)).ok).toBe(true);
 
-    const session = await client.waitJob(await client.submitSession("theorem t : 1 = 1 := by sorry"));
-    const state = session.states[0]?.state ?? "";
-    expect((await client.waitJob(await client.submitTactic(state, "rfl"))).complete).toBe(true);
-    const failed = await client.waitJob(await client.submitTactic(state, "fail")).catch((e: unknown) => e);
+    const session = await client.waitJob(await client.submitStartSession("theorem t : 1 = 1 := by sorry"));
+    const state = session.states[0]?.id ?? "";
+    const applied = await client.submitApplyTactic(state, "rfl");
+    expect(applied.kind).toBe("apply_tactic");
+    expect((await client.waitJob(applied)).complete).toBe(true);
+    const failed = await client.waitJob(await client.submitApplyTactic(state, "fail")).catch((e: unknown) => e);
     expect(isPisaError(failed, "lean")).toBe(true);
-    const proved = await client.submitSessionCheck(session.session, "theorem t : 1 = 1 := by rfl");
+    const proved = await client.submitCheckSession(session.id, "theorem t : 1 = 1 := by rfl");
     expect((await client.waitJob(proved)).ok).toBe(true);
 
     const made = await client.waitJob(await client.submitSnapshot("def jobbed := 1"));

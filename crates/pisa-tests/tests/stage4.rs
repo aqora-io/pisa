@@ -449,14 +449,14 @@ async fn sessions_run_on_snapshots_and_keep_their_imports() {
     c.wait_for_workers(2).await;
     c.kill_worker(0).await;
 
-    let state = s["states"][0]["state"].as_str().unwrap();
+    let state = s["states"][0]["id"].as_str().unwrap();
     let (status, step) = c
         .post(&format!("/states/{state}/tactic"), json!({"tactic": "rfl"}))
         .await;
     assert_eq!(status, 200, "{step}");
     assert_eq!(step["complete"], true);
 
-    let session = s["session"].as_str().unwrap();
+    let session = s["id"].as_str().unwrap();
     let path = format!("/sessions/{session}/check");
     let proof = "needs base\ntheorem t : 1 = 1 := by rfl";
     let (_, ok) = c.post(&path, json!({"code": on(&root, proof)})).await;

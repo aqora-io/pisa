@@ -10,9 +10,9 @@
 //! | --- | --- |
 //! | `POST /check` | [`CheckRequest`] → [`CheckResult`] |
 //! | `POST /check/batch` | [`CheckBatchRequest`] → [`CheckBatchResponse`] |
-//! | `POST /sessions` | [`StartRequest`] → [`StartResponse`] |
-//! | `POST /states/{state}/tactic` | [`TacticRequest`] → [`TacticResponse`] |
-//! | `POST /sessions/{session}/check` | [`SessionCheckRequest`] → [`CheckResult`] |
+//! | `POST /sessions` | [`StartSessionRequest`] → [`Session`] |
+//! | `POST /states/{id}/tactic` | [`ApplyTacticRequest`] → [`ApplyTacticResponse`] |
+//! | `POST /sessions/{id}/check` | [`CheckSessionRequest`] → [`CheckResult`] |
 //! | `POST /snapshots` | [`SnapshotRequest`] → [`SnapshotResponse`] |
 //! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`SnapshotList`] |
 //! | `GET /snapshots/{entry}` | → [`SnapshotInfo`] |
@@ -22,14 +22,14 @@
 //! | `PATCH /snapshots/{entry}` | [`LabelsRequest`] → [`SnapshotSummary`] |
 //! | `DELETE /snapshots/{entry}` | → [`Deleted`] |
 //! | `POST /snapshots/{entry}/verify` | → [`SnapshotVerified`] |
-//! | `GET /jobs/{job}` | `?wait=` ([`JobWait`]) → the request's answer, or [`JobStatus`] (202) |
-//! | `DELETE /jobs/{job}` | → [`JobStatus`] |
+//! | `GET /jobs/{id}` | `?wait=` ([`JobWait`]) → the request's answer, or [`Job`] (202) |
+//! | `DELETE /jobs/{id}` | → [`Job`] |
 //!
 //! The snapshot endpoints take an optional `?version=` ([`VersionQuery`]).
 //! Checks can ask for more in `detail` ([`Detail`]). Checks, sessions, and
 //! snapshot creates and verifies run asynchronously with
 //! `Prefer: respond-async` ([`PreferAsync`]), answering 202 with a
-//! [`JobStatus`].
+//! [`Job`].
 
 use std::collections::BTreeMap;
 
@@ -151,7 +151,7 @@ pub enum ApiErrors {
 #[into_params(parameter_in = Header)]
 pub struct PreferAsync {
     /// `respond-async` for a job at once (202), to wait for at
-    /// `/jobs/{job}`, rather than the answer.
+    /// `/jobs/{id}`, rather than the answer.
     #[param(rename = "Prefer")]
     pub prefer: Option<String>,
 }
@@ -159,25 +159,25 @@ pub struct PreferAsync {
 /// What a request with `Prefer: respond-async` answers.
 #[derive(IntoResponses)]
 pub enum Accepted {
-    /// Queued: wait for its answer at `/jobs/{job}`.
+    /// Queued: wait for its answer at `/jobs/{id}`.
     #[response(
         status = 202,
         headers(
-            ("Location" = String, description = "`/jobs/{job}`, relative to the server's root"),
+            ("Location" = String, description = "`/jobs/{id}`, relative to the server's root"),
             ("Preference-Applied" = String, description = "`respond-async`"),
         )
     )]
-    Accepted(JobStatus),
+    Accepted(Job),
 }
 
-/// An async request, as `/jobs/{job}` reports it until it is done.
+/// An async request, as `/jobs/{id}` reports it until it is done.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct JobStatus {
+pub struct Job {
     /// Its id: 32 hex digits, to keep secret, as anyone who has it can read
     /// the answer or cancel the job.
-    pub job: String,
+    pub id: String,
     pub kind: JobKind,
-    pub status: JobState,
+    pub status: JobStatus,
 }
 
 /// The endpoint an async request ran.
@@ -189,7 +189,7 @@ pub enum JobKind {
     /// `POST /sessions`
     StartSession,
     /// `POST /states/{id}/tactic`
-    Tactic,
+    ApplyTactic,
     /// `POST /sessions/{id}/check`
     CheckSession,
     /// `POST /snapshots`
@@ -202,18 +202,18 @@ pub enum JobKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum JobState {
+pub enum JobStatus {
     /// Waiting for a worker.
     Queued,
     /// A worker is running it.
     Running,
-    /// Its answer is waiting at `/jobs/{job}`.
+    /// Its answer is waiting at `/jobs/{id}`.
     Done,
     /// Withdrawn before a worker started it.
     Cancelled,
 }
 
-/// `GET /jobs/{job}`'s query.
+/// `GET /jobs/{id}`'s query.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct JobWait {
@@ -223,9 +223,9 @@ pub struct JobWait {
     pub wait: Option<u64>,
 }
 
-/// What `GET /jobs/{job}` answers once the job is done: what its request
+/// What `GET /jobs/{id}` answers once the job is done: what its request
 /// would have. By `kind`: `check` and `check_session` a `CheckResult`,
-/// `start_session` a `StartResponse`, `tactic` a `TacticResponse`,
+/// `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
 /// `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
 /// `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
 /// is the request's own, with its status.
@@ -233,8 +233,8 @@ pub struct JobWait {
 #[serde(untagged)]
 pub enum JobOutcome {
     Check(CheckResult),
-    Session(StartResponse),
-    Tactic(TacticResponse),
+    Session(Session),
+    ApplyTactic(ApplyTacticResponse),
     Snapshot(Box<SnapshotResponse>),
     Verified(SnapshotVerified),
     Rebuild(Box<RebuildResponse>),
@@ -441,7 +441,7 @@ pub struct TacticInfo {
 /// `POST /sessions`: runs code containing `sorry`; each `sorry` becomes a
 /// proof state that tactics can be applied to.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct StartRequest {
+pub struct StartSessionRequest {
     /// Code with `sorry`s, each of which becomes a state.
     pub code: String,
     #[serde(default)]
@@ -450,40 +450,47 @@ pub struct StartRequest {
     pub timeout: u64,
 }
 
+/// A proof session: the states that its code's `sorry`s start from.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct StartResponse {
-    pub session: String,
+pub struct Session {
+    /// Its id, for checking the finished proof at `/sessions/{id}/check`.
+    pub id: String,
     /// One per `sorry`, in source order.
-    pub states: Vec<StateInfo>,
+    pub states: Vec<State>,
     #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
 }
 
+/// A proof state: the goals still to prove. A state stays valid after
+/// tactics are applied to it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct StateInfo {
-    pub state: String,
-    pub goal: String,
-    /// Where the `sorry` is in the code.
+pub struct State {
+    /// Its id, for applying a tactic at `/states/{id}/tactic`.
+    pub id: String,
+    /// The goals left, as Lean prints them. A session's first states have
+    /// their `sorry`'s goal; a tactic can leave more, or none.
+    pub goals: Vec<String>,
+    /// Where the `sorry` is in the code. Only a session's first states have
+    /// it, not the states that tactics lead to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos: Option<Pos>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_pos: Option<Pos>,
 }
 
-/// `POST /states/{state}/tactic`. A failing tactic is a 422 with kind `lean`.
+/// `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct TacticRequest {
+pub struct ApplyTacticRequest {
     pub tactic: String,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct TacticResponse {
+pub struct ApplyTacticResponse {
     /// The new state. Earlier states stay valid, so a session is a tree.
-    pub state: String,
-    pub goals: Vec<String>,
+    pub state: State,
     /// No goals remain for this state's `sorry`. This says nothing about the
     /// rest of the proof; check the assembled proof with the session check.
     pub complete: bool,
@@ -492,11 +499,11 @@ pub struct TacticResponse {
     pub messages: Vec<Message>,
 }
 
-/// `POST /sessions/{session}/check`: re-checks completed code from scratch
+/// `POST /sessions/{id}/check`: re-checks completed code from scratch
 /// and confirms it proves the statements the session started from, with the
 /// same imports.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct SessionCheckRequest {
+pub struct CheckSessionRequest {
     pub code: String,
     #[serde(default = "default_timeout")]
     pub timeout: u64,

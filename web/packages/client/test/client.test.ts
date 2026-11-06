@@ -58,7 +58,7 @@ describe("PisaClient", () => {
     await client.check("#check Nat", { detail: ["tactics"], timeout: 5 });
     await client.checkBatch(["x"], { version: "v2" });
     await client.listSnapshots({ labels: { run: "a b", "k.x": "1:2" }, limit: 1, after: "c" });
-    await client.tactic("v1~h~s", "simp");
+    await client.applyTactic("v1~h~s", "simp");
     expect(sent[0]?.body).toEqual({ code: "#check Nat", version: "v1", timeout: 5, detail: ["tactics"] });
     expect(sent[0]?.headers["content-type"]).toBe("application/json");
     expect(sent[1]?.body).toEqual({ items: [{ code: "x" }], version: "v2" });
@@ -69,7 +69,7 @@ describe("PisaClient", () => {
       "1",
       "c",
     ]);
-    // A state's key carries its version.
+    // A state's id carries its version.
     expect(sent[3]).toMatchObject({ url: "/api/states/v1~h~s/tactic", body: { tactic: "simp" } });
   });
 
@@ -98,13 +98,13 @@ describe("PisaClient", () => {
 
   it("runs a rebuild, at once or as a job", async () => {
     const { client, sent } = recording((s) =>
-      s.headers["prefer"] ? json({ job: "j", kind: "rebuild_snapshots", status: "running" }, 202) : json({ ok: true, changes: [], plan: [] }),
+      s.headers["prefer"] ? json({ id: "j", kind: "rebuild_snapshots", status: "running" }, 202) : json({ ok: true, changes: [], plan: [] }),
     );
     await client.rebuild("e1", "e2", { p: "1" }, { retire: true, verify: false });
     const job = await client.submitRebuild("e1", "e2", { p: "1" });
     expect(sent[0]?.body).toEqual({ from: "e1", to: "e2", labels: { p: "1" }, dry_run: false, version: "v1", retire: true, verify: false });
     expect(sent[1]?.headers["prefer"]).toBe("respond-async");
-    expect(job).toMatchObject({ job: "j", kind: "rebuild_snapshots" });
+    expect(job).toMatchObject({ id: "j", kind: "rebuild_snapshots" });
   });
 
   it("pins search to its environment", async () => {
@@ -155,7 +155,7 @@ describe("PisaClient", () => {
   });
 
   it("submits a request as a job, and waits for its answer", async () => {
-    const job = { job: "a".repeat(32), kind: "check", status: "queued" };
+    const job = { id: "a".repeat(32), kind: "check", status: "queued" };
     let looks = 0;
     const { client, sent } = recording((s) => {
       if (s.method === "POST") return json(job, 202);
@@ -168,22 +168,22 @@ describe("PisaClient", () => {
     expect(sent[0]?.headers["prefer"]).toBe("respond-async");
     expect(sent[0]?.body).toEqual({ code: "#check Nat", version: "v1", detail: ["tactics"] });
 
-    expect(await client.pollJob(submitted)).toEqual({ done: false, status: { ...job, status: "running" } });
+    expect(await client.pollJob(submitted)).toEqual({ done: false, job: { ...job, status: "running" } });
     expect((await client.waitJob(submitted)).ok).toBe(true);
     expect(sent.slice(1).map((s) => s.url)).toEqual([
-      `/api/jobs/${job.job}`,
-      `/api/jobs/${job.job}?wait=60`,
-      `/api/jobs/${job.job}?wait=60`,
+      `/api/jobs/${job.id}`,
+      `/api/jobs/${job.id}?wait=60`,
+      `/api/jobs/${job.id}?wait=60`,
     ]);
     expect((await client.cancelJob(submitted)).status).toBe("cancelled");
   });
 
   it("throws a job's error as its request would have, and a server that won't queue it", async () => {
-    const job = { job: "b".repeat(32), kind: "tactic", status: "queued" };
+    const job = { id: "b".repeat(32), kind: "apply_tactic", status: "queued" };
     const { client } = recording((s) =>
       s.method === "POST" ? json(job, 202) : json({ error: { kind: "lean", message: "no" } }, 422),
     );
-    const submitted = await client.submitTactic("v~h~s", "fail");
+    const submitted = await client.submitApplyTactic("v~h~s", "fail");
     const thrown = await client.waitJob(submitted).catch((e: unknown) => e);
     expect(isPisaError(thrown, "lean")).toBe(true);
 

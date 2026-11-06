@@ -1,5 +1,5 @@
 //! Async requests: with `Prefer: respond-async`, the long endpoints answer 202
-//! with a job at once, which `/jobs/{job}` answers later as the request would
+//! with a job at once, which `/jobs/{id}` answers later as the request would
 //! have.
 
 mod common;
@@ -28,14 +28,14 @@ async fn submit(c: &Cluster, url: &str, body: Value) -> (u16, HeaderMap, Value) 
 async fn accepted(c: &Cluster, path: &str, body: Value, kind: &str) -> String {
     let (status, headers, r) = submit(c, &c.url(path), body).await;
     assert_eq!(status, 202, "{path}: {r}");
-    let job = r["job"].as_str().unwrap().to_string();
-    assert_eq!(r, json!({"job": job, "kind": kind, "status": "queued"}));
+    let job = r["id"].as_str().unwrap().to_string();
+    assert_eq!(r, json!({"id": job, "kind": kind, "status": "queued"}));
     assert_eq!(headers["location"], format!("/jobs/{job}").as_str());
     assert_eq!(headers["preference-applied"], "respond-async");
     job
 }
 
-/// `GET /jobs/{job}?wait=…` at `url` (a server's `/jobs/{job}`).
+/// `GET /jobs/{id}?wait=…` at `url` (a server's `/jobs/{id}`).
 async fn look(c: &Cluster, url: &str, wait: &str) -> (u16, Value) {
     let r = c
         .client
@@ -58,9 +58,7 @@ fn comparable(v: &Value) -> Value {
     match v {
         Value::Object(o) => o
             .iter()
-            .filter(|(k, _)| {
-                !["time", "entry", "session", "state", "created"].contains(&k.as_str())
-            })
+            .filter(|(k, _)| !["time", "entry", "id", "created"].contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), comparable(v)))
             .collect(),
         Value::Array(a) => a.iter().map(comparable).collect(),
@@ -72,8 +70,8 @@ fn comparable(v: &Value) -> Value {
 async fn each_long_endpoint_answers_later_as_it_would_have_at_once() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let (_, session) = c.post("/sessions", json!({"code": CODE})).await;
-    let state = session["states"][0]["state"].as_str().unwrap();
-    let session_id = session["session"].as_str().unwrap();
+    let state = session["states"][0]["id"].as_str().unwrap();
+    let session_id = session["id"].as_str().unwrap();
     // Verifying records what it checked, so each run gets an entry of its
     // own, on a module of its own.
     let mut entries = Vec::new();
@@ -88,12 +86,12 @@ async fn each_long_endpoint_answers_later_as_it_would_have_at_once() {
         (
             &*format!("/states/{state}/tactic"),
             json!({"tactic": "rfl"}),
-            "tactic",
+            "apply_tactic",
         ),
         (
             &*format!("/states/{state}/tactic"),
             json!({"tactic": "fail"}),
-            "tactic",
+            "apply_tactic",
         ),
         (
             &*format!("/sessions/{session_id}/check"),
@@ -178,10 +176,10 @@ async fn failures_are_kept_and_requests_checked_first() {
 
     // A state nobody has: the request's 404.
     let (_, session) = c.post("/sessions", json!({"code": CODE})).await;
-    let state = session["states"][0]["state"].as_str().unwrap();
+    let state = session["states"][0]["id"].as_str().unwrap();
     let unknown = format!("{}{}", &state[..state.len() - 4], "0000");
     let path = format!("/states/{unknown}/tactic");
-    let job = accepted(&c, &path, json!({"tactic": "rfl"}), "tactic").await;
+    let job = accepted(&c, &path, json!({"tactic": "rfl"}), "apply_tactic").await;
     let (status, r) = look(&c, &c.url(&format!("/jobs/{job}")), "10").await;
     assert_eq!(
         (status, &r["error"]["kind"]),
@@ -206,7 +204,7 @@ async fn any_server_answers_for_a_job() {
     assert_eq!((status, &r["ok"]), (200, &json!(true)));
     let (status, r) = delete(&c, &there).await;
     assert_eq!(status, 200);
-    assert_eq!(r, json!({"job": job, "kind": "check", "status": "done"}));
+    assert_eq!(r, json!({"id": job, "kind": "check", "status": "done"}));
 }
 
 #[tokio::test(flavor = "multi_thread")]

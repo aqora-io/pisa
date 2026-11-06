@@ -8,8 +8,8 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    Accepted, ApiErrors, CheckResult, ErrorKind, JobKind, Key, PreferAsync, SessionCheckRequest,
-    StartRequest, StartResponse, TacticRequest, TacticResponse,
+    Accepted, ApiErrors, ApplyTacticRequest, ApplyTacticResponse, CheckResult, CheckSessionRequest,
+    ErrorKind, JobKind, Key, PreferAsync, Session, StartSessionRequest,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::wire::{Job, JobResult, SessionCheckJob, SessionStartJob, SessionTacticJob};
@@ -35,13 +35,13 @@ pub(crate) fn unexpected(result: JobResult) -> ApiError {
     summary = "Start a proof session",
     description = "Checks code with `sorry`s and returns a state for each, to apply tactics to.",
     params(PreferAsync),
-    request_body = StartRequest,
-    responses((status = 200, description = "The session, with a state for each `sorry`", body = StartResponse), Accepted, ApiErrors),
+    request_body = StartSessionRequest,
+    responses((status = 200, description = "The session, with a state for each `sorry`", body = Session), Accepted, ApiErrors),
 )]
 pub async fn start(
     State(app): State<Arc<App>>,
     prefer: Prefer,
-    Body(req): Body<StartRequest>,
+    Body(req): Body<StartSessionRequest>,
 ) -> Response {
     let split = split_header(&req.code);
     let route = Route {
@@ -62,7 +62,7 @@ pub async fn start(
     app.answer(prefer, JobKind::StartSession, p).await
 }
 
-pub(crate) fn started(done: JobResult) -> Result<StartResponse, ApiError> {
+pub(crate) fn started(done: JobResult) -> Result<Session, ApiError> {
     let JobResult::SessionStarted(result) = done else {
         return Err(unexpected(done));
     };
@@ -70,20 +70,20 @@ pub(crate) fn started(done: JobResult) -> Result<StartResponse, ApiError> {
 }
 
 #[utoipa::path(
-    post, path = "/states/{id}/tactic", operation_id = "tactic", tag = "sessions",
+    post, path = "/states/{id}/tactic", operation_id = "applyTactic", tag = "sessions",
     summary = "Apply a tactic to a state",
     description = "Returns the new state. Earlier states stay valid, so a session is a tree. \
         A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an \
         unknown identifier, is in `messages`.",
-    params(("id" = String, Path, description = "A state key, from a session or an earlier tactic"), PreferAsync),
-    request_body = TacticRequest,
-    responses((status = 200, description = "The new state", body = TacticResponse), Accepted, ApiErrors),
+    params(("id" = String, Path, description = "A state's id, from a session or an earlier tactic"), PreferAsync),
+    request_body = ApplyTacticRequest,
+    responses((status = 200, description = "The new state", body = ApplyTacticResponse), Accepted, ApiErrors),
 )]
-pub async fn tactic(
+pub async fn apply_tactic(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     prefer: Prefer,
-    Body(req): Body<TacticRequest>,
+    Body(req): Body<ApplyTacticRequest>,
 ) -> Response {
     let key = match parse_key(&id) {
         Ok(key) => key,
@@ -105,10 +105,10 @@ pub async fn tactic(
         route,
         priority: Priority::Interactive,
     };
-    app.answer(prefer, JobKind::Tactic, p).await
+    app.answer(prefer, JobKind::ApplyTactic, p).await
 }
 
-pub(crate) fn applied(done: JobResult) -> Result<TacticResponse, ApiError> {
+pub(crate) fn applied(done: JobResult) -> Result<ApplyTacticResponse, ApiError> {
     let JobResult::TacticApplied(result) = done else {
         return Err(unexpected(done));
     };
@@ -121,15 +121,15 @@ pub(crate) fn applied(done: JobResult) -> Result<TacticResponse, ApiError> {
     description = "Re-checks the completed code from scratch and confirms it proves the \
         statements the session started from, with the same imports. Failures are in-band, \
         as for `/check`, with statement changes in `reasons`.",
-    params(("id" = String, Path, description = "The session ID"), PreferAsync),
-    request_body = SessionCheckRequest,
+    params(("id" = String, Path, description = "A session's id"), PreferAsync),
+    request_body = CheckSessionRequest,
     responses((status = 200, description = "The verdict", body = CheckResult), Accepted, ApiErrors),
 )]
 pub async fn check(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     prefer: Prefer,
-    Body(req): Body<SessionCheckRequest>,
+    Body(req): Body<CheckSessionRequest>,
 ) -> Response {
     let key = match parse_key(&id) {
         Ok(key) => key,
@@ -155,7 +155,7 @@ pub async fn check(
 }
 
 /// The completed proof's check result, with statement changes added to
-/// `reasons`. A bad or unknown session ID is an HTTP error; everything else
+/// `reasons`. A bad or unknown session id is an HTTP error; everything else
 /// is in-band, as for `/check`.
 pub(crate) fn checked(done: JobResult) -> Result<CheckResult, ApiError> {
     let JobResult::SessionChecked(checked) = done else {

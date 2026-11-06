@@ -38,7 +38,7 @@ def url(tmp_path_factory):
     url = f"http://127.0.0.1:{http}"
     client = Client(url)
     # The server creates the tables first, so the two don't race to.
-    wait_for(lambda: client.health() is None)
+    wait_for(lambda: client.health()["status"] == "ok")
     worker = subprocess.Popen(
         [BIN / "pisa-worker", "--database-url", db, "--version", "v",
          "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean"],
@@ -114,23 +114,23 @@ def test_session(url):
     client = Client(url, timeout=5)
     session = client.start_session("theorem t : 1 = 1 := by sorry")
     root = session["states"][0]
-    assert root["goal"] == "⊢ goal 1"
+    assert root["goals"] == ["⊢ goal 1"] and root["pos"]["line"] == 1
 
-    step = client.tactic(root["state"], "simp")
-    assert not step["complete"]
-    done = client.tactic(step["state"], "rfl")
-    assert done["complete"] and done["goals"] == []
+    step = client.apply_tactic(root["id"], "simp")
+    assert not step["complete"] and "pos" not in step["state"]
+    done = client.apply_tactic(step["state"]["id"], "rfl")
+    assert done["complete"] and done["state"]["goals"] == []
 
     with pytest.raises(LeanError, match="failed") as e:
-        client.tactic(root["state"], "fail")
+        client.apply_tactic(root["id"], "fail")
     assert (e.value.kind, e.value.status) == ("lean", 422)
     with pytest.raises(LeanError) as e:
-        client.tactic(root["state"], "run_tac pure ()")
+        client.apply_tactic(root["id"], "run_tac pure ()")
     assert e.value.kind == "policy"
 
-    verdict = client.check_session(session["session"], "theorem t : 1 = 1 := by rfl")
+    verdict = client.check_session(session["id"], "theorem t : 1 = 1 := by rfl")
     assert verdict["ok"]
-    weaker = client.check_session(session["session"], "theorem t : 2 = 2 := by rfl")
+    weaker = client.check_session(session["id"], "theorem t : 2 = 2 := by rfl")
     assert weaker["reasons"] == ["statement: t has a different type"]
 
 
@@ -138,15 +138,18 @@ def test_jobs(url):
     client = Client(url, timeout=5)
     job = client.submit_check("#check Nat")
     assert (job["kind"], job["status"]) == ("check", "queued")
+    assert isinstance(job["id"], str)
     assert client.wait_job(job)["ok"]
 
-    session = client.wait_job(client.submit_session("theorem t : 1 = 1 := by sorry"))
-    state = session["states"][0]["state"]
-    assert client.wait_job(client.submit_tactic(state, "rfl"))["complete"]
+    session = client.wait_job(client.submit_start_session("theorem t : 1 = 1 := by sorry"))
+    state = session["states"][0]["id"]
+    applied = client.submit_apply_tactic(state, "rfl")
+    assert applied["kind"] == "apply_tactic"
+    assert client.wait_job(applied)["complete"]
     # The answer raises what the request would have.
     with pytest.raises(LeanError):
-        client.wait_job(client.submit_tactic(state, "fail"))
-    verdict = client.submit_session_check(session["session"], "theorem t : 1 = 1 := by rfl")
+        client.wait_job(client.submit_apply_tactic(state, "fail"))
+    verdict = client.submit_check_session(session["id"], "theorem t : 1 = 1 := by rfl")
     assert client.wait_job(verdict)["ok"]
 
     made = client.wait_job(client.submit_snapshot("def jobbed := 1", labels={"run": "jobs"}))
@@ -154,20 +157,24 @@ def test_jobs(url):
     assert client.wait_job(client.submit_verify(made["entry"]))["verified"]
 
     slow = client.submit_check("SLEEP 1000\n#check Nat")
-    assert client.poll_job(slow) is None
-    assert client.poll_job(slow, wait=10)["ok"]
+    pending = client.poll_job(slow)
+    assert pending["done"] is False
+    assert pending["job"]["id"] == slow["id"]
+    assert pending["job"]["status"] in ("queued", "running")
+    polled = client.poll_job(slow, wait=10)
+    assert polled["done"] is True and polled["answer"]["ok"]
     assert client.cancel_job(slow)["status"] == "done"
     with pytest.raises(ValueError):
-        client.wait_job({"job": "x"})
+        client.wait_job({"id": "x"})
 
 
 def test_errors(url):
     with pytest.raises(PisaError) as e:
-        Client(url).tactic("not-a-key", "rfl")
+        Client(url).apply_tactic("not-a-key", "rfl")
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
     with pytest.raises(NotFoundError):
-        Client(url).tactic("v~abc~0123", "rfl")
+        Client(url).apply_tactic("v~abc~0123", "rfl")
 
     with pytest.raises(CapacityError) as e:
         Client(url, version="nope").check("#check Nat")

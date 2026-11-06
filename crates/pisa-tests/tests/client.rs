@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    CheckOptions, Client, Detail, Error, ErrorKind, Job, JobKind, JobPoll, JobState, Pos,
-    ProofStatus, RebuildOptions, Replaces, SnapshotList, SnapshotOptions,
+    CheckOptions, Client, Detail, Error, ErrorKind, HealthStatus, Job, JobKind, JobPoll, JobStatus,
+    Pos, ProofStatus, RebuildOptions, Replaces, SnapshotList, SnapshotOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_covers_checks_and_sessions() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_timeout(5);
-    client.health().await.unwrap();
+    assert_eq!(client.health().await.unwrap().status, HealthStatus::Ok);
 
     let r = client
         .check("import Foo\ntheorem t : 1 = 1 := rfl")
@@ -36,19 +36,23 @@ async fn client_covers_checks_and_sessions() {
         .start_session("theorem t : 1 = 1 := by sorry")
         .await
         .unwrap();
-    let step = client.tactic(&s.states[0].state, "simp").await.unwrap();
+    let step = client.apply_tactic(&s.states[0].id, "simp").await.unwrap();
     assert!(!step.complete);
-    let done = client.tactic(&step.state, "rfl").await.unwrap();
+    assert_eq!(step.state.goals, ["⊢ goal 1 after simp"]);
+    let done = client.apply_tactic(&step.state.id, "rfl").await.unwrap();
     assert!(done.complete);
-    let err = client.tactic(&step.state, "fail").await.unwrap_err();
+    let err = client
+        .apply_tactic(&step.state.id, "fail")
+        .await
+        .unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::Lean));
     let verdict = client
-        .check_session(&s.session, "theorem t : 1 = 1 := by rfl")
+        .check_session(&s.id, "theorem t : 1 = 1 := by rfl")
         .await
         .unwrap();
     assert!(verdict.ok, "{verdict:?}");
 
-    match client.tactic("not-a-key", "rfl").await {
+    match client.apply_tactic("not-a-key", "rfl").await {
         Err(Error::Server { status, kind, .. }) => {
             assert_eq!((status, kind), (400, ErrorKind::BadRequest))
         }
@@ -385,24 +389,25 @@ async fn client_submits_and_waits_for_jobs() {
     assert!(client.wait_job(&job).await.unwrap().ok);
 
     let job = client
-        .submit_session("theorem t : 1 = 1 := by sorry")
+        .submit_start_session("theorem t : 1 = 1 := by sorry")
         .await
         .unwrap();
     let s = client.wait_job(&job).await.unwrap();
     let job = client
-        .submit_tactic(&s.states[0].state, "rfl")
+        .submit_apply_tactic(&s.states[0].id, "rfl")
         .await
         .unwrap();
+    assert_eq!(job.kind, JobKind::ApplyTactic);
     assert!(client.wait_job(&job).await.unwrap().complete);
     // An error is the request's own.
     let job = client
-        .submit_tactic(&s.states[0].state, "fail")
+        .submit_apply_tactic(&s.states[0].id, "fail")
         .await
         .unwrap();
     let err = client.wait_job(&job).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::Lean));
     let job = client
-        .submit_session_check(&s.session, "theorem t : 1 = 1 := by rfl")
+        .submit_check_session(&s.id, "theorem t : 1 = 1 := by rfl")
         .await
         .unwrap();
     assert!(client.wait_job(&job).await.unwrap().ok);
@@ -418,11 +423,18 @@ async fn client_submits_and_waits_for_jobs() {
     let slow = client.submit_check("SLEEP 1000\n#check Nat").await.unwrap();
     let resumed: Job<pisa_client::CheckResult> = Job::new(slow.id.clone(), slow.kind);
     let pending = client.poll_job(&resumed, Duration::ZERO).await.unwrap();
-    assert!(matches!(pending, JobPoll::Pending(_)));
+    let JobPoll::Pending(pending) = pending else {
+        panic!("{pending:?}");
+    };
+    assert_eq!(pending.id, slow.id);
+    assert!(matches!(
+        pending.status,
+        JobStatus::Queued | JobStatus::Running
+    ));
     let queued = client.submit_check("#check Nat").await.unwrap();
     assert_eq!(
         client.cancel_job(&queued).await.unwrap().status,
-        JobState::Cancelled
+        JobStatus::Cancelled
     );
     assert!(client.wait_job(&resumed).await.unwrap().ok);
 }

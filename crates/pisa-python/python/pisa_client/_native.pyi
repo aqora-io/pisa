@@ -38,7 +38,7 @@ class Declaration(TypedDict):
     value_refs: NotRequired[list[str]]
     generated: NotRequired[bool]
 
-class Tactic(TypedDict):
+class TacticInfo(TypedDict):
     tactic: str
     goals_before: list[str]
     goals_after: list[str]
@@ -54,7 +54,7 @@ class TermInfo(TypedDict):
 
 class AtPosition(TypedDict):
     pos: Pos
-    tactic: NotRequired[Tactic]
+    tactic: NotRequired[TacticInfo]
     term: NotRequired[TermInfo]
 
 class CheckResult(TypedDict):
@@ -65,23 +65,22 @@ class CheckResult(TypedDict):
     sorries: list[Sorry]
     reasons: list[str]
     declarations: list[Declaration]
-    tactics: NotRequired[list[Tactic]]
+    tactics: NotRequired[list[TacticInfo]]
     at: NotRequired[list[AtPosition]]
 
-class StateInfo(TypedDict):
-    state: str
-    goal: str
+class State(TypedDict):
+    id: str
+    goals: list[str]
     pos: NotRequired[Pos]
     end_pos: NotRequired[Pos]
 
 class Session(TypedDict):
-    session: str
-    states: list[StateInfo]
+    id: str
+    states: list[State]
     messages: list[Message]
 
-class Step(TypedDict):
-    state: str
-    goals: list[str]
+class ApplyTacticResponse(TypedDict):
+    state: State
     complete: bool
     messages: list[Message]
 
@@ -224,13 +223,41 @@ class SnapshotVerified(TypedDict):
     checked: list[str]
     failure: NotRequired[SnapshotFailure]
 
-class JobStatus(TypedDict):
+JobKind = Literal[
+    "check", "start_session", "apply_tactic", "check_session",
+    "create_snapshot", "verify_snapshot", "rebuild_snapshots",
+]
+JobStatus = Literal["queued", "running", "done", "cancelled"]
+
+class Job(TypedDict):
     """An async request's job, as a `submit_*` returns it. Keep it to wait for
     the answer later, also from another process; keep it secret too, as anyone
     who has it can read the answer or cancel the job."""
-    job: str
-    kind: Literal["check", "start_session", "tactic", "check_session", "create_snapshot", "verify_snapshot"]
-    status: Literal["queued", "running", "done", "cancelled"]
+    id: str
+    kind: JobKind
+    status: JobStatus
+
+class SearchHealth(TypedDict):
+    ready: bool
+    env_id: str
+    qdrant: bool
+    leader: bool
+    error: NotRequired[str]
+
+class Health(TypedDict):
+    status: Literal["ok", "draining"]
+    workers: int | None
+    search: SearchHealth | None
+
+class JobDone(TypedDict):
+    done: Literal[True]
+    answer: CheckResult | Session | ApplyTacticResponse | Snapshot | SnapshotVerified | RebuildResponse
+
+class JobPending(TypedDict):
+    done: Literal[False]
+    job: Job
+
+JobPoll = JobDone | JobPending
 
 class Client:
     """A client for one pisa server. Safe to share between threads; calls
@@ -239,7 +266,8 @@ class Client:
     def __init__(self, url: str, *, version: str | None = None, timeout: int = 60) -> None:
         """`version` selects a worker pool label or alias; `timeout` is Lean's
         limit per request in seconds."""
-    def health(self) -> None: ...
+    def health(self) -> Health:
+        """The server's health. A draining server raises PisaError: a 503."""
     def check(
         self,
         code: str,
@@ -269,10 +297,10 @@ class Client:
         of `codes`. `detail` and `at` apply to every one."""
     def start_session(self, code: str) -> Session:
         """Run code containing `sorry`; returns one proof state per `sorry`."""
-    def tactic(self, state: str, tactic: str) -> Step:
+    def apply_tactic(self, state_id: str, tactic: str) -> ApplyTacticResponse:
         """Apply one tactic. Raises LeanError if Lean rejects it and LimitError
         if it times out. Earlier states stay valid."""
-    def check_session(self, session: str, code: str) -> CheckResult:
+    def check_session(self, session_id: str, code: str) -> CheckResult:
         """Re-check a completed proof from scratch; `ok` also requires that it
         proves the session's original statements, with its imports."""
     def create_snapshot(
@@ -386,7 +414,7 @@ class Client:
         allow_changes: bool = False,
         retire: bool = False,
         verify: bool | None = None,
-    ) -> JobStatus:
+    ) -> Job:
         """Like `rebuild`, as a job."""
     def set_snapshot_labels(
         self,
@@ -404,14 +432,14 @@ class Client:
         *,
         detail: list[Literal["tactics", "terms"]] = [],
         at: list[tuple[int, int]] = [],
-    ) -> JobStatus:
+    ) -> Job:
         """Like `check`, as a job the server runs without the request waiting
         for it, which outlives proxies' time limits: see `wait_job`."""
-    def submit_session(self, code: str) -> JobStatus:
+    def submit_start_session(self, code: str) -> Job:
         """Like `start_session`, as a job."""
-    def submit_tactic(self, state: str, tactic: str) -> JobStatus:
-        """Like `tactic`, as a job."""
-    def submit_session_check(self, session: str, code: str) -> JobStatus:
+    def submit_apply_tactic(self, state_id: str, tactic: str) -> Job:
+        """Like `apply_tactic`, as a job."""
+    def submit_check_session(self, session_id: str, code: str) -> Job:
         """Like `check_session`, as a job."""
     def submit_snapshot(
         self,
@@ -421,23 +449,22 @@ class Client:
         labels: dict[str, str] | None = None,
         key: str | None = None,
         replaces: str | Replaced | None = None,
-    ) -> JobStatus:
+    ) -> Job:
         """Like `create_snapshot`, as a job."""
-    def submit_verify(self, entry: str) -> JobStatus:
+    def submit_verify(self, entry: str) -> Job:
         """Like `verify_snapshot`, as a job."""
-    def poll_job(
-        self, job: JobStatus, *, wait: int = 0
-    ) -> CheckResult | Session | Step | Snapshot | SnapshotVerified | RebuildResponse | None:
-        """The job's answer, after waiting up to `wait` seconds (at most 60) for
-        it to finish, or None if it hasn't yet. The answer is what the request
-        would have returned, and raises what it would have raised."""
+    def poll_job(self, job: Job, *, wait: int = 0) -> JobPoll:
+        """Where the job stands, after waiting up to `wait` seconds (at most 60)
+        for it to finish: `{"done": True, "answer": …}`, or `{"done": False,
+        "job": …}` if it hasn't yet. The answer is what the request would have
+        returned, and polling raises what it would have raised."""
     def wait_job(
-        self, job: JobStatus
-    ) -> CheckResult | Session | Step | Snapshot | SnapshotVerified | RebuildResponse:
+        self, job: Job
+    ) -> CheckResult | Session | ApplyTacticResponse | Snapshot | SnapshotVerified | RebuildResponse:
         """Wait for the job to finish, however long it takes, and return what
         its request would have returned (or raise what it would have raised).
         The server keeps the answer for an hour after the job is done."""
-    def cancel_job(self, job: JobStatus) -> JobStatus:
+    def cancel_job(self, job: Job) -> Job:
         """Withdraw the job if no worker has started it (`status` is then
         `cancelled`); one that is `running` or `done` stays as it is."""
 

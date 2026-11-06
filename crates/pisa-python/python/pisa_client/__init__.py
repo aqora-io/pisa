@@ -7,9 +7,9 @@
     assert result["ok"]
 
     session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry")
-    step = client.tactic(session["states"][0]["state"], "simp")
+    step = client.apply_tactic(session["states"][0]["id"], "simp")
     assert step["complete"]
-    verdict = client.check_session(session["session"], "theorem t (n : Nat) : n + 0 = n := by simp")
+    verdict = client.check_session(session["id"], "theorem t (n : Nat) : n + 0 = n := by simp")
     assert verdict["ok"]
 
     # Keep accepted code as a module, and build on it without re-checking it.

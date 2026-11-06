@@ -8,6 +8,8 @@ import type { ErrorKind } from "./openapi.ts";
 
 export type {
   Allow,
+  ApplyTacticRequest,
+  ApplyTacticResponse,
   AtPosition,
   AuditAssumption,
   AuditSummary,
@@ -17,6 +19,7 @@ export type {
   CheckBatchResponse,
   CheckRequest,
   CheckResult,
+  CheckSessionRequest,
   DeclDetail,
   DeclResponse,
   Declaration,
@@ -29,9 +32,9 @@ export type {
   HealthStatus,
   Hit,
   Informal,
+  Job,
   JobKind,
   JobOutcome,
-  JobState,
   JobStatus,
   LabelsRequest,
   Message,
@@ -55,7 +58,7 @@ export type {
   SearchHealth,
   SearchRequest,
   SearchResponse,
-  SessionCheckRequest,
+  Session,
   Severity,
   SnapshotFailure,
   SnapshotAudit,
@@ -69,13 +72,10 @@ export type {
   SnapshotSummary,
   SnapshotVerified,
   Sorry,
-  StartRequest,
-  StartResponse,
-  StateInfo,
+  StartSessionRequest,
+  State,
   Suggestion,
   TacticInfo,
-  TacticRequest,
-  TacticResponse,
   TermInfo,
 } from "./openapi.ts";
 
@@ -87,9 +87,9 @@ export type { Error as ApiError } from "./openapi.ts";
 
 /** A proof state: `<version>~<header_key>~<hash>`. Opaque to clients. The hash
  *  is of the state's contents, so two tactics that reach the same state give
- *  the same key. A state stays valid after tactics are applied to it, so a
+ *  the same id. A state stays valid after tactics are applied to it, so a
  *  session is a tree. */
-export type StateKey = string;
+export type StateId = string;
 /** A tactic session, `<version>~<header_key>~<id>`. */
 export type SessionId = string;
 /** A snapshot entry: 32 lowercase hex digits. It holds the labels. */

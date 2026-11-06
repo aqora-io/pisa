@@ -3,8 +3,8 @@ import {
   type Message,
   PisaError,
   type SessionId,
-  type StateInfo,
-  type StateKey,
+  type State,
+  type StateId,
   isPisaError,
   proofText,
 } from "@aqora/pisa-client";
@@ -23,7 +23,7 @@ export interface ProofNode {
   tactic: string | null;
   status: "pending" | "ok" | "failed";
   /** Once known. */
-  state?: StateKey;
+  state?: StateId;
   goals: string[];
   /** No goals are left for this `sorry`. */
   complete: boolean;
@@ -33,7 +33,7 @@ export interface ProofNode {
    *  Lean recovered from an error, which is then in `messages`. */
   error?: PisaError;
   /** For a root, the `sorry` it stands for. */
-  sorry?: StateInfo;
+  sorry?: State;
 }
 
 export interface ProofState {
@@ -60,14 +60,14 @@ export interface ProofState {
 export type ProofAction =
   | { type: "start"; generation: number; code: string }
   | { type: "reset"; generation: number }
-  | { type: "started"; generation: number; session: SessionId; states: StateInfo[]; messages: Message[]; ids: number[] }
+  | { type: "started"; generation: number; session: SessionId; states: State[]; messages: Message[]; ids: number[] }
   | { type: "startFailed"; generation: number; error: PisaError }
   | { type: "apply"; generation: number; id: number; parent: number; tactic: string }
   | {
       type: "applied";
       generation: number;
       id: number;
-      state: StateKey;
+      state: StateId;
       goals: string[];
       complete: boolean;
       messages: Message[];
@@ -106,8 +106,8 @@ export function proofReducer(s: ProofState, a: ProofAction): ProofState {
           parent: null,
           tactic: null,
           status: "ok",
-          state: sorry.state,
-          goals: [sorry.goal],
+          state: sorry.id,
+          goals: sorry.goals,
           complete: false,
           messages: [],
           sorry,
@@ -252,7 +252,15 @@ export function useProofSession(options: ProofSessionOptions = {}): ProofSession
         dispatch({ type: "start", generation: gen, code });
         void request(
           (signal) => client.startSession(code, { ...run, signal }),
-          (r) => dispatch({ type: "started", generation: gen, ...r, ids: r.states.map(() => nextId.current++) }),
+          (r) =>
+            dispatch({
+              type: "started",
+              generation: gen,
+              session: r.id,
+              states: r.states,
+              messages: r.messages,
+              ids: r.states.map(() => nextId.current++),
+            }),
           (error) => dispatch({ type: "startFailed", generation: gen, error }),
         );
       },
@@ -264,8 +272,17 @@ export function useProofSession(options: ProofSessionOptions = {}): ProofSession
         const id = nextId.current++;
         dispatch({ type: "apply", generation: gen, id, parent, tactic });
         void request(
-          (signal) => client.tactic(state, tactic, { ...(timeout !== undefined && { timeout }), signal }),
-          (r) => dispatch({ type: "applied", generation: gen, id, ...r }),
+          (signal) => client.applyTactic(state, tactic, { ...(timeout !== undefined && { timeout }), signal }),
+          (r) =>
+            dispatch({
+              type: "applied",
+              generation: gen,
+              id,
+              state: r.state.id,
+              goals: r.state.goals,
+              complete: r.complete,
+              messages: r.messages,
+            }),
           (error) => dispatch({ type: "applyFailed", generation: gen, id, error }),
         );
         return id;

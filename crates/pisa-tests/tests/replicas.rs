@@ -37,7 +37,7 @@ async fn any_server_serves_any_request() {
     }
     let (status, s) = c.post("/sessions", json!({"code": CODE})).await;
     assert_eq!(status, 200, "{s}");
-    let state = s["states"][0]["state"].as_str().unwrap();
+    let state = s["states"][0]["id"].as_str().unwrap();
     let (status, step) = c
         .post_to(
             &b,
@@ -83,7 +83,7 @@ async fn tactics_go_to_the_worker_holding_their_state() {
     assert_eq!((r0.0, r1.0), (200, 200));
     let (status, s) = c.post("/sessions", json!({"code": CODE})).await;
     assert_eq!(status, 200, "{s}");
-    let state = s["states"][0]["state"].as_str().unwrap().to_string();
+    let state = s["states"][0]["id"].as_str().unwrap().to_string();
     let pickles: Vec<Path> = c
         .store
         .list(Some(&Path::from("states")))

@@ -64,7 +64,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/jobs/{job}": {
+    "/jobs/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -267,7 +267,7 @@ export interface paths {
          * Apply a tactic to a state
          * @description Returns the new state. Earlier states stay valid, so a session is a tree. A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an unknown identifier, is in `messages`.
          */
-        post: operations["tactic"];
+        post: operations["applyTactic"];
         delete?: never;
         options?: never;
         head?: never;
@@ -343,6 +343,22 @@ export interface components {
          * @enum {string}
          */
         Allow: "definitions";
+        /** @description `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`. */
+        ApplyTacticRequest: {
+            tactic: string;
+            /** Format: int64 */
+            timeout?: number;
+        };
+        ApplyTacticResponse: {
+            /**
+             * @description No goals remain for this state's `sorry`. This says nothing about the
+             *     rest of the proof; check the assembled proof with the session check.
+             */
+            complete: boolean;
+            messages: components["schemas"]["Message"][];
+            /** @description The new state. Earlier states stay valid, so a session is a tree. */
+            state: components["schemas"]["State"];
+        };
         /**
          * @description What Lean recorded at a position asked about in `at`. Each part is
          *     absent when no syntax of its kind written in the code contains the
@@ -466,6 +482,16 @@ export interface components {
              * @description Seconds Lean spent on the code.
              */
             time: number;
+        };
+        /**
+         * @description `POST /sessions/{id}/check`: re-checks completed code from scratch
+         *     and confirms it proves the statements the session started from, with the
+         *     same imports.
+         */
+        CheckSessionRequest: {
+            code: string;
+            /** Format: int64 */
+            timeout?: number;
         };
         DeclDetail: {
             /** @description Declarations it uses, in its statement and its proof or body. */
@@ -616,32 +642,32 @@ export interface components {
             statement_latex?: string;
             statement_nl: string;
         };
-        /**
-         * @description The endpoint an async request ran.
-         * @enum {string}
-         */
-        JobKind: "check" | "start_session" | "tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots";
-        /**
-         * @description What `GET /jobs/{job}` answers once the job is done: what its request
-         *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
-         *     `start_session` a `StartResponse`, `tactic` a `TacticResponse`,
-         *     `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
-         *     `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
-         *     is the request's own, with its status.
-         */
-        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["StartResponse"] | components["schemas"]["TacticResponse"] | components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotVerified"] | components["schemas"]["RebuildResponse"];
-        /** @enum {string} */
-        JobState: "queued" | "running" | "done" | "cancelled";
-        /** @description An async request, as `/jobs/{job}` reports it until it is done. */
-        JobStatus: {
+        /** @description An async request, as `/jobs/{id}` reports it until it is done. */
+        Job: {
             /**
              * @description Its id: 32 hex digits, to keep secret, as anyone who has it can read
              *     the answer or cancel the job.
              */
-            job: string;
+            id: string;
             kind: components["schemas"]["JobKind"];
-            status: components["schemas"]["JobState"];
+            status: components["schemas"]["JobStatus"];
         };
+        /**
+         * @description The endpoint an async request ran.
+         * @enum {string}
+         */
+        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots";
+        /**
+         * @description What `GET /jobs/{id}` answers once the job is done: what its request
+         *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
+         *     `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
+         *     `create_snapshot` a `SnapshotResponse`, `verify_snapshot` a
+         *     `SnapshotVerified` and `rebuild_snapshots` a `RebuildResponse`. An error
+         *     is the request's own, with its status.
+         */
+        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["SnapshotResponse"] | components["schemas"]["SnapshotVerified"] | components["schemas"]["RebuildResponse"];
+        /** @enum {string} */
+        JobStatus: "queued" | "running" | "done" | "cancelled";
         /**
          * @description `PATCH /snapshots/{entry}`: removes the labels `remove` names, then sets
          *     those in `set`. The labels that result must follow the rules of
@@ -948,15 +974,13 @@ export interface components {
             /** @description One per query, in order. */
             results: components["schemas"]["QueryResult"][];
         };
-        /**
-         * @description `POST /sessions/{session}/check`: re-checks completed code from scratch
-         *     and confirms it proves the statements the session started from, with the
-         *     same imports.
-         */
-        SessionCheckRequest: {
-            code: string;
-            /** Format: int64 */
-            timeout?: number;
+        /** @description A proof session: the states that its code's `sorry`s start from. */
+        Session: {
+            /** @description Its id, for checking the finished proof at `/sessions/{id}/check`. */
+            id: string;
+            messages: components["schemas"]["Message"][];
+            /** @description One per `sorry`, in source order. */
+            states: components["schemas"]["State"][];
         };
         /** @enum {string} */
         Severity: "trace" | "info" | "warning" | "error";
@@ -1220,25 +1244,31 @@ export interface components {
          * @description `POST /sessions`: runs code containing `sorry`; each `sorry` becomes a
          *     proof state that tactics can be applied to.
          */
-        StartRequest: {
+        StartSessionRequest: {
             /** @description Code with `sorry`s, each of which becomes a state. */
             code: string;
             /** Format: int64 */
             timeout?: number;
             version?: string;
         };
-        StartResponse: {
-            messages: components["schemas"]["Message"][];
-            session: string;
-            /** @description One per `sorry`, in source order. */
-            states: components["schemas"]["StateInfo"][];
-        };
-        StateInfo: {
+        /**
+         * @description A proof state: the goals still to prove. A state stays valid after
+         *     tactics are applied to it.
+         */
+        State: {
             end_pos?: components["schemas"]["Pos"];
-            goal: string;
-            /** @description Where the `sorry` is in the code. */
+            /**
+             * @description The goals left, as Lean prints them. A session's first states have
+             *     their `sorry`'s goal; a tactic can leave more, or none.
+             */
+            goals: string[];
+            /** @description Its id, for applying a tactic at `/states/{id}/tactic`. */
+            id: string;
+            /**
+             * @description Where the `sorry` is in the code. Only a session's first states have
+             *     it, not the states that tactics lead to.
+             */
             pos?: components["schemas"]["Pos"];
-            state: string;
         };
         Suggestion: {
             kind: string;
@@ -1258,23 +1288,6 @@ export interface components {
             /** @description The tactic's source text. */
             tactic: string;
         };
-        /** @description `POST /states/{state}/tactic`. A failing tactic is a 422 with kind `lean`. */
-        TacticRequest: {
-            tactic: string;
-            /** Format: int64 */
-            timeout?: number;
-        };
-        TacticResponse: {
-            /**
-             * @description No goals remain for this state's `sorry`. This says nothing about the
-             *     rest of the proof; check the assembled proof with the session check.
-             */
-            complete: boolean;
-            goals: string[];
-            messages: components["schemas"]["Message"][];
-            /** @description The new state. Earlier states stay valid, so a session is a tree. */
-            state: string;
-        };
         /** @description A term written in the code, and the type Lean expected it to have. */
         TermInfo: {
             end_pos: components["schemas"]["Pos"];
@@ -1293,6 +1306,8 @@ export interface components {
     pathItems: never;
 }
 export type Allow = components['schemas']['Allow'];
+export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
+export type ApplyTacticResponse = components['schemas']['ApplyTacticResponse'];
 export type AtPosition = components['schemas']['AtPosition'];
 export type AuditAssumption = components['schemas']['AuditAssumption'];
 export type AuditSummary = components['schemas']['AuditSummary'];
@@ -1302,6 +1317,7 @@ export type CheckBatchRequest = components['schemas']['CheckBatchRequest'];
 export type CheckBatchResponse = components['schemas']['CheckBatchResponse'];
 export type CheckRequest = components['schemas']['CheckRequest'];
 export type CheckResult = components['schemas']['CheckResult'];
+export type CheckSessionRequest = components['schemas']['CheckSessionRequest'];
 export type DeclDetail = components['schemas']['DeclDetail'];
 export type DeclResponse = components['schemas']['DeclResponse'];
 export type Declaration = components['schemas']['Declaration'];
@@ -1315,9 +1331,9 @@ export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
 export type Hit = components['schemas']['Hit'];
 export type Informal = components['schemas']['Informal'];
+export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
-export type JobState = components['schemas']['JobState'];
 export type JobStatus = components['schemas']['JobStatus'];
 export type LabelsRequest = components['schemas']['LabelsRequest'];
 export type Message = components['schemas']['Message'];
@@ -1341,7 +1357,7 @@ export type ResolveResponse = components['schemas']['ResolveResponse'];
 export type SearchHealth = components['schemas']['SearchHealth'];
 export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
-export type SessionCheckRequest = components['schemas']['SessionCheckRequest'];
+export type Session = components['schemas']['Session'];
 export type Severity = components['schemas']['Severity'];
 export type SnapshotAudit = components['schemas']['SnapshotAudit'];
 export type SnapshotDependents = components['schemas']['SnapshotDependents'];
@@ -1355,13 +1371,10 @@ export type SnapshotScope = components['schemas']['SnapshotScope'];
 export type SnapshotSummary = components['schemas']['SnapshotSummary'];
 export type SnapshotVerified = components['schemas']['SnapshotVerified'];
 export type Sorry = components['schemas']['Sorry'];
-export type StartRequest = components['schemas']['StartRequest'];
-export type StartResponse = components['schemas']['StartResponse'];
-export type StateInfo = components['schemas']['StateInfo'];
+export type StartSessionRequest = components['schemas']['StartSessionRequest'];
+export type State = components['schemas']['State'];
 export type Suggestion = components['schemas']['Suggestion'];
 export type TacticInfo = components['schemas']['TacticInfo'];
-export type TacticRequest = components['schemas']['TacticRequest'];
-export type TacticResponse = components['schemas']['TacticResponse'];
 export type TermInfo = components['schemas']['TermInfo'];
 export type $defs = Record<string, never>;
 export interface operations {
@@ -1371,7 +1384,7 @@ export interface operations {
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
@@ -1393,17 +1406,17 @@ export interface operations {
                     "application/json": components["schemas"]["CheckResult"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -1592,8 +1605,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description The job, from the 202 */
-                job: string;
+                /** @description The job's id, from the 202 */
+                id: string;
             };
             cookie?: never;
         };
@@ -1614,7 +1627,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -1684,8 +1697,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description The job, from the 202 */
-                job: string;
+                /** @description The job's id, from the 202 */
+                id: string;
             };
             cookie?: never;
         };
@@ -1697,7 +1710,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -1768,7 +1781,7 @@ export interface operations {
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
@@ -1777,7 +1790,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["StartRequest"];
+                "application/json": components["schemas"]["StartSessionRequest"];
             };
         };
         responses: {
@@ -1787,20 +1800,20 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["StartResponse"];
+                    "application/json": components["schemas"]["Session"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -1871,19 +1884,19 @@ export interface operations {
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
             path: {
-                /** @description The session ID */
+                /** @description A session's id */
                 id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SessionCheckRequest"];
+                "application/json": components["schemas"]["CheckSessionRequest"];
             };
         };
         responses: {
@@ -1896,17 +1909,17 @@ export interface operations {
                     "application/json": components["schemas"]["CheckResult"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2066,7 +2079,7 @@ export interface operations {
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
@@ -2088,17 +2101,17 @@ export interface operations {
                     "application/json": components["schemas"]["SnapshotResponse"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2254,7 +2267,7 @@ export interface operations {
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
@@ -2276,17 +2289,17 @@ export interface operations {
                     "application/json": components["schemas"]["RebuildResponse"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2710,7 +2723,7 @@ export interface operations {
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
@@ -2731,17 +2744,17 @@ export interface operations {
                     "application/json": components["schemas"]["SnapshotVerified"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -2806,25 +2819,25 @@ export interface operations {
             };
         };
     };
-    tactic: {
+    applyTactic: {
         parameters: {
             query?: never;
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{job}`, rather than the answer.
+                 *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
             };
             path: {
-                /** @description A state key, from a session or an earlier tactic */
+                /** @description A state's id, from a session or an earlier tactic */
                 id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["TacticRequest"];
+                "application/json": components["schemas"]["ApplyTacticRequest"];
             };
         };
         responses: {
@@ -2834,20 +2847,20 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["TacticResponse"];
+                    "application/json": components["schemas"]["ApplyTacticResponse"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{job}`. */
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
             202: {
                 headers: {
-                    /** @description `/jobs/{job}`, relative to the server's root */
+                    /** @description `/jobs/{id}`, relative to the server's root */
                     Location?: string;
                     /** @description `respond-async` */
                     "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobStatus"];
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

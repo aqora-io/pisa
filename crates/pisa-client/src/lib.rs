@@ -8,10 +8,10 @@
 //! assert!(result.ok);
 //!
 //! let session = client.start_session("theorem t (n : Nat) : n + 0 = n := by sorry").await?;
-//! let step = client.tactic(&session.states[0].state, "simp").await?;
+//! let step = client.apply_tactic(&session.states[0].id, "simp").await?;
 //! assert!(step.complete);
 //! let verdict = client
-//!     .check_session(&session.session, "theorem t (n : Nat) : n + 0 = n := by simp")
+//!     .check_session(&session.id, "theorem t (n : Nat) : n + 0 = n := by simp")
 //!     .await?;
 //! assert!(verdict.ok);
 //!
@@ -41,9 +41,9 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use pisa_protocol::api::{
-    CheckBatchItem, CheckBatchRequest, CheckBatchResponse, CheckRequest, Deleted, ErrorResponse,
-    LabelsRequest, RebuildRequest, SessionCheckRequest, SnapshotRequest, StartRequest,
-    TacticRequest,
+    ApplyTacticRequest, CheckBatchItem, CheckBatchRequest, CheckBatchResponse, CheckRequest,
+    CheckSessionRequest, Deleted, ErrorResponse, LabelsRequest, RebuildRequest, SnapshotRequest,
+    StartSessionRequest,
 };
 use pisa_protocol::search::{
     DeclResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
@@ -53,16 +53,16 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    Allow, AtPosition, AuditAssumption, AuditSummary, AuditUnproved, CheckResult, Declaration,
-    Detail, ErrorKind, JobKind, JobState, JobStatus, Message, Pos, ProofStatus, RebuildItem,
-    RebuildResponse, Replaced, Replacement, Replaces, Severity, SnapshotAudit, SnapshotDependents,
-    SnapshotFailure, SnapshotInfo, SnapshotList, SnapshotResponse as Snapshot, SnapshotSummary,
-    SnapshotVerified, Sorry, StartResponse as Session, StateInfo, TacticInfo,
-    TacticResponse as Step, TermInfo,
+    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditSummary, AuditUnproved,
+    CheckResult, Declaration, Detail, ErrorKind, Health, HealthStatus, JobKind, JobStatus, Message,
+    Pos, ProofStatus, RebuildItem, RebuildResponse, Replaced, Replacement, Replaces, Session,
+    Severity, SnapshotAudit, SnapshotDependents, SnapshotFailure, SnapshotInfo, SnapshotList,
+    SnapshotResponse as Snapshot, SnapshotSummary, SnapshotVerified, Sorry, State, TacticInfo,
+    TermInfo,
 };
 pub use pisa_protocol::search::{
-    DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SnapshotHit, SnapshotScope,
-    Suggestion,
+    DeclDetail, Flags, Hit, Informal, Query, QueryResult, Resolution, SearchHealth, SnapshotHit,
+    SnapshotScope, Suggestion,
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;
@@ -101,7 +101,7 @@ impl<T> Clone for Job<T> {
 #[derive(Debug, Clone)]
 pub enum JobPoll<T> {
     /// Queued or running.
-    Pending(JobStatus),
+    Pending(api::Job),
     /// Done: what its request would have answered.
     Done(T),
 }
@@ -202,9 +202,9 @@ impl Endpoint {
         Ok(url)
     }
 
-    async fn health(&self) -> Result<(), Error> {
+    async fn health(&self) -> Result<Health, Error> {
         let r = self.http.get(self.url("health")?).send().await?;
-        server_error(r).await.map(drop)
+        Ok(server_error(r).await?.json().await?)
     }
 
     async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
@@ -233,8 +233,8 @@ impl Endpoint {
         if let Some(body) = body {
             req = req.json(body);
         }
-        let status: JobStatus = server_error(req.send().await?).await?.json().await?;
-        Ok(Job::new(status.job, status.kind))
+        let job: api::Job = server_error(req.send().await?).await?.json().await?;
+        Ok(Job::new(job.id, job.kind))
     }
 
     async fn post_url<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
@@ -281,7 +281,8 @@ impl Client {
         self
     }
 
-    pub async fn health(&self) -> Result<(), Error> {
+    /// The server's health: whether it is up or draining, and its workers.
+    pub async fn health(&self) -> Result<Health, Error> {
         self.endpoint.health().await
     }
 
@@ -366,19 +367,20 @@ impl Client {
 
     /// Runs code containing `sorry` and returns one proof state per `sorry`.
     pub async fn start_session(&self, code: &str) -> Result<Session, Error> {
-        self.post("sessions", &self.start_request(code)).await
+        self.post("sessions", &self.start_session_request(code))
+            .await
     }
 
     /// Like [`Client::start_session`], as a job.
-    pub async fn submit_session(&self, code: &str) -> Result<Job<Session>, Error> {
-        let req = self.start_request(code);
+    pub async fn submit_start_session(&self, code: &str) -> Result<Job<Session>, Error> {
+        let req = self.start_session_request(code);
         self.endpoint
             .submit(self.endpoint.url("sessions")?, Some(&req))
             .await
     }
 
-    fn start_request(&self, code: &str) -> StartRequest {
-        StartRequest {
+    fn start_session_request(&self, code: &str) -> StartSessionRequest {
+        StartSessionRequest {
             code: code.to_string(),
             version: self.version.clone(),
             timeout: self.timeout,
@@ -387,23 +389,31 @@ impl Client {
 
     /// Applies one tactic to a proof state. A tactic Lean rejects is an
     /// [`Error::Server`] of kind [`ErrorKind::Lean`].
-    pub async fn tactic(&self, state: &str, tactic: &str) -> Result<Step, Error> {
+    pub async fn apply_tactic(
+        &self,
+        state_id: &str,
+        tactic: &str,
+    ) -> Result<ApplyTacticResponse, Error> {
         self.post(
-            &format!("states/{state}/tactic"),
-            &self.tactic_request(tactic),
+            &format!("states/{state_id}/tactic"),
+            &self.apply_tactic_request(tactic),
         )
         .await
     }
 
-    /// Like [`Client::tactic`], as a job.
-    pub async fn submit_tactic(&self, state: &str, tactic: &str) -> Result<Job<Step>, Error> {
-        let url = self.endpoint.url(&format!("states/{state}/tactic"))?;
-        let req = self.tactic_request(tactic);
+    /// Like [`Client::apply_tactic`], as a job.
+    pub async fn submit_apply_tactic(
+        &self,
+        state_id: &str,
+        tactic: &str,
+    ) -> Result<Job<ApplyTacticResponse>, Error> {
+        let url = self.endpoint.url(&format!("states/{state_id}/tactic"))?;
+        let req = self.apply_tactic_request(tactic);
         self.endpoint.submit(url, Some(&req)).await
     }
 
-    fn tactic_request(&self, tactic: &str) -> TacticRequest {
-        TacticRequest {
+    fn apply_tactic_request(&self, tactic: &str) -> ApplyTacticRequest {
+        ApplyTacticRequest {
             tactic: tactic.to_string(),
             timeout: self.timeout,
         }
@@ -411,24 +421,25 @@ impl Client {
 
     /// Re-checks a completed proof from scratch and confirms it proves the
     /// statements the session started from.
-    pub async fn check_session(&self, session: &str, code: &str) -> Result<CheckResult, Error> {
-        let req = self.session_check_request(code);
-        self.post(&format!("sessions/{session}/check"), &req).await
+    pub async fn check_session(&self, session_id: &str, code: &str) -> Result<CheckResult, Error> {
+        let req = self.check_session_request(code);
+        self.post(&format!("sessions/{session_id}/check"), &req)
+            .await
     }
 
     /// Like [`Client::check_session`], as a job.
-    pub async fn submit_session_check(
+    pub async fn submit_check_session(
         &self,
-        session: &str,
+        session_id: &str,
         code: &str,
     ) -> Result<Job<CheckResult>, Error> {
-        let url = self.endpoint.url(&format!("sessions/{session}/check"))?;
-        let req = self.session_check_request(code);
+        let url = self.endpoint.url(&format!("sessions/{session_id}/check"))?;
+        let req = self.check_session_request(code);
         self.endpoint.submit(url, Some(&req)).await
     }
 
-    fn session_check_request(&self, code: &str) -> SessionCheckRequest {
-        SessionCheckRequest {
+    fn check_session_request(&self, code: &str) -> CheckSessionRequest {
+        CheckSessionRequest {
             code: code.to_string(),
             timeout: self.timeout,
         }
@@ -562,7 +573,7 @@ impl Client {
 
     /// Withdraws `job` if no worker has started it. A job that is running
     /// or done stays as it is; the status says which.
-    pub async fn cancel_job<T>(&self, job: &Job<T>) -> Result<JobStatus, Error> {
+    pub async fn cancel_job<T>(&self, job: &Job<T>) -> Result<api::Job, Error> {
         self.endpoint.delete(self.job_url(&job.id)?).await
     }
 
@@ -785,7 +796,7 @@ impl SearchClient {
     }
 
     pub async fn health(&self) -> Result<(), Error> {
-        self.endpoint.health().await
+        self.endpoint.health().await.map(drop)
     }
 
     pub async fn search(&self, query: &Query) -> Result<QueryResult, Error> {

@@ -9,7 +9,7 @@ use axum::Json;
 use axum::extract::{Path, Query, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, JobState, LabelsRequest, PreferAsync,
+    Accepted, ApiErrors, Deleted, ErrorKind, JobKind, JobStatus, LabelsRequest, PreferAsync,
     RebuildRequest, RebuildResponse, SnapshotAudit, SnapshotDependents, SnapshotInfo, SnapshotList,
     SnapshotRequest, SnapshotResponse, SnapshotSummary, SnapshotVerified, VersionQuery,
 };
@@ -301,7 +301,7 @@ pub async fn rebuild(
             tracing::warn!("storing a rebuild's answer failed: {e}");
         }
     });
-    accepted(job, JobKind::RebuildSnapshots, JobState::Running)
+    accepted(job, JobKind::RebuildSnapshots, JobStatus::Running)
 }
 
 pub(crate) fn rebuilt(done: JobResult) -> Result<RebuildResponse, ApiError> {

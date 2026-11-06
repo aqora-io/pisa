@@ -144,8 +144,8 @@ pub struct SnapshotLabelsJob {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobResult {
     Check(CheckOutcome),
-    SessionStarted(Result<api::StartResponse, api::Error>),
-    TacticApplied(Result<api::TacticResponse, api::Error>),
+    SessionStarted(Result<api::Session, api::Error>),
+    TacticApplied(Result<api::ApplyTacticResponse, api::Error>),
     SessionChecked(SessionChecked),
     /// Failures are in-band, in `result.error`, as for checks.
     SnapshotCreated(Box<api::SnapshotResponse>),
