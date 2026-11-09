@@ -394,6 +394,36 @@ async fn link(c: &Cluster, id: &str) -> Value {
     r["replaces"].clone()
 }
 
+/// Deleting a snapshot in the middle of a run re-points what replaced it at
+/// what it replaced, so the run is not cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_a_middle_snapshot_keeps_the_run() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s0 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let p1 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": replacing(&s0)}),
+    )
+    .await;
+    let p2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl\ntheorem h : 1 = 1 := rfl",
+               "replaces": replacing(&p1)}),
+    )
+    .await;
+
+    let deleted = c.client.delete(c.url(&format!("/snapshots/{}", id(&p1))));
+    assert_eq!(deleted.send().await.unwrap().status(), 200);
+
+    assert_eq!(link(&c, id(&p2)).await, replacing(&s0));
+    let r = audit(&c, &[id(&s0)]).await;
+    assert_eq!(r["heads"], json!([id(&p2)]), "{r}");
+}
+
 /// The acceptance flow: a skeleton on a base, a proof that changes one of
 /// its definitions, then a base that changes one of its own, and a rebuild
 /// that retires the old run. A rebuild copies only the run's head, and

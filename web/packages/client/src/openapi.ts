@@ -476,9 +476,8 @@ export interface components {
             forks?: components["schemas"]["AuditFork"][];
             /**
              * @description With `against`: the snapshots the run ends at, which nothing
-             *     replaces, each once, in the order the walk reached them. A snapshot
-             *     replaced by one that was deleted since is a head again, as the
-             *     deleted snapshot held the link.
+             *     replaces, each once, in the order the walk reached them. Deleting a
+             *     head makes the snapshot it replaced a head again.
              */
             heads?: string[];
             /**

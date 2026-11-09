@@ -461,10 +461,10 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     definition, write _private.h)`.
 - **The link.** `replacement.filled` lists the declarations that used `sorry`
   and no longer do. The new snapshot records `replaces: {snapshot_id,
-  allow?}`, which listings and `GET /snapshots/{id}` show. Only a create that
-  passed the comparison sets it, so it can be trusted, and it stays after the
-  replaced snapshot is deleted. A key replay returns the snapshot as it is,
-  without `replacement`.
+  allow?}`, which listings and `GET /snapshots/{id}` show. It is set by a
+  create that passed the comparison, or composed when the snapshot between is
+  deleted (see [Retention](#retention)), so it can be trusted. A key replay
+  returns the snapshot as it is, without `replacement`.
 
 <a id="witnesses"></a>
 **Witnesses.** A target whose hypotheses can't hold together can be proved
@@ -533,8 +533,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   it, whatever their labels, to the run's `heads`, which nothing replaces. A
   snapshot replaced more than once is a fork, listed in `forks` with what
   replaced it: there is no merge, so delete all but one branch. A deleted
-  snapshot on the way cuts the run there, as its row held its link, and what
-  it replaced is a head again.
+  snapshot on the way doesn't cut the run, as what replaced it now replaces
+  what it replaced; deleting a head makes what it replaced a head again.
 - **Targets.** Each declaration of a spec snapshot's module, other than its
   assumptions and what Lean generated, is a target. `targets` has a row for
   each target and each head reached from its spec snapshot, with its `status`
@@ -731,7 +731,12 @@ a snapshot of it exists or a kept module imports it: deleting a snapshot
 removes its module once nothing else needs it, then each of that module's
 imports on the same terms, and `removed` lists them. So deleting a snapshot
 whose module others build on removes nothing yet, and the code on top keeps
-working. Each worker checks a module it has cached against the store at most
+working. Deleting a snapshot that [replaced](#replacing) another re-points
+what replaced it at that one, with the two links composed: `allow` and the
+`replacement` hold the changes of both steps, so a run isn't cut. A snapshot
+with no link, such as a spec snapshot, leaves its replacers' links as they
+are. A create that replaces a snapshot deleted while it was being built is a
+404. Each worker checks a module it has cached against the store at most
 every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere
 within that time.
 

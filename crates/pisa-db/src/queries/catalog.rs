@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::catalog::{
     EntryMeta, EntryRow, Fail, Logged, ModuleMeta, NewEntry, SnapshotDecls, allow_column,
     entry_from_row,
-    now_micros, to_record, unknown_entry, unknown_module,
+    now_micros, splice, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
 use crate::schema::{changes, described, entries, leases, module_imports, modules};
@@ -76,6 +76,35 @@ async fn keyed_in(conn: &mut Conn, v: &str, k: &str) -> Result<Option<(String, E
         .await
         .optional()?;
     row.map(entry_from_row).transpose()
+}
+
+/// The entries whose `replaces` is `e`, oldest first.
+async fn replacers_in(conn: &mut Conn, v: &str, e: &str) -> Result<Vec<(String, EntryMeta)>, Fail> {
+    let rows = entries::table
+        .filter(entries::version.eq(v))
+        .filter(entries::replaces.eq(e))
+        .order((entries::created_micros, entries::id))
+        .select(ENTRY)
+        .load::<EntryRow>(conn)
+        .await?;
+    rows.into_iter().map(entry_from_row).collect()
+}
+
+/// Fails with `not_found` if `entry` replaces an entry that is gone.
+async fn check_replaced(conn: &mut Conn, v: &str, entry: &NewEntry) -> Result<(), Fail> {
+    let Some(replaces) = &entry.replaces else {
+        return Ok(());
+    };
+    let kept: bool = diesel::select(exists(entries::table.find((v, &replaces.snapshot_id))))
+        .get_result(conn)
+        .await?;
+    if kept {
+        return Ok(());
+    }
+    Err(Fail::Api(Error::new(
+        ErrorKind::NotFound,
+        "the replaced snapshot was deleted while this one was being built".to_string(),
+    )))
 }
 
 /// Records that the transaction changes entry `entry` and/or module `module`.
@@ -253,6 +282,7 @@ pub(crate) async fn commit(
                 };
                 return Ok((e, taken, stored));
             }
+            check_replaced(conn, v, entry).await?;
             for parent in &meta.imports {
                 let Some(parent_meta) = module_in(conn, v, parent).await? else {
                     return Err(Fail::Api(unknown_module(parent)));
@@ -318,6 +348,7 @@ pub(crate) async fn add_entry(
             {
                 return Ok(Some(taken));
             }
+            check_replaced(conn, v, entry).await?;
             if !module_exists(conn, v, m).await? {
                 return Ok(None);
             }
@@ -347,6 +378,20 @@ pub(crate) async fn remove_entry(
             let Some(meta) = entry_in(conn, v, e).await? else {
                 return Err(Fail::Api(unknown_entry(v, e)));
             };
+            for (r, replacer) in replacers_in(conn, v, e).await? {
+                // A root has no link to give: what replaces it keeps its own.
+                let Some((replaces, replacement)) = splice(&meta, &replacer) else {
+                    break;
+                };
+                diesel::update(entries::table.find((v, &r)))
+                    .set((
+                        entries::replaces.eq(&replaces.snapshot_id),
+                        entries::replaces_allow.eq(allow_column(&replaces)?),
+                        entries::replacement.eq(serde_json::to_string(&replacement)?),
+                    ))
+                    .execute(conn)
+                    .await?;
+            }
             diesel::delete(entries::table.find((v, e)))
                 .execute(conn)
                 .await?;
@@ -424,24 +469,12 @@ pub(crate) async fn dependents(
     Ok(found)
 }
 
-/// The entries whose `replaces` is `e`, oldest first.
 pub(crate) async fn replacers(
     db: &Handle,
     v: &str,
     e: &str,
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
-    let rows = entries::table
-        .filter(entries::version.eq(v))
-        .filter(entries::replaces.eq(e))
-        .order((entries::created_micros, entries::id))
-        .select(ENTRY)
-        .load::<EntryRow>(&mut *conn(db).await?)
-        .await
-        .map_err(DbError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(entry_from_row)
-        .collect::<Result<_, _>>()?)
+    Ok(replacers_in(&mut *conn(db).await?, v, e).await?)
 }
 
 /// The entries on `modules` with every label in `labels`, oldest first.

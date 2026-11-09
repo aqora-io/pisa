@@ -20,13 +20,14 @@
 //! removes a module conflicts with one that adds an entry on it, and two
 //! creates with the same key conflict instead of both succeeding.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use pisa_protocol::api::{
-    CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces, SnapshotId,
+    Allow, CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces, SnapshotId,
 };
 use pisa_protocol::snapshot;
+use pisa_protocol::verify::normalised;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -341,6 +342,40 @@ pub(crate) fn allow_column(replaced: &Replaces) -> Result<Option<String>, Fail> 
         .transpose()?)
 }
 
+/// The link and comparison of `replacer` once `deleted`, which it replaces,
+/// is gone: `deleted`'s link with the allowed changes of both steps. `None`
+/// if `deleted` has no link.
+pub(crate) fn splice(deleted: &EntryMeta, replacer: &EntryMeta) -> Option<(Replaces, Replacement)> {
+    let link = deleted.replaces.as_ref()?;
+    let none = Replacement::default();
+    let first = deleted.replacement.as_ref().unwrap_or(&none);
+    let second = replacer.replacement.as_ref().unwrap_or(&none);
+    let replacement = Replacement {
+        filled: union(&first.filled, &second.filled),
+        changed_definitions: union(&first.changed_definitions, &second.changed_definitions),
+        affected: union(&first.affected, &second.affected),
+    };
+    let allow = (!replacement.changed_definitions.is_empty()).then(|| Allow {
+        definitions: replacement.changed_definitions.clone(),
+    });
+    let replaces = Replaces {
+        snapshot_id: link.snapshot_id.clone(),
+        allow,
+    };
+    Some((replaces, replacement))
+}
+
+/// `first`, then the names of `second` it lacks, each name once by its
+/// [`normalised`] form.
+fn union(first: &[String], second: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let names = first.iter().chain(second);
+    names
+        .filter(|name| seen.insert(normalised(name).into_owned()))
+        .cloned()
+        .collect()
+}
+
 /// The error for a module that isn't kept.
 pub fn unknown_module(m: &str) -> Error {
     Error::new(
@@ -421,7 +456,8 @@ impl Catalog {
     /// plus a new entry on it. Returns the entry and the module's stored
     /// record, which is another worker's if it stored the module first. A
     /// missing parent is `not_found`, and so is one deleted and built again
-    /// since `meta` was made from it, whose files `meta` would name.
+    /// since `meta` was made from it, whose files `meta` would name, and so
+    /// is the entry `entry` replaces, if it is gone.
     ///
     /// If `entry`'s key is already on an entry, nothing is written and that
     /// entry comes back, unchanged. On the same module, with its stored
@@ -446,7 +482,8 @@ impl Catalog {
 
     /// A new entry on an existing module; `None` if the module is gone. If
     /// `entry`'s key is already on an entry, that one comes back instead,
-    /// unchanged, and it may be on another module.
+    /// unchanged, and it may be on another module. The entry `entry`
+    /// replaces being gone is `not_found`.
     pub async fn add_entry(
         &self,
         m: &str,
@@ -462,7 +499,9 @@ impl Catalog {
     }
 
     /// Removes the entry; returns its module's record if that module was
-    /// cleaned up too.
+    /// cleaned up too. Each entry that replaces it replaces what it replaced
+    /// instead, with the two links composed; if it replaced nothing, they keep
+    /// their links to it.
     pub async fn remove_entry(&self, e: &str) -> Result<(EntryMeta, Option<ModuleMeta>), Error> {
         dispatch!(&self.db, remove_entry(&self.version, e))
     }
@@ -706,6 +745,49 @@ mod tests {
         }
     }
 
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// The link to `old` that allows `allow`, or no `allow` if that is empty.
+    fn link(old: &str, allow: &[&str]) -> Option<Replaces> {
+        Some(Replaces {
+            snapshot_id: old.into(),
+            allow: (!allow.is_empty()).then(|| Allow {
+                definitions: names(allow),
+            }),
+        })
+    }
+
+    fn replacement(filled: &[&str], changed: &[&str], affected: &[&str]) -> Replacement {
+        Replacement {
+            filled: names(filled),
+            changed_definitions: names(changed),
+            affected: names(affected),
+        }
+    }
+
+    /// A new entry that replaces `old` and allows `changed`, whose
+    /// comparison found `filled`, `changed` and `affected`.
+    fn step(old: &str, filled: &[&str], changed: &[&str], affected: &[&str]) -> NewEntry {
+        NewEntry {
+            replaces: link(old, changed),
+            replacement: Some(replacement(filled, changed, affected)),
+            ..no_labels()
+        }
+    }
+
+    /// Adds `entry` on module `x`, which must exist; returns its id.
+    async fn added(catalog: &Catalog, entry: NewEntry) -> String {
+        catalog.add_entry("x", entry).await.unwrap().unwrap().0
+    }
+
+    /// The ids of the entries that replace `e`.
+    async fn replacer_ids(catalog: &Catalog, e: &str) -> Vec<String> {
+        let found = catalog.replacers(e).await.unwrap();
+        found.into_iter().map(|(r, _)| r).collect()
+    }
+
     /// A catalog on in-memory SQLite, and one on the PostgreSQL at
     /// `PISA_TEST_DATABASE_URL` if that is set, each with a version of its
     /// own so that runs can share a database. Start a throwaway one with:
@@ -888,6 +970,193 @@ mod tests {
             assert_eq!(found.1.replacement, replacement);
             // An entry that replaces nothing has no comparison.
             assert_eq!(catalog.entry(&old).await.unwrap().replacement, None);
+        }
+    }
+
+    #[test]
+    fn a_splice_names_each_definition_once_by_its_normalised_form() {
+        let entry = |replaces, replacement| EntryMeta {
+            module: "x".into(),
+            labels: BTreeMap::new(),
+            key: None,
+            created_micros: 0,
+            replaces,
+            replacement,
+        };
+        let root = entry(None, None);
+        let top = entry(link("p1", &["f"]), Some(replacement(&[], &["f"], &[])));
+        assert!(splice(&root, &top).is_none());
+
+        let private = ["_private.PisaSnap.sa.0.h", "f"];
+        let deleted = entry(
+            link("s0", &private),
+            Some(replacement(&["t", "u"], &private, &["t"])),
+        );
+        let top = entry(
+            link("p1", &["_private.PisaSnap.sb.0.h", "g"]),
+            Some(replacement(
+                &["u", "v"],
+                &["_private.PisaSnap.sb.0.h", "g", "f"],
+                &["t", "u"],
+            )),
+        );
+        let (replaces, spliced) = splice(&deleted, &top).unwrap();
+        let changed = ["_private.PisaSnap.sa.0.h", "f", "g"];
+        assert_eq!(Some(replaces), link("s0", &changed));
+        assert_eq!(
+            spliced,
+            replacement(&["t", "u", "v"], &changed, &["t", "u"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delete_splices_what_replaces_it() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p1 = added(&catalog, step(&s0, &["t"], &["f"], &["t"])).await;
+            let p2 = added(&catalog, step(&p1, &[], &["g"], &["t"])).await;
+
+            catalog.remove_entry(&p1).await.unwrap();
+
+            let spliced = catalog.entry(&p2).await.unwrap();
+            assert_eq!(spliced.replaces, link(&s0, &["f", "g"]));
+            assert_eq!(
+                spliced.replacement,
+                Some(replacement(&["t"], &["f", "g"], &["t"]))
+            );
+            assert_eq!(replacer_ids(&catalog, &s0).await, [p2]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_spliced_link_without_changes_has_no_allow() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p1 = added(&catalog, step(&s0, &["t"], &[], &[])).await;
+            let p2 = added(&catalog, step(&p1, &["u"], &[], &[])).await;
+
+            catalog.remove_entry(&p1).await.unwrap();
+
+            let spliced = catalog.entry(&p2).await.unwrap();
+            assert_eq!(spliced.replaces, link(&s0, &[]));
+            assert_eq!(
+                spliced.replacement,
+                Some(replacement(&["t", "u"], &[], &[]))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deleted_root_leaves_its_replacers_link() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p1 = added(&catalog, step(&s0, &["t"], &["f"], &["t"])).await;
+
+            catalog.remove_entry(&s0).await.unwrap();
+
+            let kept = catalog.entry(&p1).await.unwrap();
+            assert_eq!(kept.replaces, link(&s0, &["f"]));
+            assert_eq!(kept.replacement, Some(replacement(&["t"], &["f"], &["t"])));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_fork_moves_down() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p1 = added(&catalog, step(&s0, &["t"], &[], &[])).await;
+            let a = added(&catalog, step(&p1, &["u"], &[], &[])).await;
+            let b = added(&catalog, step(&p1, &["v"], &[], &[])).await;
+
+            catalog.remove_entry(&p1).await.unwrap();
+
+            assert_eq!(replacer_ids(&catalog, &s0).await, [a.clone(), b.clone()]);
+            let (a, b) = (
+                catalog.entry(&a).await.unwrap(),
+                catalog.entry(&b).await.unwrap(),
+            );
+            assert_eq!(a.replacement, Some(replacement(&["t", "u"], &[], &[])));
+            assert_eq!(b.replacement, Some(replacement(&["t", "v"], &[], &[])));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_splice_over_a_deleted_predecessor_keeps_its_link() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p1 = added(&catalog, step(&s0, &["t"], &["f"], &["t"])).await;
+            let p2 = added(&catalog, step(&p1, &[], &["g"], &["t"])).await;
+
+            catalog.remove_entry(&s0).await.unwrap();
+            catalog.remove_entry(&p1).await.unwrap();
+
+            let spliced = catalog.entry(&p2).await.unwrap();
+            assert_eq!(spliced.replaces, link(&s0, &["f", "g"]));
+            assert_eq!(
+                spliced.replacement,
+                Some(replacement(&["t"], &["f", "g"], &["t"]))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_create_replacing_a_deleted_snapshot_is_not_found() {
+        for catalog in catalogs().await {
+            let (old, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let (kept, _) = catalog.add_entry("x", keyed("k")).await.unwrap().unwrap();
+            catalog.remove_entry(&old).await.unwrap();
+            let gone = "the replaced snapshot was deleted while this one was being built";
+            let creating = |key: Option<&str>| NewEntry {
+                key: key.map(String::from),
+                ..step(&old, &[], &[], &[])
+            };
+
+            let err = catalog
+                .commit("y", &meta("y"), None, creating(None))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (err.kind, err.message.as_str()),
+                (ErrorKind::NotFound, gone)
+            );
+            assert!(catalog.module("y").await.is_err());
+            let err = catalog.add_entry("x", creating(None)).await.unwrap_err();
+            assert_eq!(
+                (err.kind, err.message.as_str()),
+                (ErrorKind::NotFound, gone)
+            );
+            assert_eq!(catalog.list(&[], 10, None).await.unwrap().0.len(), 1);
+
+            // A key replay comes first.
+            let (e, ..) = catalog
+                .commit("y", &meta("y"), None, creating(Some("k")))
+                .await
+                .unwrap();
+            assert_eq!(e, kept);
+            let (e, _) = catalog
+                .add_entry("x", creating(Some("k")))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(e, kept);
         }
     }
 
@@ -1182,6 +1451,37 @@ mod tests {
             ids.dedup();
             assert_eq!(ids.len(), 8);
             assert_eq!(catalog.list(&[], 100, None).await.unwrap().0.len(), 9);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn deletes_racing_on_one_chain_splice_both() {
+        for catalog in catalogs().await {
+            for round in 0..5 {
+                let m = format!("x{round}");
+                let (s0, ..) = catalog
+                    .commit(&m, &meta(&m), None, no_labels())
+                    .await
+                    .unwrap();
+                let mut chain = vec![s0.clone()];
+                for changed in ["a", "b", "c"] {
+                    let entry = step(chain.last().unwrap(), &[], &[changed], &[]);
+                    let (e, _) = catalog.add_entry(&m, entry).await.unwrap().unwrap();
+                    chain.push(e);
+                }
+                racing(2, |i| {
+                    let catalog = catalog.clone();
+                    let e = chain[i + 1].clone();
+                    async move { catalog.remove_entry(&e).await.unwrap() }
+                })
+                .await;
+
+                let top = catalog.entry(&chain[3]).await.unwrap();
+                assert_eq!(top.replaces, link(&s0, &["a", "b", "c"]), "{round}");
+                let spliced = replacement(&[], &["a", "b", "c"], &[]);
+                assert_eq!(top.replacement, Some(spliced), "{round}");
+                assert_eq!(replacer_ids(&catalog, &s0).await, [chain[3].clone()]);
+            }
         }
     }
 

@@ -181,7 +181,7 @@
             "type": "array"
           },
           "heads": {
-            "description": "With `against`: the snapshots the run ends at, which nothing\nreplaces, each once, in the order the walk reached them. A snapshot\nreplaced by one that was deleted since is a head again, as the\ndeleted snapshot held the link.",
+            "description": "With `against`: the snapshots the run ends at, which nothing\nreplaces, each once, in the order the walk reached them. Deleting a\nhead makes the snapshot it replaced a head again.",
             "items": {
               "type": "string"
             },

@@ -930,9 +930,8 @@ pub struct AuditSnapshotsResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<bool>,
     /// With `against`: the snapshots the run ends at, which nothing
-    /// replaces, each once, in the order the walk reached them. A snapshot
-    /// replaced by one that was deleted since is a head again, as the
-    /// deleted snapshot held the link.
+    /// replaces, each once, in the order the walk reached them. Deleting a
+    /// head makes the snapshot it replaced a head again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heads: Vec<String>,
     /// With `against`: the snapshots on the run that more than one snapshot
