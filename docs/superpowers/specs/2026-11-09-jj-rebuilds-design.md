@@ -657,7 +657,7 @@ It describes the protocol this design assumes:
 - **Heads, catalog and API:** `GET /snapshots?heads=true` with labels and
   pages: a skeleton drops out once its proof lands, and comes back when the
   proof is deleted.
-- **Heads, search** (`search_records.rs`, against a throwaway Qdrant):
+- **Heads, search** (`crates/pisa-search/tests/snapshots.rs`, against a throwaway Qdrant):
   - a skeleton's declarations stop matching a label scope and `"all"` once
     a proof replaces it, and match again after the proof is deleted;
   - a splice and a branch delete move `head` correctly;
