@@ -8,8 +8,8 @@ use std::time::Duration;
 use common::Cluster;
 use pisa_client::{
     Allow, CheckOptions, Client, CreateSnapshotOptions, Detail, Error, ErrorKind, HealthStatus,
-    Job, JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos, ProofStatus, RebuildOptions,
-    Replaces,
+    Job, JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos, ProofStatus, RebuildLink,
+    RebuildOptions, Replaces,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -312,10 +312,19 @@ async fn client_lists_dependents_and_plans_rebuilds() {
     }
     let item = &plan.plan[0];
     assert_eq!(item.snapshot_id.as_ref(), Some(&above.id));
+    let link = RebuildLink {
+        snapshot_id: Some(above.id.clone()),
+        item: None,
+        allow: None,
+    };
+    assert_eq!(item.replaces, Some(link));
     let opts = CreateSnapshotOptions {
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
-        replaces: item.replaces.clone(),
+        replaces: Some(Replaces {
+            snapshot_id: above.id.clone(),
+            allow: None,
+        }),
         ..Default::default()
     };
     let rebuilt = client

@@ -284,10 +284,11 @@ pub async fn dependents(
     post, path = "/snapshots/rebuild", operation_id = "rebuildSnapshots", tag = "snapshots",
     summary = "Rebuild a snapshot's dependents on its replacement",
     description = "Plans the creates that make each dependent of `from` with a snapshot that \
-        has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a \
-        time, a failed chunk skipping only what builds on it, then with `retire` deleting the \
-        old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` \
-        states, or `allow_changes` be set. `from` and `to` are of one version, which the \
+        has the labels again on `to`, by level, their links mirroring the old ones, and unless \
+        `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on or \
+        replaces it, then with `retire` deleting the old snapshots it rebuilt; `from` stays. \
+        Unless `to` replaces `from`, `to` must not change what `from` states, or \
+        `allow_changes` be set. `from` and `to` are of one version, which the \
         rebuild runs on. Sending the same rebuild again replays the creates that are done. A \
         run can be async; a dry run answers at once.",
     params(PreferAsync),

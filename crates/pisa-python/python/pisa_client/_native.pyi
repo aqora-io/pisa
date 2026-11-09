@@ -169,6 +169,13 @@ class AuditSnapshotsResponse(TypedDict):
     assumptions: list[AuditAssumption]
     not_proved: list[AuditUnproved]
 
+class RebuildLink(TypedDict):
+    """What a rebuilt snapshot replaces: a snapshot that exists, or the new
+    snapshot of the plan's item at index `item`. Exactly one is set."""
+    snapshot_id: NotRequired[str]
+    item: NotRequired[int]
+    allow: NotRequired[Allow]
+
 class RebuildItem(TypedDict):
     level: int
     snapshot_id: NotRequired[str]
@@ -178,7 +185,7 @@ class RebuildItem(TypedDict):
     code: str
     labels: dict[str, str]
     key: str
-    replaces: NotRequired[Replaces]
+    replaces: NotRequired[RebuildLink]
     affected: NotRequired[list[str]]
 
 class RebuildCreated(TypedDict):
@@ -408,15 +415,17 @@ class Client:
         """Rebuild the dependents of snapshot `from_` with every label in
         `labels` (and what links them to it) on snapshot `to`: the server
         plans the creates, each item's `code` the old code with its imports
-        swapped, and runs them a level at a time, saying what it `created`,
-        what `failed` and what it `skipped` as built on those. `retire` then
-        deletes the old snapshots, from the top down, and `from_`. Calling it
+        swapped and its `replaces` mirroring the old link, and runs them a
+        level at a time, saying what it `created`, what `failed` and what it
+        `skipped` as built on, or replacing, those. `retire` then deletes the
+        old snapshots it rebuilt, from the top down; `from_` stays. Calling it
         again replays the creates that are done. Unless `to` was created to
         replace `from_`, a `to` that changes what `from_` states gives `ok:
         False` and no plan, unless `allow_changes`.
 
         `dry_run` only plans: create each item with `code`, `labels`, `key`
-        and any `replaces`, a level at a time; the keys make running the plan
+        and any `replaces`, a level at a time, a `replaces["item"]` naming
+        the snapshot created for that item; the keys make running the plan
         again safe. A run can take minutes: `submit_rebuild_snapshots` runs
         it as a job."""
     def submit_rebuild_snapshots(

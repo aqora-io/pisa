@@ -1170,7 +1170,7 @@
             "type": "object"
           },
           "level": {
-            "description": "1 for a module that imports `from`'s, 2 for one that imports that, and\nso on, by its longest chain.",
+            "description": "The wave its create runs in: one more than the highest level among\nthe items whose modules it imports and the item it replaces, so 1 for\none that imports only `from`'s module and replaces no item.",
             "minimum": 0,
             "type": "integer"
           },
@@ -1187,8 +1187,8 @@
             "type": "string"
           },
           "replaces": {
-            "$ref": "#/components/schemas/Replaces",
-            "description": "When `to` replaces `from`, the snapshot it rebuilds, to create it as\na replacement of, with the same `allow`. The create then checks that\nnothing its statements depend on changed, and is refused if\nsomething did."
+            "$ref": "#/components/schemas/RebuildLink",
+            "description": "What the new snapshot replaces, to send as the create's `replaces`,\nthe links mirroring the old ones. If the snapshot it rebuilds\nreplaced one the plan also rebuilds, it replaces that one's new\nsnapshot, `item`, with its own link's `allow`: a skeleton's proof\nreplaces the rebuilt skeleton, and is compared with it. Otherwise,\nwhen `to` replaces `from`, it replaces the snapshot it rebuilds, with\n`to`'s `allow`. The create then checks that nothing its statements\ndepend on changed, and is refused if something did."
           },
           "snapshot_id": {
             "description": "The snapshot it rebuilds. Absent for a module that only links others\nto `from`, with no snapshot that has the labels: it gets the labels\nasked for.",
@@ -1206,8 +1206,27 @@
         ],
         "type": "object"
       },
+      "RebuildLink": {
+        "description": "What a rebuilt snapshot replaces: a snapshot that exists, `snapshot_id`,\nor the new snapshot of another item of the plan, `item`. Exactly one is\nset. A create sends it as [`Replaces`], with `item` mapped to the\n`new_snapshot_id` created for that item.",
+        "properties": {
+          "allow": {
+            "$ref": "#/components/schemas/Allow",
+            "description": "As in [`Replaces::allow`]."
+          },
+          "item": {
+            "description": "The index in `plan` of the item whose new snapshot it replaces. That\nitem is at a lower level.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "snapshot_id": {
+            "description": "The replaced snapshot.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "RebuildSkipped": {
-        "description": "A [`RebuildItem`] not created, because it builds on one that wasn't.",
+        "description": "A [`RebuildItem`] not created, because it builds on, or replaces, one\nthat wasn't.",
         "properties": {
           "module": {
             "type": "string"
@@ -1248,7 +1267,7 @@
             "type": "object"
           },
           "retire": {
-            "description": "Once every item is created, delete the old snapshots, from the top\ndown, then `from`, and with them the old modules nothing else needs.",
+            "description": "Once every item is created, delete the old snapshots the plan rebuilt,\nfrom the top down, and with them the old modules nothing else needs.\n`from` stays: delete it yourself if nothing needs it.",
             "type": "boolean"
           },
           "timeout": {
@@ -1316,14 +1335,14 @@
             "type": "array"
           },
           "retired": {
-            "description": "With `retire`, the ids of the old snapshots deleted, top down, `from`\nlast.",
+            "description": "With `retire`, the ids of the old snapshots deleted, top down.",
             "items": {
               "type": "string"
             },
             "type": "array"
           },
           "skipped": {
-            "description": "For a run, the items not created because they build on one that\nfailed or was skipped. Other branches go on.",
+            "description": "For a run, the items not created because they build on, or replace,\none that failed or was skipped. Other branches go on.",
             "items": {
               "$ref": "#/components/schemas/RebuildSkipped"
             },
@@ -1368,7 +1387,7 @@
         "type": "object"
       },
       "Replaces": {
-        "description": "A snapshot that a create replaces, and what the replacement may change:\na create's [`replaces`](CreateSnapshotRequest::replaces), the link the new\nsnapshot keeps, and a rebuild item's.",
+        "description": "A snapshot that a create replaces, and what the replacement may change:\na create's [`replaces`](CreateSnapshotRequest::replaces), and the link the\nnew snapshot keeps.",
         "properties": {
           "allow": {
             "$ref": "#/components/schemas/Allow",
@@ -3287,7 +3306,7 @@
     },
     "/snapshots/rebuild": {
       "post": {
-        "description": "Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
+        "description": "Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, their links mirroring the old ones, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on or replaces it, then with `retire` deleting the old snapshots it rebuilt; `from` stays. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
         "operationId": "rebuildSnapshots",
         "parameters": [
           {

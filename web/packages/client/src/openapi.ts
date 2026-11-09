@@ -243,7 +243,7 @@ export interface paths {
         put?: never;
         /**
          * Rebuild a snapshot's dependents on its replacement
-         * @description Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the old snapshots and `from`. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
+         * @description Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, their links mirroring the old ones, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on or replaces it, then with `retire` deleting the old snapshots it rebuilt; `from` stays. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
          */
         post: operations["rebuildSnapshots"];
         delete?: never;
@@ -949,8 +949,9 @@ export interface components {
                 [key: string]: string;
             };
             /**
-             * @description 1 for a module that imports `from`'s, 2 for one that imports that, and
-             *     so on, by its longest chain.
+             * @description The wave its create runs in: one more than the highest level among
+             *     the items whose modules it imports and the item it replaces, so 1 for
+             *     one that imports only `from`'s module and replaces no item.
              */
             level: number;
             /** @description The module it rebuilds. */
@@ -960,12 +961,16 @@ export interface components {
             /** @description The module the create makes. */
             new_module: string;
             /**
-             * @description When `to` replaces `from`, the snapshot it rebuilds, to create it as
-             *     a replacement of, with the same `allow`. The create then checks that
-             *     nothing its statements depend on changed, and is refused if
-             *     something did.
+             * @description What the new snapshot replaces, to send as the create's `replaces`,
+             *     the links mirroring the old ones. If the snapshot it rebuilds
+             *     replaced one the plan also rebuilds, it replaces that one's new
+             *     snapshot, `item`, with its own link's `allow`: a skeleton's proof
+             *     replaces the rebuilt skeleton, and is compared with it. Otherwise,
+             *     when `to` replaces `from`, it replaces the snapshot it rebuilds, with
+             *     `to`'s `allow`. The create then checks that nothing its statements
+             *     depend on changed, and is refused if something did.
              */
-            replaces?: components["schemas"]["Replaces"];
+            replaces?: components["schemas"]["RebuildLink"];
             /**
              * @description The snapshot it rebuilds. Absent for a module that only links others
              *     to `from`, with no snapshot that has the labels: it gets the labels
@@ -973,7 +978,27 @@ export interface components {
              */
             snapshot_id?: string;
         };
-        /** @description A [`RebuildItem`] not created, because it builds on one that wasn't. */
+        /**
+         * @description What a rebuilt snapshot replaces: a snapshot that exists, `snapshot_id`,
+         *     or the new snapshot of another item of the plan, `item`. Exactly one is
+         *     set. A create sends it as [`Replaces`], with `item` mapped to the
+         *     `new_snapshot_id` created for that item.
+         */
+        RebuildLink: {
+            /** @description As in [`Replaces::allow`]. */
+            allow?: components["schemas"]["Allow"];
+            /**
+             * @description The index in `plan` of the item whose new snapshot it replaces. That
+             *     item is at a lower level.
+             */
+            item?: number;
+            /** @description The replaced snapshot. */
+            snapshot_id?: string;
+        };
+        /**
+         * @description A [`RebuildItem`] not created, because it builds on, or replaces, one
+         *     that wasn't.
+         */
         RebuildSkipped: {
             module: string;
             /** @description As in [`RebuildItem::snapshot_id`]. */
@@ -1006,8 +1031,9 @@ export interface components {
                 [key: string]: string;
             };
             /**
-             * @description Once every item is created, delete the old snapshots, from the top
-             *     down, then `from`, and with them the old modules nothing else needs.
+             * @description Once every item is created, delete the old snapshots the plan rebuilt,
+             *     from the top down, and with them the old modules nothing else needs.
+             *     `from` stays: delete it yourself if nothing needs it.
              */
             retire?: boolean;
             /**
@@ -1052,14 +1078,11 @@ export interface components {
              *     be created together once the level below is done.
              */
             plan: components["schemas"]["RebuildItem"][];
-            /**
-             * @description With `retire`, the ids of the old snapshots deleted, top down, `from`
-             *     last.
-             */
+            /** @description With `retire`, the ids of the old snapshots deleted, top down. */
             retired?: string[];
             /**
-             * @description For a run, the items not created because they build on one that
-             *     failed or was skipped. Other branches go on.
+             * @description For a run, the items not created because they build on, or replace,
+             *     one that failed or was skipped. Other branches go on.
              */
             skipped?: components["schemas"]["RebuildSkipped"][];
         };
@@ -1086,8 +1109,8 @@ export interface components {
         };
         /**
          * @description A snapshot that a create replaces, and what the replacement may change:
-         *     a create's [`replaces`](CreateSnapshotRequest::replaces), the link the new
-         *     snapshot keeps, and a rebuild item's.
+         *     a create's [`replaces`](CreateSnapshotRequest::replaces), and the link the
+         *     new snapshot keeps.
          */
         Replaces: {
             /**
@@ -1379,6 +1402,7 @@ export type QueryResult = components['schemas']['QueryResult'];
 export type RebuildCreated = components['schemas']['RebuildCreated'];
 export type RebuildFailed = components['schemas']['RebuildFailed'];
 export type RebuildItem = components['schemas']['RebuildItem'];
+export type RebuildLink = components['schemas']['RebuildLink'];
 export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];
 export type RebuildSnapshotsResponse = components['schemas']['RebuildSnapshotsResponse'];

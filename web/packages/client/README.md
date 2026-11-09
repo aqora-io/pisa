@@ -33,8 +33,9 @@ const { snapshot: replacement } = await pisa.createSnapshot(more, { replaces: { 
 const { snapshots } = await pisa.listDependents(base!.id, { labels: { project: "p" } });
 // What the project rests on: declarations by status, assumptions and what uses them.
 const { summary, assumptions } = await pisa.auditSnapshots({ labels: { project: "p" } });
+// Create each item a level at a time; a `replaces.item` names the snapshot made for that item.
 const { plan } = await pisa.rebuildSnapshots(base!.id, replacement!.id, { project: "p" }, { dryRun: true });
-// Or let the server run it, retiring the old snapshots; as a job, since it can take minutes.
+// Or let the server run it, retiring the old snapshots (not `base`); as a job, since it can take minutes.
 const done = await pisa.waitJob(
   await pisa.submitRebuildSnapshots(base!.id, replacement!.id, { project: "p" }, { retire: true }),
 );

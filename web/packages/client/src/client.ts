@@ -81,13 +81,14 @@ export interface RebuildOptions extends RequestOptions {
   /** Seconds Lean may run for each create. */
   timeout?: number;
   /** Only plan: create each item's `code` with its `labels`, `key` and
-   *  `replaces`, a level at a time. */
+   *  `replaces`, a level at a time, an `item` there naming the snapshot
+   *  created for that item. */
   dryRun?: boolean;
   /** Plan or rebuild even though `to`, created without `replaces`, changes
    *  what `from` states. */
   allowChanges?: boolean;
-  /** For a run: once every item is created, delete the old snapshots, from
-   *  the top down, then `from`. */
+  /** For a run: once every item is created, delete the old snapshots the
+   *  plan rebuilt, from the top down. `from` stays. */
   retire?: boolean;
   /** For a run: the kernel re-check for each create. */
   verify?: boolean;
@@ -277,9 +278,10 @@ export class PisaClient {
 
   /** Rebuilds `from`'s dependents with every label in `labels` on `to`: the
    *  server plans the creates, by level, and unless `dryRun` runs them, a
-   *  level at a time, then with `retire` deletes the old snapshots and
-   *  `from`. Sending it again replays the creates that are done. A run can
-   *  take minutes: `submitRebuildSnapshots` runs it as a job. */
+   *  level at a time, then with `retire` deletes the old snapshots it
+   *  rebuilt, though not `from`. Sending it again replays the creates that
+   *  are done. A run can take minutes: `submitRebuildSnapshots` runs it as a
+   *  job. */
   rebuildSnapshots(
     from: SnapshotId,
     to: SnapshotId,

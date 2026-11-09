@@ -523,18 +523,23 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   its imports of `from`'s module, and of the other modules the plan rebuilds,
   swapped for the new ones; lines and columns stay where they were. `from`
   and `to` are of one version, which the rebuild runs on.
+- **Levels.** An item's `level` is the wave its create runs in: one more than
+  the highest among the items whose modules it imports and the item it
+  replaces (see *Links*), so 1 for one that imports only `from`'s module.
 - **Running it.** Without `dry_run`, the server runs the plan: a level at a
   time, up to 8 of a level's creates side by side once the level below is
   done, each with the item's `code`, `labels`, `key` and `replaces`, and the
   request's `verify` and `timeout`. A create no worker takes in time is sent
   again, up to 5 times. The response adds what it did: `created` (each old
   `snapshot_id` and `module` with its `new_snapshot_id` and `new_module`),
-  `failed` (with the create's `check`), and `skipped`, the items that build on one
-  that failed or was skipped; other branches go on, and `ok` says whether
-  every item was created.
+  `failed` (with the create's `check`), and `skipped`, the items that build on,
+  or replace, one that failed or was skipped; other branches go on, and `ok`
+  says whether every item was created.
 - **Retiring.** With `"retire": true`, once every item is created, the server
-  deletes the old snapshots from the top down, then `from`, and with them the
-  old modules nothing else needs; `retired` lists the snapshots' ids.
+  deletes the old snapshots the plan rebuilt, from the top down, and with them
+  the old modules nothing else needs; `retired` lists the snapshots' ids.
+  `from` stays: when `to` replaces it, it is part of the run's history, such
+  as the skeleton a proof replaced. Delete it yourself if nothing needs it.
 - **Sending it again.** The keys come from the plan, so sending the same
   rebuild again, after a failure, a timeout or a lost server, replays the
   creates that are done and runs the rest.
@@ -547,7 +552,9 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   answers at once.
 - **Running it yourself.** Or take the plan and send each item as
   `POST /snapshots {code, labels, key, replaces?}`, a level at a time, the
-  same way; each create's `snapshot.module` is the item's `new_module`.
+  same way; each create's `snapshot.module` is the item's `new_module`. A
+  `replaces` with `item` names another item's new snapshot: send it as
+  `{"snapshot_id": …, "allow"?}` with the id that item's create returned.
 - **Statements.** If `to` replaces `from` (see [Replacing](#replacing)), its
   create compared them, so `changes` is empty. Otherwise the rebuild compares
   them the same way and, if `to` changes what `from` states, answers `ok:
@@ -557,11 +564,17 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   them, and each item lists its theorems whose type uses one, directly or
   through definitions here or below, as `affected`. That is read from what
   the modules' declarations use.
-- **Links.** When `to` replaces `from`, each item with a `snapshot_id` has
-  `replaces`, to send with its create: the rebuilt snapshot then replaces its
-  old one, with the same `allow`, which checks that nothing its statements
-  use changed through the rebuild, and the history follows it. A dependent
-  whose statements did change meaning is refused rather than kept.
+- **Links.** The new snapshots' links mirror the old ones, so a run's history
+  carries over. Each item's `replaces`, to send with its create, is:
+  - `{"item": i, "allow"?}` when its old snapshot replaced one the plan also
+    rebuilds, item `i`, as a proof replaces its skeleton: the new proof
+    replaces the new skeleton, with the old link's `allow`, and is compared
+    with it, so it must still keep the rebuilt skeleton's statements;
+  - otherwise, when `to` replaces `from`, `{"snapshot_id": …, "allow"?}`: the
+    rebuilt snapshot replaces its old one, with `to`'s `allow`, which checks
+    that nothing its statements use changed through the rebuild. A dependent
+    whose statements did change meaning is refused rather than kept;
+  - otherwise none.
 - **Limits.** At most 1000 items, as the plan carries code.
 
 **How it works.**
@@ -691,8 +704,9 @@ let extended = client.create_snapshot_with(lemma, &opts).await?.snapshot.expect(
 let above = client.list_dependents(&base.id, &run).await?; // parents first
 let audit = client.audit_snapshots(&run).await?; // statuses, assumptions, what isn't proved
 let opts = pisa_client::RebuildOptions { dry_run: true, ..Default::default() };
+// Create each item, a level at a time; a `replaces.item` names the snapshot made for that item.
 let plan = client.rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?.plan;
-let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old snapshots after
+let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old snapshots after, not `base`
 let job = client.submit_rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?;
 let done = client.wait_job(&job).await?; // the server ran the plan: done.created, done.failed
 let removed = client.delete_snapshot(&base.id).await?.removed; // the modules that went with it
@@ -721,8 +735,8 @@ more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : doub
 extended = client.create_snapshot(more, replaces={"snapshot_id": base["id"]})["snapshot"]   # "allow": {"definitions": ["double"]} lets double change
 client.list_dependents(base["id"], {"run": "7"})["snapshots"]   # parents first
 client.audit_snapshots({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
-plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time
-done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the old snapshots
+plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time; a replaces["item"] names the snapshot made for that item
+done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the old snapshots, not base
 client.delete_snapshot(base["id"])["removed"]   # the modules that went with it
 job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
 client.wait_job(job)["ok"]   # what check would have returned, or raised

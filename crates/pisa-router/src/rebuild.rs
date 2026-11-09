@@ -4,12 +4,13 @@
 //! Each create has the plan's idempotency key, so running the same rebuild
 //! again replays the creates that are done.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use pisa_protocol::api::{
     CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, Error, ErrorKind, RebuildCreated,
-    RebuildFailed, RebuildItem, RebuildSkipped, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
+    RebuildFailed, RebuildItem, RebuildLink, RebuildSkipped, RebuildSnapshotsRequest,
+    RebuildSnapshotsResponse, Replaces,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -65,29 +66,37 @@ pub(crate) async fn run(
 
     // The new snapshots that weren't made: what imports one isn't either.
     let mut missing: HashSet<String> = HashSet::new();
+    // The new snapshot of each item made, by its index in the plan.
+    let mut new_ids: HashMap<usize, String> = HashMap::new();
     let mut levels: Vec<usize> = response.plan.iter().map(|i| i.level).collect();
     levels.dedup();
     for level in levels {
-        let items = response.plan.iter().filter(|i| i.level == level);
-        let (ready, blocked): (Vec<&RebuildItem>, Vec<&RebuildItem>) =
-            items.partition(|i| !builds_on(i, &missing));
-        for item in blocked {
-            missing.insert(item.new_module.clone());
-            response.skipped.push(RebuildSkipped {
-                snapshot_id: item.snapshot_id.clone(),
-                module: item.module.clone(),
-            });
+        let mut ready: Vec<(usize, &RebuildItem, Option<Replaces>)> = Vec::new();
+        for (at, item) in response.plan.iter().enumerate() {
+            if item.level != level {
+                continue;
+            }
+            let replaces = item.replaces.as_ref().map(|link| linked(link, &new_ids));
+            if builds_on(item, &missing) || matches!(replaces, Some(None)) {
+                missing.insert(item.new_module.clone());
+                response.skipped.push(RebuildSkipped {
+                    snapshot_id: item.snapshot_id.clone(),
+                    module: item.module.clone(),
+                });
+            } else {
+                ready.push((at, item, replaces.flatten()));
+            }
         }
         for chunk in ready.chunks(PARALLEL) {
             let running: Vec<_> = chunk
                 .iter()
-                .map(|item| {
+                .map(|(_, item, replaces)| {
                     let (app, req, item) = (app.clone(), req.clone(), (*item).clone());
-                    let version = version.clone();
-                    tokio::spawn(async move { create(&app, &req, version, &item).await })
+                    let (version, replaces) = (version.clone(), replaces.clone());
+                    tokio::spawn(async move { create(&app, &req, version, &item, replaces).await })
                 })
                 .collect();
-            for (item, running) in chunk.iter().zip(running) {
+            for ((at, item, _), running) in chunk.iter().zip(running) {
                 let made = running.await.unwrap_or_else(|e| {
                     Err(Error::new(
                         ErrorKind::Internal,
@@ -99,6 +108,7 @@ pub(crate) async fn run(
                         snapshot: Some(made),
                         ..
                     }) if made.module == item.new_module => {
+                        new_ids.insert(*at, made.id.clone());
                         response.created.push(RebuildCreated {
                             snapshot_id: item.snapshot_id.clone(),
                             module: item.module.clone(),
@@ -127,7 +137,7 @@ pub(crate) async fn run(
     }
     response.ok = response.failed.is_empty() && response.skipped.is_empty();
     if req.retire && response.ok {
-        response.retired = retire(app, req, &response.plan, version).await?;
+        response.retired = retire(app, &response.plan, version).await?;
     }
     Ok(response)
 }
@@ -140,13 +150,27 @@ fn builds_on(item: &RebuildItem, missing: &HashSet<String>) -> bool {
         .any(|id| missing.contains(&snapshot::module(id)))
 }
 
-/// Creates `item` on `version` as the plan says, sending it again while no
-/// worker takes it in time.
+/// What a create with `link` replaces: its snapshot, or the one made for its
+/// item, from `new_ids`. `None` if that item wasn't made.
+fn linked(link: &RebuildLink, new_ids: &HashMap<usize, String>) -> Option<Replaces> {
+    let snapshot_id = match link.item {
+        Some(item) => new_ids.get(&item)?.clone(),
+        None => link.snapshot_id.clone()?,
+    };
+    Some(Replaces {
+        snapshot_id,
+        allow: link.allow.clone(),
+    })
+}
+
+/// Creates `item` on `version` as the plan says, replacing `replaces`,
+/// sending it again while no worker takes it in time.
 async fn create(
     app: &App,
     req: &RebuildSnapshotsRequest,
     version: Option<String>,
     item: &RebuildItem,
+    replaces: Option<Replaces>,
 ) -> Result<CreateSnapshotResponse, Error> {
     let create = CreateSnapshotRequest {
         code: item.code.clone(),
@@ -155,7 +179,7 @@ async fn create(
         verify: req.verify,
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
-        replaces: item.replaces.clone(),
+        replaces,
     };
     let p = prepare_create(app, create).map_err(|e| e.0)?;
     let mut tries = 0;
@@ -169,17 +193,16 @@ async fn create(
     }
 }
 
-/// Deletes the plan's old snapshots, from the top down, then `from`. One
+/// Deletes the plan's old snapshots, from the top down; `from` stays. One
 /// already gone counts, as when a rebuild that retired some is sent again.
 async fn retire(
     app: &App,
-    req: &RebuildSnapshotsRequest,
     plan: &[RebuildItem],
     version: Option<String>,
 ) -> Result<Vec<String>, ApiError> {
     let old = plan.iter().rev().filter_map(|i| i.snapshot_id.clone());
     let mut retired = Vec::new();
-    for entry in old.chain([req.from.clone()]) {
+    for entry in old {
         let job = Job::SnapshotDelete(SnapshotJob {
             entry: entry.clone(),
         });

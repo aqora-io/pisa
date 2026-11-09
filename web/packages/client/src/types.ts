@@ -50,6 +50,7 @@ export type {
   RebuildCreated,
   RebuildFailed,
   RebuildItem,
+  RebuildLink,
   RebuildSkipped,
   RebuildSnapshotsRequest,
   RebuildSnapshotsResponse,

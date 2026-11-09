@@ -319,13 +319,15 @@ def test_rebuild_snapshots(url):
     assert (e.value.kind, e.value.status) == ("internal", 200)
     [item] = plan["plan"]
     assert (item["snapshot_id"], item["module"], item["level"]) == (above["id"], above["module"], 1)
-    made = client.create_snapshot(item["code"], labels=item["labels"], key=item["key"])["snapshot"]
+    assert item["replaces"] == {"snapshot_id": above["id"]}
+    made = client.create_snapshot(item["code"], labels=item["labels"], key=item["key"], replaces=item["replaces"])["snapshot"]
     assert made["module"] == item["new_module"]
     run = client.rebuild_snapshots(base["id"], proof["id"], {"suite": "rebuild"})
     assert run["ok"] and run["created"][0]["new_snapshot_id"] == made["id"]
     job = client.submit_rebuild_snapshots(from_=base["id"], to=proof["id"], labels={"suite": "rebuild"}, retire=True)
     assert job["kind"] == "rebuild_snapshots"
-    assert client.wait_job(job)["retired"] == [above["id"], base["id"]]
+    assert client.wait_job(job)["retired"] == [above["id"]]
+    assert client.get_snapshot(base["id"])["id"] == base["id"]
     with pytest.raises(PisaError) as e:
         client.rebuild_snapshots(base["id"], proof["id"], {}, dry_run=True)
     assert (e.value.kind, e.value.status) == ("bad_request", 400)

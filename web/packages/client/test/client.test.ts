@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PisaClient, isCapacityError, isPisaError } from "../src/index.ts";
+import { PisaClient, isCapacityError, isPisaError, type RebuildItem, type RebuildLink } from "../src/index.ts";
 
 interface Sent {
   url: string;
@@ -124,6 +124,25 @@ describe("PisaClient", () => {
       url: "/api/snapshots/rebuild",
       body: { from: "v1~e1", to: "v1~e2", labels: { p: "1" }, dry_run: true, allow_changes: true },
     });
+  });
+
+  it("reads a plan's links, to an old snapshot or to another item's new one", async () => {
+    const skeleton: RebuildItem = {
+      level: 1,
+      snapshot_id: "v1~s0",
+      module: "PisaSnap.sa",
+      new_module: "PisaSnap.sb",
+      new_header: "import PisaSnap.sb",
+      code: "theorem s : 2 = 2 := sorry",
+      labels: { p: "1" },
+      key: "rebuild:a:b:s0",
+      replaces: { snapshot_id: "v1~s0" },
+    };
+    const proof = { ...skeleton, level: 2, snapshot_id: "v1~p1", replaces: { item: 0, allow: { definitions: ["f"] } } };
+    const { client } = recording(() => json({ ok: true, changes: [], plan: [skeleton, proof] }));
+    const { plan } = await client.rebuildSnapshots("v1~e1", "v1~e2", { p: "1" }, { dryRun: true });
+    const links: (RebuildLink | undefined)[] = plan.map((i) => i.replaces);
+    expect(links).toEqual([{ snapshot_id: "v1~s0" }, { item: 0, allow: { definitions: ["f"] } }]);
   });
 
   it("runs a rebuild, at once or as a job", async () => {

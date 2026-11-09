@@ -349,32 +349,40 @@ async fn a_module_that_links_the_labelled_ones_is_rebuilt_with_the_labels() {
     assert_eq!(p["plan"][0]["key"], key);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependents() {
-    let c = Cluster::start(&[("w0", "v", 1)]).await;
+/// B, defining `f`, with C defining `g` from it on top and E using `g` on C,
+/// all in `p:1`; and B′, which changes `f`, replacing B with `f` allowed.
+async fn redefined(c: &Cluster) -> (Value, Value) {
     let p1 = json!({"p": "1"});
     let b = create(
-        &c,
+        c,
         json!({"code": "import Foo\n\ndef f : Nat := 1\ntheorem b : f = f := sorry", "labels": p1}),
     )
     .await;
     let c_ = create(
-        &c,
+        c,
         json!({"code": on(&b, "def g : Nat := f\ntheorem c : 2 = 2 := rfl"), "labels": p1}),
     )
     .await;
     create(
-        &c,
+        c,
         json!({"code": on(&c_, "theorem e : g = g := rfl"), "labels": p1}),
     )
     .await;
     let fixed = "import Foo\n\ndef f : Nat := 2\ntheorem b : f = f := rfl";
     let replaces = json!({"snapshot_id": entry(&b), "allow": {"definitions": ["f"]}});
     let b2 = create(
-        &c,
+        c,
         json!({"code": fixed, "replaces": replaces, "labels": p1}),
     )
     .await;
+    (b, b2)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependents() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let p1 = json!({"p": "1"});
+    let (b, b2) = redefined(&c).await;
     let body = json!({"from": entry(&b), "to": entry(&b2), "labels": p1, "dry_run": true});
     let (_, p) = plan(&c, body).await;
     assert_eq!((&p["ok"], &p["changes"]), (&json!(true), &json!([])), "{p}");
@@ -486,25 +494,155 @@ async fn a_failed_chunk_skips_only_what_builds_on_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn retire_deletes_the_old_entries_and_from() {
+async fn a_rebuild_runs_under_a_named_allow() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let (b, b2) = redefined(&c).await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(items(&r, "level"), [&json!(1), &json!(2)]);
+    // E′, on C′, no longer builds on B, whose `f` its link allows.
+    let allow = json!({"definitions": ["f"]});
+    let created = r["created"].as_array().unwrap();
+    assert_eq!(created.len(), 2, "{r}");
+    for made in created {
+        let path = format!("/snapshots/{}", made["new_snapshot_id"].as_str().unwrap());
+        let (_, info) = get(&c, &path).await;
+        let link = json!({"snapshot_id": made["snapshot_id"], "allow": allow});
+        assert_eq!(info["replaces"], link, "{info}");
+    }
+}
+
+/// A skeleton S0 on B, with a `sorry` and then `extra`, and a proof P1
+/// replacing it, also on B, both in `p:1`.
+async fn skeleton_and_proof(c: &Cluster, b: &Value, extra: &str) -> (Value, Value) {
+    let p1 = json!({"p": "1"});
+    let s0 = create(
+        c,
+        json!({"code": on(b, &format!("theorem s : 2 = 2 := sorry\n{extra}")), "labels": p1}),
+    )
+    .await;
+    let replaces = json!({"snapshot_id": entry(&s0)});
+    let p1_ = create(
+        c,
+        json!({"code": on(b, "theorem s : 2 = 2 := rfl"), "replaces": replaces, "labels": p1}),
+    )
+    .await;
+    (s0, p1_)
+}
+
+/// The ids of the snapshots in `p:1` that replace `id`.
+async fn replacers(c: &Cluster, id: &str) -> Vec<String> {
+    let (_, r) = get(c, "/snapshots?label=p:1").await;
+    let snapshots = r["snapshots"].as_array().unwrap();
+    snapshots
+        .iter()
+        .filter(|s| s["replaces"]["snapshot_id"] == id)
+        .map(|s| s["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skeleton_and_its_proof_are_rebuilt_as_a_run() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    let (s0, p1) = skeleton_and_proof(&c, &b, "").await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(
+        items(&r, "snapshot_id"),
+        [&json!(entry(&s0)), &json!(entry(&p1))]
+    );
+    // S0 is rebuilt as `to` replaces `from`; P1 replaces S0′, so comes after.
+    assert_eq!(items(&r, "level"), [&json!(1), &json!(2)]);
+    assert_eq!(
+        items(&r, "replaces"),
+        [&json!({"snapshot_id": entry(&s0)}), &json!({"item": 0})]
+    );
+
+    let made = |old: &Value| -> String {
+        let created = r["created"].as_array().unwrap();
+        let made = created
+            .iter()
+            .find(|m| m["snapshot_id"] == old["snapshot"]["id"]);
+        made.unwrap()["new_snapshot_id"].as_str().unwrap().into()
+    };
+    let (s0_, p1_) = (made(&s0), made(&p1));
+    for (new, old) in [(&p1_, &s0_), (&s0_, &entry(&s0).to_string())] {
+        let (_, info) = get(&c, &format!("/snapshots/{new}")).await;
+        assert_eq!(info["replaces"], json!({"snapshot_id": old}), "{info}");
+    }
+    // The new skeleton has one replacer: no fork.
+    assert_eq!(replacers(&c, &s0_).await, std::slice::from_ref(&p1_));
+
+    // Again with `retire`: the old proof goes first, then the old skeleton,
+    // and B stays.
+    let r = rebuild(&c, &b, &b2, json!({"retire": true})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["retired"], json!([entry(&p1), entry(&s0)]));
+    let (status, _) = get(&c, &format!("/snapshots/{}", entry(&b))).await;
+    assert_eq!(status, 200);
+    assert_eq!(replacers(&c, &s0_).await, [p1_]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_that_replaces_a_failed_one_is_skipped() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    // S0 needs `b`, which the new base lacks; P1 doesn't.
+    let (s0, p1) = skeleton_and_proof(&c, &b, "needs b").await;
+    let other = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &other, json!({"allow_changes": true})).await;
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(items(&r, "replaces"), [&Value::Null, &json!({"item": 0})]);
+    assert_eq!(r["failed"][0]["snapshot_id"], s0["snapshot"]["id"], "{r}");
+    assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
+    assert_eq!(
+        r["skipped"],
+        json!([{"snapshot_id": entry(&p1), "module": module(&p1)}]),
+        "{r}"
+    );
+    assert!(r.get("created").is_none(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retire_keeps_from() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let lib = library(&c).await;
     let b2 = proved(&c, &lib).await;
     let r = rebuild(&c, &lib.b, &b2, json!({"retire": true})).await;
     assert_eq!(r["ok"], true, "{r}");
-    let old = [&lib.e, &lib.d, &lib.c, &lib.b].map(|e| e["snapshot"]["id"].clone());
+    let old = [&lib.e, &lib.d, &lib.c].map(|e| e["snapshot"]["id"].clone());
     assert_eq!(r["retired"], json!(old));
     for e in &old {
         let (status, _) = get(&c, &format!("/snapshots/{}", e.as_str().unwrap())).await;
         assert_eq!(status, 404, "{e}");
     }
+    let (status, from) = get(&c, &format!("/snapshots/{}", entry(&lib.b))).await;
+    assert_eq!(status, 200, "{from}");
     let mut now = listed(&c, "p:1").await;
     now.sort();
     let mut expected: Vec<String> = new_entries(&r)
         .iter()
         .map(|e| e.as_str().unwrap().into())
         .collect();
-    expected.push(entry(&b2).into());
+    expected.extend([entry(&lib.b).into(), entry(&b2).into()]);
     expected.sort();
     assert_eq!(now, expected);
     // The other project keeps its snapshot, and with it B's module.
