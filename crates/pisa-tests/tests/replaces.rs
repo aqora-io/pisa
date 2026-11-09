@@ -7,6 +7,8 @@
 mod common;
 
 use common::Cluster;
+use pisa_protocol::api::Replacement;
+use pisa_worker::catalog::Catalog;
 use serde_json::{Value, json};
 
 const SKELETON: &str = "import Foo\n\ntheorem t : 1 = 1 := sorry";
@@ -122,6 +124,47 @@ async fn a_definition_changes_only_when_allowed_and_its_users_are_listed() {
         "import Foo\n\ndef f : Int := 2\ntheorem t : f = f := rfl\ntheorem u : 1 = 1 := rfl";
     let r = create(&c, json!({"code": retyped, "replaces": replaces})).await;
     refused(&r, "statement: f has a different type");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_comparison_is_stored_with_the_link_for_new_code_and_kept_code() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let bare = |r: &Value| entry(r).split_once('~').unwrap().1.to_string();
+    let skeleton =
+        "import Foo\n\ndef f : Nat := 1\ntheorem t : f = f := sorry\ntheorem u : 1 = 1 := sorry";
+    let fixed =
+        "import Foo\n\ndef f : Nat := 2\ntheorem t : f = f := rfl\ntheorem u : 1 = 1 := rfl";
+    let old = entry(&create(&c, json!({"code": skeleton})).await).to_string();
+    let replaces = json!({"snapshot_id": old, "allow": "definitions"});
+    let comparison = Replacement {
+        filled: vec!["t".into(), "u".into()],
+        changed_definitions: vec!["f".into()],
+        affected: vec!["t".into()],
+    };
+
+    // The code is new, so the create builds it.
+    let built = create(&c, json!({"code": fixed, "replaces": replaces})).await;
+    let stored = catalog.entry(&bare(&built)).await.unwrap();
+    assert_eq!(stored.replacement, Some(comparison.clone()));
+    let found = catalog
+        .replacers(old.split_once('~').unwrap().1)
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+
+    // The code is kept now, so another create only adds an entry.
+    let kept = create(&c, json!({"code": fixed, "replaces": replaces})).await;
+    assert_ne!(entry(&kept), entry(&built));
+    let stored = catalog.entry(&bare(&kept)).await.unwrap();
+    assert_eq!(stored.replacement, Some(comparison));
+
+    // An entry that replaces nothing has no comparison.
+    let plain = create(&c, json!({"code": skeleton})).await;
+    assert_eq!(
+        catalog.entry(&bare(&plain)).await.unwrap().replacement,
+        None
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1073,6 +1073,7 @@ impl Snapshots {
             labels: job.labels.clone(),
             key: job.key.clone(),
             replaces: replacing.map(Replacing::link),
+            replacement: replacement.clone(),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -1298,6 +1299,7 @@ impl Snapshots {
             labels: job.labels.clone(),
             key: job.key.clone(),
             replaces: replacing.map(Replacing::link),
+            replacement: replacement.clone(),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)
@@ -2364,6 +2366,7 @@ mod tests {
             labels: Default::default(),
             key: None,
             replaces: None,
+            replacement: None,
         }
     }
 

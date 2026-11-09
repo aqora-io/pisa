@@ -28,6 +28,7 @@ const ENTRY: (
     entries::created_micros,
     entries::replaces,
     entries::replaces_allow,
+    entries::replacement,
 ) = (
     entries::id,
     entries::module,
@@ -36,6 +37,7 @@ const ENTRY: (
     entries::created_micros,
     entries::replaces,
     entries::replaces_allow,
+    entries::replacement,
 );
 
 async fn module_in(conn: &mut Conn, v: &str, m: &str) -> Result<Option<ModuleMeta>, Fail> {
@@ -110,8 +112,14 @@ async fn add(
         key: entry.key.clone(),
         created_micros: now_micros(),
         replaces: entry.replaces.clone(),
+        replacement: entry.replacement.clone(),
     };
     let allow = meta.replaces.as_ref().map(allow_column).transpose()?;
+    let replacement = meta
+        .replacement
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
     diesel::insert_into(entries::table)
         .values((
             entries::version.eq(v),
@@ -122,6 +130,7 @@ async fn add(
             entries::created_micros.eq(meta.created_micros as i64),
             entries::replaces.eq(meta.replaces.as_ref().map(|r| r.snapshot_id.as_str())),
             entries::replaces_allow.eq(allow.flatten()),
+            entries::replacement.eq(replacement),
         ))
         .execute(conn)
         .await?;
@@ -413,6 +422,26 @@ pub(crate) async fn dependents(
     })
     .await?;
     Ok(found)
+}
+
+/// The entries whose `replaces` is `e`, oldest first.
+pub(crate) async fn replacers(
+    db: &Handle,
+    v: &str,
+    e: &str,
+) -> Result<Vec<(String, EntryMeta)>, Error> {
+    let rows = entries::table
+        .filter(entries::version.eq(v))
+        .filter(entries::replaces.eq(e))
+        .order((entries::created_micros, entries::id))
+        .select(ENTRY)
+        .load::<EntryRow>(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(entry_from_row)
+        .collect::<Result<_, _>>()?)
 }
 
 /// The entries on `modules` with every label in `labels`, oldest first.

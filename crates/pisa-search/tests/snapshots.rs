@@ -363,6 +363,7 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
             .collect(),
         key: None,
         replaces: None,
+        replacement: None,
     }
 }
 

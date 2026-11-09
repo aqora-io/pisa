@@ -23,7 +23,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use pisa_protocol::api::{CheckResult, Error, ErrorKind, ProofStatus, Replaces, SnapshotId};
+use pisa_protocol::api::{
+    CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces, SnapshotId,
+};
 use pisa_protocol::snapshot;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,6 +90,10 @@ pub struct EntryMeta {
     /// turns it into a versioned id when it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
+    /// What that create's comparison found, which an audit lists later. Set
+    /// exactly when `replaces` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<Replacement>,
 }
 
 impl EntryMeta {
@@ -199,6 +205,8 @@ pub struct NewEntry {
     pub key: Option<String>,
     /// The entry it replaces, which the caller has compared it with.
     pub replaces: Option<Replaces>,
+    /// What the comparison with it found; set exactly when `replaces` is.
+    pub replacement: Option<Replacement>,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -288,8 +296,8 @@ fn has_nul(value: &Value) -> bool {
     }
 }
 
-/// An entry's id, module, labels, key, creation time, and the entry it
-/// replaces with what it allowed, as selected.
+/// An entry's id, module, labels, key, creation time, the entry it replaces
+/// with what it allowed, and the comparison as JSON text, as selected.
 pub(crate) type EntryRow = (
     String,
     String,
@@ -298,10 +306,11 @@ pub(crate) type EntryRow = (
     i64,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail> {
-    let (e, module, labels, key, created, replaces, allow) = row;
+    let (e, module, labels, key, created, replaces, allow, replacement) = row;
     let replaces = match replaces {
         Some(entry) => Some(Replaces {
             snapshot_id: entry,
@@ -318,6 +327,9 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
         key,
         created_micros: created as u64,
         replaces,
+        replacement: replacement
+            .map(|text| serde_json::from_str(&text))
+            .transpose()?,
     };
     Ok((e, meta))
 }
@@ -488,6 +500,13 @@ impl Catalog {
     /// those of its imports that are `m` or such modules.
     pub async fn dependents(&self, m: &str) -> Result<BTreeMap<String, Vec<String>>, Error> {
         dispatch!(&self.db, dependents(&self.version, m))
+    }
+
+    /// The entries of this version whose `replaces` is `entry` (its bare
+    /// hex), whatever their labels and whether or not `entry` is kept, oldest
+    /// first.
+    pub async fn replacers(&self, entry: &str) -> Result<Vec<(String, EntryMeta)>, Error> {
+        dispatch!(&self.db, replacers(&self.version, entry))
     }
 
     /// The entries on `modules` that have every `(key, value)` in `labels`,
@@ -665,6 +684,7 @@ mod tests {
             labels: BTreeMap::new(),
             key: None,
             replaces: None,
+            replacement: None,
         }
     }
 
@@ -676,6 +696,7 @@ mod tests {
                 .collect(),
             key: None,
             replaces: None,
+            replacement: None,
         }
     }
 
@@ -684,6 +705,7 @@ mod tests {
             labels: BTreeMap::new(),
             key: Some(k.into()),
             replaces: None,
+            replacement: None,
         }
     }
 
@@ -798,6 +820,74 @@ mod tests {
                 assert_eq!(found.1.replaces, replaces);
             }
             assert_eq!(catalog.entry(&old).await.unwrap().replaces, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn replacers_lists_every_entry_that_replaces_one() {
+        for catalog in catalogs().await {
+            let (a, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let replacing = |entry: &str| NewEntry {
+                replaces: Some(Replaces {
+                    snapshot_id: entry.into(),
+                    allow: None,
+                }),
+                replacement: Some(Replacement {
+                    filled: Vec::new(),
+                    changed_definitions: Vec::new(),
+                    affected: Vec::new(),
+                }),
+                ..no_labels()
+            };
+            let mut replacers = Vec::new();
+            for _ in 0..2 {
+                let (e, _) = catalog
+                    .add_entry("x", replacing(&a))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                replacers.push(e);
+            }
+            let (c, _) = catalog.add_entry("x", no_labels()).await.unwrap().unwrap();
+
+            let found = catalog.replacers(&a).await.unwrap();
+            let found: Vec<&str> = found.iter().map(|(e, _)| e.as_str()).collect();
+            assert_eq!(found, [replacers[0].as_str(), replacers[1].as_str()]);
+            assert!(catalog.replacers(&c).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_keeps_its_comparison() {
+        for catalog in catalogs().await {
+            let (old, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let replacement = Some(Replacement {
+                filled: Vec::new(),
+                changed_definitions: vec!["f".into()],
+                affected: vec!["t".into()],
+            });
+            let entry = NewEntry {
+                replaces: Some(Replaces {
+                    snapshot_id: old.clone(),
+                    allow: None,
+                }),
+                replacement: replacement.clone(),
+                ..no_labels()
+            };
+            let (e, added) = catalog.add_entry("x", entry).await.unwrap().unwrap();
+            assert_eq!(added.replacement, replacement);
+            assert_eq!(catalog.entry(&e).await.unwrap().replacement, replacement);
+            let (listed, _) = catalog.list(&[], 10, None).await.unwrap();
+            let found = listed.iter().find(|(id, _)| *id == e).unwrap();
+            assert_eq!(found.1.replacement, replacement);
+            // An entry that replaces nothing has no comparison.
+            assert_eq!(catalog.entry(&old).await.unwrap().replacement, None);
         }
     }
 

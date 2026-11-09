@@ -28,6 +28,7 @@ diesel::table! {
         created_micros -> BigInt,
         replaces -> Nullable<Text>,
         replaces_allow -> Nullable<Text>,
+        replacement -> Nullable<Text>,
     }
 }
 
