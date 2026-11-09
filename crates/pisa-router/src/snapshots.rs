@@ -448,7 +448,8 @@ pub async fn update(
     delete, path = "/snapshots/{id}", operation_id = "deleteSnapshot", tag = "snapshots",
     summary = "Delete a snapshot",
     description = "Its module goes too once no snapshot or other module refers to it: \
-        `removed` lists the modules that went.",
+        `removed` lists the modules that went. The snapshots that replace it replace what \
+        it replaced instead, with the two links composed.",
     params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`")),
     responses((status = 200, description = "What went", body = DeleteSnapshotResponse), ApiErrors),
 )]

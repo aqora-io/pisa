@@ -137,11 +137,11 @@
         "type": "object"
       },
       "AuditLink": {
-        "description": "A link that let definitions change: `snapshot_id` replaces another\nsnapshot with an `allow`, and its create's comparison found what changed.",
+        "description": "A link that let definitions change: `snapshot_id` replaces another\nsnapshot with an `allow`, and a comparison found what changed: its\ncreate's, or the union of two if the snapshot between was deleted.",
         "properties": {
           "replacement": {
             "$ref": "#/components/schemas/Replacement",
-            "description": "What its create's comparison with the replaced snapshot found, as\n[`CreateSnapshotResponse::replacement`] gave it."
+            "description": "What the comparison with the replaced snapshot found: its create's, as\n[`CreateSnapshotResponse::replacement`] gave it, or, if the snapshot\nbetween was deleted, the union of the two links' comparisons."
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
@@ -694,7 +694,7 @@
         "type": "object"
       },
       "DeleteSnapshotResponse": {
-        "description": "`DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once\nno snapshot and no kept module needs it, and then so do the modules it\nimports, on the same terms.",
+        "description": "`DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once\nno snapshot and no kept module needs it, and then so do the modules it\nimports, on the same terms. The snapshots that replace it replace what it\nreplaced instead, with the two links composed: their `allow` and\n`replacement` hold the changes of both steps. If it replaced nothing, they\nkeep their links to it.",
         "properties": {
           "removed": {
             "description": "The modules removed, the snapshot's own first.",
@@ -1470,7 +1470,7 @@
         "type": "object"
       },
       "Replacement": {
-        "description": "What a replacement changed, as the create's comparison with the snapshot\nit [`replaces`](CreateSnapshotRequest::replaces) found.",
+        "description": "What a replacement changed, as the comparison with the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) found: its create's, or the\nunion of two, for a link composed when the snapshot between was deleted.",
         "properties": {
           "affected": {
             "description": "The theorems whose type uses a changed definition, directly or\nthrough another definition.",
@@ -1728,7 +1728,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The snapshot it replaced, if it was created to."
+            "description": "The snapshot it replaced, if it was created to. If that one was\ndeleted, the snapshot that one replaced, with the two links composed."
           },
           "status": {
             "$ref": "#/components/schemas/ProofStatus",
@@ -3558,7 +3558,7 @@
     },
     "/snapshots/{id}": {
       "delete": {
-        "description": "Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went.",
+        "description": "Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed.",
         "operationId": "deleteSnapshot",
         "parameters": [
           {

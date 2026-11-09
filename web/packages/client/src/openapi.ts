@@ -265,7 +265,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a snapshot
-         * @description Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went.
+         * @description Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed.
          */
         delete: operations["deleteSnapshot"];
         options?: never;
@@ -425,12 +425,14 @@ export interface components {
         };
         /**
          * @description A link that let definitions change: `snapshot_id` replaces another
-         *     snapshot with an `allow`, and its create's comparison found what changed.
+         *     snapshot with an `allow`, and a comparison found what changed: its
+         *     create's, or the union of two if the snapshot between was deleted.
          */
         AuditLink: {
             /**
-             * @description What its create's comparison with the replaced snapshot found, as
-             *     [`CreateSnapshotResponse::replacement`] gave it.
+             * @description What the comparison with the replaced snapshot found: its create's, as
+             *     [`CreateSnapshotResponse::replacement`] gave it, or, if the snapshot
+             *     between was deleted, the union of the two links' comparisons.
              */
             replacement: components["schemas"]["Replacement"];
             /**
@@ -759,7 +761,10 @@ export interface components {
         /**
          * @description `DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once
          *     no snapshot and no kept module needs it, and then so do the modules it
-         *     imports, on the same terms.
+         *     imports, on the same terms. The snapshots that replace it replace what it
+         *     replaced instead, with the two links composed: their `allow` and
+         *     `replacement` hold the changes of both steps. If it replaced nothing, they
+         *     keep their links to it.
          */
         DeleteSnapshotResponse: {
             /** @description The modules removed, the snapshot's own first. */
@@ -1192,8 +1197,9 @@ export interface components {
             skipped?: components["schemas"]["RebuildSkipped"][];
         };
         /**
-         * @description What a replacement changed, as the create's comparison with the snapshot
-         *     it [`replaces`](CreateSnapshotRequest::replaces) found.
+         * @description What a replacement changed, as the comparison with the snapshot it
+         *     [`replaces`](CreateSnapshotRequest::replaces) found: its create's, or the
+         *     union of two, for a link composed when the snapshot between was deleted.
          */
         Replacement: {
             /**
@@ -1322,7 +1328,10 @@ export interface components {
              *     of the same code.
              */
             module: string;
-            /** @description The snapshot it replaced, if it was created to. */
+            /**
+             * @description The snapshot it replaced, if it was created to. If that one was
+             *     deleted, the snapshot that one replaced, with the two links composed.
+             */
             replaces?: components["schemas"]["Replaces"];
             /**
              * @description The worst status among its module's declarations, by the build's

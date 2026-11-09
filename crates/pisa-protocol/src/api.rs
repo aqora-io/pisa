@@ -595,8 +595,9 @@ pub struct Allow {
     pub definitions: Vec<String>,
 }
 
-/// What a replacement changed, as the create's comparison with the snapshot
-/// it [`replaces`](CreateSnapshotRequest::replaces) found.
+/// What a replacement changed, as the comparison with the snapshot it
+/// [`replaces`](CreateSnapshotRequest::replaces) found: its create's, or the
+/// union of two, for a link composed when the snapshot between was deleted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Replacement {
     /// The replaced module's declarations that used `sorry` and no longer
@@ -634,7 +635,8 @@ pub struct Snapshot {
     /// The modules its module imports.
     pub imports: Vec<String>,
     pub labels: BTreeMap<String, String>,
-    /// The snapshot it replaced, if it was created to.
+    /// The snapshot it replaced, if it was created to. If that one was
+    /// deleted, the snapshot that one replaced, with the two links composed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
     /// The worst status among its module's declarations, by the build's
@@ -979,7 +981,8 @@ pub struct AuditTarget {
 }
 
 /// A link that let definitions change: `snapshot_id` replaces another
-/// snapshot with an `allow`, and its create's comparison found what changed.
+/// snapshot with an `allow`, and a comparison found what changed: its
+/// create's, or the union of two if the snapshot between was deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditLink {
     /// The replacing snapshot.
@@ -987,8 +990,9 @@ pub struct AuditLink {
     /// Its link, as its [`Snapshot::replaces`] shows it: the replaced
     /// snapshot, which may have been deleted since, and the `allow`.
     pub replaces: Replaces,
-    /// What its create's comparison with the replaced snapshot found, as
-    /// [`CreateSnapshotResponse::replacement`] gave it.
+    /// What the comparison with the replaced snapshot found: its create's, as
+    /// [`CreateSnapshotResponse::replacement`] gave it, or, if the snapshot
+    /// between was deleted, the union of the two links' comparisons.
     pub replacement: Replacement,
 }
 
@@ -1073,7 +1077,10 @@ pub struct VerifyFailure {
 
 /// `DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once
 /// no snapshot and no kept module needs it, and then so do the modules it
-/// imports, on the same terms.
+/// imports, on the same terms. The snapshots that replace it replace what it
+/// replaced instead, with the two links composed: their `allow` and
+/// `replacement` hold the changes of both steps. If it replaced nothing, they
+/// keep their links to it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DeleteSnapshotResponse {
     /// The modules removed, the snapshot's own first.

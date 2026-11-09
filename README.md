@@ -551,8 +551,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   snapshots exist, such as a rebuilt spec's link to the original under `to`'s
   `allow`. Each is `{snapshot_id, replaces: {snapshot_id, allow},
   replacement: {filled, changed_definitions?, affected?}}`: the link as the
-  snapshot's own `replaces` shows it, and what its create's comparison
-  found.
+  snapshot's own `replaces` shows it, and what its comparison found: its
+  create's, or the union of two if the snapshot between was deleted.
 - **Counts.** `summary`, `assumptions` and `not_proved` are those of the
   heads, each standing for its module.
 - **Parameters.** The ids are of one version, which the audit uses; ids of

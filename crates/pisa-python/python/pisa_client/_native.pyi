@@ -178,7 +178,8 @@ class AuditTarget(TypedDict):
 
 class AuditLink(TypedDict):
     """A link that let definitions change: the snapshot, its `replaces` as
-    the snapshot shows it, and what its create's comparison found."""
+    the snapshot shows it, and what its comparison found: its create's, or the
+    union of two if the snapshot between was deleted."""
     snapshot_id: str
     replaces: Replaces
     replacement: Replacement
