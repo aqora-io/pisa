@@ -289,13 +289,15 @@ def test_replaces(url):
     skeleton = "import Foo\ndef g : Nat := 1\ntheorem uses_g : g = g := sorry"
     old = client.create_snapshot(skeleton)["snapshot"]["id"]
     fixed = "import Foo\ndef g : Nat := 2\ntheorem uses_g : g = g := rfl"
-    job = client.submit_create_snapshot(fixed, replaces={"snapshot_id": old, "allow": "definitions"})
+    job = client.submit_create_snapshot(fixed, replaces={"snapshot_id": old, "allow": {"definitions": ["g"]}})
     assert job["kind"] == "create_snapshot"
     done = client.wait_job(job)
     assert done["replacement"]["changed_definitions"] == ["g"]
     assert done["replacement"]["affected"] == ["uses_g"]
     with pytest.raises(ValueError):
-        client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": "everything"})
+        client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": "definitions"})
+    unknown = client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": {"definitions": ["nope"]}})
+    assert "snapshot" not in unknown and unknown["check"]["error"]["kind"] == "bad_request"
     with pytest.raises(ValueError):
         client.create_snapshot(fixed, replaces=old)
 

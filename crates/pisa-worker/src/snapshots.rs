@@ -113,7 +113,7 @@ impl Replacing {
     fn link(&self) -> Replaces {
         Replaces {
             snapshot_id: self.entry.clone(),
-            allow: self.replaced.allow,
+            allow: self.replaced.allow.clone(),
         }
     }
 }
@@ -142,15 +142,14 @@ fn compare(
     now: &[Declaration],
     swapped: &Swapped,
 ) -> Result<Replacement, Vec<String>> {
-    let allow = replacing.replaced.allow;
-    let definitions = allow == Some(Allow::Definitions);
+    let allowed = |name: &str| allows(replacing.replaced.allow.as_ref(), name);
     let (values, changed): (Vec<_>, Vec<_>) = statement_changes(&replacing.declarations, now)
         .into_iter()
-        .partition(|c| c.change == Change::Value && definitions);
+        .partition(|c| c.change == Change::Value && allowed(&c.name));
     let mut refused: Vec<String> = changed.iter().map(ToString::to_string).collect();
     let mut changed_definitions: Vec<String> = values.into_iter().map(|c| c.name).collect();
     for reached in walk(replacing, now, swapped)? {
-        if reached.change == Change::Value && definitions {
+        if reached.change == Change::Value && allowed(&reached.name) {
             changed_definitions.push(reached.name);
         } else {
             refused.push(reached.to_string());
@@ -190,6 +189,48 @@ fn compare(
         changed_definitions,
         affected,
     })
+}
+
+/// Whether `allow` lets the definition `name` change its value: it names it,
+/// both as [`normalised`].
+fn allows(allow: Option<&Allow>, name: &str) -> bool {
+    let name = normalised(name);
+    allow.is_some_and(|a| a.definitions.iter().any(|n| normalised(n) == name))
+}
+
+/// The definitions, declarations with a value, that a replacement's `allow`
+/// may name: the replaced module's, and those of the snapshots it no longer
+/// builds on.
+fn allowable<'a>(
+    replacing: &'a Replacing,
+    swapped: &'a Swapped,
+) -> impl Iterator<Item = &'a Declaration> {
+    let lost = swapped.lost.iter().flat_map(|(_, d)| d);
+    replacing
+        .declarations
+        .iter()
+        .chain(lost)
+        .filter(|d| d.value_hash.is_some())
+}
+
+/// The error for a replacement whose `allow` names something other than a
+/// definition it may change (see [`allowable`]), by [`normalised`] name.
+fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Error> {
+    let allow = replacing.replaced.allow.as_ref()?;
+    let names: HashSet<_> = allowable(replacing, swapped)
+        .map(|d| normalised(&d.name))
+        .collect();
+    let name = allow
+        .definitions
+        .iter()
+        .find(|n| !names.contains(&normalised(n)))?;
+    Some(Error::new(
+        ErrorKind::BadRequest,
+        format!(
+            "allow names {name}, which isn't a definition of the replaced snapshot or of a \
+             snapshot the code no longer builds on"
+        ),
+    ))
 }
 
 /// Whether Lean made `name` rather than the code, such as the axiom
@@ -1058,6 +1099,10 @@ impl Snapshots {
                         return Some(response);
                     }
                 };
+                if let Some(e) = allow_error(r, &swapped) {
+                    response.check.error = Some(e);
+                    return Some(response);
+                }
                 match compare(r, &meta.result.declarations, &swapped) {
                     Ok(replacement) => Some(replacement),
                     Err(reasons) => {
@@ -1258,6 +1303,10 @@ impl Snapshots {
                         return fail(outcome, e);
                     }
                 };
+                if let Some(e) = allow_error(r, &swapped) {
+                    self.unbuild(slot, id);
+                    return fail(outcome, e);
+                }
                 match compare(r, &verification.declarations, &swapped) {
                     Ok(replacement) => Some(replacement),
                     Err(reasons) => {
@@ -1709,8 +1758,16 @@ impl Snapshots {
             Some(_) => Vec::new(),
             None => compare(&strict, now, &swapped).err().unwrap_or_default(),
         };
-        let definitions = replacing(Some(Allow::Definitions));
-        let changed_definitions = match compare(&definitions, now, &swapped) {
+        // Under its own `allow` if `to` replaces `from`, else any definition.
+        let allow = match &link {
+            Some(link) => link.allow.clone(),
+            None => Some(Allow {
+                definitions: allowable(&strict, &swapped)
+                    .map(|d| d.name.clone())
+                    .collect(),
+            }),
+        };
+        let changed_definitions = match compare(&replacing(allow), now, &swapped) {
             Ok(r) => r.changed_definitions,
             // What else changed is in `changes`.
             Err(_) => statement_changes(&old_meta.result.declarations, now)
@@ -1785,7 +1842,7 @@ impl Snapshots {
                 // compares what its statements depend on.
                 replaces: link.as_ref().zip(entry.as_ref()).map(|(link, e)| Replaces {
                     snapshot_id: self.id(e),
-                    allow: link.allow,
+                    allow: link.allow.clone(),
                 }),
                 snapshot_id: entry.as_deref().map(|e| self.id(e)),
                 module: snapshot::module(&m),
@@ -2025,6 +2082,13 @@ mod tests {
         using(d, type_refs, value_refs)
     }
 
+    /// An `allow` that names `names`.
+    fn allow(names: &[&str]) -> Option<Allow> {
+        Some(Allow {
+            definitions: names.iter().map(|n| n.to_string()).collect(),
+        })
+    }
+
     fn replacing(old: Vec<Declaration>, allow: Option<Allow>) -> Replacing {
         Replacing {
             replaced: Replaces {
@@ -2072,7 +2136,7 @@ mod tests {
             compare(&replacing(old.clone(), None), &redefined, &needs),
             Err(vec!["statement: f has a different value".to_string()])
         );
-        let allowed = replacing(old.clone(), Some(Allow::Definitions));
+        let allowed = replacing(old.clone(), allow(&["f"]));
         let r = compare(&allowed, &redefined, &needs).unwrap();
         assert_eq!(r.changed_definitions, ["f"]);
         assert_eq!(compare(&allowed, &retyped, &needs).unwrap_err().len(), 1);
@@ -2104,6 +2168,105 @@ mod tests {
     }
 
     #[test]
+    fn only_the_named_definitions_may_change_their_value() {
+        let old = vec![
+            decl("f", "1", Some("2"), &[]),
+            decl("g", "1", Some("2"), &[]),
+        ];
+        let now = [
+            decl("f", "1", Some("3"), &[]),
+            decl("g", "1", Some("3"), &[]),
+        ];
+        let none = Swapped::default();
+        assert_eq!(
+            compare(&replacing(old.clone(), allow(&["f"])), &now, &none),
+            Err(vec!["statement: g has a different value".to_string()])
+        );
+        let r = compare(&replacing(old, allow(&["f", "g"])), &now, &none).unwrap();
+        assert_eq!(r.changed_definitions, ["f", "g"]);
+    }
+
+    #[test]
+    fn allow_names_definitions_of_the_replaced_module_or_a_lost_snapshot() {
+        let old = vec![decl("f", "1", Some("2"), &[]), decl("t", "3", None, &[])];
+        let swapped = Swapped {
+            lost: vec![(
+                "a".into(),
+                vec![
+                    decl("foo", "1", Some("2"), &[]),
+                    decl("_private.PisaSnap.sa.0.h", "1", Some("2"), &[]),
+                ],
+            )],
+            gained: vec![("b".into(), vec![decl("bar", "1", Some("2"), &[])])],
+        };
+        assert!(allow_error(&replacing(old.clone(), None), &swapped).is_none());
+        for names in [&["f"][..], &["foo"], &["f", "foo"], &["_private.h"]] {
+            let allowed = replacing(old.clone(), allow(names));
+            assert!(allow_error(&allowed, &swapped).is_none(), "{names:?}");
+        }
+        // A theorem, a definition of a snapshot the code builds on now, and
+        // a private name as written.
+        for name in ["t", "bar", "nope", "h"] {
+            let allowed = replacing(old.clone(), allow(&["f", name]));
+            let error = allow_error(&allowed, &swapped).unwrap();
+            assert_eq!(error.kind, ErrorKind::BadRequest);
+            let message = format!(
+                "allow names {name}, which isn't a definition of the replaced snapshot or of a \
+                 snapshot the code no longer builds on"
+            );
+            assert_eq!(error.message, message);
+        }
+    }
+
+    #[test]
+    fn a_private_definition_is_allowed_by_its_name_without_its_module() {
+        let h = |m: &str, value: &str| {
+            decl(
+                &format!("_private.PisaSnap.s{m}.0.h"),
+                "1",
+                Some(value),
+                &[],
+            )
+        };
+        let none = Swapped::default();
+        // The replaced module's own: as the comparison names it, or as a
+        // refusal does.
+        let old = vec![h("a", "2")];
+        let now = [h("b", "3")];
+        for name in ["_private.h", "_private.PisaSnap.sa.0.h"] {
+            let allowed = replacing(old.clone(), allow(&[name]));
+            assert!(allow_error(&allowed, &none).is_none(), "{name}");
+            let r = compare(&allowed, &now, &none).unwrap();
+            assert_eq!(r.changed_definitions, ["_private.PisaSnap.sa.0.h"]);
+        }
+        let bare = replacing(old.clone(), allow(&["h"]));
+        assert!(allow_error(&bare, &none).is_some());
+        assert_eq!(
+            compare(&bare, &now, &none),
+            Err(vec![
+                "statement: _private.PisaSnap.sa.0.h has a different value".to_string()
+            ])
+        );
+
+        // One the comparison reaches in a snapshot the code no longer builds
+        // on.
+        let thm = vec![using(
+            decl("thm3", "9", None, &[]),
+            &["_private.PisaSnap.sa.0.h"],
+            &[],
+        )];
+        let swapped = Swapped {
+            lost: vec![("a".into(), vec![h("a", "2")])],
+            gained: vec![("b".into(), vec![h("b", "3")])],
+        };
+        let allowed = replacing(thm.clone(), allow(&["_private.h"]));
+        assert!(allow_error(&allowed, &swapped).is_none());
+        let r = compare(&allowed, &thm, &swapped).unwrap();
+        assert_eq!(r.changed_definitions, ["_private.PisaSnap.sa.0.h"]);
+        assert_eq!(r.affected, ["thm3"]);
+    }
+
+    #[test]
     fn a_swapped_snapshot_passes_when_nothing_the_statements_use_changed() {
         let foo = || using(decl("foo", "1", Some("2"), &[]), &[], &["bar"]);
         let bar = |value: &str| using(decl("bar", "3", Some(value), &[]), &[], &[]);
@@ -2120,7 +2283,7 @@ mod tests {
             compare(&replacing(old.clone(), None), &old, &swapped),
             Err(vec![reason])
         );
-        let allowed = replacing(old.clone(), Some(Allow::Definitions));
+        let allowed = replacing(old.clone(), allow(&["bar"]));
         let r = compare(&allowed, &old, &swapped).unwrap();
         assert_eq!(
             (r.changed_definitions, r.affected),

@@ -440,11 +440,23 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   they were declared in, and what Lean makes on demand, such as equation
   lemmas (`generated`), needn't stay.
 - **Definitions.** `"replaces": {"snapshot_id": "…~9c0e…", "allow":
-  "definitions"}` lets definitions change their value but not their type,
-  e.g. to add a missing hypothesis. A theorem's type only names a definition,
-  so its meaning can change while its type matches: `replacement` in the
-  response lists the `changed_definitions` and the theorems of the new module
-  whose type uses one, directly or through another definition (`affected`).
+  {"definitions": ["helper", "bound"]}}` lets the named definitions change
+  their value but not their type, e.g. to add a missing hypothesis; any other
+  definition that changes is refused (`statement: g has a different value`).
+  A theorem's type only names a definition, so its meaning can change while
+  its type matches: `replacement` in the response lists the
+  `changed_definitions` and the theorems of the new module whose type uses
+  one, directly or through another definition (`affected`).
+  - **What may be named.** A definition (a declaration with a value) of the
+    replaced snapshot's module, or of a snapshot the code no longer builds on
+    (see *Imports*). A name is compared without a private one's module, so
+    `private def h` is `_private.h`, or the full name a refusal gives,
+    `_private.PisaSnap.s….0.h`, but not `h`.
+  - **Errors.** An empty list is a 400 `bad_request`: to change no
+    definition, leave `allow` out. A name that isn't such a definition is a
+    `bad_request` in `check.error` (`allow names nope, which isn't a
+    definition of the replaced snapshot or of a snapshot the code no longer
+    builds on`), and nothing is kept.
 - **The link.** `replacement.filled` lists the declarations that used `sorry`
   and no longer do. The new snapshot records `replaces: {snapshot_id,
   allow?}`, which listings and `GET /snapshots/{id}` show. Only a create that
@@ -540,8 +552,8 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   create compared them, so `changes` is empty. Otherwise the rebuild compares
   them the same way and, if `to` changes what `from` states, answers `ok:
   false` with the `changes` and no plan, unless `allow_changes` is set.
-- **Changed definitions.** When `to` changes a definition's value (with
-  `allow: "definitions"`, or `allow_changes`), `changed_definitions` lists
+- **Changed definitions.** When `to` changes a definition's value (one its
+  `allow` names, or with `allow_changes`), `changed_definitions` lists
   them, and each item lists its theorems whose type uses one, directly or
   through definitions here or below, as `affected`. That is read from what
   the modules' declarations use.
@@ -706,7 +718,7 @@ page = client.list_snapshots({"run": "7"}, limit=50)   # newest first; pass page
 client.update_snapshot(base["id"], {"stage": "done", "run": None})   # a merge patch: None removes a label
 client.verify_snapshot(base["id"])["snapshot"]["verified"]
 more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl"
-extended = client.create_snapshot(more, replaces={"snapshot_id": base["id"]})["snapshot"]   # "allow": "definitions" lets definitions change
+extended = client.create_snapshot(more, replaces={"snapshot_id": base["id"]})["snapshot"]   # "allow": {"definitions": ["double"]} lets double change
 client.list_dependents(base["id"], {"run": "7"})["snapshots"]   # parents first
 client.audit_snapshots({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
 plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time

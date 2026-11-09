@@ -84,10 +84,14 @@ class ApplyTacticResponse(TypedDict):
     complete: bool
     messages: list[Message]
 
+class Allow(TypedDict):
+    """The definitions whose value a replacement may change."""
+    definitions: list[str]
+
 class Replaces(TypedDict):
     """The snapshot a create replaces, and what the replacement may change."""
     snapshot_id: str
-    allow: NotRequired[Literal["definitions"]]
+    allow: NotRequired[Allow]
 
 class Replacement(TypedDict):
     filled: list[str]
@@ -333,9 +337,13 @@ class Client:
         same types and definitions' values, and what those use from a
         snapshot it no longer builds on is unchanged; `replacement` in the
         result lists what it `filled`; otherwise nothing is kept and
-        `check["reasons"]` says what changed. `"allow": "definitions"` lets
-        definitions change their value, and lists the theorems that use them
-        as `affected`."""
+        `check["reasons"]` says what changed. `"allow": {"definitions":
+        ["f"]}` lets `f` change its value, and lists the theorems that use it
+        as `affected`. Each name is a definition of the replaced snapshot or of
+        a snapshot the code no longer builds on, else the result's
+        `check["error"]` is a `bad_request`; a private one is named without
+        its module, `_private.h`. An empty list raises a `PisaError` of kind
+        `bad_request`."""
     def submit_create_snapshot(
         self,
         code: str,

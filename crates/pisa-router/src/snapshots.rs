@@ -66,6 +66,12 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         .as_deref()
         .and_then(|v| app.versions.resolve(Some(v)));
     if let Some(r) = &req.replaces {
+        if r.allow.as_ref().is_some_and(|a| a.definitions.is_empty()) {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "replaces.allow.definitions is empty: to change no definition, leave allow out",
+            ));
+        }
         let replaced = parse_id(&r.snapshot_id)?.version;
         match &version {
             Some(v) if *v != replaced => {

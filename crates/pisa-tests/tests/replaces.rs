@@ -108,7 +108,7 @@ async fn a_definition_changes_only_when_allowed_and_its_users_are_listed() {
     let r = create(&c, json!({"code": fixed, "replaces": replacing(&old)})).await;
     refused(&r, "statement: f has a different value");
 
-    let replaces = json!({"snapshot_id": old, "allow": "definitions"});
+    let replaces = json!({"snapshot_id": old, "allow": {"definitions": ["f"]}});
     let r = create(&c, json!({"code": fixed, "replaces": replaces})).await;
     assert_eq!(
         r["replacement"],
@@ -127,6 +127,66 @@ async fn a_definition_changes_only_when_allowed_and_its_users_are_listed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn only_the_named_definitions_may_change() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let skeleton = "import Foo\n\ndef f : Nat := 1\ndef g : Nat := 1\ntheorem t : f = g := sorry";
+    let old = entry(&create(&c, json!({"code": skeleton})).await).to_string();
+    let replaces = json!({"snapshot_id": old, "allow": {"definitions": ["f"]}});
+
+    let f = "import Foo\n\ndef f : Nat := 2\ndef g : Nat := 1\ntheorem t : f = g := sorry";
+    let r = create(&c, json!({"code": f, "replaces": replaces})).await;
+    assert_eq!(r["replacement"]["changed_definitions"], json!(["f"]), "{r}");
+    assert_eq!(r["snapshot"]["replaces"], replaces);
+
+    let g = "import Foo\n\ndef f : Nat := 1\ndef g : Nat := 2\ntheorem t : f = g := sorry";
+    let r = create(&c, json!({"code": g, "replaces": replaces})).await;
+    refused(&r, "statement: g has a different value");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_must_name_a_definition() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let skeleton = "import Foo\n\ndef f : Nat := 1\ntheorem t : f = f := sorry";
+    let old = entry(&create(&c, json!({"code": skeleton})).await).to_string();
+    let fixed = "import Foo\n\ndef f : Nat := 2\ntheorem t : f = f := rfl";
+    let allowing = |allow: Value| json!({"snapshot_id": old, "allow": allow});
+
+    // An empty list, and the bare form, aren't requests.
+    for allow in [json!({"definitions": []}), json!("definitions")] {
+        let body = json!({"code": fixed, "replaces": allowing(allow.clone())});
+        let (status, r) = c.post("/snapshots", body).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{allow}: {r}"
+        );
+    }
+
+    // A name that isn't a definition, such as a theorem's, keeps nothing.
+    let unknown = |r: &Value, name: &str| {
+        assert!(r.get("snapshot").is_none(), "{r}");
+        assert_eq!(r["check"]["error"]["kind"], "bad_request", "{r}");
+        let message = format!(
+            "allow names {name}, which isn't a definition of the replaced snapshot or of a \
+             snapshot the code no longer builds on"
+        );
+        assert_eq!(r["check"]["error"]["message"], message, "{r}");
+    };
+    for name in ["nope", "t"] {
+        let replaces = allowing(json!({"definitions": ["f", name]}));
+        let r = create(&c, json!({"code": fixed, "replaces": replaces})).await;
+        unknown(&r, name);
+    }
+    // Code that is kept already gets no new snapshot either.
+    create(&c, json!({"code": fixed})).await;
+    let replaces = allowing(json!({"definitions": ["nope"]}));
+    let r = create(&c, json!({"code": fixed, "replaces": replaces})).await;
+    unknown(&r, "nope");
+    let listed = get(&c, "/snapshots").await;
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 2, "{listed}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_comparison_is_stored_with_the_link_for_new_code_and_kept_code() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
@@ -136,7 +196,7 @@ async fn the_comparison_is_stored_with_the_link_for_new_code_and_kept_code() {
     let fixed =
         "import Foo\n\ndef f : Nat := 2\ntheorem t : f = f := rfl\ntheorem u : 1 = 1 := rfl";
     let old = entry(&create(&c, json!({"code": skeleton})).await).to_string();
-    let replaces = json!({"snapshot_id": old, "allow": "definitions"});
+    let replaces = json!({"snapshot_id": old, "allow": {"definitions": ["f"]}});
     let comparison = Replacement {
         filled: vec!["t".into(), "u".into()],
         changed_definitions: vec!["f".into()],
@@ -232,7 +292,7 @@ async fn a_replacement_on_other_snapshots_keeps_what_its_statements_use() {
         &r,
         &format!("statement: foo, from {lost}, has a different value"),
     );
-    let replaces = json!({"snapshot_id": old, "allow": "definitions"});
+    let replaces = json!({"snapshot_id": old, "allow": {"definitions": ["foo"]}});
     let r = create(&c, json!({"code": proof, "replaces": replaces})).await;
     assert_eq!(
         r["replacement"]["changed_definitions"],

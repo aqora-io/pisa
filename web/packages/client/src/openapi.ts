@@ -342,10 +342,24 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /**
-         * @description What a replacement may change besides adding declarations.
-         * @enum {string}
+         * @description What a replacement may change besides adding declarations: the values of
+         *     the named definitions.
          */
-        Allow: "definitions";
+        Allow: {
+            /**
+             * @description The definitions whose value may change, e.g. to add a missing
+             *     hypothesis; their types and theorems' types stay the same. A theorem's
+             *     type only names a definition, so its meaning can change: the response
+             *     lists the theorems that use a changed definition. Each is a definition
+             *     of the replaced snapshot's module or of a snapshot the code no longer
+             *     builds on, else the create's `check.error` is a `bad_request` and
+             *     nothing is kept. Names are compared with a private one's module left
+             *     out, so a `private def h` is `_private.h`, or its full name as a
+             *     refusal gives it, but not `h`. An empty list is a `bad_request`: to
+             *     change none, leave `allow` out.
+             */
+            definitions: string[];
+        };
         /** @description `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`. */
         ApplyTacticRequest: {
             tactic: string;
@@ -544,13 +558,13 @@ export interface components {
              * @description The snapshot this code replaces, e.g. the skeleton a proof fills in.
              *     The code is kept only if it still declares everything that snapshot's
              *     module declares, each the same kind of declaration with the same type
-             *     and, for definitions, the same value, and adds no assumptions
-             *     (`axiom`s, its own or a newly imported snapshot's); it may add other
-             *     declarations and imports. If it no longer builds on a snapshot that
-             *     module does, what the module's declarations use from there must be
-             *     unchanged in what the code builds on now. Otherwise nothing is kept
-             *     and `check.reasons` lists the changes. The new snapshot records the
-             *     link.
+             *     and, for definitions, the same value unless `allow` names them, and
+             *     adds no assumptions (`axiom`s, its own or a newly imported
+             *     snapshot's); it may add other declarations and imports. If it no
+             *     longer builds on a snapshot that module does, what the module's
+             *     declarations use from there must be unchanged in what the code builds
+             *     on now. Otherwise nothing is kept and `check.reasons` lists the
+             *     changes. The new snapshot records the link.
              */
             replaces?: components["schemas"]["Replaces"];
             /**
@@ -1012,7 +1026,10 @@ export interface components {
          *     are done replay their snapshots, and the rest run.
          */
         RebuildSnapshotsResponse: {
-            /** @description The definitions whose value `to` changed. */
+            /**
+             * @description The definitions whose value `to` changed: when `to` replaces `from`,
+             *     among those its `allow` names.
+             */
             changed_definitions?: string[];
             /**
              * @description How `to` differs from `from`, as in a refused replacement's
@@ -1056,7 +1073,10 @@ export interface components {
              *     through another definition.
              */
             affected?: string[];
-            /** @description With `allow: "definitions"`, the definitions whose value changed. */
+            /**
+             * @description The definitions whose value changed, each of them one that `allow`
+             *     names.
+             */
             changed_definitions?: string[];
             /**
              * @description The replaced module's declarations that used `sorry` and no longer
@@ -1071,8 +1091,8 @@ export interface components {
          */
         Replaces: {
             /**
-             * @description What the replacement may change besides adding declarations; by
-             *     default nothing.
+             * @description The definitions the replacement may change besides adding
+             *     declarations; by default none.
              */
             allow?: components["schemas"]["Allow"];
             /**

@@ -297,7 +297,7 @@ fn has_nul(value: &Value) -> bool {
 }
 
 /// An entry's id, module, labels, key, creation time, the entry it replaces
-/// with what it allowed, and the comparison as JSON text, as selected.
+/// with what it allowed and the comparison, both as JSON text, as selected.
 pub(crate) type EntryRow = (
     String,
     String,
@@ -314,10 +314,7 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
     let replaces = match replaces {
         Some(entry) => Some(Replaces {
             snapshot_id: entry,
-            allow: allow
-                .map(Value::String)
-                .map(serde_json::from_value)
-                .transpose()?,
+            allow: allow.map(|text| serde_json::from_str(&text)).transpose()?,
         }),
         None => None,
     };
@@ -334,14 +331,14 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
     Ok((e, meta))
 }
 
-/// What the `replaces_allow` column holds for `replaced`.
+/// What the `replaces_allow` column holds for `replaced`: its `allow` as
+/// JSON text.
 pub(crate) fn allow_column(replaced: &Replaces) -> Result<Option<String>, Fail> {
-    Ok(
-        match replaced.allow.map(serde_json::to_value).transpose()? {
-            Some(Value::String(s)) => Some(s),
-            _ => None,
-        },
-    )
+    Ok(replaced
+        .allow
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?)
 }
 
 /// The error for a module that isn't kept.
@@ -803,7 +800,10 @@ mod tests {
                 .commit("x", &meta("x"), None, no_labels())
                 .await
                 .unwrap();
-            for allow in [None, Some(Allow::Definitions)] {
+            let named = Allow {
+                definitions: vec!["f".into(), "_private.h".into()],
+            };
+            for allow in [None, Some(named)] {
                 let replaces = Some(Replaces {
                     snapshot_id: old.clone(),
                     allow,

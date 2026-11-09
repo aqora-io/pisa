@@ -2,11 +2,20 @@
   "components": {
     "schemas": {
       "Allow": {
-        "description": "What a replacement may change besides adding declarations.",
-        "enum": [
+        "description": "What a replacement may change besides adding declarations: the values of\nthe named definitions.",
+        "properties": {
+          "definitions": {
+            "description": "The definitions whose value may change, e.g. to add a missing\nhypothesis; their types and theorems' types stay the same. A theorem's\ntype only names a definition, so its meaning can change: the response\nlists the theorems that use a changed definition. Each is a definition\nof the replaced snapshot's module or of a snapshot the code no longer\nbuilds on, else the create's `check.error` is a `bad_request` and\nnothing is kept. Names are compared with a private one's module left\nout, so a `private def h` is `_private.h`, or its full name as a\nrefusal gives it, but not `h`. An empty list is a `bad_request`: to\nchange none, leave `allow` out.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
           "definitions"
         ],
-        "type": "string"
+        "type": "object"
       },
       "ApplyTacticRequest": {
         "description": "`POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`.",
@@ -402,7 +411,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value, and adds no assumptions\n(`axiom`s, its own or a newly imported snapshot's); it may add other\ndeclarations and imports. If it no longer builds on a snapshot that\nmodule does, what the module's declarations use from there must be\nunchanged in what the code builds on now. Otherwise nothing is kept\nand `check.reasons` lists the changes. The new snapshot records the\nlink."
+            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` names them, and\nadds no assumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link."
           },
           "timeout": {
             "description": "Lean's time limit in seconds, for building the module including its\nimports.",
@@ -1268,7 +1277,7 @@
         "description": "What a rebuild planned and, unless it was a dry run, did. Sending the same\nrebuild again plans the same items with the same keys, so the creates that\nare done replay their snapshots, and the rest run.",
         "properties": {
           "changed_definitions": {
-            "description": "The definitions whose value `to` changed.",
+            "description": "The definitions whose value `to` changed: when `to` replaces `from`,\namong those its `allow` names.",
             "items": {
               "type": "string"
             },
@@ -1339,7 +1348,7 @@
             "type": "array"
           },
           "changed_definitions": {
-            "description": "With `allow: \"definitions\"`, the definitions whose value changed.",
+            "description": "The definitions whose value changed, each of them one that `allow`\nnames.",
             "items": {
               "type": "string"
             },
@@ -1363,7 +1372,7 @@
         "properties": {
           "allow": {
             "$ref": "#/components/schemas/Allow",
-            "description": "What the replacement may change besides adding declarations; by\ndefault nothing."
+            "description": "The definitions the replacement may change besides adding\ndeclarations; by default none."
           },
           "snapshot_id": {
             "description": "The replaced snapshot. A create's is of the create's version, and\nchooses it when the create names none, ahead of the server's default.",

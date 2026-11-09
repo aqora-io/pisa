@@ -146,11 +146,11 @@ fn job_of(job: &Bound<'_, PyAny>) -> PyResult<Job<Value>> {
 }
 
 /// A create's `replaces`: `{"snapshot_id": …}`, with `"allow":
-/// "definitions"` if it may change definitions.
+/// {"definitions": [...]}` naming the definitions it may change.
 fn replaces_of(replaces: &Bound<'_, PyAny>) -> PyResult<pisa_client::Replaces> {
     serde_json::from_value(from_py(replaces)?).map_err(|_| {
         PyValueError::new_err(
-            "replaces must be {\"snapshot_id\": ...}, with \"allow\": \"definitions\" to change definitions",
+            "replaces must be {\"snapshot_id\": ...}, with \"allow\": {\"definitions\": [...]} to change those definitions",
         )
     })
 }

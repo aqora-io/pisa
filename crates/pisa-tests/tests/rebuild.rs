@@ -369,7 +369,7 @@ async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependent
     )
     .await;
     let fixed = "import Foo\n\ndef f : Nat := 2\ntheorem b : f = f := rfl";
-    let replaces = json!({"snapshot_id": entry(&b), "allow": "definitions"});
+    let replaces = json!({"snapshot_id": entry(&b), "allow": {"definitions": ["f"]}});
     let b2 = create(
         &c,
         json!({"code": fixed, "replaces": replaces, "labels": p1}),

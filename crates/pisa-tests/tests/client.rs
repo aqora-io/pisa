@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    CheckOptions, Client, CreateSnapshotOptions, Detail, Error, ErrorKind, HealthStatus, Job,
-    JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos, ProofStatus, RebuildOptions, Replaces,
+    Allow, CheckOptions, Client, CreateSnapshotOptions, Detail, Error, ErrorKind, HealthStatus,
+    Job, JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos, ProofStatus, RebuildOptions,
+    Replaces,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -225,6 +226,31 @@ async fn client_replaces_snapshots() {
         weakened.check.reasons,
         ["statement: t has a different type"]
     );
+
+    // `allow` names the definitions whose value may change.
+    let skeleton = client
+        .create_snapshot("import Foo\ndef f : Nat := 1\ntheorem u : f = f := sorry")
+        .await
+        .unwrap();
+    let replaces = Replaces {
+        snapshot_id: skeleton.snapshot.unwrap().id,
+        allow: Some(Allow {
+            definitions: vec!["f".into()],
+        }),
+    };
+    let opts = CreateSnapshotOptions {
+        replaces: Some(replaces.clone()),
+        ..Default::default()
+    };
+    let fixed = client
+        .create_snapshot_with(
+            "import Foo\ndef f : Nat := 2\ntheorem u : f = f := rfl",
+            &opts,
+        )
+        .await
+        .unwrap();
+    assert_eq!(fixed.replacement.unwrap().changed_definitions, ["f"]);
+    assert_eq!(fixed.snapshot.unwrap().replaces, Some(replaces));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -552,13 +552,13 @@ pub struct CreateSnapshotRequest {
     /// The snapshot this code replaces, e.g. the skeleton a proof fills in.
     /// The code is kept only if it still declares everything that snapshot's
     /// module declares, each the same kind of declaration with the same type
-    /// and, for definitions, the same value, and adds no assumptions
-    /// (`axiom`s, its own or a newly imported snapshot's); it may add other
-    /// declarations and imports. If it no longer builds on a snapshot that
-    /// module does, what the module's declarations use from there must be
-    /// unchanged in what the code builds on now. Otherwise nothing is kept
-    /// and `check.reasons` lists the changes. The new snapshot records the
-    /// link.
+    /// and, for definitions, the same value unless `allow` names them, and
+    /// adds no assumptions (`axiom`s, its own or a newly imported
+    /// snapshot's); it may add other declarations and imports. If it no
+    /// longer builds on a snapshot that module does, what the module's
+    /// declarations use from there must be unchanged in what the code builds
+    /// on now. Otherwise nothing is kept and `check.reasons` lists the
+    /// changes. The new snapshot records the link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
 }
@@ -571,21 +571,27 @@ pub struct Replaces {
     /// The replaced snapshot. A create's is of the create's version, and
     /// chooses it when the create names none, ahead of the server's default.
     pub snapshot_id: String,
-    /// What the replacement may change besides adding declarations; by
-    /// default nothing.
+    /// The definitions the replacement may change besides adding
+    /// declarations; by default none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Allow>,
 }
 
-/// What a replacement may change besides adding declarations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Allow {
-    /// Definitions' values, e.g. to add a missing hypothesis; their types and
-    /// theorems' types stay the same. A theorem's type only names a
-    /// definition, so its meaning can change: the response lists the
-    /// theorems that use a changed definition.
-    Definitions,
+/// What a replacement may change besides adding declarations: the values of
+/// the named definitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Allow {
+    /// The definitions whose value may change, e.g. to add a missing
+    /// hypothesis; their types and theorems' types stay the same. A theorem's
+    /// type only names a definition, so its meaning can change: the response
+    /// lists the theorems that use a changed definition. Each is a definition
+    /// of the replaced snapshot's module or of a snapshot the code no longer
+    /// builds on, else the create's `check.error` is a `bad_request` and
+    /// nothing is kept. Names are compared with a private one's module left
+    /// out, so a `private def h` is `_private.h`, or its full name as a
+    /// refusal gives it, but not `h`. An empty list is a `bad_request`: to
+    /// change none, leave `allow` out.
+    pub definitions: Vec<String>,
 }
 
 /// What a replacement changed, as the create's comparison with the snapshot
@@ -597,7 +603,8 @@ pub struct Replacement {
     #[schema(required = true)]
     #[serde(default)]
     pub filled: Vec<String>,
-    /// With `allow: "definitions"`, the definitions whose value changed.
+    /// The definitions whose value changed, each of them one that `allow`
+    /// names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_definitions: Vec<String>,
     /// The theorems whose type uses a changed definition, directly or
@@ -763,7 +770,8 @@ pub struct RebuildSnapshotsResponse {
     #[schema(required = true)]
     #[serde(default)]
     pub changes: Vec<String>,
-    /// The definitions whose value `to` changed.
+    /// The definitions whose value `to` changed: when `to` replaces `from`,
+    /// among those its `allow` names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_definitions: Vec<String>,
     /// The creates to make, by level, then oldest first. A level's items can
