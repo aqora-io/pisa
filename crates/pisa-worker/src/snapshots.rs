@@ -1231,6 +1231,28 @@ impl Snapshots {
         };
         let macros = uses_macros(&split.body) || parents.iter().any(|p| p.macros);
         let recheck = job.verify.unwrap_or(macros);
+        // The snapshots a replacement swaps follow from its imports, so a
+        // misnamed `allow` costs no build.
+        let swapped = match replacing {
+            Some(r) => {
+                let mut needs: Vec<String> = Vec::new();
+                for m in parents.iter().flat_map(|p| ids(&p.modules)) {
+                    if !needs.contains(m) {
+                        needs.push(m.clone());
+                    }
+                }
+                needs.push(id.to_string());
+                let swapped = match self.swapped(r, &needs, id).await {
+                    Ok(swapped) => swapped,
+                    Err(e) => return fail(outcome, e),
+                };
+                if let Some(e) = allow_error(r, &swapped) {
+                    return fail(outcome, e);
+                }
+                Some(swapped)
+            }
+            None => None,
+        };
         // `lean -o` imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
 
@@ -1353,31 +1375,17 @@ impl Snapshots {
             .inspect_err(|e| tracing::warn!(module = %id, "exporting declarations failed: {e}"))
             .ok();
         let status = worst_status(&verification.declarations);
-        let needs: Vec<String> = ids(&modules(&parents, own.clone())).cloned().collect();
-        let replacement = match replacing {
-            Some(r) => {
-                let swapped = match self.swapped(r, &needs, id).await {
-                    Ok(swapped) => swapped,
-                    Err(e) => {
-                        self.unbuild(slot, id);
-                        return fail(outcome, e);
-                    }
-                };
-                if let Some(e) = allow_error(r, &swapped) {
+        let replacement = match replacing.zip(swapped.as_ref()) {
+            Some((r, swapped)) => match compare(r, &verification.declarations, swapped) {
+                Ok(replacement) => Some(replacement),
+                Err(reasons) => {
                     self.unbuild(slot, id);
-                    return fail(outcome, e);
+                    verification.ok = false;
+                    verification.reasons.extend(reasons);
+                    outcome.verification = Some(verification);
+                    return Err(Box::new(outcome));
                 }
-                match compare(r, &verification.declarations, &swapped) {
-                    Ok(replacement) => Some(replacement),
-                    Err(reasons) => {
-                        self.unbuild(slot, id);
-                        verification.ok = false;
-                        verification.reasons.extend(reasons);
-                        outcome.verification = Some(verification);
-                        return Err(Box::new(outcome));
-                    }
-                }
-            }
+            },
             None => None,
         };
         outcome.verification = Some(verification);
@@ -1827,7 +1835,10 @@ impl Snapshots {
                     .collect(),
             }),
         };
-        let changed_definitions = match compare(&replacing(allow), now, &swapped) {
+        let compared = compare(&replacing(allow), now, &swapped);
+        // Without a link, whether `to` changes only definitions' values.
+        let values_only = compared.is_ok();
+        let changed_definitions = match compared {
             Ok(r) => r.changed_definitions,
             // What else changed is in `changes`.
             Err(_) => statement_changes(&old_meta.result.declarations, now)
@@ -1958,8 +1969,18 @@ impl Snapshots {
         // A link to a snapshot the plan doesn't rebuild, and that still
         // exists, stays on it, so a run isn't cut where its skeleton doesn't
         // build on `from`: the new snapshot replaces it with its own link's
-        // `allow`, and `to`'s when it built on `from`, which the new one no
-        // longer does.
+        // `allow` and, when it built on `from`, which the new one no longer
+        // does, what `to` changed: `to`'s `allow` if `to` replaces `from`,
+        // else the definitions whose value it changed. If `to` doesn't
+        // replace `from` and changes more than values, the statements of a
+        // snapshot on `from` changed, so its link goes.
+        let to_allow = match &link {
+            Some(link) => link.allow.clone(),
+            None => Some(Allow {
+                definitions: changed_definitions.clone(),
+            }),
+        };
+        let statements_kept = link.is_some() || values_only;
         let mut outside: Vec<Option<RebuildLink>> = Vec::new();
         for (p, r) in planned.iter().zip(&replaced) {
             let own = p
@@ -1970,17 +1991,17 @@ impl Snapshots {
                 Some(own) => self.catalog.find_entry(&own.snapshot_id).await?,
                 None => None,
             };
-            outside.push(own.zip(target).map(|(own, target)| {
+            outside.push(own.zip(target).and_then(|(own, target)| {
                 let on_from = target.module == old || above.contains_key(&target.module);
-                let to_allow = link
-                    .as_ref()
-                    .filter(|_| on_from)
-                    .and_then(|l| l.allow.as_ref());
-                RebuildLink {
+                if on_from && !statements_kept {
+                    return None;
+                }
+                let added = to_allow.as_ref().filter(|_| on_from);
+                Some(RebuildLink {
                     snapshot_id: Some(self.id(&own.snapshot_id)),
                     item: None,
-                    allow: union(own.allow.as_ref(), to_allow),
-                }
+                    allow: union(own.allow.as_ref(), added),
+                })
             }));
         }
         let mut sorted: Vec<usize> = (0..planned.len()).collect();

@@ -5,7 +5,7 @@
         "description": "What a replacement may change besides adding declarations: the values of\nthe named definitions.",
         "properties": {
           "definitions": {
-            "description": "The definitions whose value may change, e.g. to add a missing\nhypothesis; their types and theorems' types stay the same. A theorem's\ntype only names a definition, so its meaning can change: the response\nlists the theorems that use a changed definition. Each is a definition\nof the replaced snapshot's module or of a snapshot the code no longer\nbuilds on, else the create's `check.error` is a `bad_request` and\nnothing is kept. Names are compared with a private one's module left\nout, so a `private def h` is `_private.h`, or its full name as a\nrefusal gives it, but not `h`, as the error for `h` says. An empty\nlist is a `bad_request`: to change none, leave `allow` out.",
+            "description": "The definitions whose value may change, e.g. to add a missing\nhypothesis; their types and theorems' types stay the same. A theorem's\ntype only names a definition, so its meaning can change: the response\nlists the theorems that use a changed definition. Each is a definition\nof the replaced snapshot's module or of a snapshot the code no longer\nbuilds on, else the create's `check.error` is a `bad_request`, found\nbefore the code is built, and nothing is kept. Names are compared\nwith a private one's module left out, so a `private def h` is\n`_private.h`, or its full name as a refusal gives it, but not `h`, as\nthe error for `h` says. An empty list is a `bad_request`: to change\nnone, leave `allow` out.",
             "items": {
               "type": "string"
             },
@@ -1301,7 +1301,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/RebuildLink",
-            "description": "What the new snapshot replaces, to send as the create's `replaces`,\nthe links mirroring the old ones. If the snapshot it rebuilds\nreplaced one the plan also rebuilds, it replaces that one's new\nsnapshot, `item`, with its own link's `allow`: a skeleton's proof\nreplaces the rebuilt skeleton, and is compared with it. If it\nreplaced one the plan doesn't rebuild, it replaces that same\nsnapshot, with its own link's `allow` and, when `to` replaces `from`\nand that snapshot builds on `from`, `to`'s: a proof whose skeleton\ndoesn't build on `from` still replaces the skeleton. Otherwise, when\n`to` replaces `from`, it replaces the snapshot it rebuilds, with\n`to`'s `allow`. The create then checks that nothing its statements\ndepend on changed, and is refused if something did."
+            "description": "What the new snapshot replaces, to send as the create's `replaces`,\nthe links mirroring the old ones. If the snapshot it rebuilds\nreplaced one the plan also rebuilds, it replaces that one's new\nsnapshot, `item`, with its own link's `allow`: a skeleton's proof\nreplaces the rebuilt skeleton, and is compared with it. If it\nreplaced one the plan doesn't rebuild, and that still exists, it\nreplaces that same snapshot, so a proof whose skeleton isn't rebuilt\nstill replaces the skeleton. Its `allow` is its own link's and, when\nthat snapshot builds on `from`, what `to` changed: `to`'s `allow` if\n`to` replaces `from`, else the `changed_definitions`. There is no\nsuch link when that snapshot builds on `from` and `to` doesn't\nreplace `from` and changes more than definitions' values: its\nstatements changed. Otherwise, when `to` replaces `from`, it\nreplaces the snapshot it rebuilds, with `to`'s `allow`.\nThe create then checks that nothing its statements depend on\nchanged, and is refused if something did."
           },
           "snapshot_id": {
             "description": "The snapshot it rebuilds. Absent for a module that only links others\nto `from`, with no snapshot that has the labels: it gets the labels\nasked for.",
@@ -1324,7 +1324,7 @@
         "properties": {
           "allow": {
             "$ref": "#/components/schemas/Allow",
-            "description": "As in [`Replaces::allow`]."
+            "description": "As in [`Replaces::allow`]: for `item`, the old link's; for the\nsnapshot the item rebuilds, `to`'s; for the snapshot the old link\nnamed, the old link's and, if that snapshot builds on `from`, what\n`to` changed (see [`RebuildItem::replaces`])."
           },
           "item": {
             "description": "The index in `plan` of the item whose new snapshot it replaces. That\nitem is at a lower level.",

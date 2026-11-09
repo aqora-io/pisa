@@ -629,6 +629,95 @@ async fn a_proof_whose_skeleton_isnt_rebuilt_still_replaces_it() {
     assert_eq!(info["replaces"], link, "{info}");
 }
 
+/// B defining `g`, an unlabelled skeleton S0 on B whose statement uses `g`,
+/// and its proof P1 on B in `p:1`; then the run, with `allow_changes`, that
+/// rebuilds P1 on B′, which declares `g` by `def_g` instead and doesn't
+/// replace B. Returns S0, P1 and the run.
+async fn rebuilt_on_another_g(c: &Cluster, def_g: &str) -> (Value, Value, Value) {
+    let b = create(c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let s0 = create(c, json!({"code": on(&b, "theorem s : g = g := sorry")})).await;
+    let p1 = create(
+        c,
+        json!({"code": on(&b, "theorem s : g = g := rfl"),
+               "replaces": {"snapshot_id": entry(&s0)}, "labels": {"p": "1"}}),
+    )
+    .await;
+    let b2 = create(c, json!({"code": format!("import Foo\n\n{def_g}")})).await;
+    let r = rebuild(c, &b, &b2, json!({"allow_changes": true})).await;
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
+    (s0, p1, r)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_changes_rebuild_keeps_a_run_when_only_values_change() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let (s0, _, r) = rebuilt_on_another_g(&c, "def g : Nat := 2").await;
+    assert_eq!(r["changed_definitions"], json!(["g"]), "{r}");
+    // P1′ replaces S0, which builds on B, with the definitions B′ changed.
+    let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["g"]}});
+    assert_eq!(items(&r, "replaces"), [&link], "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
+    let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+    assert_eq!(info["replaces"], link, "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_changes_rebuild_unlinks_a_run_whose_statements_change() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let (_, p1, r) = rebuilt_on_another_g(&c, "def g : Int := 1").await;
+    assert_eq!(
+        r["changes"],
+        json!(["statement: g has a different type"]),
+        "{r}"
+    );
+    // S0's statement changed meaning, so P1′ can't replace it.
+    assert_eq!(items(&r, "replaces"), [&Value::Null], "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["created"][0]["snapshot_id"], p1["snapshot"]["id"], "{r}");
+    let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
+    let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+    assert!(info.get("replaces").is_none(), "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_allow_changes_rebuild_keeps_a_run_its_changes_cant_reach() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let a = create(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
+    let h = create(&c, json!({"code": "import Foo\n\ndef h : Nat := 1"})).await;
+    let s0 = create(
+        &c,
+        json!({"code": on(&a, "def f : Nat := 0\ntheorem s : f = a := sorry")}),
+    )
+    .await;
+    // P1, which changes `f`, also imports H; S0 doesn't.
+    let code = format!(
+        "import Foo\nimport {}\nimport {}\n\ndef f : Nat := 1\ntheorem s : f = a := rfl",
+        module(&a),
+        module(&h)
+    );
+    let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f"]}});
+    let p1 = create(
+        &c,
+        json!({"code": code, "replaces": link, "labels": {"p": "1"}}),
+    )
+    .await;
+    let h2 = create(&c, json!({"code": "import Foo\n\ndef h : Int := 1"})).await;
+    let r = rebuild(&c, &h, &h2, json!({"allow_changes": true})).await;
+    assert_eq!(
+        r["changes"],
+        json!(["statement: h has a different type"]),
+        "{r}"
+    );
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
+    // S0 doesn't build on H, so H′ can't change what it states.
+    assert_eq!(items(&r, "replaces"), [&link], "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
+    let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+    assert_eq!(info["replaces"], link, "{info}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_item_that_replaces_a_failed_one_is_skipped() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;

@@ -187,6 +187,20 @@ async fn allow_must_name_a_definition() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_misnamed_allow_builds_nothing() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    // CRASH would kill fake-lean: a build would answer `crash`.
+    let code = format!("{PROOF}\nCRASH");
+    let replaces = json!({"snapshot_id": old, "allow": {"definitions": ["nope"]}});
+    let r = create(&c, json!({"code": code, "replaces": replaces})).await;
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "bad_request", "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.starts_with("allow names nope, "), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn the_comparison_is_stored_with_the_link_for_new_code_and_kept_code() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let catalog = Catalog::new(c.db.clone(), c.version("v"));

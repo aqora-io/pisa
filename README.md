@@ -456,8 +456,9 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     definition, leave `allow` out. A name that isn't such a definition is a
     `bad_request` in `check.error` (`allow names nope, which isn't a
     definition of the replaced snapshot or of a snapshot the code no longer
-    builds on`), and nothing is kept. For `h` where a `private def h` would
-    match, it adds `(for a private definition, write _private.h)`.
+    builds on`), found before the code is built, and nothing is kept. For
+    `h` where a `private def h` would match, it adds `(for a private
+    definition, write _private.h)`.
 - **The link.** `replacement.filled` lists the declarations that used `sorry`
   and no longer do. The new snapshot records `replaces: {snapshot_id,
   allow?}`, which listings and `GET /snapshots/{id}` show. Only a create that
@@ -638,14 +639,22 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
     snapshot replaced one the plan doesn't rebuild, as when a proof imports
     a helper its skeleton doesn't and the rebuild is from the helper: the
     new proof replaces the old skeleton, with the old link's `allow` and,
-    when `to` replaces `from` and the skeleton builds on `from`, `to`'s
-    too. With `retire`, the old proof goes and the run goes on through the
-    new one;
+    when the skeleton builds on `from`, what `to` changed: `to`'s `allow`
+    when `to` replaces `from`, else the `changed_definitions`. With
+    `retire`, the old proof goes and the run goes on through the new one.
+    There is no such link when the skeleton builds on `from` and `to`
+    doesn't replace `from` and changes more than definitions' values: the
+    skeleton's statements changed;
   - otherwise, when `to` replaces `from`, `{"snapshot_id": …, "allow"?}`: the
     rebuilt snapshot replaces its old one, with `to`'s `allow`, which checks
     that nothing its statements use changed through the rebuild. A dependent
     whose statements did change meaning is refused rather than kept;
   - otherwise none.
+
+  An old link to a snapshot that has since been deleted, or one that would
+  make an item wait on itself (a snapshot that replaced one built on its own
+  module), falls through to the last two: the new snapshot replaces its old
+  one when `to` replaces `from`, and has no link otherwise.
 - **Limits.** At most 1000 items, as the plan carries code.
 
 **How it works.**

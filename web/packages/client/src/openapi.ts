@@ -352,11 +352,12 @@ export interface components {
              *     type only names a definition, so its meaning can change: the response
              *     lists the theorems that use a changed definition. Each is a definition
              *     of the replaced snapshot's module or of a snapshot the code no longer
-             *     builds on, else the create's `check.error` is a `bad_request` and
-             *     nothing is kept. Names are compared with a private one's module left
-             *     out, so a `private def h` is `_private.h`, or its full name as a
-             *     refusal gives it, but not `h`, as the error for `h` says. An empty
-             *     list is a `bad_request`: to change none, leave `allow` out.
+             *     builds on, else the create's `check.error` is a `bad_request`, found
+             *     before the code is built, and nothing is kept. Names are compared
+             *     with a private one's module left out, so a `private def h` is
+             *     `_private.h`, or its full name as a refusal gives it, but not `h`, as
+             *     the error for `h` says. An empty list is a `bad_request`: to change
+             *     none, leave `allow` out.
              */
             definitions: string[];
         };
@@ -1055,13 +1056,17 @@ export interface components {
              *     replaced one the plan also rebuilds, it replaces that one's new
              *     snapshot, `item`, with its own link's `allow`: a skeleton's proof
              *     replaces the rebuilt skeleton, and is compared with it. If it
-             *     replaced one the plan doesn't rebuild, it replaces that same
-             *     snapshot, with its own link's `allow` and, when `to` replaces `from`
-             *     and that snapshot builds on `from`, `to`'s: a proof whose skeleton
-             *     doesn't build on `from` still replaces the skeleton. Otherwise, when
-             *     `to` replaces `from`, it replaces the snapshot it rebuilds, with
-             *     `to`'s `allow`. The create then checks that nothing its statements
-             *     depend on changed, and is refused if something did.
+             *     replaced one the plan doesn't rebuild, and that still exists, it
+             *     replaces that same snapshot, so a proof whose skeleton isn't rebuilt
+             *     still replaces the skeleton. Its `allow` is its own link's and, when
+             *     that snapshot builds on `from`, what `to` changed: `to`'s `allow` if
+             *     `to` replaces `from`, else the `changed_definitions`. There is no
+             *     such link when that snapshot builds on `from` and `to` doesn't
+             *     replace `from` and changes more than definitions' values: its
+             *     statements changed. Otherwise, when `to` replaces `from`, it
+             *     replaces the snapshot it rebuilds, with `to`'s `allow`.
+             *     The create then checks that nothing its statements depend on
+             *     changed, and is refused if something did.
              */
             replaces?: components["schemas"]["RebuildLink"];
             /**
@@ -1078,7 +1083,12 @@ export interface components {
          *     `new_snapshot_id` created for that item.
          */
         RebuildLink: {
-            /** @description As in [`Replaces::allow`]. */
+            /**
+             * @description As in [`Replaces::allow`]: for `item`, the old link's; for the
+             *     snapshot the item rebuilds, `to`'s; for the snapshot the old link
+             *     named, the old link's and, if that snapshot builds on `from`, what
+             *     `to` changed (see [`RebuildItem::replaces`]).
+             */
             allow?: components["schemas"]["Allow"];
             /**
              * @description The index in `plan` of the item whose new snapshot it replaces. That

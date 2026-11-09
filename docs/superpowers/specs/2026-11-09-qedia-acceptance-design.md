@@ -134,15 +134,26 @@ For each plan item that rebuilds an entry X:
    - Its `level` is after Y's item.
 2. **X replaced a Y that this plan doesn't rebuild.** (Controller ruling
    after the final review.)
-   - X's copy replaces Y itself, with X's own `allow` and, when `to` replaces
-     `from` and Y builds on `from`, `to`'s `allow` too (the union of the
+   - When `to` replaces `from`, X's copy replaces Y itself, with X's own
+     `allow` and, when Y builds on `from`, `to`'s `allow` (the union of the
      names).
+   - When it doesn't (an `allow_changes` rebuild):
+     - Y doesn't build on `from`: X's copy replaces Y with X's own `allow`.
+       `from`'s changes can't reach Y's statements, so the link is true.
+     - Y builds on `from`, and every change the plan's comparison of `to`
+       with `from` found is a definition's value: X's copy replaces Y with
+       X's own `allow` and the plan's `changed_definitions`. They are
+       definitions of `from` or of snapshots `from` built on and `to`
+       doesn't, so they pass T3's name check for X's copy against Y.
+     - Y builds on `from`, and some change is not a value change (such as a
+       type, a kind or a missing declaration): X's copy gets no link (case
+       4). Y's statements really changed, so the link would be false.
    - Case 3 would make it replace X, which `retire` deletes, and X's row held
      Y ← X: the run would be cut. This happens when a proof imports a helper
      its skeleton doesn't, and the rebuild is from the helper.
-   - `to`'s `allow` names `from`'s definitions. A Y that doesn't build on
+   - `to`'s part names `from`'s definitions. A Y that doesn't build on
      `from` has none of them, and the create would refuse the names (T3), so
-     they are left out there. (Implementer's refinement of the ruling.)
+     they are left out there. (Controller ruling 9 after the final review.)
    - Without `retire`, X and X's copy both replace Y: a fork, as below.
 3. **Otherwise, when `to` replaces `from`.** X's copy replaces X, with `to`'s
    `allow`, as today.
