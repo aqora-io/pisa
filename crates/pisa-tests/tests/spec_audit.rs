@@ -396,9 +396,11 @@ async fn link(c: &Cluster, id: &str) -> Value {
 
 /// The acceptance flow: a skeleton on a base, a proof that changes one of
 /// its definitions, then a base that changes one of its own, and a rebuild
-/// that retires the old run. The new run is whole, and its links say what
-/// changed.
+/// that retires the old run. A rebuild copies only the run's head, and
+/// deleting the skeleton splices its link into the proof's, so the new proof
+/// replaces the old skeleton under both edits.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "Tasks 2 and 3: splices and head-only rebuilds"]
 async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let p1 = json!({"p": "1"});
@@ -427,28 +429,67 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
                       "verify": true});
     let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
     assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
-    assert_eq!(rebuilt["retired"], json!([id(&p1_), id(&s0)]));
-    let (s0_new, p1_new) = (made(&rebuilt, &s0), made(&rebuilt, &p1_));
-    // The new skeleton replaces the old one under `to`'s `allow`, and the
-    // new proof the new skeleton under its own.
-    let s0_link = json!({"snapshot_id": id(&s0), "allow": allow_g});
-    let p1_link = json!({"snapshot_id": s0_new, "allow": allow_f});
-    assert_eq!(link(&c, &s0_new).await, s0_link);
+    // S0 is obsolete, so it is neither rebuilt nor retired.
+    assert_eq!(rebuilt["retired"], json!([id(&p1_)]), "{rebuilt}");
+    let p1_new = made(&rebuilt, &p1_);
+    // The new proof replaces S0 across both edits: its own, and B′'s.
+    let allow_f_g = json!({"definitions": ["f", "g"]});
+    let p1_link = json!({"snapshot_id": id(&s0), "allow": allow_f_g});
     assert_eq!(link(&c, &p1_new).await, p1_link);
 
-    let r = audit(&c, &[s0_new.as_str()]).await;
+    let r = audit(&c, &[id(&s0)]).await;
     assert_eq!(r["heads"], json!([p1_new]), "{r}");
     assert_eq!(
         r["links"],
         json!([
-            {"snapshot_id": s0_new, "replaces": s0_link,
-             "replacement": {"filled": [], "changed_definitions": ["g"], "affected": ["t"]}},
             {"snapshot_id": p1_new, "replaces": p1_link,
-             "replacement": {"filled": ["t"], "changed_definitions": ["f"], "affected": ["t"]}}
+             "replacement": {"filled": ["t"], "changed_definitions": ["f", "g"],
+                             "affected": ["t"]}}
         ]),
         "{r}"
     );
     assert_eq!(r["clean"], true, "{r}");
+}
+
+/// A rebuild onto a base that changes a statement the skeleton uses gives
+/// the new proof no link, so `retire` keeps the old proof, and the run stays
+/// on it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Task 3: head-only rebuilds and retire"]
+async fn a_rebuild_that_changes_a_statement_leaves_the_run_on_the_old_proof() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let s0 = create(
+        &c,
+        json!({"code": on(&b, "def f : Nat := 0\ntheorem t : f = g := sorry"), "labels": p1}),
+    )
+    .await;
+    let p1_ = create(
+        &c,
+        json!({"code": on(&b, "def f : Nat := 1\ntheorem t : f = g := rfl"), "labels": p1,
+               "replaces": {"snapshot_id": id(&s0), "allow": {"definitions": ["f"]}}}),
+    )
+    .await;
+    let b2 = create(&c, json!({"code": "import Foo\n\ndef g : Int := 1"})).await;
+
+    let body = json!({"from": id(&b), "to": id(&b2), "labels": p1, "allow_changes": true,
+                      "retire": true});
+    let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
+    assert_eq!(
+        rebuilt["changes"],
+        json!(["statement: g has a different type"]),
+        "{rebuilt}"
+    );
+    let plan = rebuilt["plan"].as_array().unwrap();
+    assert_eq!(plan.len(), 1, "{rebuilt}");
+    assert_eq!(plan[0]["snapshot_id"], id(&p1_), "{rebuilt}");
+    assert!(plan[0].get("replaces").is_none(), "{rebuilt}");
+    // The new proof has no link, so the old one is kept.
+    assert!(rebuilt.get("retired").is_none(), "{rebuilt}");
+    let r = audit(&c, &[id(&s0)]).await;
+    assert_eq!(r["heads"], json!([id(&p1_)]), "{r}");
 }
 
 /// A proof P1 that also imports a helper H, which its skeleton S0 doesn't:
