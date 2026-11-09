@@ -1040,6 +1040,12 @@ A check is `ok` only when all of these hold:
   code often asks for. Options that skip the kernel, such as
   `debug.skipKernelTC`, are rejected.
 
+Lean's `autoImplicit` option is off by default, in checks, sessions and
+snapshot builds alike, so a name that isn't bound in a statement is an error
+rather than a new implicit argument. Code can turn it back on with
+`set_option autoImplicit true`, alone or with `in`, because it is an allowlisted
+option.
+
 The axiom report is a `run_cmd` metaprogram. It needs `Lean.Elab.Command`, so
 workers add `import Lean.Elab.Command` to every header they load, or
 `meta import Lean.Elab.Command` to a module-system header.

@@ -13,7 +13,7 @@ use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::launcher::{Compiled, Launcher, Verified};
-use crate::policy::{Policy, header_with_report_import};
+use crate::policy::{Policy, header_command};
 use crate::snapshots::Snapshots;
 
 /// Succeeds only in an environment where the header's imports loaded.
@@ -271,7 +271,7 @@ impl Lease {
                 )));
             }
         };
-        let header = header_with_report_import(header);
+        let header = header_command(header);
         let timeout = pool.cfg.import_timeout;
         let r = match repl
             .send(&ReplCommand::cmd(header.clone(), None), timeout)

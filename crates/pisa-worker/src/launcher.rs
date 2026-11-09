@@ -207,9 +207,8 @@ impl Launcher {
         timeout: Duration,
     ) -> std::io::Result<Compiled> {
         let before = self.oom_kills(slot);
-        let path = |p: &Path| p.to_string_lossy().into_owned();
-        let (root, file, olean) = (path(root), path(file), path(olean));
-        let args = ["-R", &root, "-o", &olean, "--json", &file];
+        let args = compile_args(root, file, olean);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let mut cmd = self.command(slot, &self.lean, &args)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -301,6 +300,22 @@ impl Launcher {
     }
 }
 
+/// The `lean` arguments that compile `file` to `olean`, a module named by its
+/// path below `root`. `-D` sets `autoImplicit` off for the whole file, as the
+/// header command does in the REPL; code can turn it back on with `set_option`.
+fn compile_args(root: &Path, file: &Path, olean: &Path) -> Vec<String> {
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    vec![
+        "-R".into(),
+        path(root),
+        "-o".into(),
+        path(olean),
+        "-DautoImplicit=false".into(),
+        "--json".into(),
+        path(file),
+    ]
+}
+
 /// No network, no view of other processes, a read-only filesystem except
 /// for the slot directory, and a fresh /tmp. The snapshot cache is bound
 /// read-only after the tmpfs, since it usually lives under /tmp.
@@ -363,6 +378,29 @@ fn parse_env0(bytes: &[u8]) -> Vec<(OsString, OsString)> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn compile_turns_auto_implicit_off_before_the_file() {
+        let args = super::compile_args(
+            Path::new("/root"),
+            Path::new("/root/s.lean"),
+            Path::new("/root/s.olean"),
+        );
+        assert_eq!(
+            args,
+            [
+                "-R",
+                "/root",
+                "-o",
+                "/root/s.olean",
+                "-DautoImplicit=false",
+                "--json",
+                "/root/s.lean"
+            ]
+        );
+    }
+
     #[test]
     fn parses_nul_separated_env() {
         let env = super::parse_env0(b"LEAN_PATH=/a:/b\0X=y=z\0");

@@ -56,7 +56,18 @@ pub const REPORT_IMPORT: &str = "import Lean.Elab.Command";
 /// `meta` import.
 pub const MODULE_REPORT_IMPORT: &str = "meta import Lean.Elab.Command";
 
-pub fn header_with_report_import(header: &str) -> String {
+/// Lean defaults `autoImplicit` to true, which turns a misspelt name in a
+/// statement into a new implicit argument instead of an error. Every header
+/// command ends with this line and the commands that follow reuse its scopes,
+/// so submitted code starts with the option off. It can opt back in with
+/// `set_option autoImplicit true`, which stays on the allowlist.
+pub const AUTO_IMPLICIT_OFF: &str = "set_option autoImplicit false";
+
+/// What a worker sends the REPL for a header: the header with the report
+/// import, then [`AUTO_IMPLICIT_OFF`]. It is built after the header's key, so
+/// the added lines change no key, and the REPL numbers each command's lines
+/// from 1, so they move no position in the code that follows.
+pub fn header_command(header: &str) -> String {
     let module_system = header.lines().next() == Some("module");
     let imported = header
         .lines()
@@ -69,13 +80,14 @@ pub fn header_with_report_import(header: &str) -> String {
     } else {
         REPORT_IMPORT
     };
-    if imported {
+    let imports = if imported {
         header.to_string()
     } else if header.trim().is_empty() {
         import.to_string()
     } else {
         format!("{header}\n{import}")
-    }
+    };
+    format!("{imports}\n{AUTO_IMPLICIT_OFF}")
 }
 
 /// Prefix of the info message the axiom report prints.
@@ -567,23 +579,37 @@ mod tests {
     }
 
     #[test]
-    fn report_import_is_added_once_in_either_kind_of_header() {
-        assert_eq!(header_with_report_import(""), REPORT_IMPORT);
+    fn header_command_imports_the_report_once_and_turns_auto_implicit_off() {
+        let off = "set_option autoImplicit false";
+        assert_eq!(AUTO_IMPLICIT_OFF, off);
         assert_eq!(
-            header_with_report_import("import Mathlib\nimport Lean.Elab.Command"),
-            "import Mathlib\nimport Lean.Elab.Command"
+            header_command(""),
+            "import Lean.Elab.Command\nset_option autoImplicit false"
         );
         assert_eq!(
-            header_with_report_import("module\npublic import Mathlib"),
-            "module\npublic import Mathlib\nmeta import Lean.Elab.Command"
+            header_command("import Mathlib"),
+            "import Mathlib\nimport Lean.Elab.Command\nset_option autoImplicit false"
+        );
+        assert_eq!(
+            header_command("import Mathlib\nimport Lean.Elab.Command"),
+            "import Mathlib\nimport Lean.Elab.Command\nset_option autoImplicit false"
+        );
+        assert_eq!(
+            header_command("module\npublic import Foo"),
+            "module\npublic import Foo\nmeta import Lean.Elab.Command\nset_option autoImplicit false"
         );
         // A module needs the `meta` import even if it imports the module.
         assert_eq!(
-            header_with_report_import("module\nimport Lean.Elab.Command"),
-            "module\nimport Lean.Elab.Command\nmeta import Lean.Elab.Command"
+            header_command("module\nimport Lean.Elab.Command"),
+            "module\nimport Lean.Elab.Command\nmeta import Lean.Elab.Command\nset_option autoImplicit false"
         );
-        let has = "module\npublic meta import Lean.Elab.Command";
-        assert_eq!(header_with_report_import(has), has);
+        assert_eq!(
+            header_command("module\npublic meta import Lean.Elab.Command"),
+            "module\npublic meta import Lean.Elab.Command\nset_option autoImplicit false"
+        );
+        for header in ["", "import Mathlib", "module\npublic import Foo"] {
+            assert_eq!(header_command(header).lines().last(), Some(off));
+        }
     }
 
     #[test]

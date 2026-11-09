@@ -256,6 +256,27 @@ def snapshots():
     step("snapshot: errors aren't kept; read, and modules go with their last snapshot")
 
 
+def auto_implicit():
+    unbound = "theorem t : foo = foo := rfl"
+    opted_in = f"set_option autoImplicit true in\n{unbound}"
+
+    def names_foo(messages):
+        return any(m["severity"] == "error" and "foo" in m["text"] for m in messages)
+
+    r = check(unbound)
+    assert not r["ok"] and names_foo(r["messages"]), r
+    r = post("/snapshots", {"code": unbound, "timeout": 600})
+    assert "snapshot" not in r and names_foo(r["check"]["messages"]), r
+    assert check(opted_in)["ok"]
+    kept = post("/snapshots", {"code": opted_in, "timeout": 600})
+    assert kept["check"]["ok"] and "snapshot" in kept, kept
+    delete_snapshots([kept])
+    # Lean recovers from the error, so a session reports it in `messages`.
+    s = post("/sessions", {"code": "theorem t : foo = foo := by sorry"})
+    assert names_foo(s["messages"]), s
+    step("autoImplicit is off unless code turns it on")
+
+
 def labels():
     def create(run):
         return post("/snapshots", {"code": SNAPSHOT_ROOT, "labels": {"e2e": "1", "run": run}, "timeout": 600})["snapshot"]
@@ -419,6 +440,7 @@ if __name__ == "__main__":
         wait_for_workers(2)
     core(failover=not args.no_failover)
     snapshots()
+    auto_implicit()
     labels()
     module_snapshots()
     if args.mathlib:
