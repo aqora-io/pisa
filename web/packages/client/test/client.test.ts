@@ -126,6 +126,16 @@ describe("PisaClient", () => {
     });
   });
 
+  it("audits a run against its spec, in the ids' version", async () => {
+    const { client, sent } = recording(() =>
+      json({ summary: {}, assumptions: [], not_proved: [], clean: false, heads: ["v2~p", "v2~q"], forks: [{ snapshot_id: "v2~s0", replaced_by: ["v2~p", "v2~q"] }] }),
+    );
+    const audit = await client.auditSnapshots({ against: ["v2~s0", "v2~s1"] });
+    expect(sent[0]?.url).toBe("/api/snapshots/audit?against=v2%7Es0&against=v2%7Es1");
+    expect(audit.clean).toBe(false);
+    expect(audit.forks?.[0]?.replaced_by).toEqual(["v2~p", "v2~q"]);
+  });
+
   it("reads a plan's links, to an old snapshot or to another item's new one", async () => {
     const skeleton: RebuildItem = {
       level: 1,

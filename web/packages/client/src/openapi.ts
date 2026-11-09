@@ -221,7 +221,7 @@ export interface paths {
         };
         /**
          * What a project rests on
-         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.
+         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.
          */
         get: operations["auditSnapshots"];
         put?: never;
@@ -396,12 +396,18 @@ export interface components {
             term?: components["schemas"]["TermInfo"];
         };
         AuditAssumption: {
+            /**
+             * @description With `against`: whether the spec permits it, as declared in a spec
+             *     snapshot's module or in a module that one builds on. Names are
+             *     compared with a private one's module left out.
+             */
+            in_spec?: boolean;
             name: string;
             /** @description As written, from its module's declaration export. */
             signature?: string;
             /**
-             * @description A snapshot of the module that declares it: one with the labels if
-             *     there is one.
+             * @description A snapshot of the module that declares it: one with the labels, or
+             *     a head, if there is one.
              */
             snapshot_id?: string;
             /** @description The snapshots' declarations that rest on it. */
@@ -409,12 +415,41 @@ export interface components {
             /** @description Its module has passed the kernel re-check. */
             verified: boolean;
         };
+        /** @description A snapshot that more than one snapshot replaces. */
+        AuditFork: {
+            /** @description The snapshots that replace it, oldest first. */
+            replaced_by: string[];
+            snapshot_id: string;
+        };
+        /**
+         * @description A link that let definitions change: `snapshot_id` replaces `replaces`
+         *     with an `allow`, and its create's comparison found the rest.
+         */
+        AuditLink: {
+            /** @description As in [`Replacement::affected`]. */
+            affected?: string[];
+            allow: components["schemas"]["Allow"];
+            /** @description As in [`Replacement::changed_definitions`]. */
+            changed_definitions?: string[];
+            /** @description The replaced snapshot, which may have been deleted since. */
+            replaces: string;
+            /** @description The replacing snapshot. */
+            snapshot_id: string;
+        };
         /**
          * @description `GET /snapshots/audit`: what the snapshots that have every label the
          *     query names (as in a listing) rest on. Statuses come from the build's
          *     axiom report, or the kernel re-check once a module is verified, so a
          *     trusted audit has no `rejected` or `sorry` and `unverified_modules` 0.
          *     Whether an assumption is reasonable is for review.
+         *
+         *     With `against=<snapshot id>` instead of labels, repeatable, it audits a
+         *     run against its spec, the snapshots named. From each, it follows the
+         *     snapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever
+         *     their labels, to the run's `heads`, and judges each spec declaration on
+         *     each head it reaches. The counts are then those of the heads' snapshots.
+         *     The ids are of one version, which the audit uses, and `label` doesn't
+         *     combine with them. A spec snapshot that doesn't exist is `not_found`.
          */
         AuditSnapshotsResponse: {
             /**
@@ -422,9 +457,42 @@ export interface components {
              *     they are declared.
              */
             assumptions: components["schemas"]["AuditAssumption"][];
+            /**
+             * @description With `against`: whether the run is done. There is no fork, and every
+             *     target is accepted on its head: the head's module is verified, and
+             *     the target is `proved`, or `conditional` on assumptions the spec
+             *     permits (see [`AuditAssumption::in_spec`]).
+             */
+            clean?: boolean;
+            /**
+             * @description With `against`: the snapshots on the run that more than one snapshot
+             *     replaces. The run isn't clean until all but one branch are deleted.
+             */
+            forks?: components["schemas"]["AuditFork"][];
+            /**
+             * @description With `against`: the snapshots the run ends at, which nothing
+             *     replaces, each once, in the order the walk reached them. A snapshot
+             *     replaced by one that was deleted since is a head again, as the
+             *     deleted snapshot held the link.
+             */
+            heads?: string[];
+            /**
+             * @description With `against`: the links that allowed definitions to change, for
+             *     review: those on the way from the spec snapshots to the heads, and
+             *     those of the spec snapshots' own chains back through what they
+             *     replaced, as far as those snapshots exist.
+             */
+            links?: components["schemas"]["AuditLink"][];
             /** @description The declarations that are `sorry` or `rejected`. */
             not_proved: components["schemas"]["AuditUnproved"][];
             summary: components["schemas"]["AuditSummary"];
+            /**
+             * @description With `against`: each declaration of a spec snapshot's module, other
+             *     than its assumptions and what Lean generated, on each head reached
+             *     from that spec snapshot. A replacement keeps every declaration of what
+             *     it replaces, so every head carries them all.
+             */
+            targets?: components["schemas"]["AuditTarget"][];
         };
         /**
          * @description The snapshots' declarations by status, each module's once, without the
@@ -446,11 +514,23 @@ export interface components {
              */
             unverified_modules: number;
         };
+        /** @description A spec declaration, as a head of the run declares it. */
+        AuditTarget: {
+            /** @description The head, reached from `spec`, whose declaration this is. */
+            head: string;
+            name: string;
+            /** @description The spec snapshot that declares it. */
+            spec: string;
+            /** @description Its status on the head. */
+            status: components["schemas"]["ProofStatus"];
+            /** @description The head's module has passed the kernel re-check. */
+            verified: boolean;
+        };
         AuditUnproved: {
             /** @description Its axioms outside the allowed list. */
             axioms: string[];
             name: string;
-            /** @description A snapshot with the labels whose module declares it. */
+            /** @description A snapshot with the labels, or a head, whose module declares it. */
             snapshot_id: string;
             status: components["schemas"]["ProofStatus"];
         };
@@ -1363,8 +1443,11 @@ export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
 export type ApplyTacticResponse = components['schemas']['ApplyTacticResponse'];
 export type AtPosition = components['schemas']['AtPosition'];
 export type AuditAssumption = components['schemas']['AuditAssumption'];
+export type AuditFork = components['schemas']['AuditFork'];
+export type AuditLink = components['schemas']['AuditLink'];
 export type AuditSnapshotsResponse = components['schemas']['AuditSnapshotsResponse'];
 export type AuditSummary = components['schemas']['AuditSummary'];
+export type AuditTarget = components['schemas']['AuditTarget'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
 export type CheckBatchItem = components['schemas']['CheckBatchItem'];
 export type CheckBatchRequest = components['schemas']['CheckBatchRequest'];
@@ -2492,7 +2575,9 @@ export interface operations {
             query?: {
                 /** @description `key:value`, split on the first `:`; repeatable */
                 label?: string[];
-                /** @description The worker version; the server's default when absent. */
+                /** @description A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label` */
+                against?: string[];
+                /** @description The worker version; the server's default when absent. With `against`, the ids' version instead. */
                 version?: string;
             };
             header?: never;

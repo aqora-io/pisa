@@ -277,6 +277,44 @@ def auto_implicit():
     step("autoImplicit is off unless code turns it on")
 
 
+def create_snapshot(code, **extra):
+    r = post("/snapshots", {"code": code, "timeout": 600, **extra})
+    assert "snapshot" in r, r
+    return r
+
+
+def spec_audit():
+    def audit(spec):
+        query = urllib.parse.urlencode({"against": spec["snapshot"]["id"]})
+        status, out = call("GET", f"/snapshots/audit?{query}")
+        assert status == 200, out
+        return out
+
+    statement = "theorem e2e_target (n : Nat) : n + 0 = n"
+    skeleton = create_snapshot(f"{statement} := sorry")
+    out = audit(skeleton)
+    assert out["clean"] is False, out
+    assert [(t["name"], t["status"]) for t in out["targets"]] == [("e2e_target", "sorry")], out
+    replaces = {"snapshot_id": skeleton["snapshot"]["id"]}
+    proof = create_snapshot(f"{statement} := rfl", replaces=replaces, verify=True)
+    out = audit(skeleton)
+    assert out["clean"] is True and out["heads"] == [proof["snapshot"]["id"]], out
+    delete_snapshots([proof, skeleton])
+    step("spec audit: a run is clean once its proof is verified")
+
+
+def allow_by_name():
+    f = "def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => {}\n\ntheorem t : f 0 = 0 := {}"
+    skeleton = create_snapshot(f.format("n", "sorry"))
+    # Lean's matcher `f.match_1` is a declaration too, but the right-hand
+    # sides don't change it.
+    replaces = {"snapshot_id": skeleton["snapshot"]["id"], "allow": {"definitions": ["f"]}}
+    changed = create_snapshot(f.format("n + 2", "rfl"), replaces=replaces)
+    assert "f" in changed["replacement"]["changed_definitions"], changed
+    delete_snapshots([changed, skeleton])
+    step("allow: a pattern-matching definition's value can change by name")
+
+
 def labels():
     def create(run):
         return post("/snapshots", {"code": SNAPSHOT_ROOT, "labels": {"e2e": "1", "run": run}, "timeout": 600})["snapshot"]
@@ -441,6 +479,8 @@ if __name__ == "__main__":
     core(failover=not args.no_failover)
     snapshots()
     auto_implicit()
+    spec_audit()
+    allow_by_name()
     labels()
     module_snapshots()
     if args.mathlib:

@@ -230,10 +230,15 @@ fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> 
     summary = "What a project rests on",
     description = "For the snapshots with every label: their declarations by status, each \
         assumption (an axiom declared in snapshot code) with what uses it, wherever it is \
-        declared, and the declarations that are `sorry` or `rejected`. It reads records only.",
+        declared, and the declarations that are `sorry` or `rejected`. With `against` \
+        instead, for a run: the snapshots it reaches from the spec snapshots through the \
+        snapshots that replace them, to its heads, with the forks on the way, each spec \
+        declaration's status on each head, the links that allowed changes, and whether \
+        the run is `clean`. It reads records only.",
     params(
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
-        ("version" = Option<String>, Query, description = "The worker version; the server's default when absent."),
+        ("against" = Option<Vec<String>>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label`"),
+        ("version" = Option<String>, Query, description = "The worker version; the server's default when absent. With `against`, the ids' version instead."),
     ),
     responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
 )]
@@ -242,13 +247,51 @@ pub async fn audit(
     State(app): State<Arc<App>>,
     RawQuery(query): RawQuery,
 ) -> Result<Json<AuditSnapshotsResponse>, ApiError> {
-    let (version, labels) = label_query(query.as_deref().unwrap_or_default())
-        .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
-    let version = app.versions.resolve(version.as_deref());
-    let job = Job::SnapshotAudit(SnapshotAuditJob { labels });
+    let query = query.as_deref().unwrap_or_default();
+    let (version, labels) =
+        label_query(query).map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    let (version, against) = match against_query(query, &labels)? {
+        Some((version, against)) => (Some(version), against),
+        None => (app.versions.resolve(version.as_deref()), Vec::new()),
+    };
+    let job = Job::SnapshotAudit(SnapshotAuditJob { labels, against });
     match submit(&app, job, version, Priority::Interactive).await? {
         JobResult::SnapshotAudit(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
+    }
+}
+
+/// The `against` ids of an audit's query, if it has any, with the version
+/// they share. They don't combine with `label` filters.
+fn against_query(query: &str, labels: &Filters) -> Result<Option<(String, Vec<String>)>, ApiError> {
+    let against: Vec<String> = form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "against")
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    if against.is_empty() {
+        return Ok(None);
+    }
+    let bad = |message: String| ApiError::new(ErrorKind::BadRequest, message);
+    if !labels.is_empty() {
+        return Err(bad(
+            "label and against don't combine: audit a project by its labels, or a run against \
+             its spec"
+                .into(),
+        ));
+    }
+    let mut versions: Vec<String> = Vec::new();
+    for id in &against {
+        let version = parse_id(id)?.version;
+        if !versions.contains(&version) {
+            versions.push(version);
+        }
+    }
+    match versions.as_slice() {
+        [version] => Ok(Some((version.clone(), against))),
+        _ => Err(bad(format!(
+            "against names snapshots of versions {}: an audit is of one version",
+            versions.join(", ")
+        ))),
     }
 }
 

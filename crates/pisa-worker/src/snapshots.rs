@@ -33,9 +33,9 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    Allow, AuditAssumption, AuditSnapshotsResponse, AuditUnproved, CheckResult,
-    CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Error, ErrorKind, Export,
-    ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildLink,
+    Allow, AuditAssumption, AuditFork, AuditLink, AuditSnapshotsResponse, AuditTarget,
+    AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Error,
+    ErrorKind, Export, ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildLink,
     RebuildSnapshotsResponse, Replacement, Replaces, Snapshot, SnapshotDetail, SnapshotId,
     VerifyFailure, VerifySnapshotResponse,
 };
@@ -2004,15 +2004,204 @@ impl Snapshots {
                 None => break,
             }
         }
+        self.count(&entries, &mut HashMap::new()).await
+    }
+
+    /// The audit of a run against its spec, the entries `against` names:
+    /// the walk from them to the run's heads, and the counts over the
+    /// heads; see [`AuditSnapshotsResponse`]. It reads records only.
+    pub async fn audit_against(&self, against: &[String]) -> Result<AuditSnapshotsResponse, Error> {
+        let mut specs: Vec<(String, EntryMeta)> = Vec::new();
+        for id in against {
+            let entry = self.parse(id)?;
+            if !specs.iter().any(|(e, _)| *e == entry) {
+                let entry_meta = self.catalog.entry(&entry).await?;
+                specs.push((entry, entry_meta));
+            }
+        }
+        let mut links = Vec::new();
+        let mut linked = HashSet::new();
+        let mut add_link = |e: &str, entry_meta: &EntryMeta| {
+            if let Some(link) = self.audit_link(e, entry_meta)
+                && linked.insert(e.to_string())
+            {
+                links.push(link);
+            }
+        };
+        let mut forks = Vec::new();
+        // Each head once, as `(entry, module)`, and those each spec reaches.
+        let mut heads: Vec<(String, String)> = Vec::new();
+        let mut reached: Vec<Vec<String>> = Vec::new();
+        for (spec, spec_meta) in &specs {
+            // Back through what it replaced, as far as the entries exist.
+            let mut back = Some((spec.clone(), spec_meta.clone()));
+            let mut seen = HashSet::new();
+            while let Some((e, entry_meta)) = back.take() {
+                let Some(replaces) = &entry_meta.replaces else {
+                    break;
+                };
+                if !seen.insert(e.clone()) {
+                    break;
+                }
+                add_link(&e, &entry_meta);
+                let older = self.catalog.find_entry(&replaces.snapshot_id).await?;
+                back = older.map(|m| (replaces.snapshot_id.clone(), m));
+            }
+            // Forward through what replaces it, to the heads.
+            let mut ends = Vec::new();
+            let mut stack = vec![(spec.clone(), spec_meta.clone())];
+            let mut seen = HashSet::new();
+            while let Some((e, entry_meta)) = stack.pop() {
+                if !seen.insert(e.clone()) {
+                    continue;
+                }
+                if e != *spec {
+                    add_link(&e, &entry_meta);
+                }
+                let replacers = self.catalog.replacers(&e).await?;
+                if replacers.is_empty() {
+                    if !heads.iter().any(|(h, _)| *h == e) {
+                        heads.push((e.clone(), entry_meta.module));
+                    }
+                    ends.push(e);
+                    continue;
+                }
+                if replacers.len() > 1
+                    && !forks
+                        .iter()
+                        .any(|f: &AuditFork| f.snapshot_id == self.id(&e))
+                {
+                    forks.push(AuditFork {
+                        snapshot_id: self.id(&e),
+                        replaced_by: replacers.iter().map(|(r, _)| self.id(r)).collect(),
+                    });
+                }
+                // Oldest first.
+                stack.extend(replacers.into_iter().rev());
+            }
+            reached.push(ends);
+        }
+
+        let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
+        let modules = specs.iter().map(|(_, m)| &m.module);
+        for m in modules.chain(heads.iter().map(|(_, m)| m)) {
+            self.cached(m, &mut metas).await?;
+        }
+        // What the spec permits: the axioms its modules, and what they build
+        // on, declare.
+        let mut permitted: HashSet<String> = HashSet::new();
+        for (_, spec_meta) in &specs {
+            let Some(meta) = metas.get(&spec_meta.module) else {
+                continue;
+            };
+            let closure: Vec<String> = ids(&meta.modules).cloned().collect();
+            for m in &closure {
+                let Some(meta) = self.cached(m, &mut metas).await? else {
+                    continue;
+                };
+                let axioms = meta
+                    .result
+                    .declarations
+                    .iter()
+                    .filter(|d| d.kind == "axiom");
+                permitted.extend(axioms.map(|d| normalised(&d.name).into_owned()));
+            }
+        }
+        let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
+        let mut targets = Vec::new();
+        let mut clean = forks.is_empty();
+        for ((spec, spec_meta), ends) in specs.iter().zip(&reached) {
+            let Some(meta) = metas.get(&spec_meta.module) else {
+                continue;
+            };
+            let declared = meta.result.declarations.iter();
+            for d in declared.filter(|d| !d.generated && d.kind != "axiom") {
+                let name = normalised(&d.name);
+                for head in ends {
+                    let Some(head_meta) = metas.get(module_of[head]) else {
+                        continue;
+                    };
+                    let mut on_head = head_meta.result.declarations.iter();
+                    // A replacement keeps every declaration, so this is a
+                    // record that was edited: the run isn't done.
+                    let Some(h) = on_head.find(|h| normalised(&h.name) == name) else {
+                        clean = false;
+                        continue;
+                    };
+                    let accepted = head_meta.verified
+                        && match h.status {
+                            ProofStatus::Proved => true,
+                            ProofStatus::Conditional => h
+                                .assumes
+                                .iter()
+                                .all(|a| permitted.contains(&*normalised(a))),
+                            ProofStatus::Sorry | ProofStatus::Rejected => false,
+                        };
+                    clean &= accepted;
+                    targets.push(AuditTarget {
+                        name: d.name.clone(),
+                        spec: self.id(spec),
+                        head: self.id(head),
+                        status: h.status,
+                        verified: head_meta.verified,
+                    });
+                }
+            }
+        }
+
+        // Each head stands for its module.
+        let mut entries: BTreeMap<String, String> = BTreeMap::new();
+        for (e, m) in &heads {
+            entries.entry(m.clone()).or_insert_with(|| e.clone());
+        }
+        let mut audit = self.count(&entries, &mut metas).await?;
+        for a in &mut audit.assumptions {
+            a.in_spec = Some(permitted.contains(&*normalised(&a.name)));
+        }
+        audit.clean = Some(clean);
+        audit.heads = heads.iter().map(|(e, _)| self.id(e)).collect();
+        audit.forks = forks;
+        audit.targets = targets;
+        audit.links = links;
+        Ok(audit)
+    }
+
+    /// Entry `e`'s link, as an audit lists it, if it allowed changes.
+    fn audit_link(&self, e: &str, entry_meta: &EntryMeta) -> Option<AuditLink> {
+        let replaces = entry_meta.replaces.as_ref()?;
+        let allow = replaces.allow.clone()?;
+        let (changed_definitions, affected) = entry_meta
+            .replacement
+            .clone()
+            .map(|r| (r.changed_definitions, r.affected))
+            .unwrap_or_default();
+        Some(AuditLink {
+            snapshot_id: self.id(e),
+            replaces: self.id(&replaces.snapshot_id),
+            allow,
+            changed_definitions,
+            affected,
+        })
+    }
+
+    /// An audit's counts over the modules of `entries`, each with the entry
+    /// that stands for it: their declarations by status, the assumptions
+    /// they use, and what isn't proved. `metas` holds the module records
+    /// read so far, and gains those read here.
+    async fn count(
+        &self,
+        entries: &BTreeMap<String, String>,
+        metas: &mut HashMap<String, ModuleMeta>,
+    ) -> Result<AuditSnapshotsResponse, Error> {
         let mut audit = AuditSnapshotsResponse::default();
         let mut used_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
-        for (m, entry) in &entries {
-            let meta = match self.catalog.module(m).await {
-                Ok(meta) => meta,
-                // Its entries were deleted since they were listed.
-                Err(e) if e.kind == ErrorKind::NotFound => continue,
-                Err(e) => return Err(e),
+        // Each assumption is declared among the entries' modules or what
+        // they build on.
+        let mut closure: BTreeSet<String> = BTreeSet::new();
+        for (m, entry) in entries {
+            // Its entries were deleted since they were found.
+            let Some(meta) = self.cached(m, metas).await? else {
+                continue;
             };
             audit.summary.unverified_modules += u64::from(!meta.verified);
             for d in meta.result.declarations.iter().filter(|d| !d.generated) {
@@ -2046,13 +2235,8 @@ impl Snapshots {
                     });
                 }
             }
-            metas.insert(m.clone(), meta);
+            closure.extend(ids(&meta.modules).cloned());
         }
-        // Each is declared among the entries' modules or what they build on.
-        let closure: BTreeSet<String> = metas
-            .values()
-            .flat_map(|m| ids(&m.modules).cloned())
-            .collect();
         for (name, mut users) in used_by {
             users.sort();
             users.dedup();
@@ -2062,11 +2246,9 @@ impl Snapshots {
                 snapshot_id: None,
                 verified: false,
                 used_by: users,
+                in_spec: None,
             };
-            if let Some(m) = self
-                .declaring(&assumption.name, &closure, &mut metas)
-                .await?
-            {
+            if let Some(m) = self.declaring(&assumption.name, &closure, metas).await? {
                 assumption.verified = metas[&m].verified;
                 let exported = self
                     .catalog
@@ -2094,6 +2276,23 @@ impl Snapshots {
         Ok(audit)
     }
 
+    /// Module `m`'s record, from `metas` or read into it; `None` if it is
+    /// gone.
+    async fn cached<'a>(
+        &self,
+        m: &str,
+        metas: &'a mut HashMap<String, ModuleMeta>,
+    ) -> Result<Option<&'a ModuleMeta>, Error> {
+        if !metas.contains_key(m) {
+            match self.catalog.module(m).await {
+                Ok(meta) => metas.insert(m.to_string(), meta),
+                Err(e) if e.kind == ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(e),
+            };
+        }
+        Ok(metas.get(m))
+    }
+
     /// The module among `modules` that declares the axiom `name`, loading
     /// the records `metas` doesn't hold yet.
     async fn declaring(
@@ -2103,15 +2302,11 @@ impl Snapshots {
         metas: &mut HashMap<String, ModuleMeta>,
     ) -> Result<Option<String>, Error> {
         for m in modules {
-            if !metas.contains_key(m) {
-                match self.catalog.module(m).await {
-                    Ok(meta) => metas.insert(m.clone(), meta),
-                    Err(e) if e.kind == ErrorKind::NotFound => continue,
-                    Err(e) => return Err(e),
-                };
-            }
+            let Some(meta) = self.cached(m, metas).await? else {
+                continue;
+            };
             let declares = |d: &Declaration| d.kind == "axiom" && d.name == name;
-            if metas[m].result.declarations.iter().any(declares) {
+            if meta.result.declarations.iter().any(declares) {
                 return Ok(Some(m.clone()));
             }
         }

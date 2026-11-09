@@ -81,6 +81,10 @@
       },
       "AuditAssumption": {
         "properties": {
+          "in_spec": {
+            "description": "With `against`: whether the spec permits it, as declared in a spec\nsnapshot's module or in a module that one builds on. Names are\ncompared with a private one's module left out.",
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
           },
@@ -89,7 +93,7 @@
             "type": "string"
           },
           "snapshot_id": {
-            "description": "A snapshot of the module that declares it: one with the labels if\nthere is one.",
+            "description": "A snapshot of the module that declares it: one with the labels, or\na head, if there is one.",
             "type": "string"
           },
           "used_by": {
@@ -111,13 +115,94 @@
         ],
         "type": "object"
       },
+      "AuditFork": {
+        "description": "A snapshot that more than one snapshot replaces.",
+        "properties": {
+          "replaced_by": {
+            "description": "The snapshots that replace it, oldest first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "replaced_by"
+        ],
+        "type": "object"
+      },
+      "AuditLink": {
+        "description": "A link that let definitions change: `snapshot_id` replaces `replaces`\nwith an `allow`, and its create's comparison found the rest.",
+        "properties": {
+          "affected": {
+            "description": "As in [`Replacement::affected`].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allow": {
+            "$ref": "#/components/schemas/Allow"
+          },
+          "changed_definitions": {
+            "description": "As in [`Replacement::changed_definitions`].",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "replaces": {
+            "description": "The replaced snapshot, which may have been deleted since.",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "The replacing snapshot.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "replaces",
+          "allow"
+        ],
+        "type": "object"
+      },
       "AuditSnapshotsResponse": {
-        "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.",
+        "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.\n\nWith `against=<snapshot id>` instead of labels, repeatable, it audits a\nrun against its spec, the snapshots named. From each, it follows the\nsnapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever\ntheir labels, to the run's `heads`, and judges each spec declaration on\neach head it reaches. The counts are then those of the heads' snapshots.\nThe ids are of one version, which the audit uses, and `label` doesn't\ncombine with them. A spec snapshot that doesn't exist is `not_found`.",
         "properties": {
           "assumptions": {
             "description": "The assumptions what the snapshots declare uses, by name, wherever\nthey are declared.",
             "items": {
               "$ref": "#/components/schemas/AuditAssumption"
+            },
+            "type": "array"
+          },
+          "clean": {
+            "description": "With `against`: whether the run is done. There is no fork, and every\ntarget is accepted on its head: the head's module is verified, and\nthe target is `proved`, or `conditional` on assumptions the spec\npermits (see [`AuditAssumption::in_spec`]).",
+            "type": "boolean"
+          },
+          "forks": {
+            "description": "With `against`: the snapshots on the run that more than one snapshot\nreplaces. The run isn't clean until all but one branch are deleted.",
+            "items": {
+              "$ref": "#/components/schemas/AuditFork"
+            },
+            "type": "array"
+          },
+          "heads": {
+            "description": "With `against`: the snapshots the run ends at, which nothing\nreplaces, each once, in the order the walk reached them. A snapshot\nreplaced by one that was deleted since is a head again, as the\ndeleted snapshot held the link.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "links": {
+            "description": "With `against`: the links that allowed definitions to change, for\nreview: those on the way from the spec snapshots to the heads, and\nthose of the spec snapshots' own chains back through what they\nreplaced, as far as those snapshots exist.",
+            "items": {
+              "$ref": "#/components/schemas/AuditLink"
             },
             "type": "array"
           },
@@ -130,6 +215,13 @@
           },
           "summary": {
             "$ref": "#/components/schemas/AuditSummary"
+          },
+          "targets": {
+            "description": "With `against`: each declaration of a spec snapshot's module, other\nthan its assumptions and what Lean generated, on each head reached\nfrom that spec snapshot. A replacement keeps every declaration of what\nit replaces, so every head carries them all.",
+            "items": {
+              "$ref": "#/components/schemas/AuditTarget"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -178,6 +270,38 @@
         ],
         "type": "object"
       },
+      "AuditTarget": {
+        "description": "A spec declaration, as a head of the run declares it.",
+        "properties": {
+          "head": {
+            "description": "The head, reached from `spec`, whose declaration this is.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "spec": {
+            "description": "The spec snapshot that declares it.",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProofStatus",
+            "description": "Its status on the head."
+          },
+          "verified": {
+            "description": "The head's module has passed the kernel re-check.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "spec",
+          "head",
+          "status",
+          "verified"
+        ],
+        "type": "object"
+      },
       "AuditUnproved": {
         "properties": {
           "axioms": {
@@ -191,7 +315,7 @@
             "type": "string"
           },
           "snapshot_id": {
-            "description": "A snapshot with the labels whose module declares it.",
+            "description": "A snapshot with the labels, or a head, whose module declares it.",
             "type": "string"
           },
           "status": {
@@ -3201,7 +3325,7 @@
     },
     "/snapshots/audit": {
       "get": {
-        "description": "For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. It reads records only.",
+        "description": "For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.",
         "operationId": "auditSnapshots",
         "parameters": [
           {
@@ -3217,7 +3341,19 @@
             }
           },
           {
-            "description": "The worker version; the server's default when absent.",
+            "description": "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label`",
+            "in": "query",
+            "name": "against",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "description": "The worker version; the server's default when absent. With `against`, the ids' version instead.",
             "in": "query",
             "name": "version",
             "required": false,

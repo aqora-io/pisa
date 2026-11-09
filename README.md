@@ -228,7 +228,7 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; see [Statuses](#statuses) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads, forks?: [{snapshot_id, replaced_by}], targets: [{name, spec, head, status, verified}], links?: [{snapshot_id, replaces, allow, changed_definitions?, affected?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | → `{removed: [...]}`, the modules that went with the snapshot; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -464,6 +464,22 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   replaced snapshot is deleted. A key replay returns the snapshot as it is,
   without `replacement`.
 
+<a id="witnesses"></a>
+**Witnesses.** A target whose hypotheses can't hold together can be proved
+vacuously, and an allowed definition change can make them so. By convention,
+a skeleton states next to each such target a witness that its hypotheses can
+hold:
+
+```lean
+theorem t (x : ℕ) (h : Pre x) : Post x := sorry
+theorem t_nonvacuous : ∃ x, Pre x := sorry
+```
+
+`replaces` freezes the witness like any statement, so every replacement keeps
+it, and it is a target of the [spec audit](#spec-audit) like `t`. If a change
+that `allow` lets through makes `Pre` impossible, the witness can no longer be
+proved: the audit shows it unproved, and the run isn't `clean`.
+
 <a id="statuses"></a>
 **Statuses and assumptions.** An `axiom` declared in snapshot code, or in the
 code being checked, is an assumption: a statement taken as given, such as a
@@ -496,6 +512,50 @@ labels rest on, from their records, without running Lean:
 A trusted audit has no `rejected` or `sorry` and no `unverified_modules`.
 Whether each assumption is reasonable is for review: `axiom oops : False`
 makes everything above it `conditional`.
+
+<a id="spec-audit"></a>
+**Auditing a run against its spec.** A run starts from spec snapshots,
+skeletons whose statements are its targets, and goes on through the snapshots
+that [replace](#replacing) them. `GET /snapshots/audit?against=<id>` (repeated
+for a spec spread over several snapshots) audits it from its records:
+
+```text
+GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
+  → {"summary": {"proved": 1, "conditional": 0, "sorry": 0, "rejected": 0, "unverified_modules": 0},
+     "assumptions": [], "not_proved": [], "clean": true, "heads": ["v4.35.0-1a2b3c4d~4b7a…"],
+     "targets": [{"name": "t", "spec": "v4.35.0-1a2b3c4d~9c0e…", "head": "v4.35.0-1a2b3c4d~4b7a…",
+                  "status": "proved", "verified": true}]}
+```
+
+- **The walk.** From each spec snapshot it follows the snapshots that replace
+  it, whatever their labels, to the run's `heads`, which nothing replaces. A
+  snapshot replaced more than once is a fork, listed in `forks` with what
+  replaced it: there is no merge, so delete all but one branch. A deleted
+  snapshot on the way cuts the run there, as its row held its link, and what
+  it replaced is a head again.
+- **Targets.** Each declaration of a spec snapshot's module, other than its
+  assumptions and what Lean generated, is a target. `targets` has a row for
+  each target and each head reached from its spec snapshot, with its `status`
+  there and whether the head is `verified`. A replacement keeps every
+  statement of what it replaces, so every head has them all.
+- **`clean`.** There is no fork, and every target is accepted on its head:
+  the head is verified, and the target is `proved`, or `conditional` only on
+  assumptions the spec permits, those declared in a spec snapshot's module or
+  in a module it builds on. Each of `assumptions` says whether the spec
+  permits it (`in_spec`).
+- **Links.** For review, `links` lists every link that let definitions change
+  (with an `allow`): those on the way to the heads, and those of each spec
+  snapshot's own chain back through what it replaced, as far as those
+  snapshots exist, such as a rebuilt spec's link to the original under `to`'s
+  `allow`. Each is `{snapshot_id, replaces, allow, changed_definitions?,
+  affected?}`, as its create's comparison found them.
+- **Counts.** `summary`, `assumptions` and `not_proved` are those of the
+  heads, each standing for its module.
+- **Parameters.** The ids are of one version, which the audit uses; ids of
+  several versions are a 400 that names them. `label` doesn't combine with
+  `against` (400), and a spec snapshot that doesn't exist is a 404. After a
+  [rebuild](#rebuilding), audit against the new spec snapshots: `created`
+  maps the old ids to the new.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports
@@ -703,6 +763,7 @@ let lemma = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two :
 let extended = client.create_snapshot_with(lemma, &opts).await?.snapshot.expect("kept");
 let above = client.list_dependents(&base.id, &run).await?; // parents first
 let audit = client.audit_snapshots(&run).await?; // statuses, assumptions, what isn't proved
+let audit = client.audit_snapshots_against([&base.id]).await?; // the run from base: audit.clean, heads, targets
 let opts = pisa_client::RebuildOptions { dry_run: true, ..Default::default() };
 // Create each item, a level at a time; a `replaces.item` names the snapshot made for that item.
 let plan = client.rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?.plan;
@@ -735,6 +796,7 @@ more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : doub
 extended = client.create_snapshot(more, replaces={"snapshot_id": base["id"]})["snapshot"]   # "allow": {"definitions": ["double"]} lets double change
 client.list_dependents(base["id"], {"run": "7"})["snapshots"]   # parents first
 client.audit_snapshots({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
+client.audit_snapshots(against=[base["id"]])["clean"]   # the run from base, to its heads; see Auditing a run
 plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time; a replaces["item"] names the snapshot made for that item
 done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the old snapshots, not base
 client.delete_snapshot(base["id"])["removed"]   # the modules that went with it

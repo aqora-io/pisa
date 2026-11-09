@@ -257,10 +257,19 @@ export class PisaClient {
 
   /** What the snapshots with every label rest on: their declarations by
    *  `status`, each assumption (an axiom declared in snapshot code) with what
-   *  uses it, and what isn't proved. */
-  auditSnapshots(params: { labels?: Labels } = {}, options: VersionOptions = {}): Promise<AuditSnapshotsResponse> {
-    const query = this.versionQuery(options);
+   *  uses it, and what isn't proved. With `against`, a run's spec snapshots,
+   *  all of one version, instead: the `heads` the run reaches through the
+   *  snapshots that replace them, the `forks` on the way, each spec
+   *  declaration's status on each head (`targets`), the `links` that allowed
+   *  changes, and whether the run is `clean`. The ids carry the version, and
+   *  `labels` doesn't combine with them. */
+  auditSnapshots(
+    params: { labels?: Labels; against?: SnapshotId[] } = {},
+    options: VersionOptions = {},
+  ): Promise<AuditSnapshotsResponse> {
+    const query = params.against?.length ? new URLSearchParams() : this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
+    for (const id of params.against ?? []) query.append("against", id);
     return this.call("GET", ["snapshots", "audit"], undefined, options, query);
   }
 

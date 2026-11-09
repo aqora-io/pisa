@@ -116,6 +116,10 @@ pub struct SnapshotDependentsJob {
 pub struct SnapshotAuditJob {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<(String, String)>,
+    /// The spec's snapshot ids, of the job's version; with them, `labels` is
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub against: Vec<String>,
 }
 
 /// `POST /snapshots/rebuild`, as a plan.

@@ -18,7 +18,7 @@
 //! | `GET /snapshots/{id}` | → [`SnapshotDetail`] |
 //! | `GET /snapshots/{id}/dependents` | `?label=key:value` → [`ListDependentsResponse`] |
 //! | `POST /snapshots/rebuild` | [`RebuildSnapshotsRequest`] → [`RebuildSnapshotsResponse`] |
-//! | `GET /snapshots/audit` | `?label=key:value` → [`AuditSnapshotsResponse`] |
+//! | `GET /snapshots/audit` | `?label=key:value` or `?against=<id>` → [`AuditSnapshotsResponse`] |
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
 //! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
@@ -894,6 +894,14 @@ pub struct RebuildLink {
 /// axiom report, or the kernel re-check once a module is verified, so a
 /// trusted audit has no `rejected` or `sorry` and `unverified_modules` 0.
 /// Whether an assumption is reasonable is for review.
+///
+/// With `against=<snapshot id>` instead of labels, repeatable, it audits a
+/// run against its spec, the snapshots named. From each, it follows the
+/// snapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever
+/// their labels, to the run's `heads`, and judges each spec declaration on
+/// each head it reaches. The counts are then those of the heads' snapshots.
+/// The ids are of one version, which the audit uses, and `label` doesn't
+/// combine with them. A spec snapshot that doesn't exist is `not_found`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AuditSnapshotsResponse {
     pub summary: AuditSummary,
@@ -902,6 +910,73 @@ pub struct AuditSnapshotsResponse {
     pub assumptions: Vec<AuditAssumption>,
     /// The declarations that are `sorry` or `rejected`.
     pub not_proved: Vec<AuditUnproved>,
+    /// With `against`: whether the run is done. There is no fork, and every
+    /// target is accepted on its head: the head's module is verified, and
+    /// the target is `proved`, or `conditional` on assumptions the spec
+    /// permits (see [`AuditAssumption::in_spec`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<bool>,
+    /// With `against`: the snapshots the run ends at, which nothing
+    /// replaces, each once, in the order the walk reached them. A snapshot
+    /// replaced by one that was deleted since is a head again, as the
+    /// deleted snapshot held the link.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heads: Vec<String>,
+    /// With `against`: the snapshots on the run that more than one snapshot
+    /// replaces. The run isn't clean until all but one branch are deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forks: Vec<AuditFork>,
+    /// With `against`: each declaration of a spec snapshot's module, other
+    /// than its assumptions and what Lean generated, on each head reached
+    /// from that spec snapshot. A replacement keeps every declaration of what
+    /// it replaces, so every head carries them all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<AuditTarget>,
+    /// With `against`: the links that allowed definitions to change, for
+    /// review: those on the way from the spec snapshots to the heads, and
+    /// those of the spec snapshots' own chains back through what they
+    /// replaced, as far as those snapshots exist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<AuditLink>,
+}
+
+/// A snapshot that more than one snapshot replaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditFork {
+    pub snapshot_id: String,
+    /// The snapshots that replace it, oldest first.
+    pub replaced_by: Vec<String>,
+}
+
+/// A spec declaration, as a head of the run declares it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditTarget {
+    pub name: String,
+    /// The spec snapshot that declares it.
+    pub spec: String,
+    /// The head, reached from `spec`, whose declaration this is.
+    pub head: String,
+    /// Its status on the head.
+    pub status: ProofStatus,
+    /// The head's module has passed the kernel re-check.
+    pub verified: bool,
+}
+
+/// A link that let definitions change: `snapshot_id` replaces `replaces`
+/// with an `allow`, and its create's comparison found the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditLink {
+    /// The replacing snapshot.
+    pub snapshot_id: String,
+    /// The replaced snapshot, which may have been deleted since.
+    pub replaces: String,
+    pub allow: Allow,
+    /// As in [`Replacement::changed_definitions`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changed_definitions: Vec<String>,
+    /// As in [`Replacement::affected`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected: Vec<String>,
 }
 
 /// The snapshots' declarations by status, each module's once, without the
@@ -923,20 +998,25 @@ pub struct AuditAssumption {
     /// As written, from its module's declaration export.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    /// A snapshot of the module that declares it: one with the labels if
-    /// there is one.
+    /// A snapshot of the module that declares it: one with the labels, or
+    /// a head, if there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     /// Its module has passed the kernel re-check.
     pub verified: bool,
     /// The snapshots' declarations that rest on it.
     pub used_by: Vec<String>,
+    /// With `against`: whether the spec permits it, as declared in a spec
+    /// snapshot's module or in a module that one builds on. Names are
+    /// compared with a private one's module left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_spec: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AuditUnproved {
     pub name: String,
-    /// A snapshot with the labels whose module declares it.
+    /// A snapshot with the labels, or a head, whose module declares it.
     pub snapshot_id: String,
     pub status: ProofStatus,
     /// Its axioms outside the allowed list.

@@ -362,14 +362,23 @@ impl Client {
         )
     }
 
-    #[pyo3(signature = (labels = None))]
+    #[pyo3(signature = (labels = None, *, against = None))]
     fn audit_snapshots<'py>(
         &self,
         py: Python<'py>,
         labels: Option<BTreeMap<String, String>>,
+        against: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = labels.unwrap_or_default();
-        call(py, async move { self.inner.audit_snapshots(&labels).await })
+        match against {
+            Some(_) if !labels.is_empty() => Err(PyValueError::new_err(
+                "labels and against don't combine: audit a project by its labels, or a run against its spec",
+            )),
+            Some(against) => call(py, async move {
+                self.inner.audit_snapshots_against(&against).await
+            }),
+            None => call(py, async move { self.inner.audit_snapshots(&labels).await }),
+        }
     }
 
     #[pyo3(signature = (from_, to, labels, *, dry_run = false, allow_changes = false, retire = false, verify = None))]

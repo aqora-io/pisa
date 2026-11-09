@@ -162,7 +162,12 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
         Job::SnapshotRebuild(j) => {
             JobResult::SnapshotRebuild(pool.snapshots().rebuild_plan(&j).await)
         }
-        Job::SnapshotAudit(j) => JobResult::SnapshotAudit(pool.snapshots().audit(&j.labels).await),
+        Job::SnapshotAudit(j) if j.against.is_empty() => {
+            JobResult::SnapshotAudit(pool.snapshots().audit(&j.labels).await)
+        }
+        Job::SnapshotAudit(j) => {
+            JobResult::SnapshotAudit(pool.snapshots().audit_against(&j.against).await)
+        }
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the server".into(),
         },

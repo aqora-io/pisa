@@ -157,6 +157,7 @@ class AuditAssumption(TypedDict):
     snapshot_id: NotRequired[str]
     verified: bool
     used_by: list[str]
+    in_spec: NotRequired[bool]
 
 class AuditUnproved(TypedDict):
     name: str
@@ -164,10 +165,33 @@ class AuditUnproved(TypedDict):
     status: ProofStatus
     axioms: list[str]
 
+class AuditFork(TypedDict):
+    snapshot_id: str
+    replaced_by: list[str]
+
+class AuditTarget(TypedDict):
+    name: str
+    spec: str
+    head: str
+    status: ProofStatus
+    verified: bool
+
+class AuditLink(TypedDict):
+    snapshot_id: str
+    replaces: str
+    allow: Allow
+    changed_definitions: NotRequired[list[str]]
+    affected: NotRequired[list[str]]
+
 class AuditSnapshotsResponse(TypedDict):
     summary: AuditSummary
     assumptions: list[AuditAssumption]
     not_proved: list[AuditUnproved]
+    clean: NotRequired[bool]
+    heads: NotRequired[list[str]]
+    forks: NotRequired[list[AuditFork]]
+    targets: NotRequired[list[AuditTarget]]
+    links: NotRequired[list[AuditLink]]
 
 class RebuildLink(TypedDict):
     """What a rebuilt snapshot replaces: a snapshot that exists, or the new
@@ -396,11 +420,20 @@ class Client:
         """The snapshots of every module that imports `id`'s, directly or
         through others, parents first (by level, then oldest first): those
         with every label in `labels`, or all of them."""
-    def audit_snapshots(self, labels: dict[str, str] | None = None) -> AuditSnapshotsResponse:
+    def audit_snapshots(
+        self, labels: dict[str, str] | None = None, *, against: list[str] | None = None
+    ) -> AuditSnapshotsResponse:
         """What the snapshots with every label in `labels` rest on: their
         declarations by `status` (`proved`, `conditional` on assumptions,
         `sorry`, `rejected`), each assumption (an axiom declared in snapshot
-        code) with what uses it, and what isn't proved."""
+        code) with what uses it, and what isn't proved.
+
+        With `against`, the ids of a run's spec snapshots, all of one
+        version, it audits the run instead: the `heads` it reaches through
+        the snapshots that replace them, the `forks` on the way, each spec
+        declaration's status on each head (`targets`), the `links` that
+        allowed changes, and whether the run is `clean`; the counts are the
+        heads'. `labels` and `against` don't combine (ValueError)."""
     def rebuild_snapshots(
         self,
         from_: str,

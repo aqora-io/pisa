@@ -346,6 +346,24 @@ def test_audit(url):
     assert audit["assumptions"][0]["snapshot_id"] == a["id"]
 
 
+def test_audit_against(url):
+    client = Client(url, timeout=5)
+    spec = client.create_snapshot("import Foo\ntheorem py_target : 2 = 2 := sorry")["snapshot"]
+    audit = client.audit_snapshots(against=[spec["id"]])
+    assert audit["clean"] is False and audit["heads"] == [spec["id"]]
+    assert audit["targets"][0]["status"] == "sorry"
+    proof = client.create_snapshot(
+        "import Foo\ntheorem py_target : 2 = 2 := rfl", replaces={"snapshot_id": spec["id"]}, verify=True
+    )["snapshot"]
+    audit = client.audit_snapshots(against=[spec["id"]])
+    assert audit["clean"] is True and audit["heads"] == [proof["id"]]
+    assert audit["targets"] == [
+        {"name": "py_target", "spec": spec["id"], "head": proof["id"], "status": "proved", "verified": True}
+    ]
+    with pytest.raises(ValueError):
+        client.audit_snapshots({"suite": "audit"}, against=[spec["id"]])
+
+
 def test_snapshot_labels(url):
     client = Client(url, timeout=5)
     code = "import Foo\ntheorem listed : 1 = 1 := rfl"

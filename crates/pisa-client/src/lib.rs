@@ -55,13 +55,13 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditSnapshotsResponse,
-    AuditSummary, AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration,
-    DeleteSnapshotResponse, Detail, ErrorKind, Export, Health, HealthStatus, JobKind, JobStatus,
-    ListDependentsResponse, ListSnapshotsResponse, Message, Pos, ProofStatus, RebuildCreated,
-    RebuildFailed, RebuildItem, RebuildLink, RebuildSkipped, RebuildSnapshotsResponse, Replacement,
-    Replaces, Session, Severity, Snapshot, SnapshotDetail, Sorry, State, TacticInfo, TermInfo,
-    VerifyFailure, VerifySnapshotResponse,
+    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditFork, AuditLink,
+    AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, CheckResult,
+    CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Detail, ErrorKind, Export, Health,
+    HealthStatus, JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, Message, Pos,
+    ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildLink, RebuildSkipped,
+    RebuildSnapshotsResponse, Replacement, Replaces, Session, Severity, Snapshot, SnapshotDetail,
+    Sorry, State, TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
@@ -729,6 +729,26 @@ impl Client {
         add_labels(&mut url, labels);
         if let Some(v) = &self.version {
             url.query_pairs_mut().append_pair("version", v);
+        }
+        self.endpoint.get(url).await
+    }
+
+    /// Audits a run against its spec, the snapshots `against` names, all of
+    /// one version: the heads it reaches through the snapshots that replace
+    /// them, the forks on the way, each spec declaration's status on each
+    /// head, the links that allowed changes, and whether the run is `clean`;
+    /// see [`AuditSnapshotsResponse`].
+    pub async fn audit_snapshots_against<I, S>(
+        &self,
+        against: I,
+    ) -> Result<AuditSnapshotsResponse, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut url = self.endpoint.url("snapshots/audit")?;
+        for id in against {
+            url.query_pairs_mut().append_pair("against", id.as_ref());
         }
         self.endpoint.get(url).await
     }

@@ -386,6 +386,44 @@ async fn client_audits_a_project() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn client_audits_a_run_against_its_spec() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let spec = client
+        .create_snapshot("import Foo\ntheorem t : 1 = 1 := sorry")
+        .await
+        .unwrap()
+        .snapshot
+        .unwrap();
+    let audit = client.audit_snapshots_against([&spec.id]).await.unwrap();
+    assert_eq!(audit.clean, Some(false));
+    assert_eq!(audit.targets[0].status, ProofStatus::Sorry);
+
+    let opts = CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: spec.id.clone(),
+            allow: None,
+        }),
+        verify: Some(true),
+        ..Default::default()
+    };
+    let proof = client
+        .create_snapshot_with("import Foo\ntheorem t : 1 = 1 := rfl", &opts)
+        .await
+        .unwrap()
+        .snapshot
+        .unwrap();
+    let audit = client.audit_snapshots_against([&spec.id]).await.unwrap();
+    assert_eq!(audit.clean, Some(true), "{audit:?}");
+    assert_eq!(audit.heads, std::slice::from_ref(&proof.id));
+    let target = &audit.targets[0];
+    assert_eq!(
+        (&target.name, &target.spec, &target.head, target.status),
+        (&"t".to_string(), &spec.id, &proof.id, ProofStatus::Proved)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_lists_and_updates_snapshots() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
