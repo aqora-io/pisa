@@ -723,21 +723,22 @@ pub struct ListDependentsResponse {
     pub snapshots: Vec<Snapshot>,
 }
 
-/// `POST /snapshots/rebuild`: plans how to create the dependents of `from`
-/// (see [`ListDependentsResponse`]) again on `to`, each with its imports of
-/// `from`'s module, and of the other modules it rebuilds, swapped for the new
-/// ones, and unless `dry_run` creates them: a level at a time, a level's
-/// creates side by side once the level below is done. `from` and `to` are of
-/// one version, which the rebuild runs on.
+/// `POST /snapshots/rebuild`: plans how to copy each head among the
+/// dependents of `from` (see [`ListDependentsResponse`]), a snapshot nothing
+/// replaces, onto `to`, with its imports of `from`'s module, and of the other
+/// modules it rebuilds, swapped for the new ones, and unless `dry_run`
+/// creates them: a level at a time, a level's creates side by side once the
+/// level below is done. `from` and `to` are of one version, which the
+/// rebuild runs on.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildSnapshotsRequest {
     /// The snapshot being replaced.
     pub from: String,
     /// Its replacement, of `from`'s version.
     pub to: String,
-    /// Which dependents to rebuild: those with a snapshot that has every
-    /// label, and the modules they build on above `from`. Required, so that
-    /// the caller chooses which projects follow the edit.
+    /// Which dependents to rebuild: those with a head that has every label,
+    /// and the modules they build on above `from`. Required, so that the
+    /// caller chooses which projects follow the edit.
     pub labels: BTreeMap<String, String>,
     /// Only plan: the client creates the plan's items.
     #[serde(default)]
@@ -746,9 +747,11 @@ pub struct RebuildSnapshotsRequest {
     /// created to [`replace`](CreateSnapshotRequest::replaces) `from`.
     #[serde(default)]
     pub allow_changes: bool,
-    /// Once every item is created, delete the old snapshots the plan rebuilt,
-    /// from the top down, and with them the old modules nothing else needs.
-    /// `from` stays: delete it yourself if nothing needs it.
+    /// Once every item is created, delete the old snapshots whose copies
+    /// replace them, from the top down, and with them the old modules
+    /// nothing else needs. Each delete splices the run, so it goes on
+    /// through the copy. An old snapshot whose copy has no link stays, and
+    /// so does `from`: delete it yourself if nothing needs it.
     #[serde(default)]
     pub retire: bool,
     /// As [`CreateSnapshotRequest::verify`], for each create.
@@ -783,19 +786,35 @@ pub struct RebuildSnapshotsResponse {
     #[schema(required = true)]
     #[serde(default)]
     pub plan: Vec<RebuildItem>,
+    /// The snapshots with every label that the plan leaves out because a
+    /// snapshot without every label replaces them, on dry runs and runs
+    /// alike: their runs went on under other labels, which a rebuild with
+    /// their heads' labels follows. It doesn't change `ok`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaced: Vec<RebuildReplaced>,
     /// For a run, the items created, in plan order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<RebuildCreated>,
     /// For a run, the items whose create kept nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed: Vec<RebuildFailed>,
-    /// For a run, the items not created because they build on, or replace,
-    /// one that failed or was skipped. Other branches go on.
+    /// For a run, the items not created because they build on one that
+    /// failed or was skipped. Other branches go on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<RebuildSkipped>,
     /// With `retire`, the ids of the old snapshots deleted, top down.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired: Vec<String>,
+}
+
+/// A labelled snapshot left out of a rebuild because one without every label
+/// replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RebuildReplaced {
+    /// The snapshot left out.
+    pub snapshot_id: String,
+    /// The snapshots without every label that replace it, oldest first.
+    pub replaced_by: Vec<String>,
 }
 
 /// A [`RebuildItem`] created.
@@ -822,8 +841,7 @@ pub struct RebuildFailed {
     pub check: CheckResult,
 }
 
-/// A [`RebuildItem`] not created, because it builds on, or replaces, one
-/// that wasn't.
+/// A [`RebuildItem`] not created, because it builds on one that wasn't.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildSkipped {
     /// As in [`RebuildItem::snapshot_id`].
@@ -837,12 +855,13 @@ pub struct RebuildSkipped {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildItem {
     /// The wave its create runs in: one more than the highest level among
-    /// the items whose modules it imports and the item it replaces, so 1 for
-    /// one that imports only `from`'s module and replaces no item.
+    /// the items whose modules it imports, so 1 for one that imports only
+    /// `from`'s module.
     pub level: usize,
-    /// The snapshot it rebuilds. Absent for a module that only links others
-    /// to `from`, with no snapshot that has the labels: it gets the labels
-    /// asked for.
+    /// The snapshot it copies: a head with the labels, or one that only its
+    /// copies from this same rebuild replace, so that sending the rebuild
+    /// again replays them. Absent for a module that only links others to
+    /// `from`, with no such snapshot: it gets the labels asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     /// The module it rebuilds.
@@ -858,50 +877,20 @@ pub struct RebuildItem {
     /// keys, so running a plan again after a failure replays the creates
     /// that are done.
     pub key: String,
-    /// What the new snapshot replaces, to send as the create's `replaces`,
-    /// the links mirroring the old ones. If the snapshot it rebuilds
-    /// replaced one the plan also rebuilds, it replaces that one's new
-    /// snapshot, `item`, with its own link's `allow`: a skeleton's proof
-    /// replaces the rebuilt skeleton, and is compared with it. If it
-    /// replaced one the plan doesn't rebuild, and that still exists, it
-    /// replaces that same snapshot, so a proof whose skeleton isn't rebuilt
-    /// still replaces the skeleton. Its `allow` is its own link's and, when
-    /// that snapshot builds on `from`, what `to` changed: `to`'s `allow` if
-    /// `to` replaces `from`, else the `changed_definitions`. There is no
-    /// such link when that snapshot builds on `from` and `to` doesn't
-    /// replace `from` and changes more than definitions' values: its
-    /// statements changed. Otherwise, when `to` replaces `from`, it
-    /// replaces the snapshot it rebuilds, with `to`'s `allow`.
-    /// The create then checks that nothing its statements depend on
-    /// changed, and is refused if something did.
+    /// What the new snapshot replaces, to send as the create's `replaces`:
+    /// the snapshot it copies, so the run goes on through the copy. The plan
+    /// runs the comparison the create will, taking the copy and the new
+    /// modules it builds on to declare what their originals do, and `allow`
+    /// names the definitions it found changed, if any. Absent when the
+    /// comparison fails, as when `to` changes the type of something the
+    /// copy's statements use: the copy then belongs to no run, and `retire`
+    /// keeps the old snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replaces: Option<RebuildLink>,
+    pub replaces: Option<Replaces>,
     /// The theorems of the module whose type uses a changed definition,
     /// directly or through other definitions, here or below.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affected: Vec<String>,
-}
-
-/// What a rebuilt snapshot replaces: a snapshot that exists, `snapshot_id`,
-/// or the new snapshot of another item of the plan, `item`. Exactly one is
-/// set. A create sends it as [`Replaces`], with `item` mapped to the
-/// `new_snapshot_id` created for that item.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct RebuildLink {
-    /// The replaced snapshot: the one the item rebuilds, or the one that
-    /// snapshot replaced if the plan doesn't rebuild it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<String>,
-    /// The index in `plan` of the item whose new snapshot it replaces. That
-    /// item is at a lower level.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub item: Option<usize>,
-    /// As in [`Replaces::allow`]: for `item`, the old link's; for the
-    /// snapshot the item rebuilds, `to`'s; for the snapshot the old link
-    /// named, the old link's and, if that snapshot builds on `from`, what
-    /// `to` changed (see [`RebuildItem::replaces`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow: Option<Allow>,
 }
 
 /// `GET /snapshots/audit`: what the snapshots that have every label the

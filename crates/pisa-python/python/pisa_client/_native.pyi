@@ -194,13 +194,6 @@ class AuditSnapshotsResponse(TypedDict):
     targets: NotRequired[list[AuditTarget]]
     links: NotRequired[list[AuditLink]]
 
-class RebuildLink(TypedDict):
-    """What a rebuilt snapshot replaces: a snapshot that exists, or the new
-    snapshot of the plan's item at index `item`. Exactly one is set."""
-    snapshot_id: NotRequired[str]
-    item: NotRequired[int]
-    allow: NotRequired[Allow]
-
 class RebuildItem(TypedDict):
     level: int
     snapshot_id: NotRequired[str]
@@ -210,7 +203,7 @@ class RebuildItem(TypedDict):
     code: str
     labels: dict[str, str]
     key: str
-    replaces: NotRequired[RebuildLink]
+    replaces: NotRequired[Replaces]
     affected: NotRequired[list[str]]
 
 class RebuildCreated(TypedDict):
@@ -228,11 +221,18 @@ class RebuildSkipped(TypedDict):
     snapshot_id: NotRequired[str]
     module: str
 
+class RebuildReplaced(TypedDict):
+    """A labelled snapshot a rebuild left out, because snapshots without
+    every label, `replaced_by`, replace it."""
+    snapshot_id: str
+    replaced_by: list[str]
+
 class RebuildSnapshotsResponse(TypedDict):
     ok: bool
     changes: list[str]
     changed_definitions: NotRequired[list[str]]
     plan: list[RebuildItem]
+    replaced: NotRequired[list[RebuildReplaced]]
     created: NotRequired[list[RebuildCreated]]
     failed: NotRequired[list[RebuildFailed]]
     skipped: NotRequired[list[RebuildSkipped]]
@@ -449,18 +449,20 @@ class Client:
     ) -> RebuildSnapshotsResponse:
         """Rebuild the dependents of snapshot `from_` with every label in
         `labels` (and what links them to it) on snapshot `to`: the server
-        plans the creates, each item's `code` the old code with its imports
-        swapped and its `replaces` mirroring the old link, and runs them a
+        plans the creates that copy their heads, each item's `code` the old
+        code with its imports swapped and its `replaces` the snapshot it
+        copies, unless the copy's statements would change, and runs them a
         level at a time, saying what it `created`, what `failed` and what it
-        `skipped` as built on, or replacing, those. `retire` then deletes the
-        old snapshots it rebuilt, from the top down; `from_` stays. Calling it
-        again replays the creates that are done. Unless `to` was created to
-        replace `from_`, a `to` that changes what `from_` states gives `ok:
-        False` and no plan, unless `allow_changes`.
+        `skipped` as built on those. `replaced` lists the labelled snapshots
+        left out because a snapshot without the labels replaces them.
+        `retire` then deletes the old snapshots whose copies replace them,
+        from the top down; `from_` stays. Calling it again replays the
+        creates that are done. Unless `to` was created to replace `from_`, a
+        `to` that changes what `from_` states gives `ok: False` and no plan,
+        unless `allow_changes`.
 
         `dry_run` only plans: create each item with `code`, `labels`, `key`
-        and any `replaces`, a level at a time, a `replaces["item"]` naming
-        the snapshot created for that item; the keys make running the plan
+        and any `replaces`, a level at a time; the keys make running the plan
         again safe. A run can take minutes: `submit_rebuild_snapshots` runs
         it as a job."""
     def submit_rebuild_snapshots(

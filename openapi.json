@@ -1283,7 +1283,7 @@
             "type": "object"
           },
           "level": {
-            "description": "The wave its create runs in: one more than the highest level among\nthe items whose modules it imports and the item it replaces, so 1 for\none that imports only `from`'s module and replaces no item.",
+            "description": "The wave its create runs in: one more than the highest level among\nthe items whose modules it imports, so 1 for one that imports only\n`from`'s module.",
             "minimum": 0,
             "type": "integer"
           },
@@ -1300,11 +1300,11 @@
             "type": "string"
           },
           "replaces": {
-            "$ref": "#/components/schemas/RebuildLink",
-            "description": "What the new snapshot replaces, to send as the create's `replaces`,\nthe links mirroring the old ones. If the snapshot it rebuilds\nreplaced one the plan also rebuilds, it replaces that one's new\nsnapshot, `item`, with its own link's `allow`: a skeleton's proof\nreplaces the rebuilt skeleton, and is compared with it. If it\nreplaced one the plan doesn't rebuild, and that still exists, it\nreplaces that same snapshot, so a proof whose skeleton isn't rebuilt\nstill replaces the skeleton. Its `allow` is its own link's and, when\nthat snapshot builds on `from`, what `to` changed: `to`'s `allow` if\n`to` replaces `from`, else the `changed_definitions`. There is no\nsuch link when that snapshot builds on `from` and `to` doesn't\nreplace `from` and changes more than definitions' values: its\nstatements changed. Otherwise, when `to` replaces `from`, it\nreplaces the snapshot it rebuilds, with `to`'s `allow`.\nThe create then checks that nothing its statements depend on\nchanged, and is refused if something did."
+            "$ref": "#/components/schemas/Replaces",
+            "description": "What the new snapshot replaces, to send as the create's `replaces`:\nthe snapshot it copies, so the run goes on through the copy. The plan\nruns the comparison the create will, taking the copy and the new\nmodules it builds on to declare what their originals do, and `allow`\nnames the definitions it found changed, if any. Absent when the\ncomparison fails, as when `to` changes the type of something the\ncopy's statements use: the copy then belongs to no run, and `retire`\nkeeps the old snapshot."
           },
           "snapshot_id": {
-            "description": "The snapshot it rebuilds. Absent for a module that only links others\nto `from`, with no snapshot that has the labels: it gets the labels\nasked for.",
+            "description": "The snapshot it copies: a head with the labels, or one that only its\ncopies from this same rebuild replace, so that sending the rebuild\nagain replays them. Absent for a module that only links others to\n`from`, with no such snapshot: it gets the labels asked for.",
             "type": "string"
           }
         },
@@ -1319,27 +1319,29 @@
         ],
         "type": "object"
       },
-      "RebuildLink": {
-        "description": "What a rebuilt snapshot replaces: a snapshot that exists, `snapshot_id`,\nor the new snapshot of another item of the plan, `item`. Exactly one is\nset. A create sends it as [`Replaces`], with `item` mapped to the\n`new_snapshot_id` created for that item.",
+      "RebuildReplaced": {
+        "description": "A labelled snapshot left out of a rebuild because one without every label\nreplaces it.",
         "properties": {
-          "allow": {
-            "$ref": "#/components/schemas/Allow",
-            "description": "As in [`Replaces::allow`]: for `item`, the old link's; for the\nsnapshot the item rebuilds, `to`'s; for the snapshot the old link\nnamed, the old link's and, if that snapshot builds on `from`, what\n`to` changed (see [`RebuildItem::replaces`])."
-          },
-          "item": {
-            "description": "The index in `plan` of the item whose new snapshot it replaces. That\nitem is at a lower level.",
-            "minimum": 0,
-            "type": "integer"
+          "replaced_by": {
+            "description": "The snapshots without every label that replace it, oldest first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "snapshot_id": {
-            "description": "The replaced snapshot: the one the item rebuilds, or the one that\nsnapshot replaced if the plan doesn't rebuild it.",
+            "description": "The snapshot left out.",
             "type": "string"
           }
         },
+        "required": [
+          "snapshot_id",
+          "replaced_by"
+        ],
         "type": "object"
       },
       "RebuildSkipped": {
-        "description": "A [`RebuildItem`] not created, because it builds on, or replaces, one\nthat wasn't.",
+        "description": "A [`RebuildItem`] not created, because it builds on one that wasn't.",
         "properties": {
           "module": {
             "type": "string"
@@ -1355,7 +1357,7 @@
         "type": "object"
       },
       "RebuildSnapshotsRequest": {
-        "description": "`POST /snapshots/rebuild`: plans how to create the dependents of `from`\n(see [`ListDependentsResponse`]) again on `to`, each with its imports of\n`from`'s module, and of the other modules it rebuilds, swapped for the new\nones, and unless `dry_run` creates them: a level at a time, a level's\ncreates side by side once the level below is done. `from` and `to` are of\none version, which the rebuild runs on.",
+        "description": "`POST /snapshots/rebuild`: plans how to copy each head among the\ndependents of `from` (see [`ListDependentsResponse`]), a snapshot nothing\nreplaces, onto `to`, with its imports of `from`'s module, and of the other\nmodules it rebuilds, swapped for the new ones, and unless `dry_run`\ncreates them: a level at a time, a level's creates side by side once the\nlevel below is done. `from` and `to` are of one version, which the\nrebuild runs on.",
         "properties": {
           "allow_changes": {
             "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](CreateSnapshotRequest::replaces) `from`.",
@@ -1373,14 +1375,14 @@
             "additionalProperties": {
               "type": "string"
             },
-            "description": "Which dependents to rebuild: those with a snapshot that has every\nlabel, and the modules they build on above `from`. Required, so that\nthe caller chooses which projects follow the edit.",
+            "description": "Which dependents to rebuild: those with a head that has every label,\nand the modules they build on above `from`. Required, so that the\ncaller chooses which projects follow the edit.",
             "propertyNames": {
               "type": "string"
             },
             "type": "object"
           },
           "retire": {
-            "description": "Once every item is created, delete the old snapshots the plan rebuilt,\nfrom the top down, and with them the old modules nothing else needs.\n`from` stays: delete it yourself if nothing needs it.",
+            "description": "Once every item is created, delete the old snapshots whose copies\nreplace them, from the top down, and with them the old modules\nnothing else needs. Each delete splices the run, so it goes on\nthrough the copy. An old snapshot whose copy has no link stays, and\nso does `from`: delete it yourself if nothing needs it.",
             "type": "boolean"
           },
           "timeout": {
@@ -1447,6 +1449,13 @@
             },
             "type": "array"
           },
+          "replaced": {
+            "description": "The snapshots with every label that the plan leaves out because a\nsnapshot without every label replaces them, on dry runs and runs\nalike: their runs went on under other labels, which a rebuild with\ntheir heads' labels follows. It doesn't change `ok`.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildReplaced"
+            },
+            "type": "array"
+          },
           "retired": {
             "description": "With `retire`, the ids of the old snapshots deleted, top down.",
             "items": {
@@ -1455,7 +1464,7 @@
             "type": "array"
           },
           "skipped": {
-            "description": "For a run, the items not created because they build on, or replace,\none that failed or was skipped. Other branches go on.",
+            "description": "For a run, the items not created because they build on one that\nfailed or was skipped. Other branches go on.",
             "items": {
               "$ref": "#/components/schemas/RebuildSkipped"
             },
@@ -3431,7 +3440,7 @@
     },
     "/snapshots/rebuild": {
       "post": {
-        "description": "Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, their links mirroring the old ones, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on or replaces it, then with `retire` deleting the old snapshots it rebuilt; `from` stays. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
+        "description": "Plans the creates that copy each head among the dependents of `from` with the labels onto `to`, by level, each copy replacing its original when its statements keep their meaning, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the originals their copies replace; `from` stays. A labelled snapshot that one without the labels replaces is listed in `replaced`, not copied. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.",
         "operationId": "rebuildSnapshots",
         "parameters": [
           {

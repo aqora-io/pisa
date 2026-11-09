@@ -4,13 +4,12 @@
 //! Each create has the plan's idempotency key, so running the same rebuild
 //! again replays the creates that are done.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use pisa_protocol::api::{
     CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, Error, ErrorKind, RebuildCreated,
-    RebuildFailed, RebuildItem, RebuildLink, RebuildSkipped, RebuildSnapshotsRequest,
-    RebuildSnapshotsResponse, Replaces,
+    RebuildFailed, RebuildItem, RebuildSkipped, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -66,37 +65,31 @@ pub(crate) async fn run(
 
     // The new snapshots that weren't made: what imports one isn't either.
     let mut missing: HashSet<String> = HashSet::new();
-    // The new snapshot of each item made, by its index in the plan.
-    let mut new_ids: HashMap<usize, String> = HashMap::new();
     let mut levels: Vec<usize> = response.plan.iter().map(|i| i.level).collect();
     levels.dedup();
     for level in levels {
-        let mut ready: Vec<(usize, &RebuildItem, Option<Replaces>)> = Vec::new();
-        for (at, item) in response.plan.iter().enumerate() {
-            if item.level != level {
-                continue;
-            }
-            let replaces = item.replaces.as_ref().map(|link| linked(link, &new_ids));
-            if builds_on(item, &missing) || matches!(replaces, Some(None)) {
+        let mut ready: Vec<&RebuildItem> = Vec::new();
+        for item in response.plan.iter().filter(|i| i.level == level) {
+            if builds_on(item, &missing) {
                 missing.insert(item.new_module.clone());
                 response.skipped.push(RebuildSkipped {
                     snapshot_id: item.snapshot_id.clone(),
                     module: item.module.clone(),
                 });
             } else {
-                ready.push((at, item, replaces.flatten()));
+                ready.push(item);
             }
         }
         for chunk in ready.chunks(PARALLEL) {
             let running: Vec<_> = chunk
                 .iter()
-                .map(|(_, item, replaces)| {
+                .map(|item| {
                     let (app, req, item) = (app.clone(), req.clone(), (*item).clone());
-                    let (version, replaces) = (version.clone(), replaces.clone());
-                    tokio::spawn(async move { create(&app, &req, version, &item, replaces).await })
+                    let version = version.clone();
+                    tokio::spawn(async move { create(&app, &req, version, &item).await })
                 })
                 .collect();
-            for ((at, item, _), running) in chunk.iter().zip(running) {
+            for (item, running) in chunk.iter().zip(running) {
                 let made = running.await.unwrap_or_else(|e| {
                     Err(Error::new(
                         ErrorKind::Internal,
@@ -108,7 +101,6 @@ pub(crate) async fn run(
                         snapshot: Some(made),
                         ..
                     }) if made.module == item.new_module => {
-                        new_ids.insert(*at, made.id.clone());
                         response.created.push(RebuildCreated {
                             snapshot_id: item.snapshot_id.clone(),
                             module: item.module.clone(),
@@ -150,27 +142,13 @@ fn builds_on(item: &RebuildItem, missing: &HashSet<String>) -> bool {
         .any(|id| missing.contains(&snapshot::module(id)))
 }
 
-/// What a create with `link` replaces: its snapshot, or the one made for its
-/// item, from `new_ids`. `None` if that item wasn't made.
-fn linked(link: &RebuildLink, new_ids: &HashMap<usize, String>) -> Option<Replaces> {
-    let snapshot_id = match link.item {
-        Some(item) => new_ids.get(&item)?.clone(),
-        None => link.snapshot_id.clone()?,
-    };
-    Some(Replaces {
-        snapshot_id,
-        allow: link.allow.clone(),
-    })
-}
-
-/// Creates `item` on `version` as the plan says, replacing `replaces`,
-/// sending it again while no worker takes it in time.
+/// Creates `item` on `version` as the plan says, sending it again while no
+/// worker takes it in time.
 async fn create(
     app: &App,
     req: &RebuildSnapshotsRequest,
     version: Option<String>,
     item: &RebuildItem,
-    replaces: Option<Replaces>,
 ) -> Result<CreateSnapshotResponse, Error> {
     let create = CreateSnapshotRequest {
         code: item.code.clone(),
@@ -179,7 +157,7 @@ async fn create(
         verify: req.verify,
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
-        replaces,
+        replaces: item.replaces.clone(),
     };
     let p = prepare_create(app, create).map_err(|e| e.0)?;
     let mut tries = 0;
@@ -193,14 +171,17 @@ async fn create(
     }
 }
 
-/// Deletes the plan's old snapshots, from the top down; `from` stays. One
-/// already gone counts, as when a rebuild that retired some is sent again.
+/// Deletes the plan's old snapshots whose copies replace them, from the top
+/// down, each delete splicing the run through the copy; the rest, and
+/// `from`, stay. One already gone counts, as when a rebuild that retired
+/// some is sent again.
 async fn retire(
     app: &App,
     plan: &[RebuildItem],
     version: Option<String>,
 ) -> Result<Vec<String>, ApiError> {
-    let old = plan.iter().rev().filter_map(|i| i.snapshot_id.clone());
+    let linked = plan.iter().rev().filter(|i| i.replaces.is_some());
+    let old = linked.filter_map(|i| i.snapshot_id.clone());
     let mut retired = Vec::new();
     for entry in old {
         let job = Job::SnapshotDelete(SnapshotJob {

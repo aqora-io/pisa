@@ -340,14 +340,15 @@ pub async fn dependents(
 #[utoipa::path(
     post, path = "/snapshots/rebuild", operation_id = "rebuildSnapshots", tag = "snapshots",
     summary = "Rebuild a snapshot's dependents on its replacement",
-    description = "Plans the creates that make each dependent of `from` with a snapshot that \
-        has the labels again on `to`, by level, their links mirroring the old ones, and unless \
-        `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on or \
-        replaces it, then with `retire` deleting the old snapshots it rebuilt; `from` stays. \
-        Unless `to` replaces `from`, `to` must not change what `from` states, or \
-        `allow_changes` be set. `from` and `to` are of one version, which the \
-        rebuild runs on. Sending the same rebuild again replays the creates that are done. A \
-        run can be async; a dry run answers at once.",
+    description = "Plans the creates that copy each head among the dependents of `from` with \
+        the labels onto `to`, by level, each copy replacing its original when its statements \
+        keep their meaning, and unless `dry_run` runs them: a level at a time, a failed chunk \
+        skipping only what builds on it, then with `retire` deleting the originals their \
+        copies replace; `from` stays. A labelled snapshot that one without the labels \
+        replaces is listed in `replaced`, not copied. Unless `to` replaces `from`, \
+        `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` \
+        are of one version, which the rebuild runs on. Sending the same rebuild again replays \
+        the creates that are done. A run can be async; a dry run answers at once.",
     params(PreferAsync),
     request_body = RebuildSnapshotsRequest,
     responses((status = 200, description = "The plan, and what the run did", body = RebuildSnapshotsResponse), Accepted, ApiErrors),

@@ -313,7 +313,7 @@ def test_rebuild_snapshots(url):
     replaces = {"snapshot_id": base["id"]}
     proof = client.create_snapshot("import Foo\ntheorem rebuilt : 1 = 1 := rfl", replaces=replaces)["snapshot"]
     plan = client.rebuild_snapshots(base["id"], proof["id"], {"suite": "rebuild"}, dry_run=True)
-    assert plan["ok"] and plan["changes"] == [] and "created" not in plan
+    assert plan["ok"] and plan["changes"] == [] and "created" not in plan and "replaced" not in plan
     with pytest.raises(PisaError, match="answered at once") as e:
         client.submit_rebuild_snapshots(base["id"], proof["id"], {"suite": "rebuild"}, dry_run=True)
     assert (e.value.kind, e.value.status) == ("internal", 200)

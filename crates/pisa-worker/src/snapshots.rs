@@ -35,7 +35,7 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
     Allow, AuditAssumption, AuditFork, AuditLink, AuditSnapshotsResponse, AuditTarget,
     AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Error,
-    ErrorKind, Export, ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildLink,
+    ErrorKind, Export, ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildReplaced,
     RebuildSnapshotsResponse, Replacement, Replaces, Snapshot, SnapshotDetail, SnapshotId,
     VerifyFailure, VerifySnapshotResponse,
 };
@@ -552,58 +552,32 @@ fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashMap<String, 
     levels
 }
 
-/// A rebuild item before its level and link: when its snapshot was made (or
-/// its module, for an item without one), its old module, and the link that
-/// snapshot keeps.
+/// A rebuild item before its level: when its snapshot was made (or its
+/// module, for an item without one), and its old module.
 struct Planned {
     created: u64,
     module: String,
-    link: Option<Replaces>,
     item: RebuildItem,
 }
 
 /// The level of each item of a rebuild plan (see [`RebuildItem::level`]):
 /// one more than the highest among the items on the modules it imports,
-/// `imports[i]`, and the item whose new snapshot it replaces, `replaced[i]`.
-/// Only a snapshot that replaced one built on its own module, which then
-/// declares nothing, can close a cycle: when the items left all wait on each
-/// other, their links to items left are dropped from `replaced`.
-fn waves(imports: &[Vec<usize>], replaced: &mut [Option<usize>]) -> Vec<usize> {
+/// `imports[i]`.
+fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
     let mut waves: Vec<Option<usize>> = vec![None; imports.len()];
+    // Imports always lead down to `from`, so each pass places some.
     while waves.contains(&None) {
-        let mut placed = false;
         for i in 0..waves.len() {
             if waves[i].is_some() {
                 continue;
             }
-            let below = imports[i].iter().chain(&replaced[i]);
-            if let Some(known) = below.map(|&j| waves[j]).collect::<Option<Vec<usize>>>() {
+            let below = imports[i].iter().map(|&j| waves[j]);
+            if let Some(known) = below.collect::<Option<Vec<usize>>>() {
                 waves[i] = Some(1 + known.into_iter().max().unwrap_or(0));
-                placed = true;
-            }
-        }
-        // Imports alone always lead down to `from`.
-        if !placed {
-            for (r, wave) in replaced.iter_mut().zip(&waves) {
-                if wave.is_none() && r.is_some_and(|r| waves[r].is_none()) {
-                    *r = None;
-                }
             }
         }
     }
     waves.into_iter().flatten().collect()
-}
-
-/// The definitions `a` or `b` names, `a`'s first, each once; none if
-/// neither names any.
-fn union(a: Option<&Allow>, b: Option<&Allow>) -> Option<Allow> {
-    let mut definitions: Vec<String> = Vec::new();
-    for name in a.into_iter().chain(b).flat_map(|allow| &allow.definitions) {
-        if !definitions.contains(name) {
-            definitions.push(name.clone());
-        }
-    }
-    (!definitions.is_empty()).then_some(Allow { definitions })
 }
 
 /// Marks `generated`, what the axiom report of the same module marks as
@@ -1014,6 +988,20 @@ impl Snapshots {
         needs: &[String],
         own: &str,
     ) -> Result<Swapped, Error> {
+        self.predicted_swap(replacing, needs, own, &HashMap::new())
+            .await
+    }
+
+    /// [`swapped`](Self::swapped) for a replacement that builds on modules
+    /// not made yet: each module `originals` maps is taken to declare what
+    /// the module it maps to does.
+    async fn predicted_swap(
+        &self,
+        replacing: &Replacing,
+        needs: &[String],
+        own: &str,
+        originals: &HashMap<String, String>,
+    ) -> Result<Swapped, Error> {
         let lost: Vec<&String> = replacing
             .needs
             .iter()
@@ -1028,7 +1016,8 @@ impl Snapshots {
             (&mut swapped.gained, gained.collect()),
         ] {
             for m in modules {
-                let decls = self.catalog.module(m).await?.result.declarations;
+                let read = originals.get(m).unwrap_or(m);
+                let decls = self.catalog.module(read).await?.result.declarations;
                 side.push((m.clone(), decls));
             }
         }
@@ -1836,8 +1825,6 @@ impl Snapshots {
             }),
         };
         let compared = compare(&replacing(allow), now, &swapped);
-        // Without a link, whether `to` changes only definitions' values.
-        let values_only = compared.is_ok();
         let changed_definitions = match compared {
             Ok(r) => r.changed_definitions,
             // What else changed is in `changes`.
@@ -1860,12 +1847,33 @@ impl Snapshots {
         let levels = levels(&above, &old);
         let filter: Vec<(String, String)> = job.labels.clone().into_iter().collect();
         let modules: Vec<String> = above.keys().cloned().collect();
+        let has_labels = |e: &EntryMeta| job.labels.iter().all(|(k, v)| e.labels.get(k) == Some(v));
         let mut matching: HashMap<String, Vec<(String, EntryMeta)>> = HashMap::new();
+        let mut replaced: Vec<RebuildReplaced> = Vec::new();
         for (e, entry_meta) in self.catalog.entries_on(&modules, &filter).await? {
-            matching
-                .entry(entry_meta.module.clone())
-                .or_default()
-                .push((e, entry_meta));
+            // Only heads are copied, and entries that only their copies from
+            // this same rebuild replace, so that it replays them when sent
+            // again.
+            let key = format!("rebuild:{old}:{new}:{e}");
+            let replacers = self.catalog.replacers(&e).await?;
+            if replacers.iter().all(|(_, r)| r.key.as_ref() == Some(&key)) {
+                matching
+                    .entry(entry_meta.module.clone())
+                    .or_default()
+                    .push((e, entry_meta));
+                continue;
+            }
+            let outside: Vec<String> = replacers
+                .iter()
+                .filter(|(_, r)| !has_labels(r))
+                .map(|(r, _)| self.id(r))
+                .collect();
+            if !outside.is_empty() {
+                replaced.push(RebuildReplaced {
+                    snapshot_id: self.id(&e),
+                    replaced_by: outside,
+                });
+            }
         }
         let mut order: Vec<String> = needed(&above, matching.keys().cloned())
             .into_iter()
@@ -1891,6 +1899,8 @@ impl Snapshots {
         }
 
         let mut renamed = BTreeMap::from([(old.clone(), new.clone())]);
+        // Each new module's original, whose declarations it is taken to have.
+        let mut originals: HashMap<String, String> = HashMap::new();
         let mut planned: Vec<Planned> = Vec::new();
         for m in order {
             let meta = self.catalog.module(&m).await?;
@@ -1898,6 +1908,7 @@ impl Snapshots {
             let id = snapshot::id(&code);
             let header = snapshot::next_header(&split_header(&code).header, &id);
             renamed.insert(m.clone(), id.clone());
+            originals.insert(id.clone(), m.clone());
             let affected = if changed_definitions.is_empty() {
                 Vec::new()
             } else {
@@ -1905,10 +1916,10 @@ impl Snapshots {
                 used.extend(users);
                 theorems
             };
-            let item = |entry: Option<String>, labels: BTreeMap<String, String>| RebuildItem {
+            let item = |entry: Option<String>, labels, replaces| RebuildItem {
                 level: 0,
                 key: format!("rebuild:{old}:{new}:{}", entry.as_deref().unwrap_or(&m)),
-                replaces: None,
+                replaces,
                 snapshot_id: entry.as_deref().map(|e| self.id(e)),
                 module: snapshot::module(&m),
                 new_module: snapshot::module(&id),
@@ -1917,39 +1928,69 @@ impl Snapshots {
                 labels,
                 affected: affected.clone(),
             };
-            match matching.remove(&m) {
-                Some(entries) => {
-                    planned.extend(entries.into_iter().map(|(e, entry_meta)| Planned {
-                        created: entry_meta.created_micros,
-                        module: m.clone(),
-                        link: entry_meta.replaces,
-                        item: item(Some(e), entry_meta.labels),
-                    }))
-                }
+            let Some(entries) = matching.remove(&m) else {
                 // It only links what has the labels to `from`.
-                None => planned.push(Planned {
+                planned.push(Planned {
                     created: meta.created * 1_000_000,
                     module: m.clone(),
-                    link: None,
-                    item: item(None, job.labels.clone()),
-                }),
+                    item: item(None, job.labels.clone(), None),
+                });
+                continue;
+            };
+            // What the copy builds on, as its create will find it: `to`'s
+            // modules for `from`'s, and the new modules for those the plan
+            // rebuilds.
+            let needs_before: Vec<String> =
+                ids(&meta.modules).filter(|n| **n != m).cloned().collect();
+            let mut needs_now: Vec<String> = Vec::new();
+            for n in &needs_before {
+                let now = if *n == old {
+                    needs.clone()
+                } else {
+                    vec![renamed.get(n).unwrap_or(n).clone()]
+                };
+                for n in now {
+                    if !needs_now.contains(&n) {
+                        needs_now.push(n);
+                    }
+                }
+            }
+            for (e, entry_meta) in entries {
+                // The comparison the copy's create will run, the copy taken to
+                // declare what its original does, under an `allow` of every
+                // definition: the copy replaces its original if it passes.
+                let mut copied = Replacing {
+                    replaced: Replaces {
+                        snapshot_id: self.id(&e),
+                        allow: None,
+                    },
+                    entry: e.clone(),
+                    declarations: meta.result.declarations.clone(),
+                    needs: needs_before.clone(),
+                };
+                let swapped = self
+                    .predicted_swap(&copied, &needs_now, &id, &originals)
+                    .await?;
+                let definitions: Vec<String> = allowable(&copied, &swapped)
+                    .map(|d| d.name.clone())
+                    .collect();
+                copied.replaced.allow = (!definitions.is_empty()).then_some(Allow { definitions });
+                let replaces = compare(&copied, &copied.declarations, &swapped)
+                    .ok()
+                    .map(|r| Replaces {
+                        snapshot_id: copied.replaced.snapshot_id.clone(),
+                        allow: (!r.changed_definitions.is_empty()).then_some(Allow {
+                            definitions: r.changed_definitions,
+                        }),
+                    });
+                planned.push(Planned {
+                    created: entry_meta.created_micros,
+                    module: m.clone(),
+                    item: item(Some(e), entry_meta.labels, replaces),
+                });
             }
         }
 
-        // The links mirror the old ones: a snapshot that replaced one the
-        // plan rebuilds replaces its new snapshot, after it.
-        let rebuilt: HashMap<&str, usize> = planned
-            .iter()
-            .enumerate()
-            .filter_map(|(i, p)| Some((p.item.snapshot_id.as_deref()?, i)))
-            .collect();
-        let mut replaced: Vec<Option<usize>> = planned
-            .iter()
-            .map(|p| {
-                let link = p.link.as_ref()?;
-                rebuilt.get(self.id(&link.snapshot_id).as_str()).copied()
-            })
-            .collect();
         let mut on: HashMap<&str, Vec<usize>> = HashMap::new();
         for (i, p) in planned.iter().enumerate() {
             on.entry(&p.module).or_default().push(i);
@@ -1965,81 +2006,17 @@ impl Snapshots {
                     .collect()
             })
             .collect();
-        let wave = waves(&imports, &mut replaced);
-        // A link to a snapshot the plan doesn't rebuild, and that still
-        // exists, stays on it, so a run isn't cut where its skeleton doesn't
-        // build on `from`: the new snapshot replaces it with its own link's
-        // `allow` and, when it built on `from`, which the new one no longer
-        // does, what `to` changed: `to`'s `allow` if `to` replaces `from`,
-        // else the definitions whose value it changed. If `to` doesn't
-        // replace `from` and changes more than values, the statements of a
-        // snapshot on `from` changed, so its link goes.
-        let to_allow = match &link {
-            Some(link) => link.allow.clone(),
-            None => Some(Allow {
-                definitions: changed_definitions.clone(),
-            }),
-        };
-        let statements_kept = link.is_some() || values_only;
-        let mut outside: Vec<Option<RebuildLink>> = Vec::new();
-        for (p, r) in planned.iter().zip(&replaced) {
-            let own = p
-                .link
-                .as_ref()
-                .filter(|l| r.is_none() && !rebuilt.contains_key(self.id(&l.snapshot_id).as_str()));
-            let target = match own {
-                Some(own) => self.catalog.find_entry(&own.snapshot_id).await?,
-                None => None,
-            };
-            outside.push(own.zip(target).and_then(|(own, target)| {
-                let on_from = target.module == old || above.contains_key(&target.module);
-                if on_from && !statements_kept {
-                    return None;
-                }
-                let added = to_allow.as_ref().filter(|_| on_from);
-                Some(RebuildLink {
-                    snapshot_id: Some(self.id(&own.snapshot_id)),
-                    item: None,
-                    allow: union(own.allow.as_ref(), added),
-                })
-            }));
+        let wave = waves(&imports);
+        for (p, wave) in planned.iter_mut().zip(wave) {
+            p.item.level = wave;
         }
-        let mut sorted: Vec<usize> = (0..planned.len()).collect();
-        sorted.sort_by_key(|&i| (wave[i], planned[i].created));
-        let mut at = vec![0; sorted.len()];
-        for (position, &i) in sorted.iter().enumerate() {
-            at[i] = position;
-        }
-        let mut plan: Vec<(usize, RebuildItem)> = Vec::new();
-        for ((i, p), outside) in planned.into_iter().enumerate().zip(outside) {
-            let mut item = p.item;
-            item.level = wave[i];
-            item.replaces = match (replaced[i], outside) {
-                (Some(r), _) => Some(RebuildLink {
-                    snapshot_id: None,
-                    item: Some(at[r]),
-                    allow: p.link.and_then(|l| l.allow),
-                }),
-                (None, Some(outside)) => Some(outside),
-                // Under a link, each other rebuilt entry replaces its old
-                // one, which compares what its statements depend on.
-                (None, None) => link
-                    .as_ref()
-                    .zip(item.snapshot_id.clone())
-                    .map(|(link, e)| RebuildLink {
-                        snapshot_id: Some(e),
-                        item: None,
-                        allow: link.allow.clone(),
-                    }),
-            };
-            plan.push((at[i], item));
-        }
-        plan.sort_by_key(|(at, _)| *at);
+        planned.sort_by_key(|p| (p.item.level, p.created));
         Ok(RebuildSnapshotsResponse {
             ok: true,
             changes,
             changed_definitions,
-            plan: plan.into_iter().map(|(_, item)| item).collect(),
+            plan: planned.into_iter().map(|p| p.item).collect(),
+            replaced,
             ..Default::default()
         })
     }
@@ -2813,22 +2790,10 @@ mod tests {
     }
 
     #[test]
-    fn an_item_comes_after_what_it_imports_and_what_it_replaces() {
-        // Skeleton 0 and its proof 1 on `from`; 2 on the skeleton's module,
-        // and 3 on 2's, replacing the proof.
-        let imports = [vec![], vec![], vec![0], vec![2]];
-        let mut replaced = [None, Some(0), None, Some(1)];
-        assert_eq!(waves(&imports, &mut replaced), [1, 2, 2, 3]);
-        assert_eq!(replaced, [None, Some(0), None, Some(1)]);
-    }
-
-    #[test]
-    fn a_link_that_closes_a_cycle_is_dropped() {
-        // 1 on 0's module, 2 on 1's, and 0 replaced 2.
-        let imports = [vec![], vec![0], vec![1]];
-        let mut replaced = [Some(2), None, None];
-        assert_eq!(waves(&imports, &mut replaced), [1, 2, 3]);
-        assert_eq!(replaced, [None, None, None]);
+    fn an_item_comes_after_what_it_imports() {
+        // 0 and 1 on `from`'s module; 2 on 0's module, and 3 on 1's and 2's.
+        let imports = [vec![], vec![], vec![0], vec![1, 2]];
+        assert_eq!(waves(&imports), [1, 1, 2, 3]);
     }
 
     #[test]

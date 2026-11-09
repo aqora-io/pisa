@@ -512,13 +512,13 @@ async fn a_rebuild_runs_under_a_named_allow() {
     }
 }
 
-/// A skeleton S0 on B, with a `sorry` and then `extra`, and a proof P1
-/// replacing it, also on B, both in `p:1`.
-async fn skeleton_and_proof(c: &Cluster, b: &Value, extra: &str) -> (Value, Value) {
+/// A skeleton S0 on B, with a `sorry`, and a proof P1 replacing it, also on
+/// B, both in `p:1`.
+async fn skeleton_and_proof(c: &Cluster, b: &Value) -> (Value, Value) {
     let p1 = json!({"p": "1"});
     let s0 = create(
         c,
-        json!({"code": on(b, &format!("theorem s : 2 = 2 := sorry\n{extra}")), "labels": p1}),
+        json!({"code": on(b, "theorem s : 2 = 2 := sorry"), "labels": p1}),
     )
     .await;
     let replaces = json!({"snapshot_id": entry(&s0)});
@@ -549,7 +549,7 @@ async fn a_skeleton_and_its_proof_are_rebuilt_as_a_run() {
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
-    let (s0, p1) = skeleton_and_proof(&c, &b, "").await;
+    let (s0, p1) = skeleton_and_proof(&c, &b).await;
     let b2 = create(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
@@ -557,40 +557,30 @@ async fn a_skeleton_and_its_proof_are_rebuilt_as_a_run() {
     .await;
     let r = rebuild(&c, &b, &b2, json!({})).await;
     assert_eq!(r["ok"], true, "{r}");
-    assert_eq!(
-        items(&r, "snapshot_id"),
-        [&json!(entry(&s0)), &json!(entry(&p1))]
-    );
-    // S0 is rebuilt as `to` replaces `from`; P1 replaces S0′, so comes after.
-    assert_eq!(items(&r, "level"), [&json!(1), &json!(2)]);
-    assert_eq!(
-        items(&r, "replaces"),
-        [&json!({"snapshot_id": entry(&s0)}), &json!({"item": 0})]
-    );
+    // S0 is replaced, so only the run's head is copied, and the copy
+    // replaces it.
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))]);
+    assert_eq!(items(&r, "replaces"), [&json!({"snapshot_id": entry(&p1)})]);
+    let p1_ = new_entries(&r)[0].as_str().unwrap().to_string();
+    // The run goes on through the copy: no fork.
+    assert_eq!(replacers(&c, entry(&s0)).await, [entry(&p1)]);
+    assert_eq!(replacers(&c, entry(&p1)).await, std::slice::from_ref(&p1_));
 
-    let made = |old: &Value| -> String {
-        let created = r["created"].as_array().unwrap();
-        let made = created
-            .iter()
-            .find(|m| m["snapshot_id"] == old["snapshot"]["id"]);
-        made.unwrap()["new_snapshot_id"].as_str().unwrap().into()
-    };
-    let (s0_, p1_) = (made(&s0), made(&p1));
-    for (new, old) in [(&p1_, &s0_), (&s0_, &entry(&s0).to_string())] {
-        let (_, info) = get(&c, &format!("/snapshots/{new}")).await;
-        assert_eq!(info["replaces"], json!({"snapshot_id": old}), "{info}");
-    }
-    // The new skeleton has one replacer: no fork.
-    assert_eq!(replacers(&c, &s0_).await, std::slice::from_ref(&p1_));
-
-    // Again with `retire`: the old proof goes first, then the old skeleton,
-    // and B stays.
+    // Again with `retire`: the old proof goes, and the copy replaces the
+    // skeleton. S0 and B stay.
     let r = rebuild(&c, &b, &b2, json!({"retire": true})).await;
     assert_eq!(r["ok"], true, "{r}");
-    assert_eq!(r["retired"], json!([entry(&p1), entry(&s0)]));
-    let (status, _) = get(&c, &format!("/snapshots/{}", entry(&b))).await;
-    assert_eq!(status, 200);
-    assert_eq!(replacers(&c, &s0_).await, [p1_]);
+    assert_eq!(r["retired"], json!([entry(&p1)]));
+    for kept in [&s0, &b] {
+        let (status, _) = get(&c, &format!("/snapshots/{}", entry(kept))).await;
+        assert_eq!(status, 200);
+    }
+    let (_, info) = get(&c, &format!("/snapshots/{p1_}")).await;
+    assert_eq!(
+        info["replaces"],
+        json!({"snapshot_id": entry(&s0)}),
+        "{info}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -621,8 +611,9 @@ async fn a_proof_whose_skeleton_isnt_rebuilt_still_replaces_it() {
     let r = rebuild(&c, &b, &b2, json!({})).await;
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))]);
-    // P1′ replaces S0, which builds on B, with P1's `allow` and `to`'s.
-    let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f", "g"]}});
+    // P1′ replaces P1, so stays on S0's run, and says what changed under
+    // it: B′'s `g`, which P1's statement uses.
+    let link = json!({"snapshot_id": entry(&p1), "allow": {"definitions": ["g"]}});
     assert_eq!(items(&r, "replaces"), [&link]);
     let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
     let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
@@ -651,10 +642,10 @@ async fn rebuilt_on_another_g(c: &Cluster, def_g: &str) -> (Value, Value, Value)
 #[tokio::test(flavor = "multi_thread")]
 async fn an_allow_changes_rebuild_keeps_a_run_when_only_values_change() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let (s0, _, r) = rebuilt_on_another_g(&c, "def g : Nat := 2").await;
+    let (_, p1, r) = rebuilt_on_another_g(&c, "def g : Nat := 2").await;
     assert_eq!(r["changed_definitions"], json!(["g"]), "{r}");
-    // P1′ replaces S0, which builds on B, with the definitions B′ changed.
-    let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["g"]}});
+    // P1′ replaces P1, with the definition of B′ its statement uses.
+    let link = json!({"snapshot_id": entry(&p1), "allow": {"definitions": ["g"]}});
     assert_eq!(items(&r, "replaces"), [&link], "{r}");
     assert_eq!(r["ok"], true, "{r}");
     let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
@@ -671,7 +662,7 @@ async fn an_allow_changes_rebuild_unlinks_a_run_whose_statements_change() {
         json!(["statement: g has a different type"]),
         "{r}"
     );
-    // S0's statement changed meaning, so P1′ can't replace it.
+    // P1's statement changed meaning, so P1′ can't replace it.
     assert_eq!(items(&r, "replaces"), [&Value::Null], "{r}");
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(r["created"][0]["snapshot_id"], p1["snapshot"]["id"], "{r}");
@@ -710,7 +701,8 @@ async fn an_allow_changes_rebuild_keeps_a_run_its_changes_cant_reach() {
         "{r}"
     );
     assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
-    // S0 doesn't build on H, so H′ can't change what it states.
+    // P1's statements use nothing of H, so H′ can't change what they state.
+    let link = json!({"snapshot_id": entry(&p1)});
     assert_eq!(items(&r, "replaces"), [&link], "{r}");
     assert_eq!(r["ok"], true, "{r}");
     let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
@@ -719,31 +711,133 @@ async fn an_allow_changes_rebuild_keeps_a_run_its_changes_cant_reach() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_item_that_replaces_a_failed_one_is_skipped() {
+async fn a_proof_whose_helper_uses_a_changed_type_is_unlinked() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let a = create(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
+    let h = create(&c, json!({"code": "import Foo\n\ndef h : Nat := 1"})).await;
+    let s0 = create(
+        &c,
+        json!({"code": on(&a, "def f : Nat := 0\ntheorem s : f = a := sorry")}),
+    )
+    .await;
+    // P1's helper lemma states something about H's `h`; S0 doesn't use H.
+    let code = format!(
+        "import Foo\nimport {}\nimport {}\n\ndef f : Nat := 1\ntheorem s : f = a := rfl\n\
+         theorem aux : h = h := rfl",
+        module(&a),
+        module(&h)
+    );
+    let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f"]}});
+    let p1 = create(
+        &c,
+        json!({"code": code, "replaces": link, "labels": {"p": "1"}}),
+    )
+    .await;
+    let h2 = create(&c, json!({"code": "import Foo\n\ndef h : Int := 1"})).await;
+    let r = rebuild(&c, &h, &h2, json!({"allow_changes": true})).await;
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
+    // `aux` would state something else, so P1′ can't replace P1.
+    assert_eq!(items(&r, "replaces"), [&Value::Null], "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
+    let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+    assert!(info.get("replaces").is_none(), "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resent_rebuild_replays_the_copy_that_replaced_its_original() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let lib = library(&c).await;
+    let b2 = proved(&c, &lib).await;
+    let r = rebuild(&c, &lib.b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    // The originals are replaced now, by their own copies: they stay items.
+    let again = rebuild(&c, &lib.b, &b2, json!({})).await;
+    assert_eq!(again["plan"], r["plan"]);
+    assert_eq!(new_entries(&again), new_entries(&r));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_copy_above_a_rebuilt_module_keeps_its_link() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry", "labels": p1}),
+    )
+    .await;
+    // A chain whose statements use what the one below declares.
+    let c_ = create(
+        &c,
+        json!({"code": on(&b, "def c : Nat := 2"), "labels": p1}),
+    )
+    .await;
+    let d = create(
+        &c,
+        json!({"code": on(&c_, "def d : Nat := c"), "labels": p1}),
+    )
+    .await;
+    let e = create(
+        &c,
+        json!({"code": on(&d, "theorem e : d = d := rfl"), "labels": p1}),
+    )
+    .await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    let old = [&c_, &d, &e];
+    assert_eq!(items(&r, "snapshot_id"), old.map(|s| &s["snapshot"]["id"]));
+    // What E and D use is in the copies below them, which declare the same.
+    let links = old.map(|s| json!({"snapshot_id": entry(s)}));
+    assert_eq!(items(&r, "replaces"), links.each_ref(), "{r}");
+    for (made, link) in new_entries(&r).into_iter().zip(&links) {
+        let (_, info) = get(&c, &format!("/snapshots/{}", made.as_str().unwrap())).await;
+        assert_eq!(&info["replaces"], link, "{info}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_leaves_the_labels_is_reported() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let b = create(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
-    // S0 needs `b`, which the new base lacks; P1 doesn't.
-    let (s0, p1) = skeleton_and_proof(&c, &b, "needs b").await;
-    let other = create(
+    let s0 = create(
         &c,
-        json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
+        json!({"code": on(&b, "theorem s : 2 = 2 := sorry"), "labels": {"p": "2"}}),
     )
     .await;
-    let r = rebuild(&c, &b, &other, json!({"allow_changes": true})).await;
-    assert_eq!(r["ok"], false, "{r}");
-    assert_eq!(items(&r, "replaces"), [&Value::Null, &json!({"item": 0})]);
-    assert_eq!(r["failed"][0]["snapshot_id"], s0["snapshot"]["id"], "{r}");
-    assert_eq!(r["failed"].as_array().unwrap().len(), 1, "{r}");
-    assert_eq!(
-        r["skipped"],
-        json!([{"snapshot_id": entry(&p1), "module": module(&p1)}]),
-        "{r}"
-    );
-    assert!(r.get("created").is_none(), "{r}");
+    let p1 = create(
+        &c,
+        json!({"code": on(&b, "theorem s : 2 = 2 := rfl"), "labels": {"p": "1"},
+               "replaces": {"snapshot_id": entry(&s0)}}),
+    )
+    .await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+    // `p:2`'s run went on in `p:1`, so a `p:2` rebuild leaves it out, and
+    // says so.
+    let replaced = json!([{"snapshot_id": entry(&s0), "replaced_by": [entry(&p1)]}]);
+    for dry_run in [true, false] {
+        let body = json!({"from": entry(&b), "to": entry(&b2), "labels": {"p": "2"},
+                          "dry_run": dry_run});
+        let (status, r) = plan(&c, body).await;
+        assert_eq!((status, &r["ok"]), (200, &json!(true)), "{r}");
+        assert_eq!(r["plan"], json!([]), "{r}");
+        assert_eq!(r["replaced"], replaced, "{r}");
+    }
+    let r = rebuild(&c, &b, &b2, json!({"dry_run": true})).await;
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
+    assert!(r.get("replaced").is_none(), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

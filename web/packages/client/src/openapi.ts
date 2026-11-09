@@ -243,7 +243,7 @@ export interface paths {
         put?: never;
         /**
          * Rebuild a snapshot's dependents on its replacement
-         * @description Plans the creates that make each dependent of `from` with a snapshot that has the labels again on `to`, by level, their links mirroring the old ones, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on or replaces it, then with `retire` deleting the old snapshots it rebuilt; `from` stays. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
+         * @description Plans the creates that copy each head among the dependents of `from` with the labels onto `to`, by level, each copy replacing its original when its statements keep their meaning, and unless `dry_run` runs them: a level at a time, a failed chunk skipping only what builds on it, then with `retire` deleting the originals their copies replace; `from` stays. A labelled snapshot that one without the labels replaces is listed in `replaced`, not copied. Unless `to` replaces `from`, `to` must not change what `from` states, or `allow_changes` be set. `from` and `to` are of one version, which the rebuild runs on. Sending the same rebuild again replays the creates that are done. A run can be async; a dry run answers at once.
          */
         post: operations["rebuildSnapshots"];
         delete?: never;
@@ -1044,8 +1044,8 @@ export interface components {
             };
             /**
              * @description The wave its create runs in: one more than the highest level among
-             *     the items whose modules it imports and the item it replaces, so 1 for
-             *     one that imports only `from`'s module and replaces no item.
+             *     the items whose modules it imports, so 1 for one that imports only
+             *     `from`'s module.
              */
             level: number;
             /** @description The module it rebuilds. */
@@ -1055,72 +1055,48 @@ export interface components {
             /** @description The module the create makes. */
             new_module: string;
             /**
-             * @description What the new snapshot replaces, to send as the create's `replaces`,
-             *     the links mirroring the old ones. If the snapshot it rebuilds
-             *     replaced one the plan also rebuilds, it replaces that one's new
-             *     snapshot, `item`, with its own link's `allow`: a skeleton's proof
-             *     replaces the rebuilt skeleton, and is compared with it. If it
-             *     replaced one the plan doesn't rebuild, and that still exists, it
-             *     replaces that same snapshot, so a proof whose skeleton isn't rebuilt
-             *     still replaces the skeleton. Its `allow` is its own link's and, when
-             *     that snapshot builds on `from`, what `to` changed: `to`'s `allow` if
-             *     `to` replaces `from`, else the `changed_definitions`. There is no
-             *     such link when that snapshot builds on `from` and `to` doesn't
-             *     replace `from` and changes more than definitions' values: its
-             *     statements changed. Otherwise, when `to` replaces `from`, it
-             *     replaces the snapshot it rebuilds, with `to`'s `allow`.
-             *     The create then checks that nothing its statements depend on
-             *     changed, and is refused if something did.
+             * @description What the new snapshot replaces, to send as the create's `replaces`:
+             *     the snapshot it copies, so the run goes on through the copy. The plan
+             *     runs the comparison the create will, taking the copy and the new
+             *     modules it builds on to declare what their originals do, and `allow`
+             *     names the definitions it found changed, if any. Absent when the
+             *     comparison fails, as when `to` changes the type of something the
+             *     copy's statements use: the copy then belongs to no run, and `retire`
+             *     keeps the old snapshot.
              */
-            replaces?: components["schemas"]["RebuildLink"];
+            replaces?: components["schemas"]["Replaces"];
             /**
-             * @description The snapshot it rebuilds. Absent for a module that only links others
-             *     to `from`, with no snapshot that has the labels: it gets the labels
-             *     asked for.
+             * @description The snapshot it copies: a head with the labels, or one that only its
+             *     copies from this same rebuild replace, so that sending the rebuild
+             *     again replays them. Absent for a module that only links others to
+             *     `from`, with no such snapshot: it gets the labels asked for.
              */
             snapshot_id?: string;
         };
         /**
-         * @description What a rebuilt snapshot replaces: a snapshot that exists, `snapshot_id`,
-         *     or the new snapshot of another item of the plan, `item`. Exactly one is
-         *     set. A create sends it as [`Replaces`], with `item` mapped to the
-         *     `new_snapshot_id` created for that item.
+         * @description A labelled snapshot left out of a rebuild because one without every label
+         *     replaces it.
          */
-        RebuildLink: {
-            /**
-             * @description As in [`Replaces::allow`]: for `item`, the old link's; for the
-             *     snapshot the item rebuilds, `to`'s; for the snapshot the old link
-             *     named, the old link's and, if that snapshot builds on `from`, what
-             *     `to` changed (see [`RebuildItem::replaces`]).
-             */
-            allow?: components["schemas"]["Allow"];
-            /**
-             * @description The index in `plan` of the item whose new snapshot it replaces. That
-             *     item is at a lower level.
-             */
-            item?: number;
-            /**
-             * @description The replaced snapshot: the one the item rebuilds, or the one that
-             *     snapshot replaced if the plan doesn't rebuild it.
-             */
-            snapshot_id?: string;
+        RebuildReplaced: {
+            /** @description The snapshots without every label that replace it, oldest first. */
+            replaced_by: string[];
+            /** @description The snapshot left out. */
+            snapshot_id: string;
         };
-        /**
-         * @description A [`RebuildItem`] not created, because it builds on, or replaces, one
-         *     that wasn't.
-         */
+        /** @description A [`RebuildItem`] not created, because it builds on one that wasn't. */
         RebuildSkipped: {
             module: string;
             /** @description As in [`RebuildItem::snapshot_id`]. */
             snapshot_id?: string;
         };
         /**
-         * @description `POST /snapshots/rebuild`: plans how to create the dependents of `from`
-         *     (see [`ListDependentsResponse`]) again on `to`, each with its imports of
-         *     `from`'s module, and of the other modules it rebuilds, swapped for the new
-         *     ones, and unless `dry_run` creates them: a level at a time, a level's
-         *     creates side by side once the level below is done. `from` and `to` are of
-         *     one version, which the rebuild runs on.
+         * @description `POST /snapshots/rebuild`: plans how to copy each head among the
+         *     dependents of `from` (see [`ListDependentsResponse`]), a snapshot nothing
+         *     replaces, onto `to`, with its imports of `from`'s module, and of the other
+         *     modules it rebuilds, swapped for the new ones, and unless `dry_run`
+         *     creates them: a level at a time, a level's creates side by side once the
+         *     level below is done. `from` and `to` are of one version, which the
+         *     rebuild runs on.
          */
         RebuildSnapshotsRequest: {
             /**
@@ -1133,17 +1109,19 @@ export interface components {
             /** @description The snapshot being replaced. */
             from: string;
             /**
-             * @description Which dependents to rebuild: those with a snapshot that has every
-             *     label, and the modules they build on above `from`. Required, so that
-             *     the caller chooses which projects follow the edit.
+             * @description Which dependents to rebuild: those with a head that has every label,
+             *     and the modules they build on above `from`. Required, so that the
+             *     caller chooses which projects follow the edit.
              */
             labels: {
                 [key: string]: string;
             };
             /**
-             * @description Once every item is created, delete the old snapshots the plan rebuilt,
-             *     from the top down, and with them the old modules nothing else needs.
-             *     `from` stays: delete it yourself if nothing needs it.
+             * @description Once every item is created, delete the old snapshots whose copies
+             *     replace them, from the top down, and with them the old modules
+             *     nothing else needs. Each delete splices the run, so it goes on
+             *     through the copy. An old snapshot whose copy has no link stays, and
+             *     so does `from`: delete it yourself if nothing needs it.
              */
             retire?: boolean;
             /**
@@ -1188,11 +1166,18 @@ export interface components {
              *     be created together once the level below is done.
              */
             plan: components["schemas"]["RebuildItem"][];
+            /**
+             * @description The snapshots with every label that the plan leaves out because a
+             *     snapshot without every label replaces them, on dry runs and runs
+             *     alike: their runs went on under other labels, which a rebuild with
+             *     their heads' labels follows. It doesn't change `ok`.
+             */
+            replaced?: components["schemas"]["RebuildReplaced"][];
             /** @description With `retire`, the ids of the old snapshots deleted, top down. */
             retired?: string[];
             /**
-             * @description For a run, the items not created because they build on, or replace,
-             *     one that failed or was skipped. Other branches go on.
+             * @description For a run, the items not created because they build on one that
+             *     failed or was skipped. Other branches go on.
              */
             skipped?: components["schemas"]["RebuildSkipped"][];
         };
@@ -1519,7 +1504,7 @@ export type QueryResult = components['schemas']['QueryResult'];
 export type RebuildCreated = components['schemas']['RebuildCreated'];
 export type RebuildFailed = components['schemas']['RebuildFailed'];
 export type RebuildItem = components['schemas']['RebuildItem'];
-export type RebuildLink = components['schemas']['RebuildLink'];
+export type RebuildReplaced = components['schemas']['RebuildReplaced'];
 export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];
 export type RebuildSnapshotsResponse = components['schemas']['RebuildSnapshotsResponse'];

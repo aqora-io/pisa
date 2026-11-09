@@ -59,7 +59,7 @@ pub use pisa_protocol::api::{
     AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, CheckResult,
     CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Detail, ErrorKind, Export, Health,
     HealthStatus, JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, Message, Pos,
-    ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildLink, RebuildSkipped,
+    ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped,
     RebuildSnapshotsResponse, Replacement, Replaces, Session, Severity, Snapshot, SnapshotDetail,
     Sorry, State, TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
@@ -146,14 +146,13 @@ pub struct CreateSnapshotOptions {
 #[derive(Debug, Clone, Default)]
 pub struct RebuildOptions {
     /// Only plan: create each item's `code` with its `labels`, `key` and
-    /// `replaces`, a level at a time, an `item` there naming the snapshot
-    /// created for that item.
+    /// `replaces`, a level at a time.
     pub dry_run: bool,
     /// Rebuild even though `to`, created without `replaces`, changes what
     /// `from` states.
     pub allow_changes: bool,
-    /// Once every item is created, delete the old snapshots the plan
-    /// rebuilt, from the top down. `from` stays.
+    /// Once every item is created, delete the old snapshots whose copies
+    /// replace them, from the top down. `from` stays.
     pub retire: bool,
     /// The kernel re-check for each create; see
     /// [`CreateSnapshotOptions::verify`].
@@ -669,10 +668,11 @@ impl Client {
     }
 
     /// Rebuilds `from`'s dependents with every label in `labels` on `to`:
-    /// the server plans the creates, by level, and unless `opts.dry_run` runs
-    /// them, a level at a time, and with `retire` then deletes the old
-    /// snapshots it rebuilt, though not `from`. Sending it again replays the
-    /// creates that are done. A run can take minutes;
+    /// the server plans the creates that copy their heads, by level, and
+    /// unless `opts.dry_run` runs them, a level at a time, and with `retire`
+    /// then deletes the old snapshots whose copies replace them, though not
+    /// `from`. Sending it again replays the creates that are done. A run can
+    /// take minutes;
     /// [`submit_rebuild_snapshots`](Self::submit_rebuild_snapshots) runs it
     /// as a job.
     pub async fn rebuild_snapshots(

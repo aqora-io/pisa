@@ -227,7 +227,7 @@ pnpm -C web generate
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
-| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | → `{removed: [...]}`, the modules that went with the snapshot; see [Retention](#retention) |
@@ -548,8 +548,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 - **Links.** For review, `links` lists every link that let definitions change
   (with an `allow`): those on the way to the heads, and those of each spec
   snapshot's own chain back through what it replaced, as far as those
-  snapshots exist, such as a rebuilt spec's link to the original under `to`'s
-  `allow`. Each is `{snapshot_id, replaces: {snapshot_id, allow},
+  snapshots exist, such as a rebuilt spec's link to the original, which
+  allows what `to` changed under it. Each is `{snapshot_id, replaces: {snapshot_id, allow},
   replacement: {filled, changed_definitions?, affected?}}`: the link as the
   snapshot's own `replaces` shows it, and what its comparison found: its
   create's, or the union of two if the snapshot between was deleted.
@@ -558,9 +558,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 - **Parameters.** The ids are of one version, which the audit uses; ids of
   several versions are a 400 that names them, and so is a `version` that
   isn't theirs. `label` doesn't combine with `against` (400), and a spec
-  snapshot that doesn't exist is a 404. After a
-  [rebuild](#rebuilding), audit against the new spec snapshots: `created`
-  maps the old ids to the new.
+  snapshot that doesn't exist is a 404. A [rebuild](#rebuilding) copies
+  only a run's heads, so audit against the same ids after it; a spec
+  snapshot that was itself a head is copied too, and `created` maps it to
+  its copy.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports
@@ -571,7 +572,7 @@ parents first: by level (1 imports it, 2 imports a level 1, and so on, by the
 longest chain), then oldest first. With `label` filters, as in a listing, only
 the snapshots with every label.
 
-`POST /snapshots/rebuild` creates them again on the replacement, or with
+`POST /snapshots/rebuild` copies their heads onto the replacement, or with
 `"dry_run": true` only plans how:
 
 ```text
@@ -581,30 +582,42 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
         "new_header": "…", "code": "…", "labels": {…}, "key": "rebuild:…"}, …]}
 ```
 
-- **What it rebuilds.** The dependents with a snapshot that has every label
+- **What it rebuilds.** The dependents with a head that has every label
   (`labels` is required, so the caller chooses which projects follow the
   edit), and any module between them and `from`, which gets an item without
-  `snapshot_id`, with the labels asked for. Each item's `code` is the old code with
-  its imports of `from`'s module, and of the other modules the plan rebuilds,
-  swapped for the new ones; lines and columns stay where they were. `from`
-  and `to` are of one version, which the rebuild runs on.
+  `snapshot_id`, with the labels asked for. A head is a snapshot that
+  nothing replaces, with the labels or without: a replaced one is history,
+  and its run goes on through what replaced it. A snapshot that only its copies from
+  this same rebuild replace stays an item, so sending the rebuild again
+  replays them. Each item's `code` is the old code with its imports of
+  `from`'s module, and of the other modules the plan rebuilds, swapped for
+  the new ones; lines and columns stay where they were. `from` and `to` are
+  of one version, which the rebuild runs on.
+- **Runs that left the labels.** A snapshot with the labels that one
+  without them replaces isn't copied, as its run went on elsewhere: on dry
+  runs and runs alike, `replaced` lists it as `{snapshot_id, replaced_by}`,
+  with those replacers. Rebuild that run with its heads' labels. It doesn't
+  change `ok`.
 - **Levels.** An item's `level` is the wave its create runs in: one more than
-  the highest among the items whose modules it imports and the item it
-  replaces (see *Links*), so 1 for one that imports only `from`'s module.
+  the highest among the items whose modules it imports, so 1 for one that
+  imports only `from`'s module.
 - **Running it.** Without `dry_run`, the server runs the plan: a level at a
   time, up to 8 of a level's creates side by side once the level below is
   done, each with the item's `code`, `labels`, `key` and `replaces`, and the
   request's `verify` and `timeout`. A create no worker takes in time is sent
   again, up to 5 times. The response adds what it did: `created` (each old
   `snapshot_id` and `module` with its `new_snapshot_id` and `new_module`),
-  `failed` (with the create's `check`), and `skipped`, the items that build on,
-  or replace, one that failed or was skipped; other branches go on, and `ok`
-  says whether every item was created.
+  `failed` (with the create's `check`), and `skipped`, the items that build
+  on one that failed or was skipped; other branches go on, and `ok` says
+  whether every item was created.
 - **Retiring.** With `"retire": true`, once every item is created, the server
-  deletes the old snapshots the plan rebuilt, from the top down, and with them
-  the old modules nothing else needs; `retired` lists the snapshots' ids.
-  `from` stays: when `to` replaces it, it is part of the run's history, such
-  as the skeleton a proof replaced. Delete it yourself if nothing needs it.
+  deletes the old snapshots whose copies replace them, from the top down, and
+  with them the old modules nothing else needs; `retired` lists the
+  snapshots' ids. Each delete splices the run (see [Retention](#retention)),
+  so a skeleton S0 and its proof P1, with P1 copied as P1′, read S0 ← P1′.
+  An old snapshot whose copy has no link stays, and its run with it. `from`
+  stays: when `to` replaces it, it is part of the run's history, such as the
+  skeleton a proof replaced. Delete it yourself if nothing needs it.
 - **Sending it again.** The keys come from the plan, so sending the same
   rebuild again, after a failure, a timeout or a lost server, replays the
   creates that are done and runs the rest.
@@ -617,9 +630,7 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   answers at once.
 - **Running it yourself.** Or take the plan and send each item as
   `POST /snapshots {code, labels, key, replaces?}`, a level at a time, the
-  same way; each create's `snapshot.module` is the item's `new_module`. A
-  `replaces` with `item` names another item's new snapshot: send it as
-  `{"snapshot_id": …, "allow"?}` with the id that item's create returned.
+  same way; each create's `snapshot.module` is the item's `new_module`.
 - **Statements.** If `to` replaces `from` (see [Replacing](#replacing)), its
   create compared them, so `changes` is empty. Otherwise the rebuild compares
   them the same way and, if `to` changes what `from` states, answers `ok:
@@ -629,32 +640,19 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   them, and each item lists its theorems whose type uses one, directly or
   through definitions here or below, as `affected`. That is read from what
   the modules' declarations use.
-- **Links.** The new snapshots' links mirror the old ones, so a run's history
-  carries over. Each item's `replaces`, to send with its create, is:
-  - `{"item": i, "allow"?}` when its old snapshot replaced one the plan also
-    rebuilds, item `i`, as a proof replaces its skeleton: the new proof
-    replaces the new skeleton, with the old link's `allow`, and is compared
-    with it, so it must still keep the rebuilt skeleton's statements;
-  - `{"snapshot_id": …, "allow"?}` naming that same snapshot when its old
-    snapshot replaced one the plan doesn't rebuild, as when a proof imports
-    a helper its skeleton doesn't and the rebuild is from the helper: the
-    new proof replaces the old skeleton, with the old link's `allow` and,
-    when the skeleton builds on `from`, what `to` changed: `to`'s `allow`
-    when `to` replaces `from`, else the `changed_definitions`. With
-    `retire`, the old proof goes and the run goes on through the new one.
-    There is no such link when the skeleton builds on `from` and `to`
-    doesn't replace `from` and changes more than definitions' values: the
-    skeleton's statements changed;
-  - otherwise, when `to` replaces `from`, `{"snapshot_id": …, "allow"?}`: the
-    rebuilt snapshot replaces its old one, with `to`'s `allow`, which checks
-    that nothing its statements use changed through the rebuild. A dependent
-    whose statements did change meaning is refused rather than kept;
-  - otherwise none.
-
-  An old link to a snapshot that has since been deleted, or one that would
-  make an item wait on itself (a snapshot that replaced one built on its own
-  module), falls through to the last two: the new snapshot replaces its old
-  one when `to` replaces `from`, and has no link otherwise.
+- **Links.** Each copy replaces the snapshot it copies, so a run's history
+  carries over, and a run's spec snapshots keep their ids. Before anything
+  is built, the plan runs the comparison the copy's create will run (see
+  [Replacing](#replacing)), the copy and the new modules it builds on taken
+  to declare what their originals do, and every definition allowed to
+  change its value. If it passes, the item's `replaces` is `{"snapshot_id":
+  …, "allow"?}`, where `allow` names the definitions it found changed, such
+  as one of `to`'s that the copy's statements use; with none, there is no
+  `allow`. If it fails, as when `to` changes the type of something the
+  copy's statements use, the item has no `replaces`: a changed statement is
+  a new spec, for a person to set. The copy then belongs to no run, and the
+  old run stays as it was, even with `retire`. To start a new run, create
+  the skeleton again on the new base, then the copy's code replacing it.
 - **Limits.** At most 1000 items, as the plan carries code.
 
 **How it works.**
@@ -790,9 +788,9 @@ let above = client.list_dependents(&base.id, &run).await?; // parents first
 let audit = client.audit_snapshots(&run).await?; // statuses, assumptions, what isn't proved
 let audit = client.audit_snapshots_against([&base.id]).await?; // the run from base: audit.clean, heads, targets
 let opts = pisa_client::RebuildOptions { dry_run: true, ..Default::default() };
-// Create each item, a level at a time; a `replaces.item` names the snapshot made for that item.
+// Create each item, a level at a time, with its `replaces`.
 let plan = client.rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?.plan;
-let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the old snapshots after, not `base`
+let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the originals the copies replace, not `base`
 let job = client.submit_rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?;
 let done = client.wait_job(&job).await?; // the server ran the plan: done.created, done.failed
 let removed = client.delete_snapshot(&base.id).await?.removed; // the modules that went with it
@@ -822,8 +820,8 @@ extended = client.create_snapshot(more, replaces={"snapshot_id": base["id"]})["s
 client.list_dependents(base["id"], {"run": "7"})["snapshots"]   # parents first
 client.audit_snapshots({"run": "7"})["summary"]   # by status: proved, conditional, sorry, rejected
 client.audit_snapshots(against=[base["id"]])["clean"]   # the run from base, to its heads; see Auditing a run
-plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time; a replaces["item"] names the snapshot made for that item
-done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the old snapshots, not base
+plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time, with its replaces
+done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the originals the copies replace, not base
 client.delete_snapshot(base["id"])["removed"]   # the modules that went with it
 job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
 client.wait_job(job)["ok"]   # what check would have returned, or raised

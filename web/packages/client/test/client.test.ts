@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PisaClient, isCapacityError, isPisaError, type RebuildItem, type RebuildLink } from "../src/index.ts";
+import { PisaClient, isCapacityError, isPisaError, type RebuildItem, type Replaces } from "../src/index.ts";
 
 interface Sent {
   url: string;
@@ -139,23 +139,25 @@ describe("PisaClient", () => {
     expect(sent).toHaveLength(1);
   });
 
-  it("reads a plan's links, to an old snapshot or to another item's new one", async () => {
-    const skeleton: RebuildItem = {
+  it("reads a plan's links, each to the snapshot its item copies, and the runs it left out", async () => {
+    const proof: RebuildItem = {
       level: 1,
-      snapshot_id: "v1~s0",
+      snapshot_id: "v1~p1",
       module: "PisaSnap.sa",
       new_module: "PisaSnap.sb",
       new_header: "import PisaSnap.sb",
-      code: "theorem s : 2 = 2 := sorry",
+      code: "theorem s : 2 = 2 := rfl",
       labels: { p: "1" },
-      key: "rebuild:a:b:s0",
-      replaces: { snapshot_id: "v1~s0" },
+      key: "rebuild:a:b:p1",
+      replaces: { snapshot_id: "v1~p1", allow: { definitions: ["f"] } },
     };
-    const proof = { ...skeleton, level: 2, snapshot_id: "v1~p1", replaces: { item: 0, allow: { definitions: ["f"] } } };
-    const { client } = recording(() => json({ ok: true, changes: [], plan: [skeleton, proof] }));
-    const { plan } = await client.rebuildSnapshots("v1~e1", "v1~e2", { p: "1" }, { dryRun: true });
-    const links: (RebuildLink | undefined)[] = plan.map((i) => i.replaces);
-    expect(links).toEqual([{ snapshot_id: "v1~s0" }, { item: 0, allow: { definitions: ["f"] } }]);
+    const unlinked = { ...proof, snapshot_id: "v1~q1", key: "rebuild:a:b:q1", replaces: undefined };
+    const replaced = [{ snapshot_id: "v1~s0", replaced_by: ["v1~r1"] }];
+    const { client } = recording(() => json({ ok: true, changes: [], plan: [proof, unlinked], replaced }));
+    const r = await client.rebuildSnapshots("v1~e1", "v1~e2", { p: "1" }, { dryRun: true });
+    const links: (Replaces | undefined)[] = r.plan.map((i) => i.replaces);
+    expect(links).toEqual([{ snapshot_id: "v1~p1", allow: { definitions: ["f"] } }, undefined]);
+    expect(r.replaced?.[0]?.replaced_by).toEqual(["v1~r1"]);
   });
 
   it("runs a rebuild, at once or as a job", async () => {

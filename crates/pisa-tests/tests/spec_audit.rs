@@ -360,21 +360,17 @@ async fn a_spec_over_two_snapshots_survives_a_retiring_rebuild() {
                       "verify": true});
     let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
     assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
-    assert_eq!(rebuilt["retired"], json!([id(&p_b), id(&s_b)]));
-    let made = |old: &Value| -> String {
-        let created = rebuilt["created"].as_array().unwrap();
-        let made = created.iter().find(|m| m["snapshot_id"] == id(old));
-        made.unwrap()["new_snapshot_id"].as_str().unwrap().into()
-    };
-    let (s_b_, p_b_) = (made(&s_b), made(&p_b));
+    // Only the head P_b is copied and retired, so the spec keeps its ids.
+    assert_eq!(rebuilt["retired"], json!([id(&p_b)]));
+    let p_b_ = made(&rebuilt, &p_b);
 
-    let r = audit(&c, &[id(&s_a), &s_b_]).await;
+    let r = audit(&c, &[id(&s_a), id(&s_b)]).await;
     assert_eq!(r["heads"], json!([id(&p_a), p_b_]), "{r}");
     assert_eq!(
         targets(&r),
         [
             format!("ta {} {} proved true", id(&s_a), id(&p_a)),
-            format!("tb {s_b_} {p_b_} proved true")
+            format!("tb {} {p_b_} proved true", id(&s_b))
         ]
     );
     assert_eq!(r["clean"], true, "{r}");
@@ -426,11 +422,11 @@ async fn deleting_a_middle_snapshot_keeps_the_run() {
 
 /// The acceptance flow: a skeleton on a base, a proof that changes one of
 /// its definitions, then a base that changes one of its own, and a rebuild
-/// that retires the old run. A rebuild copies only the run's head, and
-/// deleting the skeleton splices its link into the proof's, so the new proof
-/// replaces the old skeleton under both edits.
+/// that retires the old head. A rebuild copies only the run's head, the old
+/// proof, and `retire` deletes it, which splices its link to the skeleton
+/// into its copy's, so the new proof replaces the old skeleton under both
+/// edits.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Tasks 2 and 3: splices and head-only rebuilds"]
 async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let p1 = json!({"p": "1"});
@@ -485,7 +481,6 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
 /// the new proof no link, so `retire` keeps the old proof, and the run stays
 /// on it.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Task 3: head-only rebuilds and retire"]
 async fn a_rebuild_that_changes_a_statement_leaves_the_run_on_the_old_proof() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let p1 = json!({"p": "1"});
@@ -523,7 +518,8 @@ async fn a_rebuild_that_changes_a_statement_leaves_the_run_on_the_old_proof() {
 }
 
 /// A proof P1 that also imports a helper H, which its skeleton S0 doesn't:
-/// a rebuild from H rebuilds P1 but not S0, and P1′ replaces S0 itself.
+/// a rebuild from H copies P1, the copy replacing it, and once `retire`
+/// deletes P1 the copy replaces S0 itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_whose_skeleton_is_outside_the_plan_survives_a_retiring_rebuild() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
@@ -549,8 +545,8 @@ async fn a_run_whose_skeleton_is_outside_the_plan_survives_a_retiring_rebuild() 
         json!({"code": both, "replaces": replacing(&s0), "labels": p1}),
     )
     .await;
-    // H′ changes `hd`. S0 doesn't build on H, so P1′'s link leaves H′'s
-    // `allow` out: S0's comparison would refuse it as naming nothing there.
+    // H′ changes `hd`, which P1's statements don't use, so P1′'s link has
+    // no `allow`.
     let h2 = create(
         &c,
         json!({"code": "import Foo\n\ndef hd : Nat := 0 + 1",
@@ -561,25 +557,23 @@ async fn a_run_whose_skeleton_is_outside_the_plan_survives_a_retiring_rebuild() 
     let mut body = json!({"from": id(&h), "to": id(&h2), "labels": p1, "verify": true});
     let (status, rebuilt) = c.post("/snapshots/rebuild", body.clone()).await;
     assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
-    assert_eq!(rebuilt["plan"][0]["replaces"], replacing(&s0), "{rebuilt}");
+    assert_eq!(rebuilt["plan"][0]["replaces"], replacing(&p1_), "{rebuilt}");
     let p1_new = made(&rebuilt, &p1_);
-    assert_eq!(link(&c, &p1_new).await, replacing(&s0));
+    assert_eq!(link(&c, &p1_new).await, replacing(&p1_));
 
-    // Without `retire`, the old proof stays: the run forks at S0.
+    // Without `retire`, the old proof stays, and the run goes on through it
+    // to the new one: no fork.
     let r = audit(&c, &[id(&s0)]).await;
-    assert_eq!(
-        r["forks"],
-        json!([{"snapshot_id": id(&s0), "replaced_by": [id(&p1_), p1_new]}]),
-        "{r}"
-    );
-    assert_eq!(r["clean"], false);
+    assert_eq!(r["heads"], json!([p1_new]), "{r}");
+    assert!(r.get("forks").is_none(), "{r}");
 
-    // Sent again with `retire`, it deletes the old proof, and the run goes
-    // on through the new one.
+    // Sent again with `retire`, it deletes the old proof, and the new one
+    // replaces S0.
     body["retire"] = json!(true);
     let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
     assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
     assert_eq!(rebuilt["retired"], json!([id(&p1_)]));
+    assert_eq!(link(&c, &p1_new).await, replacing(&s0));
     let r = audit(&c, &[id(&s0)]).await;
     assert_eq!(r["heads"], json!([p1_new]), "{r}");
     assert!(r.get("forks").is_none(), "{r}");
