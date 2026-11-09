@@ -224,11 +224,17 @@ fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Error> {
         .definitions
         .iter()
         .find(|n| !names.contains(&normalised(n)))?;
+    let private = format!("_private.{}", normalised(name));
+    let hint = if names.contains(private.as_str()) {
+        format!(" (for a private definition, write {private})")
+    } else {
+        String::new()
+    };
     Some(Error::new(
         ErrorKind::BadRequest,
         format!(
             "allow names {name}, which isn't a definition of the replaced snapshot or of a \
-             snapshot the code no longer builds on"
+             snapshot the code no longer builds on{hint}"
         ),
     ))
 }
@@ -586,6 +592,18 @@ fn waves(imports: &[Vec<usize>], replaced: &mut [Option<usize>]) -> Vec<usize> {
         }
     }
     waves.into_iter().flatten().collect()
+}
+
+/// The definitions `a` or `b` names, `a`'s first, each once; none if
+/// neither names any.
+fn union(a: Option<&Allow>, b: Option<&Allow>) -> Option<Allow> {
+    let mut definitions: Vec<String> = Vec::new();
+    for name in a.into_iter().chain(b).flat_map(|allow| &allow.definitions) {
+        if !definitions.contains(name) {
+            definitions.push(name.clone());
+        }
+    }
+    (!definitions.is_empty()).then_some(Allow { definitions })
 }
 
 /// Marks `generated`, what the axiom report of the same module marks as
@@ -1937,6 +1955,34 @@ impl Snapshots {
             })
             .collect();
         let wave = waves(&imports, &mut replaced);
+        // A link to a snapshot the plan doesn't rebuild, and that still
+        // exists, stays on it, so a run isn't cut where its skeleton doesn't
+        // build on `from`: the new snapshot replaces it with its own link's
+        // `allow`, and `to`'s when it built on `from`, which the new one no
+        // longer does.
+        let mut outside: Vec<Option<RebuildLink>> = Vec::new();
+        for (p, r) in planned.iter().zip(&replaced) {
+            let own = p
+                .link
+                .as_ref()
+                .filter(|l| r.is_none() && !rebuilt.contains_key(self.id(&l.snapshot_id).as_str()));
+            let target = match own {
+                Some(own) => self.catalog.find_entry(&own.snapshot_id).await?,
+                None => None,
+            };
+            outside.push(own.zip(target).map(|(own, target)| {
+                let on_from = target.module == old || above.contains_key(&target.module);
+                let to_allow = link
+                    .as_ref()
+                    .filter(|_| on_from)
+                    .and_then(|l| l.allow.as_ref());
+                RebuildLink {
+                    snapshot_id: Some(self.id(&own.snapshot_id)),
+                    item: None,
+                    allow: union(own.allow.as_ref(), to_allow),
+                }
+            }));
+        }
         let mut sorted: Vec<usize> = (0..planned.len()).collect();
         sorted.sort_by_key(|&i| (wave[i], planned[i].created));
         let mut at = vec![0; sorted.len()];
@@ -1944,18 +1990,19 @@ impl Snapshots {
             at[i] = position;
         }
         let mut plan: Vec<(usize, RebuildItem)> = Vec::new();
-        for (i, p) in planned.into_iter().enumerate() {
+        for ((i, p), outside) in planned.into_iter().enumerate().zip(outside) {
             let mut item = p.item;
             item.level = wave[i];
-            item.replaces = match replaced[i] {
-                Some(r) => Some(RebuildLink {
+            item.replaces = match (replaced[i], outside) {
+                (Some(r), _) => Some(RebuildLink {
                     snapshot_id: None,
                     item: Some(at[r]),
                     allow: p.link.and_then(|l| l.allow),
                 }),
+                (None, Some(outside)) => Some(outside),
                 // Under a link, each other rebuilt entry replaces its old
                 // one, which compares what its statements depend on.
-                None => link
+                (None, None) => link
                     .as_ref()
                     .zip(item.snapshot_id.clone())
                     .map(|(link, e)| RebuildLink {
@@ -2107,47 +2154,8 @@ impl Snapshots {
                 permitted.extend(axioms.map(|d| normalised(&d.name).into_owned()));
             }
         }
-        let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
-        let mut targets = Vec::new();
-        let mut clean = forks.is_empty();
-        for ((spec, spec_meta), ends) in specs.iter().zip(&reached) {
-            let Some(meta) = metas.get(&spec_meta.module) else {
-                continue;
-            };
-            let declared = meta.result.declarations.iter();
-            for d in declared.filter(|d| !d.generated && d.kind != "axiom") {
-                let name = normalised(&d.name);
-                for head in ends {
-                    let Some(head_meta) = metas.get(module_of[head]) else {
-                        continue;
-                    };
-                    let mut on_head = head_meta.result.declarations.iter();
-                    // A replacement keeps every declaration, so this is a
-                    // record that was edited: the run isn't done.
-                    let Some(h) = on_head.find(|h| normalised(&h.name) == name) else {
-                        clean = false;
-                        continue;
-                    };
-                    let accepted = head_meta.verified
-                        && match h.status {
-                            ProofStatus::Proved => true,
-                            ProofStatus::Conditional => h
-                                .assumes
-                                .iter()
-                                .all(|a| permitted.contains(&*normalised(a))),
-                            ProofStatus::Sorry | ProofStatus::Rejected => false,
-                        };
-                    clean &= accepted;
-                    targets.push(AuditTarget {
-                        name: d.name.clone(),
-                        spec: self.id(spec),
-                        head: self.id(head),
-                        status: h.status,
-                        verified: head_meta.verified,
-                    });
-                }
-            }
-        }
+        let (targets, accepted) = self.targets(&specs, &reached, &heads, &metas, &permitted);
+        let clean = forks.is_empty() && accepted;
 
         // Each head stands for its module.
         let mut entries: BTreeMap<String, String> = BTreeMap::new();
@@ -2166,21 +2174,78 @@ impl Snapshots {
         Ok(audit)
     }
 
+    /// The targets of an audit against `specs`: each declaration of a spec
+    /// snapshot's module, other than its assumptions and what Lean
+    /// generated, on each head that spec reaches (`reached`), with whether
+    /// every one is accepted there under the assumptions `permitted` (see
+    /// [`AuditSnapshotsResponse::clean`]). `heads` holds each head's module,
+    /// and `metas` the module records.
+    fn targets(
+        &self,
+        specs: &[(String, EntryMeta)],
+        reached: &[Vec<String>],
+        heads: &[(String, String)],
+        metas: &HashMap<String, ModuleMeta>,
+        permitted: &HashSet<String>,
+    ) -> (Vec<AuditTarget>, bool) {
+        let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
+        let mut targets = Vec::new();
+        let mut all_accepted = true;
+        for ((spec, spec_meta), ends) in specs.iter().zip(reached) {
+            // A record deleted during the audit can't be judged, so isn't
+            // accepted; nor below.
+            let Some(meta) = metas.get(&spec_meta.module) else {
+                all_accepted = false;
+                continue;
+            };
+            let declared = meta.result.declarations.iter();
+            for d in declared.filter(|d| !d.generated && d.kind != "axiom") {
+                let name = normalised(&d.name);
+                for head in ends {
+                    let Some(head_meta) = metas.get(module_of[head]) else {
+                        all_accepted = false;
+                        continue;
+                    };
+                    let mut on_head = head_meta.result.declarations.iter();
+                    // A replacement keeps every declaration, so this is a
+                    // record that was edited: the run isn't done.
+                    let Some(h) = on_head.find(|h| normalised(&h.name) == name) else {
+                        all_accepted = false;
+                        continue;
+                    };
+                    let accepted = head_meta.verified
+                        && match h.status {
+                            ProofStatus::Proved => true,
+                            ProofStatus::Conditional => h
+                                .assumes
+                                .iter()
+                                .all(|a| permitted.contains(&*normalised(a))),
+                            ProofStatus::Sorry | ProofStatus::Rejected => false,
+                        };
+                    all_accepted &= accepted;
+                    targets.push(AuditTarget {
+                        name: d.name.clone(),
+                        spec: self.id(spec),
+                        head: self.id(head),
+                        status: h.status,
+                        verified: head_meta.verified,
+                    });
+                }
+            }
+        }
+        (targets, all_accepted)
+    }
+
     /// Entry `e`'s link, as an audit lists it, if it allowed changes.
     fn audit_link(&self, e: &str, entry_meta: &EntryMeta) -> Option<AuditLink> {
-        let replaces = entry_meta.replaces.as_ref()?;
-        let allow = replaces.allow.clone()?;
-        let (changed_definitions, affected) = entry_meta
-            .replacement
-            .clone()
-            .map(|r| (r.changed_definitions, r.affected))
-            .unwrap_or_default();
+        let replaces = entry_meta.replaces.as_ref().filter(|r| r.allow.is_some())?;
         Some(AuditLink {
             snapshot_id: self.id(e),
-            replaces: self.id(&replaces.snapshot_id),
-            allow,
-            changed_definitions,
-            affected,
+            replaces: Replaces {
+                snapshot_id: self.id(&replaces.snapshot_id),
+                allow: replaces.allow.clone(),
+            },
+            replacement: entry_meta.replacement.clone().unwrap_or_default(),
         })
     }
 
@@ -2506,14 +2571,19 @@ mod tests {
             assert!(allow_error(&allowed, &swapped).is_none(), "{names:?}");
         }
         // A theorem, a definition of a snapshot the code builds on now, and
-        // a private name as written.
-        for name in ["t", "bar", "nope", "h"] {
+        // a private name as written, which the error says how to name.
+        for (name, hint) in [
+            ("t", ""),
+            ("bar", ""),
+            ("nope", ""),
+            ("h", " (for a private definition, write _private.h)"),
+        ] {
             let allowed = replacing(old.clone(), allow(&["f", name]));
             let error = allow_error(&allowed, &swapped).unwrap();
             assert_eq!(error.kind, ErrorKind::BadRequest);
             let message = format!(
                 "allow names {name}, which isn't a definition of the replaced snapshot or of a \
-                 snapshot the code no longer builds on"
+                 snapshot the code no longer builds on{hint}"
             );
             assert_eq!(error.message, message);
         }
@@ -3178,5 +3248,43 @@ mod tests {
         assert_eq!(rows(&db).await, before);
         assert!(!has_files(&s, &ours).await, "this build's files go");
         assert!(has_files(&s, &theirs).await);
+    }
+
+    /// A spec snapshot's module and its head's, as an audit judges them,
+    /// with one record or the other gone, as when a snapshot is deleted
+    /// during the audit: what can't be judged isn't accepted.
+    #[tokio::test]
+    async fn an_audit_target_without_its_records_is_not_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = snapshots(Db::memory().await, dir.path());
+        let entry = |module: &str| EntryMeta {
+            module: module.into(),
+            labels: Default::default(),
+            key: None,
+            created_micros: 0,
+            replaces: None,
+            replacement: None,
+        };
+        // Each module declares `t`, proved and verified.
+        let module = |m: &str| ModuleMeta {
+            verified: true,
+            result: CheckResult {
+                declarations: vec![decl("t", "1", None, &[])],
+                ..Default::default()
+            },
+            ..built(m, b"")
+        };
+        let specs = [("spec".to_string(), entry("s"))];
+        let reached = [vec!["head".to_string()]];
+        let heads = [("head".to_string(), "h".to_string())];
+        let judged = |modules: &[&str]| {
+            let metas = modules.iter().map(|m| (m.to_string(), module(m))).collect();
+            s.targets(&specs, &reached, &heads, &metas, &HashSet::new())
+        };
+        let (targets, accepted) = judged(&["s", "h"]);
+        assert_eq!((targets.len(), accepted), (1, true));
+        for left in ["s", "h"] {
+            assert_eq!(judged(&[left]), (Vec::new(), false), "only {left}");
+        }
     }
 }

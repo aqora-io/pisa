@@ -238,7 +238,7 @@ fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> 
     params(
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
         ("against" = Option<Vec<String>>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label`"),
-        ("version" = Option<String>, Query, description = "The worker version; the server's default when absent. With `against`, the ids' version instead."),
+        ("version" = Option<String>, Query, description = "The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given."),
     ),
     responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
 )]
@@ -251,7 +251,21 @@ pub async fn audit(
     let (version, labels) =
         label_query(query).map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
     let (version, against) = match against_query(query, &labels)? {
-        Some((version, against)) => (Some(version), against),
+        Some((ids, against)) => {
+            // A version beside the ids must be theirs, as with a create's
+            // `replaces`.
+            if let Some(v) = version
+                .as_deref()
+                .and_then(|v| app.versions.resolve(Some(v)))
+                && v != ids
+            {
+                return Err(ApiError::new(
+                    ErrorKind::BadRequest,
+                    format!("against names snapshots of version {ids}, and the query version {v}"),
+                ));
+            }
+            (Some(ids), against)
+        }
         None => (app.versions.resolve(version.as_deref()), Vec::new()),
     };
     let job = Job::SnapshotAudit(SnapshotAuditJob { labels, against });

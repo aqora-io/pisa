@@ -132,9 +132,21 @@ For each plan item that rebuilds an entry X:
    - It is compared with Y's copy, so it must still keep the rebuilt spec's
      statements.
    - Its `level` is after Y's item.
-2. **Otherwise, when `to` replaces `from`.** X's copy replaces X, with `to`'s
+2. **X replaced a Y that this plan doesn't rebuild.** (Controller ruling
+   after the final review.)
+   - X's copy replaces Y itself, with X's own `allow` and, when `to` replaces
+     `from` and Y builds on `from`, `to`'s `allow` too (the union of the
+     names).
+   - Case 3 would make it replace X, which `retire` deletes, and X's row held
+     Y ← X: the run would be cut. This happens when a proof imports a helper
+     its skeleton doesn't, and the rebuild is from the helper.
+   - `to`'s `allow` names `from`'s definitions. A Y that doesn't build on
+     `from` has none of them, and the create would refuse the names (T3), so
+     they are left out there. (Implementer's refinement of the ruling.)
+   - Without `retire`, X and X's copy both replace Y: a fork, as below.
+3. **Otherwise, when `to` replaces `from`.** X's copy replaces X, with `to`'s
    `allow`, as today.
-3. **Otherwise** it has no link, as today.
+4. **Otherwise** it has no link, as today.
 
 **The plan item's link.** In case 1, Y's copy doesn't exist when the plan is
 made. So a plan item's `replaces` becomes a `RebuildLink`:
@@ -162,7 +174,9 @@ down, and no longer deletes `from`. (My call.)
 `GET /snapshots/audit?against=<snapshot id>` takes `against` repeatedly, since a
 spec can span several snapshots.
 - **Parameters.** Every `against` id must be of one version, which the audit
-  uses. `label` and `against` don't combine: both together is a `bad_request`.
+  uses. A `version` given too must be that one, else a `bad_request` naming
+  both, as with a create's `replaces`. `label` and `against` don't combine:
+  both together is a `bad_request`.
 - **The walk.**
   - From each spec snapshot, follow `replacers` forward, through every
     snapshot whatever its labels, to the heads: the snapshots nothing
@@ -191,8 +205,11 @@ spec can span several snapshots.
     list. (My call.)
   - `links`: every link that allowed changes, on the paths forward and on the
     spec snapshots' own chains back. Each is
-    `{snapshot_id, replaces, allow, changed_definitions, affected}`, from the
-    stored comparison, for review.
+    `{snapshot_id, replaces, replacement}`, for review: `replaces` is the link
+    as the snapshot's own `replaces` shows it (the replaced id and the
+    `allow`), and `replacement` the stored comparison (`filled`,
+    `changed_definitions`, `affected`). (Changed after the final review, to
+    reuse those shapes.)
   - `AuditAssumption.in_spec`: whether the assumption is permitted, as above.
 - **No Lean runs.** The audit reads records only.
 - **Clients:** Rust `audit_snapshots_against(ids)`, Python
@@ -220,7 +237,9 @@ The README's Snapshots section documents a convention:
   - T2: the replacers query;
   - T3: per-definition allow, an unknown name, an empty list;
   - Rebuild: mirrored links, with a skeleton and its proof rebuilt together
-    and no fork from the new spec, with and without `retire`;
+    and no fork from the new spec, with and without `retire`; and a proof
+    whose skeleton the plan doesn't rebuild, which replaces the old skeleton
+    (a fork without `retire`, a clean run with it);
   - T4:
     - a clean run;
     - a target still `sorry`;
@@ -228,7 +247,10 @@ The README's Snapshots section documents a convention:
     - a run through an allowed link, and a rebuilt spec's own allowed link;
     - a `conditional` target on a spec axiom (clean) and on an axiom outside
       the spec (not clean);
-    - mixed versions, and `label` with `against`.
+    - mixed versions, a `version` that isn't the ids', and `label` with
+      `against`;
+    - the acceptance flow composed: an allowed edit to a skeleton's
+      definition, then an allowed edit below and a retiring rebuild.
   - Rebuild: `retire` keeps `from`, and the audit of a spec spread over two
     snapshots is clean after a retiring rebuild from the first spec snapshot
     to its proof.

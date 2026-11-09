@@ -355,8 +355,8 @@ export interface components {
              *     builds on, else the create's `check.error` is a `bad_request` and
              *     nothing is kept. Names are compared with a private one's module left
              *     out, so a `private def h` is `_private.h`, or its full name as a
-             *     refusal gives it, but not `h`. An empty list is a `bad_request`: to
-             *     change none, leave `allow` out.
+             *     refusal gives it, but not `h`, as the error for `h` says. An empty
+             *     list is a `bad_request`: to change none, leave `allow` out.
              */
             definitions: string[];
         };
@@ -419,20 +419,24 @@ export interface components {
         AuditFork: {
             /** @description The snapshots that replace it, oldest first. */
             replaced_by: string[];
+            /** @description The snapshot replaced more than once. */
             snapshot_id: string;
         };
         /**
-         * @description A link that let definitions change: `snapshot_id` replaces `replaces`
-         *     with an `allow`, and its create's comparison found the rest.
+         * @description A link that let definitions change: `snapshot_id` replaces another
+         *     snapshot with an `allow`, and its create's comparison found what changed.
          */
         AuditLink: {
-            /** @description As in [`Replacement::affected`]. */
-            affected?: string[];
-            allow: components["schemas"]["Allow"];
-            /** @description As in [`Replacement::changed_definitions`]. */
-            changed_definitions?: string[];
-            /** @description The replaced snapshot, which may have been deleted since. */
-            replaces: string;
+            /**
+             * @description What its create's comparison with the replaced snapshot found, as
+             *     [`CreateSnapshotResponse::replacement`] gave it.
+             */
+            replacement: components["schemas"]["Replacement"];
+            /**
+             * @description Its link, as its [`Snapshot::replaces`] shows it: the replaced
+             *     snapshot, which may have been deleted since, and the `allow`.
+             */
+            replaces: components["schemas"]["Replaces"];
             /** @description The replacing snapshot. */
             snapshot_id: string;
         };
@@ -518,6 +522,11 @@ export interface components {
         AuditTarget: {
             /** @description The head, reached from `spec`, whose declaration this is. */
             head: string;
+            /**
+             * @description Its name as the spec snapshot's module declares it, so a private
+             *     one's names the spec's module. The head's declaration is the one
+             *     with the same name, a private one's module left out.
+             */
             name: string;
             /** @description The spec snapshot that declares it. */
             spec: string;
@@ -1045,8 +1054,12 @@ export interface components {
              *     the links mirroring the old ones. If the snapshot it rebuilds
              *     replaced one the plan also rebuilds, it replaces that one's new
              *     snapshot, `item`, with its own link's `allow`: a skeleton's proof
-             *     replaces the rebuilt skeleton, and is compared with it. Otherwise,
-             *     when `to` replaces `from`, it replaces the snapshot it rebuilds, with
+             *     replaces the rebuilt skeleton, and is compared with it. If it
+             *     replaced one the plan doesn't rebuild, it replaces that same
+             *     snapshot, with its own link's `allow` and, when `to` replaces `from`
+             *     and that snapshot builds on `from`, `to`'s: a proof whose skeleton
+             *     doesn't build on `from` still replaces the skeleton. Otherwise, when
+             *     `to` replaces `from`, it replaces the snapshot it rebuilds, with
              *     `to`'s `allow`. The create then checks that nothing its statements
              *     depend on changed, and is refused if something did.
              */
@@ -1072,7 +1085,10 @@ export interface components {
              *     item is at a lower level.
              */
             item?: number;
-            /** @description The replaced snapshot. */
+            /**
+             * @description The replaced snapshot: the one the item rebuilds, or the one that
+             *     snapshot replaced if the plan doesn't rebuild it.
+             */
             snapshot_id?: string;
         };
         /**
@@ -2577,7 +2593,7 @@ export interface operations {
                 label?: string[];
                 /** @description A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label` */
                 against?: string[];
-                /** @description The worker version; the server's default when absent. With `against`, the ids' version instead. */
+                /** @description The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given. */
                 version?: string;
             };
             header?: never;

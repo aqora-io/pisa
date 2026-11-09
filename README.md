@@ -228,7 +228,7 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads, forks?: [{snapshot_id, replaced_by}], targets: [{name, spec, head, status, verified}], links?: [{snapshot_id, replaces, allow, changed_definitions?, affected?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | → `{removed: [...]}`, the modules that went with the snapshot; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -456,7 +456,8 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     definition, leave `allow` out. A name that isn't such a definition is a
     `bad_request` in `check.error` (`allow names nope, which isn't a
     definition of the replaced snapshot or of a snapshot the code no longer
-    builds on`), and nothing is kept.
+    builds on`), and nothing is kept. For `h` where a `private def h` would
+    match, it adds `(for a private definition, write _private.h)`.
 - **The link.** `replacement.filled` lists the declarations that used `sorry`
   and no longer do. The new snapshot records `replaces: {snapshot_id,
   allow?}`, which listings and `GET /snapshots/{id}` show. Only a create that
@@ -547,13 +548,16 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   (with an `allow`): those on the way to the heads, and those of each spec
   snapshot's own chain back through what it replaced, as far as those
   snapshots exist, such as a rebuilt spec's link to the original under `to`'s
-  `allow`. Each is `{snapshot_id, replaces, allow, changed_definitions?,
-  affected?}`, as its create's comparison found them.
+  `allow`. Each is `{snapshot_id, replaces: {snapshot_id, allow},
+  replacement: {filled, changed_definitions?, affected?}}`: the link as the
+  snapshot's own `replaces` shows it, and what its create's comparison
+  found.
 - **Counts.** `summary`, `assumptions` and `not_proved` are those of the
   heads, each standing for its module.
 - **Parameters.** The ids are of one version, which the audit uses; ids of
-  several versions are a 400 that names them. `label` doesn't combine with
-  `against` (400), and a spec snapshot that doesn't exist is a 404. After a
+  several versions are a 400 that names them, and so is a `version` that
+  isn't theirs. `label` doesn't combine with `against` (400), and a spec
+  snapshot that doesn't exist is a 404. After a
   [rebuild](#rebuilding), audit against the new spec snapshots: `created`
   maps the old ids to the new.
 
@@ -630,6 +634,13 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
     rebuilds, item `i`, as a proof replaces its skeleton: the new proof
     replaces the new skeleton, with the old link's `allow`, and is compared
     with it, so it must still keep the rebuilt skeleton's statements;
+  - `{"snapshot_id": …, "allow"?}` naming that same snapshot when its old
+    snapshot replaced one the plan doesn't rebuild, as when a proof imports
+    a helper its skeleton doesn't and the rebuild is from the helper: the
+    new proof replaces the old skeleton, with the old link's `allow` and,
+    when `to` replaces `from` and the skeleton builds on `from`, `to`'s
+    too. With `retire`, the old proof goes and the run goes on through the
+    new one;
   - otherwise, when `to` replaces `from`, `{"snapshot_id": …, "allow"?}`: the
     rebuilt snapshot replaces its old one, with `to`'s `allow`, which checks
     that nothing its statements use changed through the rebuild. A dependent

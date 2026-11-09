@@ -362,6 +362,8 @@ def test_audit_against(url):
     ]
     with pytest.raises(ValueError):
         client.audit_snapshots({"suite": "audit"}, against=[spec["id"]])
+    with pytest.raises(ValueError):
+        client.audit_snapshots(against=[])
 
 
 def test_snapshot_labels(url):

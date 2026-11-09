@@ -589,14 +589,14 @@ pub struct Allow {
     /// builds on, else the create's `check.error` is a `bad_request` and
     /// nothing is kept. Names are compared with a private one's module left
     /// out, so a `private def h` is `_private.h`, or its full name as a
-    /// refusal gives it, but not `h`. An empty list is a `bad_request`: to
-    /// change none, leave `allow` out.
+    /// refusal gives it, but not `h`, as the error for `h` says. An empty
+    /// list is a `bad_request`: to change none, leave `allow` out.
     pub definitions: Vec<String>,
 }
 
 /// What a replacement changed, as the create's comparison with the snapshot
 /// it [`replaces`](CreateSnapshotRequest::replaces) found.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Replacement {
     /// The replaced module's declarations that used `sorry` and no longer
     /// do.
@@ -859,8 +859,12 @@ pub struct RebuildItem {
     /// the links mirroring the old ones. If the snapshot it rebuilds
     /// replaced one the plan also rebuilds, it replaces that one's new
     /// snapshot, `item`, with its own link's `allow`: a skeleton's proof
-    /// replaces the rebuilt skeleton, and is compared with it. Otherwise,
-    /// when `to` replaces `from`, it replaces the snapshot it rebuilds, with
+    /// replaces the rebuilt skeleton, and is compared with it. If it
+    /// replaced one the plan doesn't rebuild, it replaces that same
+    /// snapshot, with its own link's `allow` and, when `to` replaces `from`
+    /// and that snapshot builds on `from`, `to`'s: a proof whose skeleton
+    /// doesn't build on `from` still replaces the skeleton. Otherwise, when
+    /// `to` replaces `from`, it replaces the snapshot it rebuilds, with
     /// `to`'s `allow`. The create then checks that nothing its statements
     /// depend on changed, and is refused if something did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -877,7 +881,8 @@ pub struct RebuildItem {
 /// `new_snapshot_id` created for that item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RebuildLink {
-    /// The replaced snapshot.
+    /// The replaced snapshot: the one the item rebuilds, or the one that
+    /// snapshot replaced if the plan doesn't rebuild it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     /// The index in `plan` of the item whose new snapshot it replaces. That
@@ -943,6 +948,7 @@ pub struct AuditSnapshotsResponse {
 /// A snapshot that more than one snapshot replaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditFork {
+    /// The snapshot replaced more than once.
     pub snapshot_id: String,
     /// The snapshots that replace it, oldest first.
     pub replaced_by: Vec<String>,
@@ -951,6 +957,9 @@ pub struct AuditFork {
 /// A spec declaration, as a head of the run declares it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditTarget {
+    /// Its name as the spec snapshot's module declares it, so a private
+    /// one's names the spec's module. The head's declaration is the one
+    /// with the same name, a private one's module left out.
     pub name: String,
     /// The spec snapshot that declares it.
     pub spec: String,
@@ -962,21 +971,18 @@ pub struct AuditTarget {
     pub verified: bool,
 }
 
-/// A link that let definitions change: `snapshot_id` replaces `replaces`
-/// with an `allow`, and its create's comparison found the rest.
+/// A link that let definitions change: `snapshot_id` replaces another
+/// snapshot with an `allow`, and its create's comparison found what changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditLink {
     /// The replacing snapshot.
     pub snapshot_id: String,
-    /// The replaced snapshot, which may have been deleted since.
-    pub replaces: String,
-    pub allow: Allow,
-    /// As in [`Replacement::changed_definitions`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub changed_definitions: Vec<String>,
-    /// As in [`Replacement::affected`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub affected: Vec<String>,
+    /// Its link, as its [`Snapshot::replaces`] shows it: the replaced
+    /// snapshot, which may have been deleted since, and the `allow`.
+    pub replaces: Replaces,
+    /// What its create's comparison with the replaced snapshot found, as
+    /// [`CreateSnapshotResponse::replacement`] gave it.
+    pub replacement: Replacement,
 }
 
 /// The snapshots' declarations by status, each module's once, without the

@@ -315,6 +315,21 @@ def allow_by_name():
     step("allow: a pattern-matching definition's value can change by name")
 
 
+def allow_through_a_lost_snapshot():
+    f = "def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => {}"
+    allow = {"definitions": ["f"]}
+    base1 = create_snapshot(f.format("n"))
+    skeleton = create_snapshot(f"{base1['snapshot']['header']}\n\ntheorem t : f 0 = 0 := sorry")
+    base2 = create_snapshot(f.format("n + 2"), replaces={"snapshot_id": base1["snapshot"]["id"], "allow": allow})
+    # The proof imports Base2 instead of Base1: the comparison follows `t`'s
+    # statement into Base1, which it lost, and finds `f` changed there.
+    replaces = {"snapshot_id": skeleton["snapshot"]["id"], "allow": allow}
+    proof = create_snapshot(f"{base2['snapshot']['header']}\n\ntheorem t : f 0 = 0 := rfl", replaces=replaces)
+    assert "f" in proof["replacement"]["changed_definitions"], proof
+    delete_snapshots([proof, skeleton, base2, base1])
+    step("allow: a definition changed in a snapshot the code no longer builds on")
+
+
 def labels():
     def create(run):
         return post("/snapshots", {"code": SNAPSHOT_ROOT, "labels": {"e2e": "1", "run": run}, "timeout": 600})["snapshot"]
@@ -481,6 +496,7 @@ if __name__ == "__main__":
     auto_implicit()
     spec_audit()
     allow_by_name()
+    allow_through_a_lost_snapshot()
     labels()
     module_snapshots()
     if args.mathlib:

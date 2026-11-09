@@ -200,8 +200,9 @@ async fn allowed_links_are_listed() {
     assert_eq!(r["heads"], json!([id(&q)]), "{r}");
     assert_eq!(
         r["links"],
-        json!([{"snapshot_id": id(&p), "replaces": id(&s), "allow": allow,
-                "changed_definitions": ["f"], "affected": ["t"]}]),
+        json!([{"snapshot_id": id(&p), "replaces": {"snapshot_id": id(&s), "allow": allow},
+                "replacement": {"filled": ["t"], "changed_definitions": ["f"],
+                                "affected": ["t"]}}]),
         "{r}"
     );
 }
@@ -237,8 +238,9 @@ async fn a_rebuilt_specs_own_link_is_listed() {
     assert_eq!(r["heads"], json!([s_]), "{r}");
     assert_eq!(
         r["links"],
-        json!([{"snapshot_id": s_, "replaces": id(&s), "allow": allow,
-                "changed_definitions": ["f"], "affected": ["s"]}]),
+        json!([{"snapshot_id": s_, "replaces": {"snapshot_id": id(&s), "allow": allow},
+                "replacement": {"filled": [], "changed_definitions": ["f"],
+                                "affected": ["s"]}}]),
         "{r}"
     );
 }
@@ -378,6 +380,141 @@ async fn a_spec_over_two_snapshots_survives_a_retiring_rebuild() {
     assert_eq!(r["clean"], true, "{r}");
 }
 
+/// The new snapshot `rebuilt` created for the old snapshot `old`.
+fn made(rebuilt: &Value, old: &Value) -> String {
+    let created = rebuilt["created"].as_array().unwrap();
+    let made = created.iter().find(|m| m["snapshot_id"] == id(old));
+    made.unwrap()["new_snapshot_id"].as_str().unwrap().into()
+}
+
+/// A snapshot's `replaces`, as `GET /snapshots/{id}` shows it.
+async fn link(c: &Cluster, id: &str) -> Value {
+    let (status, r) = get(c, &format!("/snapshots/{id}")).await;
+    assert_eq!(status, 200, "{r}");
+    r["replaces"].clone()
+}
+
+/// The acceptance flow: a skeleton on a base, a proof that changes one of
+/// its definitions, then a base that changes one of its own, and a rebuild
+/// that retires the old run. The new run is whole, and its links say what
+/// changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let s0 = create(
+        &c,
+        json!({"code": on(&b, "def f : Nat := 0\ntheorem t : f = g := sorry"), "labels": p1}),
+    )
+    .await;
+    let allow_f = json!({"definitions": ["f"]});
+    let p1_ = create(
+        &c,
+        json!({"code": on(&b, "def f : Nat := 1\ntheorem t : f = g := rfl"), "labels": p1,
+               "replaces": {"snapshot_id": id(&s0), "allow": allow_f}}),
+    )
+    .await;
+    let allow_g = json!({"definitions": ["g"]});
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ndef g : Nat := 0 + 1",
+               "replaces": {"snapshot_id": id(&b), "allow": allow_g}}),
+    )
+    .await;
+
+    let body = json!({"from": id(&b), "to": id(&b2), "labels": p1, "retire": true,
+                      "verify": true});
+    let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
+    assert_eq!(rebuilt["retired"], json!([id(&p1_), id(&s0)]));
+    let (s0_new, p1_new) = (made(&rebuilt, &s0), made(&rebuilt, &p1_));
+    // The new skeleton replaces the old one under `to`'s `allow`, and the
+    // new proof the new skeleton under its own.
+    let s0_link = json!({"snapshot_id": id(&s0), "allow": allow_g});
+    let p1_link = json!({"snapshot_id": s0_new, "allow": allow_f});
+    assert_eq!(link(&c, &s0_new).await, s0_link);
+    assert_eq!(link(&c, &p1_new).await, p1_link);
+
+    let r = audit(&c, &[s0_new.as_str()]).await;
+    assert_eq!(r["heads"], json!([p1_new]), "{r}");
+    assert_eq!(
+        r["links"],
+        json!([
+            {"snapshot_id": s0_new, "replaces": s0_link,
+             "replacement": {"filled": [], "changed_definitions": ["g"], "affected": ["t"]}},
+            {"snapshot_id": p1_new, "replaces": p1_link,
+             "replacement": {"filled": ["t"], "changed_definitions": ["f"], "affected": ["t"]}}
+        ]),
+        "{r}"
+    );
+    assert_eq!(r["clean"], true, "{r}");
+}
+
+/// A proof P1 that also imports a helper H, which its skeleton S0 doesn't:
+/// a rebuild from H rebuilds P1 but not S0, and P1′ replaces S0 itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_skeleton_is_outside_the_plan_survives_a_retiring_rebuild() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let p1 = json!({"p": "1"});
+    let a = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem a : 1 = 1 := rfl"}),
+    )
+    .await;
+    let h = create(&c, json!({"code": "import Foo\n\ndef hd : Nat := 1"})).await;
+    let s0 = create(
+        &c,
+        json!({"code": on(&a, "theorem t : 2 = 2 := sorry"), "labels": p1}),
+    )
+    .await;
+    let both = format!(
+        "import Foo\nimport {}\nimport {}\n\ntheorem t : 2 = 2 := rfl",
+        a["snapshot"]["module"].as_str().unwrap(),
+        h["snapshot"]["module"].as_str().unwrap()
+    );
+    let p1_ = create(
+        &c,
+        json!({"code": both, "replaces": replacing(&s0), "labels": p1}),
+    )
+    .await;
+    // H′ changes `hd`. S0 doesn't build on H, so P1′'s link leaves H′'s
+    // `allow` out: S0's comparison would refuse it as naming nothing there.
+    let h2 = create(
+        &c,
+        json!({"code": "import Foo\n\ndef hd : Nat := 0 + 1",
+               "replaces": {"snapshot_id": id(&h), "allow": {"definitions": ["hd"]}}}),
+    )
+    .await;
+
+    let mut body = json!({"from": id(&h), "to": id(&h2), "labels": p1, "verify": true});
+    let (status, rebuilt) = c.post("/snapshots/rebuild", body.clone()).await;
+    assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
+    assert_eq!(rebuilt["plan"][0]["replaces"], replacing(&s0), "{rebuilt}");
+    let p1_new = made(&rebuilt, &p1_);
+    assert_eq!(link(&c, &p1_new).await, replacing(&s0));
+
+    // Without `retire`, the old proof stays: the run forks at S0.
+    let r = audit(&c, &[id(&s0)]).await;
+    assert_eq!(
+        r["forks"],
+        json!([{"snapshot_id": id(&s0), "replaced_by": [id(&p1_), p1_new]}]),
+        "{r}"
+    );
+    assert_eq!(r["clean"], false);
+
+    // Sent again with `retire`, it deletes the old proof, and the run goes
+    // on through the new one.
+    body["retire"] = json!(true);
+    let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
+    assert_eq!(rebuilt["retired"], json!([id(&p1_)]));
+    let r = audit(&c, &[id(&s0)]).await;
+    assert_eq!(r["heads"], json!([p1_new]), "{r}");
+    assert!(r.get("forks").is_none(), "{r}");
+    assert_eq!(r["clean"], true, "{r}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn bad_queries() {
     let c = Cluster::start(&[("w0", "va", 1), ("w1", "vb", 1)]).await;
@@ -408,6 +545,18 @@ async fn bad_queries() {
     }
     bad(format!("/snapshots/audit?against={}&label=p:1", id(&a))).await;
     bad("/snapshots/audit?against=nope".into()).await;
+    // A version beside the ids must be theirs.
+    let (va, vb) = (c.version("va"), c.version("vb"));
+    let message = bad(format!("/snapshots/audit?against={}&version={vb}", id(&a))).await;
+    for v in [&va, &vb] {
+        assert!(message.contains(v.as_str()), "{v}: {message}");
+    }
+    let (status, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&version={va}", id(&a)),
+    )
+    .await;
+    assert_eq!(status, 200, "{r}");
 
     let r = c
         .client

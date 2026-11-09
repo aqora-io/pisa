@@ -398,6 +398,10 @@ async fn client_audits_a_run_against_its_spec() {
     let audit = client.audit_snapshots_against([&spec.id]).await.unwrap();
     assert_eq!(audit.clean, Some(false));
     assert_eq!(audit.targets[0].status, ProofStatus::Sorry);
+    // No ids would be a label audit: it isn't sent.
+    let none: [&str; 0] = [];
+    let refused = client.audit_snapshots_against(none).await;
+    assert!(matches!(refused, Err(Error::Invalid(_))), "{refused:?}");
 
     let opts = CreateSnapshotOptions {
         replaces: Some(Replaces {

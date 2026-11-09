@@ -177,11 +177,11 @@ class AuditTarget(TypedDict):
     verified: bool
 
 class AuditLink(TypedDict):
+    """A link that let definitions change: the snapshot, its `replaces` as
+    the snapshot shows it, and what its create's comparison found."""
     snapshot_id: str
-    replaces: str
-    allow: Allow
-    changed_definitions: NotRequired[list[str]]
-    affected: NotRequired[list[str]]
+    replaces: Replaces
+    replacement: Replacement
 
 class AuditSnapshotsResponse(TypedDict):
     summary: AuditSummary
@@ -433,7 +433,8 @@ class Client:
         the snapshots that replace them, the `forks` on the way, each spec
         declaration's status on each head (`targets`), the `links` that
         allowed changes, and whether the run is `clean`; the counts are the
-        heads'. `labels` and `against` don't combine (ValueError)."""
+        heads'. `labels` and `against` don't combine, and `against` can't be
+        empty (ValueError)."""
     def rebuild_snapshots(
         self,
         from_: str,

@@ -594,6 +594,42 @@ async fn a_skeleton_and_its_proof_are_rebuilt_as_a_run() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_proof_whose_skeleton_isnt_rebuilt_still_replaces_it() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let b = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    // S0 is another project's, so the plan doesn't rebuild it; its proof
+    // P1, which changes `f`, is in `p:1`.
+    let s0 = create(
+        &c,
+        json!({"code": on(&b, "def f : Nat := 0\ntheorem s : f = g := sorry"),
+               "labels": {"p": "2"}}),
+    )
+    .await;
+    let replaces = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f"]}});
+    let p1 = create(
+        &c,
+        json!({"code": on(&b, "def f : Nat := 1\ntheorem s : f = g := rfl"),
+               "replaces": replaces, "labels": {"p": "1"}}),
+    )
+    .await;
+    let replaces = json!({"snapshot_id": entry(&b), "allow": {"definitions": ["g"]}});
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ndef g : Nat := 0 + 1", "replaces": replaces}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))]);
+    // P1′ replaces S0, which builds on B, with P1's `allow` and `to`'s.
+    let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f", "g"]}});
+    assert_eq!(items(&r, "replaces"), [&link]);
+    let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
+    let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+    assert_eq!(info["replaces"], link, "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_item_that_replaces_a_failed_one_is_skipped() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let b = create(

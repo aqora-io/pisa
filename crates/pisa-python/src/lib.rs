@@ -29,7 +29,7 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 /// Raises the exception class `pisa_client.errors` picks for the error.
 fn to_py_err(py: Python<'_>, e: Error) -> PyErr {
     let (status, kind, message) = match e {
-        Error::Url(msg) => return PyValueError::new_err(msg),
+        Error::Url(msg) | Error::Invalid(msg) => return PyValueError::new_err(msg),
         Error::Server {
             status,
             kind,

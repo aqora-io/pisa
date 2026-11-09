@@ -134,6 +134,9 @@ describe("PisaClient", () => {
     expect(sent[0]?.url).toBe("/api/snapshots/audit?against=v2%7Es0&against=v2%7Es1");
     expect(audit.clean).toBe(false);
     expect(audit.forks?.[0]?.replaced_by).toEqual(["v2~p", "v2~q"]);
+    // No ids would be a label audit: it isn't sent.
+    await expect(client.auditSnapshots({ against: [] })).rejects.toMatchObject({ name: "PisaError", kind: "bad_request" });
+    expect(sent).toHaveLength(1);
   });
 
   it("reads a plan's links, to an old snapshot or to another item's new one", async () => {

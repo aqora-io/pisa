@@ -164,6 +164,10 @@ pub struct RebuildOptions {
 pub enum Error {
     #[error("invalid server URL: {0}")]
     Url(String),
+    /// The request was refused before it was sent, as one the server would
+    /// misread, e.g. an audit against no snapshot.
+    #[error("invalid request: {0}")]
+    Invalid(String),
     /// The server could not be reached or sent something unreadable.
     #[error("request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -737,7 +741,8 @@ impl Client {
     /// one version: the heads it reaches through the snapshots that replace
     /// them, the forks on the way, each spec declaration's status on each
     /// head, the links that allowed changes, and whether the run is `clean`;
-    /// see [`AuditSnapshotsResponse`].
+    /// see [`AuditSnapshotsResponse`]. An empty `against` is an
+    /// [`Error::Invalid`]: without ids, the server would audit by labels.
     pub async fn audit_snapshots_against<I, S>(
         &self,
         against: I,
@@ -746,6 +751,14 @@ impl Client {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
+        let against: Vec<S> = against.into_iter().collect();
+        if against.is_empty() {
+            return Err(Error::Invalid(
+                "against names no snapshot: audit a run against its spec snapshots, or a \
+                 project by its labels"
+                    .into(),
+            ));
+        }
         let mut url = self.endpoint.url("snapshots/audit")?;
         for id in against {
             url.query_pairs_mut().append_pair("against", id.as_ref());
