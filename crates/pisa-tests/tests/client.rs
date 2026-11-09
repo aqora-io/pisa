@@ -131,7 +131,7 @@ async fn client_covers_snapshots() {
     assert!(base.replacement.is_none());
     let base = base.snapshot.unwrap();
     let (id, name) = (base.id.clone(), base.module.clone());
-    assert_eq!(base.version, "v");
+    assert_eq!(base.version, c.version("v"));
 
     let r = client
         .check(&format!("{}\nneeds base", base.header))
