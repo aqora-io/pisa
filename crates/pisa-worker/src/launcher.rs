@@ -303,7 +303,7 @@ impl Launcher {
 /// The `lean` arguments that compile `file` to `olean`, a module named by its
 /// path below `root`. `-D` sets `autoImplicit` off for the whole file, as the
 /// header command does in the REPL; code can turn it back on with `set_option`.
-fn compile_args(root: &Path, file: &Path, olean: &Path) -> Vec<String> {
+pub fn compile_args(root: &Path, file: &Path, olean: &Path) -> Vec<String> {
     let path = |p: &Path| p.to_string_lossy().into_owned();
     vec![
         "-R".into(),
