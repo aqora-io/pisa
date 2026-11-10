@@ -136,6 +136,11 @@ async fn check_answers_positions_in_the_submitted_code() {
             json!({"items": items, "at": many}),
             "the most is 64",
         ),
+        (
+            "/check/batch",
+            json!({"items": vec![json!({"code": "#check Nat"}); 129]}),
+            "the most is 128",
+        ),
     ] {
         let (status, r) = c.post(path, body).await;
         assert_eq!(
@@ -283,6 +288,23 @@ async fn batch_results_keep_order() {
         assert_eq!(r["messages"][0]["pos"]["line"], 2);
         assert!(r.get("id").is_none(), "{r}");
     }
+
+    // More items than go out at once keep their order too.
+    let items: Vec<_> = (0..40)
+        .map(|i| json!({"code": if i % 2 == 0 { "#check Nat" } else { "error_here" }}))
+        .collect();
+    let (status, body) = c.post("/check/batch", json!({"items": items})).await;
+    assert_eq!(status, 200, "{body}");
+    let severities: Vec<&Value> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| &r["messages"][0]["severity"])
+        .collect();
+    let expected: Vec<Value> = (0..40)
+        .map(|i| json!(if i % 2 == 0 { "info" } else { "error" }))
+        .collect();
+    assert_eq!(severities, expected.iter().collect::<Vec<_>>());
 }
 
 #[tokio::test(flavor = "multi_thread")]

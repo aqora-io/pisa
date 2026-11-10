@@ -35,7 +35,7 @@ export interface paths {
         put?: never;
         /**
          * Check several pieces of code
-         * @description Each item gets a result, as from `/check`, with its own failure in `error`.
+         * @description Each item gets a result, as from `/check`, with its own failure in `error`. Up to 128 items, of which 32 are queued at a time, so that an item's wait for a worker starts when it is queued, not when the batch arrives.
          */
         post: operations["checkBatch"];
         delete?: never;
@@ -608,7 +608,10 @@ export interface components {
             at?: components["schemas"]["Pos"][];
             /** @description Applies to every item. */
             detail?: components["schemas"]["Detail"][];
-            /** @description The code to check; each item gets a result, in this order. */
+            /**
+             * @description The code to check, up to 128 items; each gets a result, in this
+             *     order.
+             */
             items: components["schemas"]["CheckBatchItem"][];
             /** Format: int64 */
             timeout?: number;

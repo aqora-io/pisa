@@ -9,10 +9,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::future::join_all;
+use futures::StreamExt;
 use pisa_protocol::api::{
     self, Accepted, ApiErrors, CheckBatchRequest, CheckBatchResponse, CheckRequest, CheckResult,
-    Detail, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, Pos, PreferAsync,
+    Detail, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, MAX_BATCH, Pos,
+    PreferAsync,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -176,7 +177,9 @@ async fn check(
 #[utoipa::path(
     post, path = "/check/batch", operation_id = "checkBatch", tag = "checks",
     summary = "Check several pieces of code",
-    description = "Each item gets a result, as from `/check`, with its own failure in `error`.",
+    description = "Each item gets a result, as from `/check`, with its own failure in `error`. \
+        Up to 128 items, of which 32 are queued at a time, so that an item's wait for a \
+        worker starts when it is queued, not when the batch arrives.",
     request_body = CheckBatchRequest,
     responses((status = 200, description = "A result per item, in order", body = CheckBatchResponse), ApiErrors),
 )]
@@ -187,6 +190,10 @@ async fn check_batch(
     Body(req): Body<CheckBatchRequest>,
 ) -> Result<Json<CheckBatchResponse>, ApiError> {
     check_positions(&req.detail, &req.at)?;
+    if req.items.len() > MAX_BATCH {
+        let message = format!("`items` has {}; the most is {MAX_BATCH}", req.items.len());
+        return Err(ApiError::new(ErrorKind::BadRequest, message));
+    }
     let version = app.versions.resolve(req.version.as_deref());
     let items = req.items.into_iter().map(|item| {
         let app = &app;
@@ -203,10 +210,14 @@ async fn check_batch(
             }
         }
     });
+    let results = futures::stream::iter(items).buffered(BATCH_WINDOW);
     Ok(Json(CheckBatchResponse {
-        results: join_all(items).await,
+        results: results.collect().await,
     }))
 }
+
+/// The most items of a batch queued at once.
+const BATCH_WINDOW: usize = 32;
 
 /// A check asks about at most [`MAX_AT`] positions, and for terms only at
 /// some.

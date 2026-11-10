@@ -180,7 +180,8 @@ export class PisaClient {
     return this.submit(["check"], { code, ...this.run(options), ...asked(options) }, options);
   }
 
-  /** Checks several pieces of code; every one gets a result, in order. */
+  /** Checks several pieces of code, up to 128; every one gets a result, in
+   *  order. */
   async checkBatch(codes: string[], options: CheckOptions = {}): Promise<CheckResult[]> {
     const body = { items: codes.map((code) => ({ code })), ...this.run(options), ...asked(options) };
     const r = await this.call<CheckBatchResponse>("POST", ["check", "batch"], body, options);

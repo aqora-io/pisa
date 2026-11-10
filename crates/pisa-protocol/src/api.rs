@@ -323,6 +323,9 @@ pub enum Detail {
 /// The most positions a check can ask about in `at`.
 pub const MAX_AT: usize = 64;
 
+/// The most items a `/check/batch` takes.
+pub const MAX_BATCH: usize = 128;
+
 /// `POST /check`
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CheckRequest {
@@ -343,7 +346,8 @@ pub struct CheckRequest {
 /// `POST /check/batch`
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CheckBatchRequest {
-    /// The code to check; each item gets a result, in this order.
+    /// The code to check, up to 128 items; each gets a result, in this
+    /// order.
     pub items: Vec<CheckBatchItem>,
     #[serde(default)]
     pub version: Option<String>,
