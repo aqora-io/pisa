@@ -315,8 +315,27 @@ async fn a_to_that_changes_statements_needs_allow_changes() {
     assert_eq!(p["plan"].as_array().unwrap().len(), 3);
 }
 
+/// The modules of the snapshots listed for `query` (such as `?label=p:1`, or
+/// none), sorted.
+async fn listed_modules(c: &Cluster, query: &str) -> Vec<String> {
+    let (_, r) = get(c, &format!("/snapshots{query}")).await;
+    let snapshots = r["snapshots"].as_array().unwrap();
+    let mut modules: Vec<String> = snapshots
+        .iter()
+        .map(|s| s["module"].as_str().unwrap().into())
+        .collect();
+    modules.sort();
+    modules
+}
+
+/// Whether `module` (as `PisaSnap.s<hash>`) has a row in `v`.
+async fn stored(c: &Cluster, module: &str) -> bool {
+    let row = vec!["modules".to_string(), module["PisaSnap.s".len()..].into()];
+    c.stored_rows("v").await.contains(&row)
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_module_that_links_the_labelled_ones_is_rebuilt_with_the_labels() {
+async fn a_module_between_is_rebuilt_as_a_support_module() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let b = create(
         &c,
@@ -335,20 +354,171 @@ async fn a_module_that_links_the_labelled_ones_is_rebuilt_with_the_labels() {
         json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
     )
     .await;
-    let body = json!({"from": entry(&b), "to": entry(&b2), "labels": {"p": "1"}, "dry_run": true});
-    let (_, p) = plan(&c, body).await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    // M has no snapshot to copy and no labels, and N's copy replaces N.
     assert_eq!(
-        items(&p, "snapshot_id"),
+        items(&r, "snapshot_id"),
         [&Value::Null, &n["snapshot"]["id"]],
-        "{p}"
+        "{r}"
     );
     assert_eq!(
-        items(&p, "module"),
+        items(&r, "module"),
         [&m["snapshot"]["module"], &n["snapshot"]["module"]]
     );
-    assert_eq!(p["plan"][0]["labels"], json!({"p": "1"}));
+    assert_eq!(items(&r, "labels"), [&json!({}), &json!({"p": "1"})], "{r}");
+    assert_eq!(
+        items(&r, "replaces"),
+        [&Value::Null, &json!({"snapshot_id": entry(&n)})]
+    );
     let key = format!("rebuild:{}:{}:{}", id(&b), id(&b2), id(&m));
-    assert_eq!(p["plan"][0]["key"], key);
+    assert_eq!(r["plan"][0]["key"], key);
+
+    // M′ is created and deleted: `created` names its module only.
+    let created = r["created"].as_array().unwrap();
+    assert_eq!(created.len(), 2, "{r}");
+    assert_eq!(created[0]["module"], m["snapshot"]["module"], "{r}");
+    assert_eq!(created[0]["new_module"], r["plan"][0]["new_module"], "{r}");
+    assert!(created[0].get("snapshot_id").is_none(), "{r}");
+    assert!(created[0].get("new_snapshot_id").is_none(), "{r}");
+    assert_eq!(created[1]["snapshot_id"], entry(&n), "{r}");
+    let n_ = created[1]["new_snapshot_id"].as_str().unwrap();
+
+    // Only N and its copy are snapshots of `p:1`, and M′ is none at all.
+    let mut expected = vec![
+        module(&n).to_string(),
+        r["plan"][1]["new_module"].as_str().unwrap().into(),
+    ];
+    expected.sort();
+    assert_eq!(listed_modules(&c, "?label=p:1").await, expected);
+    let new_m = r["plan"][0]["new_module"].as_str().unwrap();
+    assert!(!listed_modules(&c, "").await.iter().any(|m| m == new_m));
+    let (status, info) = get(&c, &format!("/snapshots/{n_}")).await;
+    assert_eq!(status, 200, "{info}");
+
+    // The copy still builds on it.
+    assert!(stored(&c, new_m).await);
+    let header = r["plan"][1]["new_header"].as_str().unwrap();
+    let (_, checked) = c
+        .post(
+            "/check",
+            json!({"code": format!("{header}\n\nneeds n\nneeds m")}),
+        )
+        .await;
+    assert_eq!(checked["ok"], true, "{checked}");
+
+    // Sent again, it replays N′ and leaves no snapshot of M′ behind.
+    let again = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(again["plan"], r["plan"]);
+    assert_eq!(new_entries(&again), new_entries(&r));
+    assert!(!listed_modules(&c, "").await.iter().any(|m| m == new_m));
+    assert!(stored(&c, new_m).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_obsolete_helper_a_head_imports_is_a_support_module() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    let h = create(
+        &c,
+        json!({"code": on(&b, "theorem h : 2 = 2 := sorry"), "labels": p1}),
+    )
+    .await;
+    // H2 replaces H, and carries no labels.
+    let h2 = create(
+        &c,
+        json!({"code": on(&b, "theorem h : 2 = 2 := rfl"),
+               "replaces": {"snapshot_id": entry(&h)}}),
+    )
+    .await;
+    // P, a head of `p:1`, still imports H.
+    let p = create(
+        &c,
+        json!({"code": on(&h, "theorem p : 3 = 3 := rfl\nneeds h"), "labels": p1}),
+    )
+    .await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl",
+               "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    // H′ is a support item: H isn't copied, as H2 replaces it, and H2 has no
+    // labels.
+    assert_eq!(
+        items(&r, "snapshot_id"),
+        [&Value::Null, &p["snapshot"]["id"]],
+        "{r}"
+    );
+    assert_eq!(
+        items(&r, "module"),
+        [&h["snapshot"]["module"], &p["snapshot"]["module"]]
+    );
+    assert_eq!(items(&r, "labels"), [&json!({}), &p1], "{r}");
+    assert_eq!(
+        r["replaced"],
+        json!([{"snapshot_id": entry(&h), "replaced_by": [entry(&h2)]}]),
+        "{r}"
+    );
+
+    // Only P′ is a snapshot of the copies.
+    let created = r["created"].as_array().unwrap();
+    assert_eq!(created.len(), 2, "{r}");
+    assert!(created[0].get("new_snapshot_id").is_none(), "{r}");
+    assert_eq!(created[1]["snapshot_id"], entry(&p), "{r}");
+    let new_h = r["plan"][0]["new_module"].as_str().unwrap();
+    let new_p = r["plan"][1]["new_module"].as_str().unwrap();
+    let listed = listed_modules(&c, "").await;
+    assert!(listed.iter().any(|m| m == new_p), "{listed:?}");
+    assert!(!listed.iter().any(|m| m == new_h), "{listed:?}");
+    // P′ still builds on it.
+    assert!(stored(&c, new_h).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_support_module_whose_dependents_failed_goes() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl"}),
+    )
+    .await;
+    let m = create(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
+    // Q needs `b`, which `to` doesn't declare.
+    let q = create(
+        &c,
+        json!({"code": on(&m, "theorem q : 3 = 3 := rfl\nneeds b"), "labels": {"p": "1"}}),
+    )
+    .await;
+    let to = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &to, json!({"allow_changes": true})).await;
+    assert_eq!(r["ok"], false, "{r}");
+    // M′ built, and Q′ didn't.
+    let created = r["created"].as_array().unwrap();
+    assert_eq!(created.len(), 1, "{r}");
+    assert_eq!(created[0]["module"], m["snapshot"]["module"], "{r}");
+    assert!(created[0].get("new_snapshot_id").is_none(), "{r}");
+    let failed = r["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1, "{r}");
+    assert_eq!(failed[0]["snapshot_id"], entry(&q), "{r}");
+    assert!(r.get("skipped").is_none(), "{r}");
+
+    // Nothing imports M′, so it went with its snapshot.
+    let new_m = created[0]["new_module"].as_str().unwrap();
+    assert!(!stored(&c, new_m).await, "{:?}", c.stored_rows("v").await);
+    assert!(stored(&c, module(&m)).await);
 }
 
 /// B, defining `f`, with C defining `g` from it on top and E using `g` on C,

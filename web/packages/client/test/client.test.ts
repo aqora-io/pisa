@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { PisaClient, isCapacityError, isPisaError, type RebuildItem, type Replaces } from "../src/index.ts";
+import { PisaClient, isCapacityError, isPisaError, type RebuildCreated, type RebuildItem, type Replaces } from "../src/index.ts";
 
 interface Sent {
   url: string;
@@ -160,6 +160,24 @@ describe("PisaClient", () => {
     const links: (Replaces | undefined)[] = r.plan.map((i) => i.replaces);
     expect(links).toEqual([{ snapshot_id: "v1~p1", allow: { definitions: ["f"] } }, undefined]);
     expect(r.replaced?.[0]?.replaced_by).toEqual(["v1~r1"]);
+  });
+
+  it("reads a support item, which has no labels and, once made, no snapshot", async () => {
+    const support: RebuildItem = {
+      level: 1,
+      module: "PisaSnap.sm",
+      new_module: "PisaSnap.sn",
+      new_header: "import PisaSnap.sn",
+      code: "theorem m : 2 = 2 := rfl",
+      labels: {},
+      key: "rebuild:a:b:m",
+    };
+    const made: RebuildCreated = { module: support.module, new_module: support.new_module };
+    const { client } = recording(() => json({ ok: true, changes: [], plan: [support], created: [made] }));
+    const r = await client.rebuildSnapshots("v1~e1", "v1~e2", { p: "1" });
+    expect(r.plan[0]?.snapshot_id).toBeUndefined();
+    expect(r.plan[0]?.labels).toEqual({});
+    expect(r.created?.[0]?.new_snapshot_id).toBeUndefined();
   });
 
   it("runs a rebuild, at once or as a job", async () => {

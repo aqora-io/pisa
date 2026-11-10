@@ -595,15 +595,23 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
 
 - **What it rebuilds.** The dependents with a head that has every label
   (`labels` is required, so the caller chooses which projects follow the
-  edit), and any module between them and `from`, which gets an item without
-  `snapshot_id`, with the labels asked for. A head is a snapshot that
-  nothing replaces, with the labels or without: a replaced one is history,
-  and its run goes on through what replaced it. A snapshot that only its copies from
-  this same rebuild replace stays an item, so sending the rebuild again
-  replays them. Each item's `code` is the old code with its imports of
-  `from`'s module, and of the other modules the plan rebuilds, swapped for
-  the new ones; lines and columns stay where they were. `from` and `to` are
-  of one version, which the rebuild runs on.
+  edit), and the modules they build on above `from` (see *Support modules*).
+  A head is a snapshot that nothing replaces, with the labels or without: a
+  replaced one is history, and its run goes on through what replaced it. A
+  snapshot that only its copies from this same rebuild replace stays an item,
+  so sending the rebuild again replays them. Each item's `code` is the old
+  code with its imports of `from`'s module, and of the other modules the plan
+  rebuilds, swapped for the new ones; lines and columns stay where they were.
+  `from` and `to` are of one version, which the rebuild runs on.
+- **Support modules.** A module that is rebuilt only because a copy builds on
+  it, such as one between the heads and `from`, or an obsolete snapshot's
+  that a head still imports, is a support item: no `snapshot_id`, no
+  `labels` and no `replaces`. The rebuild creates it so that the items above
+  can build, then deletes its snapshot. Its module stays only while a created
+  snapshot builds on it, and is in no listing, search or audit, so old code
+  doesn't come back as a head. One whose dependents all failed goes with its
+  snapshot. If the server stops mid-run, the support snapshots stay until the
+  rebuild is sent again, which replays and deletes them.
 - **Runs that left the labels.** A snapshot with the labels that one
   without them replaces isn't copied, as its run went on elsewhere: on dry
   runs and runs alike, `replaced` lists it as `{snapshot_id, replaced_by}`,
@@ -617,10 +625,10 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   done, each with the item's `code`, `labels`, `key` and `replaces`, and the
   request's `verify` and `timeout`. A create no worker takes in time is sent
   again, up to 5 times. The response adds what it did: `created` (each old
-  `snapshot_id` and `module` with its `new_snapshot_id` and `new_module`),
-  `failed` (with the create's `check`), and `skipped`, the items that build
-  on one that failed or was skipped; other branches go on, and `ok` says
-  whether every item was created.
+  `snapshot_id` and `module` with its `new_snapshot_id` and `new_module`; a
+  support item has the modules only), `failed` (with the create's `check`),
+  and `skipped`, the items that build on one that failed or was skipped; other
+  branches go on, and `ok` says whether every item was created.
 - **Retiring.** With `"retire": true`, once every item is created, the server
   deletes the old snapshots whose copies replace them, from the top down, and
   with them the old modules nothing else needs; `retired` lists the
@@ -644,7 +652,9 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   answers at once.
 - **Running it yourself.** Or take the plan and send each item as
   `POST /snapshots {code, labels, key, replaces?}`, a level at a time, the
-  same way; each create's `snapshot.module` is the item's `new_module`.
+  same way; each create's `snapshot.module` is the item's `new_module`. A
+  support item has no labels: once the items above it are created, delete its
+  snapshot with `DELETE /snapshots/{id}`.
 - **Statements.** If `to` replaces `from` (see [Replacing](#replacing)), its
   create compared them, so `changes` is empty. Otherwise the rebuild compares
   them the same way and, if `to` changes what `from` states, answers `ok:

@@ -1023,8 +1023,12 @@ export interface components {
         RebuildCreated: {
             module: string;
             new_module: string;
-            /** @description The snapshot the create made, or replayed. */
-            new_snapshot_id: string;
+            /**
+             * @description The snapshot the create made, or replayed. Absent for a support item:
+             *     its snapshot was deleted once every level had run, and its module
+             *     stays only while a created snapshot builds on it.
+             */
+            new_snapshot_id?: string;
             /** @description As in [`RebuildItem::snapshot_id`]. */
             snapshot_id?: string;
         };
@@ -1042,6 +1046,14 @@ export interface components {
         /**
          * @description A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its
          *     `code`, `labels`, `key` and `replaces`.
+         *
+         *     An item without `snapshot_id` is a support item: a module that a copy
+         *     builds on, such as one between a head and `from`, or an obsolete
+         *     snapshot's that a head imports. It has no labels and no `replaces`. Create
+         *     it as given so that it exists while the items above it are built, then
+         *     delete its snapshot once they are created. The module then stays only
+         *     while a created snapshot builds on it, and appears in no listing, search or
+         *     audit.
          */
         RebuildItem: {
             /**
@@ -1057,6 +1069,10 @@ export interface components {
              *     that are done.
              */
             key: string;
+            /**
+             * @description The labels to create it with: those of the snapshot it copies, none
+             *     for a support item.
+             */
             labels: {
                 [key: string]: string;
             };
@@ -1086,8 +1102,7 @@ export interface components {
             /**
              * @description The snapshot it copies: a head with the labels, or one that only its
              *     copies from this same rebuild replace, so that sending the rebuild
-             *     again replays them. Absent for a module that only links others to
-             *     `from`, with no such snapshot: it gets the labels asked for.
+             *     again replays them. Absent for a support item, which copies none.
              */
             snapshot_id?: string;
         };
@@ -1113,8 +1128,10 @@ export interface components {
          *     replaces, onto `to`, with its imports of `from`'s module, and of the other
          *     modules it rebuilds, swapped for the new ones, and unless `dry_run`
          *     creates them: a level at a time, a level's creates side by side once the
-         *     level below is done. `from` and `to` are of one version, which the
-         *     rebuild runs on.
+         *     level below is done. A module a head builds on above `from` is rebuilt
+         *     too, as a support item that leaves no snapshot behind (see
+         *     [`RebuildItem`]). `from` and `to` are of one version, which the rebuild
+         *     runs on.
          */
         RebuildSnapshotsRequest: {
             /**

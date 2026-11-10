@@ -748,8 +748,10 @@ pub struct ListDependentsResponse {
 /// replaces, onto `to`, with its imports of `from`'s module, and of the other
 /// modules it rebuilds, swapped for the new ones, and unless `dry_run`
 /// creates them: a level at a time, a level's creates side by side once the
-/// level below is done. `from` and `to` are of one version, which the
-/// rebuild runs on.
+/// level below is done. A module a head builds on above `from` is rebuilt
+/// too, as a support item that leaves no snapshot behind (see
+/// [`RebuildItem`]). `from` and `to` are of one version, which the rebuild
+/// runs on.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildSnapshotsRequest {
     /// The snapshot being replaced.
@@ -844,8 +846,11 @@ pub struct RebuildCreated {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     pub module: String,
-    /// The snapshot the create made, or replayed.
-    pub new_snapshot_id: String,
+    /// The snapshot the create made, or replayed. Absent for a support item:
+    /// its snapshot was deleted once every level had run, and its module
+    /// stays only while a created snapshot builds on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_snapshot_id: Option<String>,
     pub new_module: String,
 }
 
@@ -872,6 +877,14 @@ pub struct RebuildSkipped {
 
 /// A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its
 /// `code`, `labels`, `key` and `replaces`.
+///
+/// An item without `snapshot_id` is a support item: a module that a copy
+/// builds on, such as one between a head and `from`, or an obsolete
+/// snapshot's that a head imports. It has no labels and no `replaces`. Create
+/// it as given so that it exists while the items above it are built, then
+/// delete its snapshot once they are created. The module then stays only
+/// while a created snapshot builds on it, and appears in no listing, search or
+/// audit.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RebuildItem {
     /// The wave its create runs in: one more than the highest level among
@@ -880,8 +893,7 @@ pub struct RebuildItem {
     pub level: usize,
     /// The snapshot it copies: a head with the labels, or one that only its
     /// copies from this same rebuild replace, so that sending the rebuild
-    /// again replays them. Absent for a module that only links others to
-    /// `from`, with no such snapshot: it gets the labels asked for.
+    /// again replays them. Absent for a support item, which copies none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     /// The module it rebuilds.
@@ -892,6 +904,8 @@ pub struct RebuildItem {
     pub new_header: String,
     /// The old module's code with its imports swapped.
     pub code: String,
+    /// The labels to create it with: those of the snapshot it copies, none
+    /// for a support item.
     pub labels: BTreeMap<String, String>,
     /// The idempotency key to create it with. Planning again gives the same
     /// keys, so running a plan again after a failure replays the creates

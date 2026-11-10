@@ -349,7 +349,7 @@ async fn client_lists_dependents_and_plans_rebuilds() {
         .await
         .unwrap();
     assert!(run.ok, "{run:?}");
-    assert_eq!(run.created[0].new_snapshot_id, rebuilt.id);
+    assert_eq!(run.created[0].new_snapshot_id.as_ref(), Some(&rebuilt.id));
     let job = client
         .submit_rebuild_snapshots(&b.id, &new.id, &labels, &opts)
         .await

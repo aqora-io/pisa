@@ -1231,7 +1231,7 @@
             "type": "string"
           },
           "new_snapshot_id": {
-            "description": "The snapshot the create made, or replayed.",
+            "description": "The snapshot the create made, or replayed. Absent for a support item:\nits snapshot was deleted once every level had run, and its module\nstays only while a created snapshot builds on it.",
             "type": "string"
           },
           "snapshot_id": {
@@ -1241,7 +1241,6 @@
         },
         "required": [
           "module",
-          "new_snapshot_id",
           "new_module"
         ],
         "type": "object"
@@ -1268,7 +1267,7 @@
         "type": "object"
       },
       "RebuildItem": {
-        "description": "A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its\n`code`, `labels`, `key` and `replaces`.",
+        "description": "A create in a [`RebuildSnapshotsResponse`]: `POST /snapshots` with its\n`code`, `labels`, `key` and `replaces`.\n\nAn item without `snapshot_id` is a support item: a module that a copy\nbuilds on, such as one between a head and `from`, or an obsolete\nsnapshot's that a head imports. It has no labels and no `replaces`. Create\nit as given so that it exists while the items above it are built, then\ndelete its snapshot once they are created. The module then stays only\nwhile a created snapshot builds on it, and appears in no listing, search or\naudit.",
         "properties": {
           "affected": {
             "description": "The theorems of the module whose type uses a changed definition,\ndirectly or through other definitions, here or below.",
@@ -1289,6 +1288,7 @@
             "additionalProperties": {
               "type": "string"
             },
+            "description": "The labels to create it with: those of the snapshot it copies, none\nfor a support item.",
             "propertyNames": {
               "type": "string"
             },
@@ -1316,7 +1316,7 @@
             "description": "What the new snapshot replaces, to send as the create's `replaces`:\nthe snapshot it copies, so the run goes on through the copy. The plan\nruns the comparison the create will, taking the copy and the new\nmodules it builds on to declare what their originals do, and `allow`\nnames the definitions it found changed, if any. Absent when the\ncomparison fails, as when `to` changes the type of something the\ncopy's statements use: the copy then belongs to no run, and `retire`\nkeeps the old snapshot."
           },
           "snapshot_id": {
-            "description": "The snapshot it copies: a head with the labels, or one that only its\ncopies from this same rebuild replace, so that sending the rebuild\nagain replays them. Absent for a module that only links others to\n`from`, with no such snapshot: it gets the labels asked for.",
+            "description": "The snapshot it copies: a head with the labels, or one that only its\ncopies from this same rebuild replace, so that sending the rebuild\nagain replays them. Absent for a support item, which copies none.",
             "type": "string"
           }
         },
@@ -1369,7 +1369,7 @@
         "type": "object"
       },
       "RebuildSnapshotsRequest": {
-        "description": "`POST /snapshots/rebuild`: plans how to copy each head among the\ndependents of `from` (see [`ListDependentsResponse`]), a snapshot nothing\nreplaces, onto `to`, with its imports of `from`'s module, and of the other\nmodules it rebuilds, swapped for the new ones, and unless `dry_run`\ncreates them: a level at a time, a level's creates side by side once the\nlevel below is done. `from` and `to` are of one version, which the\nrebuild runs on.",
+        "description": "`POST /snapshots/rebuild`: plans how to copy each head among the\ndependents of `from` (see [`ListDependentsResponse`]), a snapshot nothing\nreplaces, onto `to`, with its imports of `from`'s module, and of the other\nmodules it rebuilds, swapped for the new ones, and unless `dry_run`\ncreates them: a level at a time, a level's creates side by side once the\nlevel below is done. A module a head builds on above `from` is rebuilt\ntoo, as a support item that leaves no snapshot behind (see\n[`RebuildItem`]). `from` and `to` are of one version, which the rebuild\nruns on.",
         "properties": {
           "allow_changes": {
             "description": "Plan even though `to` changes what `from` states, when `to` wasn't\ncreated to [`replace`](CreateSnapshotRequest::replaces) `from`.",

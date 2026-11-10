@@ -196,6 +196,9 @@ class AuditSnapshotsResponse(TypedDict):
     links: NotRequired[list[AuditLink]]
 
 class RebuildItem(TypedDict):
+    """An item without `snapshot_id` is a support item: it has no labels and
+    no `replaces`. Create it as given, then delete its snapshot once the
+    items above it are created."""
     level: int
     snapshot_id: NotRequired[str]
     module: str
@@ -208,9 +211,11 @@ class RebuildItem(TypedDict):
     affected: NotRequired[list[str]]
 
 class RebuildCreated(TypedDict):
+    """A support item has no `new_snapshot_id`: the rebuild deleted its
+    snapshot."""
     snapshot_id: NotRequired[str]
     module: str
-    new_snapshot_id: str
+    new_snapshot_id: NotRequired[str]
     new_module: str
 
 class RebuildFailed(TypedDict):

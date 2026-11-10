@@ -2023,11 +2023,12 @@ impl Snapshots {
                 affected: affected.clone(),
             };
             let Some(entries) = matching.remove(&m) else {
-                // It only links what has the labels to `from`.
+                // Nothing to copy: it supports the copies above it, with no
+                // labels and no link.
                 planned.push(Planned {
                     created: meta.created * 1_000_000,
                     module: m.clone(),
-                    item: item(None, job.labels.clone(), None),
+                    item: item(None, BTreeMap::new(), None),
                 });
                 continue;
             };

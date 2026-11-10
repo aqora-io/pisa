@@ -1,8 +1,8 @@
 //! A rebuild that the server runs: the plan a worker makes (see
 //! `POST /snapshots/rebuild` with `dry_run`), created a level at a time
-//! through ordinary create jobs, then, if asked, the old snapshots retired.
-//! Each create has the plan's idempotency key, so running the same rebuild
-//! again replays the creates that are done.
+//! through ordinary create jobs, then the support snapshots deleted, and, if
+//! asked, the old snapshots retired. Each create has the plan's idempotency
+//! key, so running the same rebuild again replays the creates that are done.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -42,7 +42,9 @@ pub(crate) fn version(req: &RebuildSnapshotsRequest) -> Result<String, ApiError>
 }
 
 /// Plans `req` (as a dry run) and runs the plan on `version`, the one
-/// [`version`] found; see [`RebuildSnapshotsResponse`].
+/// [`version`] found; see [`RebuildSnapshotsResponse`]. The snapshots of the
+/// plan's support items, made so that the items above them could build, are
+/// deleted once every level has run, whether or not they did.
 pub(crate) async fn run(
     app: &Arc<App>,
     req: &RebuildSnapshotsRequest,
@@ -65,6 +67,8 @@ pub(crate) async fn run(
 
     // The new snapshots that weren't made: what imports one isn't either.
     let mut missing: HashSet<String> = HashSet::new();
+    // The support snapshots made, to delete once every level has run.
+    let mut support: Vec<String> = Vec::new();
     let mut levels: Vec<usize> = response.plan.iter().map(|i| i.level).collect();
     levels.dedup();
     for level in levels {
@@ -101,10 +105,17 @@ pub(crate) async fn run(
                         snapshot: Some(made),
                         ..
                     }) if made.module == item.new_module => {
+                        let new_snapshot_id = match item.snapshot_id {
+                            Some(_) => Some(made.id),
+                            None => {
+                                support.push(made.id);
+                                None
+                            }
+                        };
                         response.created.push(RebuildCreated {
                             snapshot_id: item.snapshot_id.clone(),
                             module: item.module.clone(),
-                            new_snapshot_id: made.id,
+                            new_snapshot_id,
                             new_module: made.module,
                         });
                     }
@@ -128,6 +139,9 @@ pub(crate) async fn run(
         }
     }
     response.ok = response.failed.is_empty() && response.skipped.is_empty();
+    for entry in support.into_iter().rev() {
+        delete(app, entry, version.clone()).await?;
+    }
     if req.retire && response.ok {
         response.retired = retire(app, &response.plan, version).await?;
     }
@@ -185,17 +199,19 @@ async fn retire(
     let old = linked.filter_map(|i| i.snapshot_id.clone());
     let mut retired = Vec::new();
     for entry in old {
-        let job = Job::SnapshotDelete(SnapshotJob {
-            entry: entry.clone(),
-        });
-        match submit(app, job, version.clone(), Priority::Interactive).await? {
-            JobResult::SnapshotDeleted(Ok(_)) => retired.push(entry),
-            JobResult::SnapshotDeleted(Err(e)) if e.kind == ErrorKind::NotFound => {
-                retired.push(entry)
-            }
-            JobResult::SnapshotDeleted(Err(e)) => return Err(ApiError(e)),
-            other => return Err(unexpected(other)),
-        }
+        delete(app, entry.clone(), version.clone()).await?;
+        retired.push(entry);
     }
     Ok(retired)
+}
+
+/// Deletes snapshot `entry` on `version`; one already gone counts.
+async fn delete(app: &App, entry: String, version: Option<String>) -> Result<(), ApiError> {
+    let job = Job::SnapshotDelete(SnapshotJob { entry });
+    match submit(app, job, version, Priority::Interactive).await? {
+        JobResult::SnapshotDeleted(Ok(_)) => Ok(()),
+        JobResult::SnapshotDeleted(Err(e)) if e.kind == ErrorKind::NotFound => Ok(()),
+        JobResult::SnapshotDeleted(Err(e)) => Err(ApiError(e)),
+        other => Err(unexpected(other)),
+    }
 }
