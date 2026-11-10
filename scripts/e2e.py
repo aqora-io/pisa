@@ -16,10 +16,12 @@ port-forward.
 """
 
 import argparse
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -400,6 +402,46 @@ def holes():
     step("holes: a spec's holes are filled without allow, and nothing else changes in a clean run")
 
 
+def comparator():
+    spec = ("def cost : Nat := {}\n\ndef good (n : Nat) : Prop := {}\n\n"
+            "theorem t : good cost := {}\n\ntheorem t_nonvacuous : ∃ n, good n := {}")
+    skeleton = create_snapshot(spec.format("sorry", "n ≤ 10", "sorry", "sorry"), holes=["cost"], verify=True)
+    spec_id = skeleton["snapshot"]["id"]
+    proofs = ("3", "n ≤ 10", "by unfold good; decide", "⟨0, by unfold good; decide⟩")
+    filled = create_snapshot(spec.format(*proofs), replaces={"snapshot_id": spec_id}, verify=True)
+    assert audit_against(skeleton)["clean"] is True
+
+    query = urllib.parse.urlencode([("against", spec_id)])
+    with urllib.request.urlopen(BASE + f"/snapshots/export?{query}", timeout=900) as r:
+        assert r.headers.get_content_type() == "application/gzip", r.headers
+        archive = r.read()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        names = tar.getnames()
+        config = json.load(tar.extractfile("pisa-run/comparator/1.json"))
+    assert config["theorem_names"] == ["t", "t_nonvacuous"] and config["definition_names"] == ["cost"], config
+    assert config["solution_module"] == filled["snapshot"]["module"], config
+    head_file = filled["snapshot"]["module"].replace(".", "/")
+    assert f"pisa-run/{head_file}.lean" in names and "pisa-run/lakefile.toml" in names, names
+    step("comparator: a run exports as a Lake project")
+
+    verdict = post("/snapshots/comparator", {"against": [spec_id]})
+    assert verdict["accepted"] and verdict["pairs"][0]["exit_code"] == 0, verdict
+    step("comparator: a head that fills the spec's holes is accepted, paranoid")
+    delete_snapshots([filled])
+
+    # `good` isn't a hole: changed under the head's own `allow`, the audit
+    # isn't clean, and comparator refuses it too.
+    replaces = {"snapshot_id": spec_id, "allow": {"definitions": ["good"]}}
+    cheat = create_snapshot(spec.format("3", "True", "trivial", "⟨0, trivial⟩"), replaces=replaces, verify=True)
+    assert audit_against(skeleton)["clean"] is False
+    verdict = post("/snapshots/comparator", {"against": [spec_id], "paranoid": False})
+    pair = verdict["pairs"][0]
+    assert not verdict["accepted"] and pair["exit_code"] == 1, verdict
+    assert "does not match" in pair["output"] and "good" in pair["output"], pair
+    delete_snapshots([cheat, skeleton])
+    step("comparator: a head that changes what a statement means is refused")
+
+
 def allow_through_a_lost_snapshot():
     f = "def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => {}"
     allow = {"definitions": ["f"]}
@@ -646,6 +688,7 @@ if __name__ == "__main__":
     statements_under_replaces()
     allow_by_name()
     holes()
+    comparator()
     allow_through_a_lost_snapshot()
     labels()
     module_snapshots()
