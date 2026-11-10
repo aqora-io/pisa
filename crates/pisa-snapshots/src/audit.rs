@@ -75,13 +75,22 @@ impl Reader {
         against: &[String],
         allow: &[String],
     ) -> Result<AuditSnapshotsResponse, Error> {
-        let mut specs: Vec<(String, EntryMeta)> = Vec::new();
+        let mut wanted: Vec<String> = Vec::new();
         for id in against {
             let entry = self.parse(id)?;
-            if !specs.iter().any(|(e, _)| *e == entry) {
-                let entry_meta = self.catalog.entry(&entry).await?;
-                specs.push((entry, entry_meta));
+            if !wanted.contains(&entry) {
+                wanted.push(entry);
             }
+        }
+        // The whole run, from one read of the catalog.
+        let run = Run::read(&self.catalog, &wanted).await?;
+        let mut specs: Vec<(String, EntryMeta)> = Vec::new();
+        for entry in wanted {
+            let entry_meta = match run.entry(&entry) {
+                Some(meta) => meta.clone(),
+                None => self.catalog.entry(&entry).await?,
+            };
+            specs.push((entry, entry_meta));
         }
         let mut links = Vec::new();
         let mut linked = HashSet::new();
@@ -110,7 +119,7 @@ impl Reader {
                     break;
                 }
                 add_link(&e, &entry_meta);
-                let older = self.catalog.find_entry(&replaces.snapshot_id).await?;
+                let older = run.entry(&replaces.snapshot_id).cloned();
                 cut |= older.is_none();
                 back = older.map(|m| (replaces.snapshot_id.clone(), m));
             }
@@ -126,7 +135,7 @@ impl Reader {
                 if e != *spec {
                     add_link(&e, &entry_meta);
                 }
-                let replacers = self.catalog.replacers(&e).await?;
+                let replacers = run.replacers(&e);
                 if replacers.is_empty() {
                     if !heads.iter().any(|(h, _)| *h == e) {
                         heads.push((e.clone(), entry_meta.module));

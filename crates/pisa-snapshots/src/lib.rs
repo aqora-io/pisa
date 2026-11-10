@@ -30,11 +30,13 @@ pub mod compare;
 mod plan;
 mod read;
 pub mod review;
+mod run;
 #[cfg(test)]
 mod tests;
 
 use compare::*;
 use plan::*;
+use run::Run;
 
 /// Reads the snapshot catalog of one version.
 pub struct Reader {

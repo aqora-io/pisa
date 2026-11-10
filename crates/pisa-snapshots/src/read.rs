@@ -59,11 +59,12 @@ impl Reader {
     /// replaces it already: the error, which names the replacers and the
     /// run's heads from there, and the heads. `None` if `entry` is a head.
     pub async fn replaced_by(&self, entry: &str) -> Result<Option<(Error, Vec<String>)>, Error> {
-        let replacers = self.catalog.replacers(entry).await?;
+        let run = Run::read(&self.catalog, &[entry.to_string()]).await?;
+        let replacers = run.replacers(entry);
         if replacers.is_empty() {
             return Ok(None);
         }
-        let heads = self.heads_from(entry).await?;
+        let heads: Vec<String> = run.heads_from(entry).iter().map(|e| self.id(e)).collect();
         let replacers: Vec<String> = replacers.iter().map(|(r, _)| self.id(r)).collect();
         let message = format!(
             "{} is replaced by {}; the run's heads from there are {}. Replace a head, or set fork",
@@ -78,18 +79,12 @@ impl Reader {
     /// that nothing replaces, reached from `entry` through what replaces it,
     /// oldest first.
     pub async fn heads_from(&self, entry: &str) -> Result<Vec<String>, Error> {
-        let created = self.catalog.entry(entry).await?.created_micros;
-        let mut todo = vec![(entry.to_string(), created)];
-        let mut heads = Vec::new();
-        while let Some((e, created)) = todo.pop() {
-            let replacers = self.catalog.replacers(&e).await?;
-            if replacers.is_empty() {
-                heads.push((created, e));
-            }
-            todo.extend(replacers.into_iter().map(|(r, m)| (r, m.created_micros)));
+        let run = Run::read(&self.catalog, &[entry.to_string()]).await?;
+        if run.entry(entry).is_none() {
+            // Not kept: the catalog says so.
+            self.catalog.entry(entry).await?;
         }
-        heads.sort();
-        Ok(heads.into_iter().map(|(_, e)| self.id(&e)).collect())
+        Ok(run.heads_from(entry).iter().map(|e| self.id(e)).collect())
     }
 
     /// The snapshot modules a replacement of `replacing` that builds on
