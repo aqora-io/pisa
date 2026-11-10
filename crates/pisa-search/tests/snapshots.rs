@@ -106,7 +106,7 @@ async fn tei(
     mocks.embedded.lock().unwrap().push(inputs.clone());
     let fail = mocks
         .embed_failures
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
         .is_ok();
     let delay = mocks.embed_delay_ms.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(delay)).await;
