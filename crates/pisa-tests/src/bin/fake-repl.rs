@@ -25,7 +25,6 @@
 //! statements and docstrings (see `pisa_tests::exports`). Both read the code
 //! as `pisa_tests::as_reported` gives it, so `-- reported-as: LINE` makes them
 //! show `LINE` in place of the next line, where the verifier sees the code.
-//! Tactic `rfl` closes the goal, `fail` errors, anything else leaves a goal open.
 
 use std::io::{BufRead, Write};
 
@@ -79,29 +78,6 @@ fn main() {
 }
 
 fn respond(s: &mut State, input: &Value) -> Value {
-    if let Some(tactic) = input.get("tactic").and_then(Value::as_str) {
-        let Some(goal) = state_goal(s, input) else {
-            return json!({"message": "Unknown proof state."});
-        };
-        return apply_tactic(s, &goal, tactic);
-    }
-    if let Some(path) = input.get("pickleTo").and_then(Value::as_str) {
-        if input.get("proofState").is_some() {
-            let Some(goal) = state_goal(s, input) else {
-                return json!({"message": "Unknown proof State."});
-            };
-            std::fs::write(path, json!({"goal": goal}).to_string()).unwrap();
-            return step(s, vec![goal], "Incomplete: open goals remain");
-        }
-        let env = input["env"].as_u64().unwrap() as usize;
-        std::fs::write(path, json!({"env": s.envs[env].local}).to_string()).unwrap();
-        return json!({"env": env});
-    }
-    if let Some(path) = input.get("unpickleProofStateFrom").and_then(Value::as_str) {
-        let saved: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let goal = saved["goal"].as_str().unwrap().to_string();
-        return step(s, vec![goal], "Incomplete: open goals remain");
-    }
     let cmd = input["cmd"].as_str().expect("cmd");
     match input.get("env").and_then(Value::as_u64) {
         None => import(s, cmd),
@@ -109,28 +85,6 @@ fn respond(s: &mut State, input: &Value) -> Value {
             None => json!({"message": "Unknown environment."}),
             Some(prev) => run(s, &prev, cmd, input["infotree"].as_str()),
         },
-    }
-}
-
-fn state_goal(s: &State, input: &Value) -> Option<String> {
-    let id = input["proofState"].as_u64()? as usize;
-    s.goals.get(id).cloned()
-}
-
-fn step(s: &mut State, goals: Vec<String>, status: &str) -> Value {
-    s.goals.push(goals.first().cloned().unwrap_or_default());
-    json!({"proofState": s.goals.len() - 1, "goals": goals, "proofStatus": status})
-}
-
-fn apply_tactic(s: &mut State, goal: &str, tactic: &str) -> Value {
-    match tactic {
-        "fail" => json!({"message": "Lean error:\nfailed"}),
-        "rfl" => step(s, vec![], "Completed"),
-        t => step(
-            s,
-            vec![format!("{goal} after {t}")],
-            "Incomplete: open goals remain",
-        ),
     }
 }
 

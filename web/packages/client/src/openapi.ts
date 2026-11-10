@@ -75,7 +75,7 @@ export interface paths {
         put?: never;
         /**
          * Open code for goals and probes
-         * @description Opens the code on Lean Beam, and answers Lean's errors and warnings and the goals of its `sorry`s. The document stays open, for goals at positions and candidate tactics probed there. A worker holds it open, and the code is stored, so another worker reopens it if that one goes; unused, it expires with the workers' proof states. Nothing here is a verdict: check finished code with `/check`. A 503 means no worker serves documents.
+         * @description Opens the code on Lean Beam, and answers Lean's errors and warnings and the goals of its `sorry`s. The document stays open, for goals at positions and candidate tactics probed there. A worker holds it open, and the code is stored, so another worker reopens it if that one goes; unused, it expires after the workers' `PISA_STATE_TTL_SECS`. Nothing here is a verdict: check finished code with `/check`. A 503 means no worker serves documents.
          */
         post: operations["openDocument"];
         delete?: never;

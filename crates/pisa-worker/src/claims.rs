@@ -3,9 +3,8 @@
 //!
 //! Every free worker of a version looks at the same oldest jobs, and each
 //! leaves a job alone for a moment ([`PREFER`]) when another live worker with
-//! a free slot is a better home for it: the one that stored the proof state
-//! it continues, or, when this worker hasn't imported its header, one that
-//! has. Otherwise the first to claim a job runs it.
+//! a free slot is a better home for it: when this worker hasn't imported its
+//! header, one that has. Otherwise the first to claim a job runs it.
 //!
 //! Jobs on open documents go to workers with Beam slots ([`pick_documents`]),
 //! one at a time per document, and wait for the worker holding the document
@@ -75,20 +74,14 @@ pub fn pick(
             break;
         }
         let released = c.enqueued_micros + PREFER.as_micros() as i64;
-        let elsewhere = now < released && {
-            let holder = c.affinity.as_deref();
-            match holder {
-                Some(h) if h == me => false,
-                Some(h) if take(h, &mut spare) => true,
-                _ => c.header_key.as_ref().is_some_and(|key| {
-                    !warm.contains(key)
-                        && peers
-                            .iter()
-                            .filter(|p| p.warm.contains(key))
-                            .any(|p| take(&p.name, &mut spare))
-                }),
-            }
-        };
+        let elsewhere = now < released
+            && c.header_key.as_ref().is_some_and(|key| {
+                !warm.contains(key)
+                    && peers
+                        .iter()
+                        .filter(|p| p.warm.contains(key))
+                        .any(|p| take(&p.name, &mut spare))
+            });
         if elsewhere {
             picked.release_at = Some(picked.release_at.map_or(released, |r| r.min(released)));
         } else {
@@ -541,23 +534,6 @@ mod tests {
         let jobs = [job(1, "h", None, FRESH), job(2, "h", None, FRESH)];
         let peers = [peer("w", 2, 1, &["h"])];
         assert_eq!(pick("me", 2, &keys(&[]), &jobs, &peers, NOW).ids, [2]);
-    }
-
-    #[test]
-    fn the_holder_of_a_state_gets_first_refusal() {
-        let jobs = [job(1, "h", Some("w"), FRESH)];
-        let peers = [peer("w", 1, 0, &[]), peer("me", 1, 0, &["h"])];
-        // Even over a worker with the header warm.
-        assert!(
-            pick("me", 1, &keys(&["h"]), &jobs, &peers, NOW)
-                .ids
-                .is_empty()
-        );
-        assert_eq!(pick("w", 1, &keys(&[]), &jobs, &peers, NOW).ids, [1]);
-        // A busy holder doesn't get it, and a lost one isn't in the registry.
-        let busy = [peer("w", 1, 1, &[])];
-        assert_eq!(pick("me", 1, &keys(&[]), &jobs, &busy, NOW).ids, [1]);
-        assert_eq!(pick("me", 1, &keys(&[]), &jobs, &[], NOW).ids, [1]);
     }
 
     fn on(id: i64, document: &str, holder: Option<&str>) -> Candidate {

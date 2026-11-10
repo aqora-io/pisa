@@ -1,4 +1,4 @@
-//! Proof states', sessions' and open documents' records, by hash and by id,
+//! The records of tactic sessions, their states and open documents, by id,
 //! each with the time it was stored (a document's, when it was last used), so
 //! that old ones can be swept.
 

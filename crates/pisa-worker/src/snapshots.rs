@@ -1296,7 +1296,7 @@ impl Snapshots {
             }
         }
         let header = snapshot::next_header(&split.header, &id);
-        let mut slot = pool.acquire(&header_key(&header), None).await;
+        let mut slot = pool.acquire(&header_key(&header)).await;
         let built = self
             .build(&mut slot, job, split, replacing, &id, &header)
             .await;
@@ -1855,7 +1855,7 @@ impl Snapshots {
             return Ok(done);
         }
         // No header to prefer: this takes a slot with nothing warm if it can.
-        let mut slot = pool.acquire("", None).await;
+        let mut slot = pool.acquire("").await;
         // The verifier imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
         let verification = match recheck_module(&slot, &module.id).await {

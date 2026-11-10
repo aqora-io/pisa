@@ -2,7 +2,7 @@
 //! import header. Idle slots are reused by header (a warm hit) and otherwise
 //! evicted least-recently-used first.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,16 +47,6 @@ pub struct Slot {
     last_used: Instant,
     /// OOM kills in the slot's cgroup when the current process started.
     oom_baseline: u64,
-    /// Proof states loaded in the current process, by state hash.
-    states: HashMap<String, Resident>,
-}
-
-/// A proof state held in a live process.
-#[derive(Debug, Clone)]
-pub struct Resident {
-    pub proof_state: u64,
-    pub header: String,
-    pub session: String,
 }
 
 struct Warm {
@@ -88,7 +78,6 @@ impl Pool {
                 jobs: 0,
                 last_used: now,
                 oom_baseline: 0,
-                states: HashMap::new(),
             })
             .collect();
         let (warm, warm_rx) = watch::channel(BTreeMap::new());
@@ -122,9 +111,9 @@ impl Pool {
         &self.launcher
     }
 
-    /// Waits for a free slot, preferring one that holds proof state `state`,
-    /// then one that already has `header_key` warm.
-    pub async fn acquire(self: &Arc<Self>, header_key: &str, state: Option<&str>) -> Lease {
+    /// Waits for a free slot, preferring one that already has `header_key`
+    /// warm.
+    pub async fn acquire(self: &Arc<Self>, header_key: &str) -> Lease {
         let permit = self
             .permits
             .clone()
@@ -132,12 +121,9 @@ impl Pool {
             .await
             .expect("pool semaphore closed");
         let mut idle = self.idle.lock().unwrap();
-        let pick = state
-            .and_then(|st| idle.iter().position(|s| s.states.contains_key(st)))
-            .or_else(|| {
-                idle.iter()
-                    .position(|s| s.header.as_ref().is_some_and(|w| w.key == header_key))
-            })
+        let pick = idle
+            .iter()
+            .position(|s| s.header.as_ref().is_some_and(|w| w.key == header_key))
             .or_else(|| idle.iter().position(|s| s.header.is_none()))
             .or_else(|| {
                 idle.iter()
@@ -348,14 +334,6 @@ impl Lease {
         })
     }
 
-    pub fn resident(&self, state: &str) -> Option<Resident> {
-        self.states.get(state).cloned()
-    }
-
-    pub fn remember(&mut self, state: String, resident: Resident) {
-        self.slot.as_mut().unwrap().states.insert(state, resident);
-    }
-
     /// The slot's private directory, shared with its sandboxed process.
     pub fn scratch_dir(&self) -> std::path::PathBuf {
         self.pool.launcher.slot_dir(self.id)
@@ -435,7 +413,6 @@ impl Lease {
     }
 
     fn forget(&mut self) {
-        self.states.clear();
         if self.header.take().is_some() {
             self.pool.set_warm(self.id, None);
         }

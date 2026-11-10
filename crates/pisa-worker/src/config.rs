@@ -84,15 +84,15 @@ pub struct WorkerConfig {
     /// Allow #eval, macros, elaborators and other metaprogramming in submitted code.
     #[arg(long, env = "PISA_ALLOW_METAPROGRAMMING")]
     pub allow_metaprogramming: bool,
-    /// Where pickled proof states live. `s3` reads the AWS_* environment
+    /// Where snapshot modules live. `s3` reads the AWS_* environment
     /// variables (AWS_ENDPOINT, AWS_BUCKET, AWS_REGION, credentials,
     /// AWS_ALLOW_HTTP). All workers of a version must share one store.
     #[arg(long, env = "PISA_STORE", value_enum, default_value_t = StoreKind::Memory)]
     pub store: StoreKind,
     /// The database that holds the job queue, shared with the servers, and
-    /// the session, proof-state and snapshot records, shared by all workers
-    /// of a version: PostgreSQL (`postgres://…`), or a SQLite file for a
-    /// single machine. Pickled states and snapshot modules go to `--store`.
+    /// the document, session, state and snapshot records, shared by all
+    /// workers of a version: PostgreSQL (`postgres://…`), or a SQLite file
+    /// for a single machine. Snapshot modules go to `--store`.
     #[arg(long, env = "PISA_DATABASE_URL", required = true)]
     pub database_url: Option<String>,
     /// The job queue to take jobs from, as the servers name it.
@@ -102,7 +102,8 @@ pub struct WorkerConfig {
     /// whose worker died runs elsewhere once it lapses.
     #[arg(long, env = "PISA_LEASE_SECS", default_value_t = 10)]
     pub lease_secs: u64,
-    /// Delete stored proof states and sessions older than this (0 keeps them).
+    /// Delete documents, sessions and their states older than this (0 keeps
+    /// them).
     #[arg(long, env = "PISA_STATE_TTL_SECS", default_value_t = 0)]
     pub state_ttl_secs: u64,
     /// How long a lookup in the store vouches for a snapshot this worker has
@@ -130,7 +131,7 @@ pub struct WorkerConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum StoreKind {
-    /// In this process only; sessions can't move between workers.
+    /// In this process only; snapshots can't move between workers.
     Memory,
     S3,
 }

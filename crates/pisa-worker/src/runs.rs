@@ -117,7 +117,7 @@ pub async fn comparator(
 ) -> Result<ComparatorResponse, Error> {
     let project = pool.launcher().project();
     let run = export(pool.snapshots(), project, &job.against, &job.allow).await?;
-    let mut slot = pool.acquire("", None).await;
+    let mut slot = pool.acquire("").await;
     // Comparator builds the modules, so free the slot's memory first.
     slot.retire_and_wait("evict").await;
     let dir = slot.scratch_dir().join("run");
