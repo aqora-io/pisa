@@ -231,3 +231,116 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
         r.pairs[0].output
     );
 }
+
+/// The files of the tar.gz `bytes`, by path.
+fn unpack(bytes: &[u8]) -> std::collections::BTreeMap<String, String> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    let mut files = std::collections::BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+        files.insert(path, text);
+    }
+    files
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_api_exports_a_run_and_judges_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+
+    let r = c
+        .client
+        .get(c.url(&format!("/snapshots/export?against={}", id(&s))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["content-type"], "application/gzip");
+    assert!(
+        r.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("pisa-run.tar.gz")
+    );
+    let files = unpack(&r.bytes().await.unwrap());
+    let config: Value = serde_json::from_str(&files["pisa-run/comparator/1.json"]).unwrap();
+    assert_eq!(config["solution_module"], module(&p));
+    for path in [
+        "pisa-run/lakefile.toml",
+        "pisa-run/lake-manifest.json",
+        "pisa-run/README.md",
+    ] {
+        assert!(files.contains_key(path), "{:?}", files.keys());
+    }
+
+    // As a job to read back later.
+    let r = c
+        .client
+        .post(c.url("/snapshots/comparator"))
+        .header("prefer", "respond-async")
+        .json(&json!({"against": [id(&s)], "paranoid": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let job: Value = r.json().await.unwrap();
+    assert_eq!(job["kind"], "comparator");
+    let r = c
+        .client
+        .get(c.url(&format!("/jobs/{}?wait=30", job["id"].as_str().unwrap())))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let verdict: Value = r.json().await.unwrap();
+    assert_eq!(verdict["accepted"], true, "{verdict}");
+    assert_eq!(verdict["pairs"][0]["head"], json!(id(&p)), "{verdict}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_is_named_by_spec_snapshots_of_one_version() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let get = async |query: &str| {
+        let r = c
+            .client
+            .get(c.url(&format!("/snapshots/export{query}")))
+            .send()
+            .await
+            .unwrap();
+        (r.status().as_u16(), r.json::<Value>().await.unwrap())
+    };
+    let hex = "0123456789abcdef0123456789abcdef";
+    let v = c.version("v");
+    for (query, status) in [
+        ("".to_string(), 400),
+        (format!("?against={v}~{hex}&against=w~{hex}"), 400),
+        ("?against=nope".to_string(), 400),
+        (format!("?against={v}~{hex}"), 404),
+    ] {
+        let (got, e) = get(&query).await;
+        assert_eq!(got, status, "{query}: {e}");
+    }
+    for body in [
+        json!({"against": []}),
+        json!({"against": [format!("{v}~{hex}")], "allow": [""]}),
+    ] {
+        let (status, e) = c.post("/snapshots/comparator", body.clone()).await;
+        assert_eq!(
+            (status, &e["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{body}: {e}"
+        );
+    }
+}

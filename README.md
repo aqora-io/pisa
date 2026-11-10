@@ -239,6 +239,8 @@ pnpm -C web generate
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
+| `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting with comparator](#comparator) |
+| `POST /snapshots/comparator` | `{against, allow?, paranoid?, timeout?}` → `{accepted, forks?, pairs: [{spec, head, config, accepted, exit_code?, output, skipped?}]}`; async with `Prefer: respond-async` |
 | `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
@@ -254,7 +256,7 @@ takes a comma-separated list of origins, or `*`. It is empty by default.
 
 <a id="async-requests"></a>
 **Async requests.** A check, a session's start, tactic or check, a
-snapshot's create or verify, and a rebuild can take minutes: a wait for a worker, loading the
+snapshot's create or verify, a rebuild, and a comparator run can take minutes: a wait for a worker, loading the
 imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
 requests off at 60 s, or over a network that drops, send them with
 `Prefer: respond-async`. The server then answers `202 {id, kind, status:
@@ -710,6 +712,56 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   shows that it states what the original did, and an audit against it isn't
   `clean`: rebuild a run's spec snapshots without `retire`.
 
+<a id="comparator"></a>
+**Accepting with comparator.** The audit's comparison is pisa's own code.
+`lake comparator`, which Lean ships, judges a run with none of it:
+- **The export.** `GET /snapshots/export?against=<id>` (repeated, with
+  `allow=` as for the audit) answers the run as a Lake project in
+  `pisa-run/`, as a tar.gz:
+  - every module the spec snapshots and their heads need, as
+    `PisaSnap/s….lean` with its stored code;
+  - the worker project's `lean-toolchain` and `lake-manifest.json`, and a
+    `lakefile.toml` that requires what the project requires and builds the
+    modules with `autoImplicit` off, as pisa builds them;
+  - a configuration in `comparator/` for each spec snapshot and head the
+    audit reaches, listed in the export's `README.md`.
+- **A configuration.** The spec snapshot's module is the challenge and the
+  head's the solution:
+  - `theorem_names` are the spec's theorems, witnesses included, without
+    what Lean generates;
+  - `definition_names` are the spec's holes and `allow`;
+  - `permitted_axioms` are `propext`, `Quot.sound` and `Classical.choice`, and
+    the assumptions the spec permits, those declared in its module or in a
+    module it builds on.
+
+  Comparator accepts the head when each theorem is proved there with the same
+  statement, the definitions those statements use are the same but for the
+  holes, an assumption keeps its statement, and the proofs use no other
+  axiom. It replays them in Lean's kernel and, with `--paranoid`, in the
+  external kernels Lean bundles.
+- **Running it.** `POST /snapshots/comparator {"against": [...]}` runs
+  `lake comparator --paranoid` on a worker, on each pair in turn, in one
+  export so that each module builds once. `paranoid: false` uses Lean's
+  kernel only, and `timeout` (default 600) is each pair's limit in seconds.
+  Each pair has comparator's `exit_code` (0 accepted, 1 refused, 2 couldn't
+  start, none past `timeout`) and the end of its `output`. The run is
+  `accepted` when every pair is and there is no fork. A pair that imports
+  Mathlib takes about 25 s, or 45 s paranoid, so send it with
+  `Prefer: respond-async`. Or untar the export and run `lake comparator
+  --paranoid --config comparator/1.json` there: it needs `bwrap`.
+- **What it doesn't see.** Private names differ between two modules, so a
+  configuration leaves out private theorems, holes and assumptions and lists
+  them in `skipped`. A definition that no theorem's statement uses isn't
+  compared, as the audit compares it. Comparator also refuses some heads
+  that keep the spec's statements, such as code that opens `Classical` in its
+  header, or whose auxiliary declarations differ. So it adds to the audit,
+  and doesn't replace it.
+- **The worker.** Comparator runs on a REPL slot, in its cgroup and outside
+  pisa's sandbox, as it sandboxes the code it judges itself with `bwrap`,
+  with only `PATH`, `HOME`, `ELAN_HOME`, `LANG` and `TMPDIR` of the worker's
+  environment. It needs `/run/user`, which the worker image creates.
+  `PISA_LAKE` names `lake` (default `lake`).
+
 <a id="agent-runs"></a>
 **Running agents on snapshots.** A leader hands targets to agents, and
 [replacing](#replacing) keeps their submissions in one run:
@@ -747,7 +799,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 - **Accepting.** The run is accepted when `audit?against=` its spec ids is
   `clean` (see [Auditing a run](#spec-audit)), with `allow=` each definition
   the leader decided later may change, such as one its own base edit
-  changed; the spec's holes may change already. What the agents' links
+  changed; the spec's holes may change already. Then comparator, which
+  shares no code with the audit, accepts it with the same `allow` (see
+  [Accepting with comparator](#comparator)). What the agents' links
   allowed doesn't count; `comparisons` and `links` show what each head
   changed, for review, holes' values included.
 - **Afterwards.** The leader may retire and delete superseded versions.

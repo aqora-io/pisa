@@ -316,6 +316,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots/comparator": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Judge a run with lake comparator
+         * @description Runs `lake comparator` on the run's export (`GET /snapshots/export`), for each spec snapshot and head it reaches: the head is accepted if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. Comparator shares no code with the audit, so accept a run when the audit is `clean` and comparator `accepted`. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
+         */
+        post: operations["judgeRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/snapshots/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A run as a Lake project
+         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/comparator` runs comparator on it.
+         */
+        get: operations["exportRun"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots/rebuild": {
         parameters: {
             query?: never;
@@ -761,6 +801,62 @@ export interface components {
             code: string;
             /** Format: int64 */
             timeout?: number;
+        };
+        ComparatorPair: {
+            accepted: boolean;
+            /** @description Its comparator configuration in the export. */
+            config: string;
+            /**
+             * Format: int32
+             * @description Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it
+             *     ran past `timeout`.
+             */
+            exit_code?: number;
+            /** @description The head. */
+            head: string;
+            /** @description The end of what it printed. */
+            output: string;
+            /**
+             * @description Targets, holes and assumptions the configuration leaves out because
+             *     they are private, which comparator can't name across two modules.
+             */
+            skipped?: string[];
+            /** @description The spec snapshot. */
+            spec: string;
+        };
+        /**
+         * @description `POST /snapshots/comparator`: judges a run with `lake comparator`,
+         *     which shares no code with the audit, on the Lake project
+         *     `GET /snapshots/export` gives: each spec snapshot against each head it
+         *     reaches.
+         */
+        ComparatorRequest: {
+            /** @description The spec's snapshot ids, as for the audit. */
+            against: string[];
+            /**
+             * @description The definitions the heads may change besides the spec's holes, as for
+             *     the audit.
+             */
+            allow?: string[];
+            /**
+             * @description Also run the external kernels Lean bundles: `leanchecker-paranoid`,
+             *     `lean4lean`, `nanoda`, `con-leche` and `con-ron`.
+             */
+            paranoid?: boolean;
+            /**
+             * Format: int64
+             * @description The time limit in seconds for each spec snapshot and head, in which
+             *     comparator builds and exports both and checks the head.
+             */
+            timeout?: number;
+        };
+        ComparatorResponse: {
+            /** @description There is no fork, and comparator accepted every pair. */
+            accepted: boolean;
+            /** @description As in the audit. */
+            forks?: components["schemas"]["AuditFork"][];
+            /** @description Each spec snapshot with each head it reaches. */
+            pairs: components["schemas"]["ComparatorPair"][];
         };
         /**
          * @description `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
@@ -1220,7 +1316,7 @@ export interface components {
          * @description The endpoint an async request ran.
          * @enum {string}
          */
-        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots";
+        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots" | "comparator";
         /**
          * @description What `GET /jobs/{id}` answers once the job is done: what its request
          *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
@@ -1807,6 +1903,11 @@ export interface components {
             /** @description The tactic's source text. */
             tactic: string;
         };
+        /**
+         * Format: binary
+         * @description A tar.gz archive, as `GET /snapshots/export` answers it.
+         */
+        Tarball: string;
         /** @description A term written in the code, and the type Lean expected it to have. */
         TermInfo: {
             end_pos: components["schemas"]["Pos"];
@@ -1879,6 +1980,9 @@ export type CheckBatchResponse = components['schemas']['CheckBatchResponse'];
 export type CheckRequest = components['schemas']['CheckRequest'];
 export type CheckResult = components['schemas']['CheckResult'];
 export type CheckSessionRequest = components['schemas']['CheckSessionRequest'];
+export type ComparatorPair = components['schemas']['ComparatorPair'];
+export type ComparatorRequest = components['schemas']['ComparatorRequest'];
+export type ComparatorResponse = components['schemas']['ComparatorResponse'];
 export type CreateSnapshotRequest = components['schemas']['CreateSnapshotRequest'];
 export type CreateSnapshotResponse = components['schemas']['CreateSnapshotResponse'];
 export type Declaration = components['schemas']['Declaration'];
@@ -1944,6 +2048,7 @@ export type StartSessionRequest = components['schemas']['StartSessionRequest'];
 export type State = components['schemas']['State'];
 export type Suggestion = components['schemas']['Suggestion'];
 export type TacticInfo = components['schemas']['TacticInfo'];
+export type Tarball = components['schemas']['Tarball'];
 export type TermInfo = components['schemas']['TermInfo'];
 export type UpdateSnapshotRequest = components['schemas']['UpdateSnapshotRequest'];
 export type VerifyFailure = components['schemas']['VerifyFailure'];
@@ -3487,6 +3592,194 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuditSnapshotsResponse"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    judgeRun: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{id}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ComparatorRequest"];
+            };
+        };
+        responses: {
+            /** @description Comparator's verdict on each pair */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ComparatorResponse"];
+                };
+            };
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{id}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    exportRun: {
+        parameters: {
+            query: {
+                /** @description A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version */
+                against: string[];
+                /** @description A definition the run's heads may change besides the spec's holes, as for the audit; repeatable */
+                allow?: string[];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The project, as a tar.gz */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": components["schemas"]["Tarball"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

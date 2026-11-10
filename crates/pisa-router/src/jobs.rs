@@ -95,6 +95,7 @@ pub(crate) fn respond(kind: JobKind, outcome: Result<JobResult, DispatchError>) 
         JobKind::CreateSnapshot => answer(outcome.and_then(snapshots::created)),
         JobKind::VerifySnapshot => answer(outcome.and_then(snapshots::verified)),
         JobKind::RebuildSnapshots => answer(outcome.and_then(snapshots::rebuilt)),
+        JobKind::Comparator => answer(outcome.and_then(snapshots::compared)),
     }
 }
 

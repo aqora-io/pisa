@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, RawQuery, State};
+use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    Accepted, ApiErrors, AuditSnapshotsResponse, CreateSnapshotRequest, CreateSnapshotResponse,
-    DeleteSnapshotResponse, ErrorKind, JobKind, JobStatus, ListDependentsResponse,
-    ListSnapshotsResponse, PreferAsync, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
-    Snapshot, SnapshotDetail, SnapshotId, UpdateSnapshotRequest, VerifySnapshotResponse,
+    Accepted, ApiErrors, AuditSnapshotsResponse, ComparatorRequest, ComparatorResponse,
+    CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, ErrorKind, JobKind,
+    JobStatus, ListDependentsResponse, ListSnapshotsResponse, PreferAsync, RebuildSnapshotsRequest,
+    RebuildSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest,
+    VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -20,8 +22,9 @@ use pisa_protocol::labels::{
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
-    Job, JobResult, SnapshotAuditJob, SnapshotCreateJob, SnapshotDeleteJob, SnapshotDependentsJob,
-    SnapshotJob, SnapshotLabelsJob, SnapshotListJob, SnapshotRebuildJob,
+    ExportedRun, Job, JobResult, SnapshotAuditJob, SnapshotComparatorJob, SnapshotCreateJob,
+    SnapshotDeleteJob, SnapshotDependentsJob, SnapshotExportJob, SnapshotJob, SnapshotLabelsJob,
+    SnapshotListJob, SnapshotRebuildJob,
 };
 use serde::Deserialize;
 use utoipa::IntoParams;
@@ -348,19 +351,146 @@ fn against_query(query: &str, labels: &Filters) -> Result<Option<(String, Vec<St
                 .into(),
         ));
     }
+    Ok(Some((run_version(&against)?, against)))
+}
+
+/// The version that a run's spec snapshots `against` share.
+fn run_version(against: &[String]) -> Result<String, ApiError> {
+    let bad = |message: String| ApiError::new(ErrorKind::BadRequest, message);
     let mut versions: Vec<String> = Vec::new();
-    for id in &against {
+    for id in against {
         let version = parse_id(id)?.version;
         if !versions.contains(&version) {
             versions.push(version);
         }
     }
     match versions.as_slice() {
-        [version] => Ok(Some((version.clone(), against))),
+        [version] => Ok(version.clone()),
+        [] => Err(bad(
+            "against names the run's spec snapshots, and is empty".into()
+        )),
         _ => Err(bad(format!(
-            "against names snapshots of versions {}: an audit is of one version",
+            "against names snapshots of versions {}: a run is of one version",
             versions.join(", ")
         ))),
+    }
+}
+
+#[utoipa::path(
+    get, path = "/snapshots/export", operation_id = "exportRun", tag = "snapshots",
+    summary = "A run as a Lake project",
+    description = "The run that the spec snapshots start, as `GET /snapshots/audit?against=` \
+        walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code \
+        with the audit: every module the spec snapshots and their heads need, the worker \
+        project's toolchain, manifest and requirements, and a configuration in `comparator/` \
+        for each spec snapshot and head it reaches. Each names the spec's theorems, its holes \
+        and `allow` as definition holes, and the standard axioms and the spec's assumptions as \
+        permitted. `POST /snapshots/comparator` runs comparator on it.",
+    params(
+        ("against" = Vec<String>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version"),
+        ("allow" = Option<Vec<String>>, Query, description = "A definition the run's heads may change besides the spec's holes, as for the audit; repeatable"),
+    ),
+    responses(
+        (status = 200, description = "The project, as a tar.gz", content_type = "application/gzip", body = Tarball),
+        ApiErrors,
+    ),
+)]
+/// `GET /snapshots/export`.
+pub async fn export(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+) -> Result<Response, ApiError> {
+    let query = query.as_deref().unwrap_or_default();
+    let allow = allow_query(query)?;
+    let Some((version, against)) = against_query(query, &Filters::new())? else {
+        return Err(ApiError::new(
+            ErrorKind::BadRequest,
+            "against names the run's spec snapshots, and is required",
+        ));
+    };
+    let job = Job::SnapshotExport(SnapshotExportJob { against, allow });
+    let run = match submit(&app, job, Some(version), Priority::Interactive).await? {
+        JobResult::SnapshotExport(r) => r.map_err(ApiError)?,
+        other => return Err(unexpected(other)),
+    };
+    let tarball = tarball(&run)
+        .map_err(|e| ApiError::new(ErrorKind::Internal, format!("packing the export: {e}")))?;
+    let headers = [
+        (CONTENT_TYPE, "application/gzip"),
+        (
+            CONTENT_DISPOSITION,
+            "attachment; filename=\"pisa-run.tar.gz\"",
+        ),
+    ];
+    Ok((headers, tarball).into_response())
+}
+
+/// The directory an export unpacks to.
+const EXPORT_ROOT: &str = "pisa-run";
+
+/// `run`'s files as a tar.gz, in [`EXPORT_ROOT`].
+fn tarball(run: &ExportedRun) -> std::io::Result<Vec<u8>> {
+    let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for f in &run.files {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(f.text.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(now);
+        let path = format!("{EXPORT_ROOT}/{}", f.path);
+        tar.append_data(&mut header, path, f.text.as_bytes())?;
+    }
+    tar.into_inner()?.finish()
+}
+
+#[utoipa::path(
+    post, path = "/snapshots/comparator", operation_id = "judgeRun", tag = "snapshots",
+    summary = "Judge a run with lake comparator",
+    description = "Runs `lake comparator` on the run's export (`GET /snapshots/export`), for \
+        each spec snapshot and head it reaches: the head is accepted if each theorem of the spec \
+        is proved there with the same statement, the definitions those statements use are the \
+        same but for the spec's holes and `allow`, and the proofs use only the standard axioms \
+        and the spec's assumptions. Comparator shares no code with the audit, so accept a run \
+        when the audit is `clean` and comparator `accepted`. A Mathlib-sized pair takes about \
+        half a minute, or a minute paranoid: send it with `Prefer: respond-async`.",
+    params(PreferAsync),
+    request_body = ComparatorRequest,
+    responses((status = 200, description = "Comparator's verdict on each pair", body = ComparatorResponse), Accepted, ApiErrors),
+)]
+/// `POST /snapshots/comparator`.
+pub async fn comparator(
+    State(app): State<Arc<App>>,
+    prefer: Prefer,
+    Body(req): Body<ComparatorRequest>,
+) -> Response {
+    let version = match run_version(&req.against) {
+        Ok(version) => version,
+        Err(e) => return e.into_response(),
+    };
+    if req.allow.iter().any(String::is_empty) {
+        let e = ApiError::new(
+            ErrorKind::BadRequest,
+            "allow names a definition, and is empty",
+        );
+        return e.into_response();
+    }
+    let job = Job::SnapshotComparator(SnapshotComparatorJob {
+        against: req.against,
+        allow: req.allow,
+        paranoid: req.paranoid,
+        timeout_secs: req.timeout,
+    });
+    let p = prepare(job, Some(version), Priority::Batch);
+    app.answer(prefer, JobKind::Comparator, p).await
+}
+
+pub(crate) fn compared(done: JobResult) -> Result<ComparatorResponse, ApiError> {
+    match done {
+        JobResult::SnapshotComparator(r) => r.map_err(ApiError),
+        other => Err(unexpected(other)),
     }
 }
 

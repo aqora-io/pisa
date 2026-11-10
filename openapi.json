@@ -571,6 +571,109 @@
         ],
         "type": "object"
       },
+      "ComparatorPair": {
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "config": {
+            "description": "Its comparator configuration in the export.",
+            "type": "string"
+          },
+          "exit_code": {
+            "description": "Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it\nran past `timeout`.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "head": {
+            "description": "The head.",
+            "type": "string"
+          },
+          "output": {
+            "description": "The end of what it printed.",
+            "type": "string"
+          },
+          "skipped": {
+            "description": "Targets, holes and assumptions the configuration leaves out because\nthey are private, which comparator can't name across two modules.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "spec": {
+            "description": "The spec snapshot.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "spec",
+          "head",
+          "config",
+          "accepted",
+          "output"
+        ],
+        "type": "object"
+      },
+      "ComparatorRequest": {
+        "description": "`POST /snapshots/comparator`: judges a run with `lake comparator`,\nwhich shares no code with the audit, on the Lake project\n`GET /snapshots/export` gives: each spec snapshot against each head it\nreaches.",
+        "properties": {
+          "against": {
+            "description": "The spec's snapshot ids, as for the audit.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allow": {
+            "description": "The definitions the heads may change besides the spec's holes, as for\nthe audit.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "paranoid": {
+            "description": "Also run the external kernels Lean bundles: `leanchecker-paranoid`,\n`lean4lean`, `nanoda`, `con-leche` and `con-ron`.",
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "The time limit in seconds for each spec snapshot and head, in which\ncomparator builds and exports both and checks the head.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "against"
+        ],
+        "type": "object"
+      },
+      "ComparatorResponse": {
+        "properties": {
+          "accepted": {
+            "description": "There is no fork, and comparator accepted every pair.",
+            "type": "boolean"
+          },
+          "forks": {
+            "description": "As in the audit.",
+            "items": {
+              "$ref": "#/components/schemas/AuditFork"
+            },
+            "type": "array"
+          },
+          "pairs": {
+            "description": "Each spec snapshot with each head it reaches.",
+            "items": {
+              "$ref": "#/components/schemas/ComparatorPair"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "accepted",
+          "pairs"
+        ],
+        "type": "object"
+      },
       "CreateSnapshotRequest": {
         "description": "`POST /snapshots`: checks code like `/check` and, if Lean accepts it,\nkeeps it as a module that later code can import, with a new snapshot of\nit. Code that is already kept gets a new snapshot of its module without\nbeing built again.",
         "properties": {
@@ -1337,7 +1440,8 @@
           "check_session",
           "create_snapshot",
           "verify_snapshot",
-          "rebuild_snapshots"
+          "rebuild_snapshots",
+          "comparator"
         ],
         "type": "string"
       },
@@ -2387,6 +2491,11 @@
           "end_pos"
         ],
         "type": "object"
+      },
+      "Tarball": {
+        "description": "A tar.gz archive, as `GET /snapshots/export` answers it.",
+        "format": "binary",
+        "type": "string"
       },
       "TermInfo": {
         "description": "A term written in the code, and the type Lean expected it to have.",
@@ -4406,6 +4515,241 @@
           }
         },
         "summary": "What a project rests on",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
+    "/snapshots/comparator": {
+      "post": {
+        "description": "Runs `lake comparator` on the run's export (`GET /snapshots/export`), for each spec snapshot and head it reaches: the head is accepted if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. Comparator shares no code with the audit, so accept a run when the audit is `clean` and comparator `accepted`. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.",
+        "operationId": "judgeRun",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComparatorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComparatorResponse"
+                }
+              }
+            },
+            "description": "Comparator's verdict on each pair"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{id}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Judge a run with lake comparator",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
+    "/snapshots/export": {
+      "get": {
+        "description": "The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/comparator` runs comparator on it.",
+        "operationId": "exportRun",
+        "parameters": [
+          {
+            "description": "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version",
+            "in": "query",
+            "name": "against",
+            "required": true,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          {
+            "description": "A definition the run's heads may change besides the spec's holes, as for the audit; repeatable",
+            "in": "query",
+            "name": "allow",
+            "required": false,
+            "schema": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "$ref": "#/components/schemas/Tarball"
+                }
+              }
+            },
+            "description": "The project, as a tar.gz"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "A run as a Lake project",
         "tags": [
           "snapshots"
         ]

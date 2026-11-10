@@ -22,6 +22,8 @@
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
 //! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
+//! | `GET /snapshots/export` | `?against=<id>&allow=<name>` → a Lake project, as a tar.gz |
+//! | `POST /snapshots/comparator` | [`ComparatorRequest`] → [`ComparatorResponse`] |
 //! | `POST /documents` | [`OpenDocumentRequest`] → [`Document`] |
 //! | `PATCH /documents/{id}` | [`EditDocumentRequest`] → [`Document`] |
 //! | `POST /documents/{id}/goals` | [`DocumentGoalsRequest`] → [`DocumentGoals`] |
@@ -209,6 +211,8 @@ pub enum JobKind {
     VerifySnapshot,
     /// `POST /snapshots/rebuild`, run rather than planned
     RebuildSnapshots,
+    /// `POST /snapshots/comparator`
+    Comparator,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1201,6 +1205,11 @@ pub struct AuditComparison {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<Replacement>,
 }
+
+/// A tar.gz archive, as `GET /snapshots/export` answers it.
+#[derive(ToSchema)]
+#[schema(value_type = String, format = Binary)]
+pub struct Tarball(pub Vec<u8>);
 
 /// `POST /snapshots/comparator`: judges a run with `lake comparator`,
 /// which shares no code with the audit, on the Lake project
