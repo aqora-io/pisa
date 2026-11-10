@@ -299,6 +299,32 @@ async fn a_worker_without_beam_takes_no_job_on_a_document() {
     assert_eq!(c.queue.give_up(job).await.unwrap(), Some(0));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_slot_closes_its_least_recently_used_document() {
+    let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
+        pisa_worker::WorkerConfig {
+            beam_documents: 2,
+            ..beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+        }
+    })
+    .await;
+    let ids: Vec<String> = (0..3).map(|_| new_id()).collect();
+    open(&c, &ids[0], CODE).await;
+    open(&c, &ids[1], CODE).await;
+    // The first is the least recently used once the second is asked about.
+    goals(&c, &ids[0], None, &[(4, None)]).await.unwrap();
+    goals(&c, &ids[1], None, &[(4, None)]).await.unwrap();
+    let workspace = c.dir.path().join("w0/slot-1/docs/PisaDocs");
+    let file = |id: &str| workspace.join(format!("D{id}.lean"));
+    open(&c, &ids[2], CODE).await;
+    assert!(!file(&ids[0]).exists(), "the least recently used is closed");
+    assert!(file(&ids[1]).exists() && file(&ids[2]).exists());
+    // It reopens when asked about, and closes the next least recently used.
+    let g = goals(&c, &ids[0], None, &[(4, None)]).await.unwrap();
+    assert_eq!(g.at[0].goals, ["⊢ sorry"]);
+    assert!(file(&ids[0]).exists() && !file(&ids[1]).exists());
+}
+
 async fn beam_cluster() -> Cluster {
     Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
         beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)

@@ -378,14 +378,6 @@ impl Documents {
     /// recently used idle one if it is full.
     async fn place(&self) -> usize {
         let mut counts = vec![0; self.slots.len()];
-        let in_slot = |slot: usize| -> Vec<String> {
-            let placed = self.placed.lock().unwrap();
-            placed
-                .iter()
-                .filter(|(_, s)| **s == slot)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
         for slot in self.placed.lock().unwrap().values() {
             counts[*slot] += 1;
         }
@@ -393,8 +385,12 @@ impl Documents {
         if counts[slot] < self.per_slot {
             return slot;
         }
+        let in_slot: Vec<String> = (self.placed.lock().unwrap().iter())
+            .filter(|(_, s)| **s == slot)
+            .map(|(id, _)| id.clone())
+            .collect();
         let mut oldest: Option<(Instant, String, OwnedMutexGuard<Option<Open>>)> = None;
-        for id in in_slot(slot) {
+        for id in in_slot {
             let Some(entry) = self.docs.lock().unwrap().get(&id).cloned() else {
                 continue;
             };
