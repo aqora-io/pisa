@@ -1313,7 +1313,33 @@ a module-system header. It describes each declaration: its axioms, and the
 canonical text of its type and, for a definition, of its value, which the
 worker hashes with SHA-256. The text is injective, so two declarations with
 the same hashes have the same statement. The kernel re-check describes
-declarations with the same library.
+declarations with the same library. The canonical form reads code as the
+kernel does, so that what doesn't change a statement doesn't change its text:
+- Binder names don't count, and binder kinds (`(n)`, `{n}`, `[inst]`) do.
+  A declaration's universe parameters count by position, so renaming one,
+  or the hygienic name Lean gives one it makes, doesn't change it.
+- A module's own private names read without the module, which differs
+  between a module and its replacement; another module's read whole, so one
+  `import all`-ed can't stand in for the module's own.
+- A `sorry` reads as one marker of its type, whatever Lean labels it with
+  (the module and position it was written at).
+- A proof reads as the proposition it proves, as the kernel takes any two
+  proofs of a proposition to be equal: an application of a theorem, or of a
+  constant whose type is a proposition (`rfl`, `Eq.refl`), and a `sorry` of a
+  proposition. So a field filled with `sorry`, Lean's `_proof_1` or a lemma
+  reads the same.
+- Lean's auxiliaries (internal names such as `f._unary` or `f._mutual`,
+  matchers such as `f.match_1`, `grind`'s) aren't declarations of their own:
+  what uses one reads its value in its place.
+
+What it doesn't see through is refused, as a changed statement would be:
+- an instance found by another path after new instances or imports;
+- a proof by a lemma stated in another but equal form, such as one of
+  `b ≥ a` where `a ≤ b` is wanted, which reads as a proof of `b ≥ a`;
+- a statement that uses an `import all`-ed private of a snapshot the code no
+  longer builds on;
+- a definition that uses `panic!`, whose message carries the module and the
+  line it is written on.
 
 This scan is a conservative pre-filter, not the last word: it over-approximates
 "the kernel checked every declaration with sound options" by forbidding
