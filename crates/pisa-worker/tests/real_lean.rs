@@ -307,6 +307,38 @@ fn what_lean_makes_on_demand_for_a_matcher_neednt_stay() {
     assert_eq!(changes(spec, proved), Vec::<String>::new());
 }
 
+/// Notation and syntax of every kind: Lean makes a parser for each, which is
+/// a definition by type alone (code may take its name), and macros.
+const NOTATION: &str = "local notation \"d\" => (2 : Nat)
+notation \"e\" => Nat.succ 1
+infixl:65 \" +!+ \" => Nat.add
+syntax \"zz\" : term
+macro_rules | `(zz) => `(3)
+macro \"mm\" : term => `(4)
+declare_syntax_cat foo
+theorem t : d + e = 4 := sorry
+theorem u : 1 +!+ zz = mm := sorry
+";
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn notation_reads_the_same_in_another_module() {
+    // A local notation's parser names its syntax kind by the module.
+    let moved = format!("-- another module\n{NOTATION}");
+    assert_eq!(changes(NOTATION, &moved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn notation_dropped_or_reworded_keeps_every_statement() {
+    let proved = "local notation \"two\" => (2 : Nat)
+infixl:65 \" ⊕⊕ \" => Nat.add
+theorem t : two + Nat.succ 1 = 4 := rfl
+theorem u : 1 ⊕⊕ 3 = 4 := rfl
+";
+    assert_eq!(changes(NOTATION, proved), Vec::<String>::new());
+}
+
 #[test]
 #[ignore = "needs elan Lean 4.36.0-rc2"]
 fn what_lean_makes_on_demand_in_module_system_code_neednt_stay() {

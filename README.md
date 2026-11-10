@@ -1337,8 +1337,14 @@ kernel does, so that what doesn't change a statement doesn't change its text:
   proposition. So a field filled with `sorry`, Lean's `_proof_1` or a lemma
   reads the same.
 - Lean's auxiliaries (internal names such as `f._unary` or `f._mutual`,
-  matchers such as `f.match_1`, `grind`'s) aren't declarations of their own:
-  what uses one reads its value in its place.
+  matchers such as `f.match_1`, `grind`'s) and the definitions it makes for
+  notation and syntax (the parser of `notation "d" => 2`) aren't declarations
+  of their own: what uses one reads its value in its place. So notation can
+  be added, dropped or reworded, as statements are compared after it is
+  expanded.
+- Equation lemmas Lean makes on demand are `generated`, including those it
+  names privately in module-system code (`_private.….f.eq_1`, for a `f` whose
+  body isn't exposed).
 
 What it doesn't see through is refused, as a changed statement would be:
 - an instance found by another path after new instances or imports;

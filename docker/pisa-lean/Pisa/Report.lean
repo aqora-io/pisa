@@ -65,12 +65,20 @@ def auxName (n : Name) : Bool :=
     | .str _ s => "grind_".isPrefixOf s && (s.drop 6).toString.isNat
     | _ => false
 
-/-- An auxiliary: a definition or theorem with an auxiliary's name. It isn't
-described; what uses one reads, in its place, its value, or for a theorem the
-proposition it proves (see `canon`). Others with such a name, such as
-`native_decide`'s axiom, are described. -/
+/-- Whether `type` is that of syntax Lean makes a definition for: the parser
+of a `notation`, `infix`, `syntax` or `macro` (`termD`, `«term_+_»`), or a
+syntax category. By type, as code may take such a definition's name. -/
+def syntaxType (type : Expr) : Bool :=
+  type.isConstOf ``Lean.ParserDescr || type.isConstOf ``Lean.TrailingParserDescr ||
+    type.isConstOf ``Lean.Parser.Category
+
+/-- An auxiliary: a definition or theorem with an auxiliary's name, or a
+definition of syntax. It isn't described; what uses one reads, in its place,
+its value, or for a theorem the proposition it proves (see `canon`). Others
+with such a name, such as `native_decide`'s axiom, are described. -/
 def auxiliary (n : Name) : Option ConstantInfo → Bool
-  | some (.defnInfo _) | some (.thmInfo _) => auxName n
+  | some (.defnInfo d) => auxName n || syntaxType d.type
+  | some (.thmInfo _) => auxName n
   | _ => false
 
 /-- The module that declared the private name `n`. -/
