@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod carry;
 pub mod corpus;
 pub mod dense;
 pub mod encode;

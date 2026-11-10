@@ -92,7 +92,7 @@ services:
       PISA_CORS_ORIGINS: ${PISA_CORS_ORIGINS:-}
       PISA_SEARCH_QDRANT: ${PISA_SEARCH_QDRANT:-}
       # The env_id of the loaded bundle: that of docker/lean-project.
-      PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.35.0-da683984}
+      PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.36.0-rc2-1e541805}
       PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
       # Set a describe model (e.g. claude-haiku-5-5, with ANTHROPIC_API_KEY)

@@ -637,7 +637,7 @@ impl Prompts {
     }
 
     fn system(&self, d: &Decl) -> &[String] {
-        if d.library == "Physlib" {
+        if matches!(d.library.as_str(), "Physlib" | "PhyslibAlpha") {
             &self.physlib
         } else {
             &self.mathlib

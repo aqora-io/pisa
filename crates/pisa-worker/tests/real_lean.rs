@@ -1,7 +1,7 @@
 //! The axiom report and the kernel verifier on real Lean: code is compiled to
 //! snapshot modules as a worker builds them, reported as the builder reports
 //! them, and re-checked by `docker/verifier/PisaVerify.lean`. Each test needs
-//! elan's Lean 4.35.0 on `PATH` and the `Pisa` library built, so they are
+//! elan's Lean 4.36.0-rc2 on `PATH` and the `Pisa` library built, so they are
 //! ignored by default:
 //!
 //! ```text
@@ -67,7 +67,7 @@ impl Snapshots {
             .current_dir(self.root.path())
             .env("LEAN_PATH", std::env::join_paths(path).unwrap())
             .output()
-            .expect("running lean (is elan's Lean 4.35.0 on PATH?)")
+            .expect("running lean (is elan's Lean 4.36.0-rc2 on PATH?)")
     }
 
     /// Compiles `code` to its snapshot module, then reports and re-checks it.
@@ -196,14 +196,14 @@ theorem u : g = 2 := sorry
 ";
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn the_same_text_in_another_module_keeps_every_statement() {
     let moved = format!("-- another module\n{SPEC}");
     assert_eq!(changes(SPEC, &moved), Vec::<String>::new());
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_changed_type_is_refused() {
     let retyped = SPEC.replace("f n = n + 1 :=", "f n = n + 2 :=");
     assert_eq!(
@@ -213,7 +213,7 @@ fn a_changed_type_is_refused() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn only_what_lean_makes_counts_as_generated() {
     let snapshots = Snapshots::new();
     // Lean lets code declare `bar.induct` for a definition that doesn't
@@ -235,7 +235,7 @@ fn only_what_lean_makes_counts_as_generated() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn names_that_read_alike_are_told_apart() {
     // `x.y` has two components, `«x.y»` one: different constants.
     let base = "def x.y : Nat := 1\ndef «x.y» : Nat := 1\n";
@@ -248,7 +248,7 @@ fn names_that_read_alike_are_told_apart() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_binder_made_implicit_is_refused() {
     let explicit = "theorem u (n : Nat) (h : 0 < n) : n ≠ 0 := sorry\n";
     let implicit = "theorem u {n : Nat} {h : 0 < n} : n ≠ 0 := sorry\n";
@@ -259,7 +259,7 @@ fn a_binder_made_implicit_is_refused() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn an_imported_private_cannot_stand_in_for_the_specs() {
     // With `import all`, `h` in the head's `t` is the other module's private
     // `h` (1), not the head's own (0), which it declares after `t`.
@@ -279,7 +279,7 @@ fn an_imported_private_cannot_stand_in_for_the_specs() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn an_untouched_stubbed_definition_keeps_its_value() {
     // Lean labels each `sorry` with where it was written.
     let spec = "def H : Nat := sorry\ntheorem t : H = H := sorry\n";
@@ -293,7 +293,7 @@ fn an_untouched_stubbed_definition_keeps_its_value() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn what_lean_makes_on_demand_for_a_matcher_neednt_stay() {
     // `simp [g]` has Lean make `g`'s and its matcher's equations.
     let spec = "private def g : Nat → Nat\n  | 0 => 0\n  | n + 1 => n\n\
@@ -304,7 +304,7 @@ fn what_lean_makes_on_demand_for_a_matcher_neednt_stay() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_helper_prepended_keeps_every_statement() {
     // The helper's matcher is cached and reused for `f`, which then names
     // `helper.match_1` where it named `f.match_1`.
@@ -314,7 +314,7 @@ fn a_helper_prepended_keeps_every_statement() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_proof_by_match_replaces_another_proof() {
     let by_match =
         "theorem t (a b : Prop) (h : a ∧ b) : b ∧ a :=\n  match h with\n  | ⟨x, y⟩ => ⟨y, x⟩\n";
@@ -332,7 +332,7 @@ fn a_proof_by_match_replaces_another_proof() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_private_well_founded_body_cannot_change() {
     // Mutually recursive, the bodies are in the private auxiliary
     // `ev._mutual`, which `ev` and `od` use.
@@ -364,7 +364,7 @@ fn a_private_well_founded_body_cannot_change() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn an_instance_field_proved_by_a_lemma_keeps_its_value() {
     let class = "class C (n : Nat) : Prop where h : n + 0 = n\n";
     let stub = format!("{class}instance : C 1 := ⟨sorry⟩\n");
@@ -373,7 +373,7 @@ fn an_instance_field_proved_by_a_lemma_keeps_its_value() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_field_with_a_parameter_proved_by_a_lemma_keeps_its_value() {
     let structure = "structure S (n : Nat) where\n  x : Nat\n  h : n + 0 = n\n";
     let stub = format!("{structure}def s (n : Nat) : S n := ⟨n, sorry⟩\n");
@@ -388,7 +388,7 @@ fn a_field_with_a_parameter_proved_by_a_lemma_keeps_its_value() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn an_enumeration_reads_the_same_in_another_module() {
     // `noConfusionType`'s universe is a hygienic name with the module in it.
     let spec =
@@ -398,7 +398,7 @@ fn an_enumeration_reads_the_same_in_another_module() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_private_structure_reads_the_same_in_another_module() {
     // Its projections are `fun self => self.1` on the private structure.
     let spec = "private structure P where\n  x : Nat\ntheorem t (p : P) : p.x = p.x := sorry\n";
@@ -407,7 +407,7 @@ fn a_private_structure_reads_the_same_in_another_module() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_renamed_universe_variable_keeps_the_statement() {
     let u =
         "universe u\ndef idf (α : Sort u) (a : α) : α := a\ntheorem t : idf Nat 1 = 1 := sorry\n";
@@ -416,7 +416,7 @@ fn a_renamed_universe_variable_keeps_the_statement() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_proof_refers_to_what_it_proves_not_to_the_lemma() {
     let snapshots = Snapshots::new();
     let lemmas = snapshots.build(
@@ -433,7 +433,7 @@ fn a_proof_refers_to_what_it_proves_not_to_the_lemma() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_universe_polymorphic_proof_in_a_definition_keeps_its_value() {
     let stub = "def c.{u} (α : Sort u) (x : α) : {y : α // y = x} := ⟨x, sorry⟩\n";
     let proved = "def c.{u} (α : Sort u) (x : α) : {y : α // y = x} := ⟨x, rfl⟩\n";
@@ -441,7 +441,7 @@ fn a_universe_polymorphic_proof_in_a_definition_keeps_its_value() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn what_code_declares_isnt_what_lean_makes_from_a_type() {
     let snapshots = Snapshots::new();
     // Named as Lean names what it makes, or shaped like a projection, but
@@ -465,7 +465,7 @@ fn what_code_declares_isnt_what_lean_makes_from_a_type() {
 }
 
 #[test]
-#[ignore = "needs elan Lean 4.35.0"]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_structure_with_another_field_is_one_change() {
     let one = "structure S where\n  x : Nat\ntheorem t (s : S) : s.x = s.x := rfl\n";
     let two = "structure S where\n  x : Nat\n  y : Nat\ntheorem t (s : S) : s.x = s.x := rfl\n";

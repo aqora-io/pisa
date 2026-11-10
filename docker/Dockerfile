@@ -36,11 +36,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 ENV ELAN_HOME=/opt/elan PATH=/opt/elan/bin:$PATH
-ARG LEAN_TOOLCHAIN=leanprover/lean4:v4.35.0
+ARG LEAN_TOOLCHAIN=leanprover/lean4:v4.36.0-rc2
 RUN curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
     | sh -s -- -y --no-modify-path --default-toolchain ${LEAN_TOOLCHAIN}
 # The REPL must be built with exactly the project's toolchain.
-ARG REPL_REV=v4.35.0
+ARG REPL_REV=v4.36.0-rc2
 RUN git clone --depth 1 --branch ${REPL_REV} https://github.com/leanprover-community/repl /opt/repl \
     && cd /opt/repl && lake build \
     && ln -s /opt/repl/.lake/build/bin/repl /usr/local/bin/repl
@@ -66,10 +66,11 @@ COPY --from=build /usr/local/bin/pisa-worker /usr/local/bin/
 ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl
 ENTRYPOINT ["pisa-worker"]
 
-# Exports every declaration of the project (about 40 minutes) and ingests it.
-# QuantumInfo can't be imported alongside Mathlib (both declare
-# `Commute.log_left`), so it comes from a second environment and its
-# declarations record the header that loads them.
+# Exports every declaration of the project (about 30 minutes) and ingests it.
+# QuantumInfo (which couldn't be imported alongside Mathlib up to Physlib
+# v4.35.0) and PhyslibAlpha come from environments of their own, and their
+# declarations record the header that loads them. A declaration keeps its
+# first export's copy, so PhyslibAlpha's goes last.
 FROM lean AS search-export
 COPY search/exporter /opt/exporter
 COPY --from=build-server /usr/local/bin/pisa-search /usr/local/bin/
@@ -77,10 +78,13 @@ RUN lake env lean --run /opt/exporter/PisaExport.lean --env mathlib-physlib Math
         > /tmp/decls.ndjson \
     && lake env lean --run /opt/exporter/PisaExport.lean --env physlib-quantuminfo Physlib QuantumInfo \
         > /tmp/quantuminfo.ndjson \
+    && lake env lean --run /opt/exporter/PisaExport.lean --env physlib-alpha PhyslibAlpha \
+        > /tmp/alpha.ndjson \
     && lake env lean --run /opt/exporter/ToAdditive.lean Mathlib Physlib > /tmp/additive.ndjson \
     && pisa-search ingest --export /tmp/decls.ndjson --export /tmp/quantuminfo.ndjson \
-        --export /tmp/additive.ndjson --project /opt/project --out /corpus \
-        --env-imports "physlib-quantuminfo=import Physlib; import QuantumInfo"
+        --export /tmp/alpha.ndjson --export /tmp/additive.ndjson --project /opt/project --out /corpus \
+        --env-imports "physlib-quantuminfo=import Physlib; import QuantumInfo" \
+        --env-imports "physlib-alpha=import PhyslibAlpha"
 
 FROM scratch AS corpus
 COPY --from=search-export /corpus /

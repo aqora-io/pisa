@@ -26,7 +26,8 @@ impl Versions {
 }
 
 /// `<toolchain tag>-<8 hex>`, e.g. `v4.35.0-1a2b3c4d`, hashing
-/// `lake-manifest.json` and `lakefile.toml` (or `lakefile.lean`).
+/// `lake-manifest.json`, `lakefile.toml` (or `lakefile.lean`) and the
+/// project's own `.lean` files, whose imports decide what gets built.
 pub fn project_version(project: &Path) -> std::io::Result<String> {
     let toolchain = std::fs::read_to_string(project.join("lean-toolchain"))?;
     let toolchain = toolchain.trim();
@@ -37,6 +38,15 @@ pub fn project_version(project: &Path) -> std::io::Result<String> {
             hasher.update(file.as_bytes());
             hasher.update(&bytes);
         }
+    }
+    let mut sources: Vec<String> = std::fs::read_dir(project)?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".lean") && n != "lakefile.lean")
+        .collect();
+    sources.sort();
+    for file in sources {
+        hasher.update(file.as_bytes());
+        hasher.update(std::fs::read(project.join(&file))?);
     }
     Ok(format!("{tag}-{}", hex::encode(&hasher.finalize()[..4])))
 }
@@ -55,7 +65,16 @@ mod tests {
         assert!(before.starts_with("v4.35.0-"), "{before}");
         assert_eq!(before.len(), "v4.35.0-".len() + 8);
         std::fs::write(dir.join("lakefile.toml"), "name = \"x\"").unwrap();
-        assert_ne!(project_version(&dir).unwrap(), before);
+        let with_lakefile = project_version(&dir).unwrap();
+        assert_ne!(with_lakefile, before);
+        std::fs::write(dir.join("X.lean"), "import Mathlib\n").unwrap();
+        let with_root = project_version(&dir).unwrap();
+        assert_ne!(
+            with_root, with_lakefile,
+            "a new import is a new environment"
+        );
+        std::fs::write(dir.join("notes.md"), "not Lean").unwrap();
+        assert_eq!(project_version(&dir).unwrap(), with_root);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

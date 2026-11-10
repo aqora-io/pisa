@@ -51,7 +51,7 @@ playground (see [Clients](#clients)).
 ## Running
 
 ```sh
-docker compose up --build              # Lean v4.35.0 + Mathlib + Physlib (first build compiles Physlib)
+docker compose up --build              # Lean v4.36.0-rc2 + Mathlib + Physlib (first build compiles Physlib)
 PROJECT=lean-core docker compose up --build   # no Mathlib, for quick checks
 python3 scripts/e2e.py [--mathlib] [--search]   # end-to-end checks against the running stack
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
@@ -1099,7 +1099,7 @@ directories, each with `NOTICE`:
 # Serve a published index (the repository is private, so gh must be logged in).
 # Swap bundle for store or corpus to fetch the others.
 gh release list -R aqora-io/pisa
-gh release download index-v4.35.0-da683984 -R aqora-io/pisa -p bundle.tar.zst -O - \
+gh release download index-v4.36.0-rc2-1e541805 -R aqora-io/pisa -p bundle.tar.zst -O - \
   | tar -I zstd -x -C search
 docker compose --profile search-load run --rm search-load   # into Qdrant, once
 PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
@@ -1135,13 +1135,18 @@ gh release upload index-$ENV_ID -R aqora-io/pisa --clobber search/release/*.tar.
 **Building an index:**
 
 ```sh
-# Export the pinned project's declarations (about 25 minutes).
+# After a version bump, keep the corpus the store's descriptions were made for.
+mv search/corpus search/work/corpus-previous
+# Export the pinned project's declarations (about 30 minutes).
 docker build -f docker/Dockerfile --target corpus --output search/corpus .
+# Keep descriptions of declarations unchanged but for docstring whitespace, which
+# Lean releases reformat (for v4.36.0-rc2 it kept 329k descriptions out of 423k).
+pisa-search carry --from search/work/corpus-previous --corpus search/corpus --informal search/store
 # Reuse LeanSearch v2's Mathlib descriptions (downloads 332 MB, verified by sha256).
 pisa-search import-lsv2 --corpus search/corpus --file search/lsv2.jsonl --informal search/store
 # Describe everything else with Claude (needs ANTHROPIC_API_KEY), and embed every
 # declaration as its description lands (needs SCW_SECRET_KEY). Try --sample 500 first.
-LIBS=Mathlib,Physlib,Batteries,Init,Std,QuantumInfo
+LIBS=Mathlib,Physlib,PhyslibAlpha,Batteries,Init,Std,QuantumInfo
 EMBEDDER="openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"
 pisa-search embed --corpus search/corpus --informal search/store --libraries $LIBS \
   --embedder "$EMBEDDER" --label qwen3-embedding-8b@scaleway --batch 32 --concurrency 32 \
@@ -1277,11 +1282,14 @@ hits[0]["module"], hits[0]["snapshot_ids"], hits[0]["status"]  # "PisaSnap.s1fâ€
   a full-run estimate, check pass rates and samples to review.
 
 **Imports.** Most of the index loads with `import Mathlib` and `import Physlib`.
-QuantumInfo (density matrices, entropies, channels) can't be imported
-alongside Mathlib, because both declare `Commute.log_left`; pisa reports that
-clash as a header error. Its declarations are exported from a second
+QuantumInfo (density matrices, entropies, channels) couldn't be imported
+alongside Mathlib up to Physlib v4.35.0, because both declared
+`Commute.log_left`. So its declarations are still exported from a second
 environment, and each hit carries the header that loads it in
 `flags.imports` (`import Physlib; import QuantumInfo`) and in its `text`.
+PhyslibAlpha (Physlib's lightly reviewed, often AI-written contributions) comes
+from a third, and its hits carry `import PhyslibAlpha`. It is searched by
+default; `libraries` narrows a search to the reviewed ones.
 
 ## Verification policy
 

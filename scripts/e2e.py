@@ -511,10 +511,12 @@ def snapshot_search():
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
     assert r["ok"], r
-    # Mathlib and QuantumInfo both declare Commute.log_left, so they can't be
-    # imported together; the error must say so rather than leave names unknown.
+    # Up to Physlib v4.35.0, Mathlib and QuantumInfo both declared
+    # Commute.log_left; now they import together.
     r = check("import Mathlib\nimport QuantumInfo\n#check MState")
-    assert not r["ok"] and "Commute.log_left" in r["messages"][0]["text"], r
+    assert r["ok"], r
+    r = check("import Mathlib\nimport PhyslibAlpha\n#check ClassicalFieldTheory.Local.Lagrangian")
+    assert r["ok"], r
     r = check("import Physlib\n\n#check SpaceTime")
     assert r["messages"][0]["pos"]["line"] == 3, r
     r = check("import Mathlib\n\n" + TACTIC_PROOF, detail=["tactics"])

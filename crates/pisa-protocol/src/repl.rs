@@ -1,4 +1,4 @@
-//! Types for the JSON protocol of the Lean REPL (leanprover-community/repl, v4.35.0).
+//! Types for the JSON protocol of the Lean REPL (leanprover-community/repl, v4.36.0-rc2).
 //!
 //! Commands are written as one JSON line followed by a blank line. Responses are
 //! pretty-printed JSON values terminated by a blank line. Fields are omitted when

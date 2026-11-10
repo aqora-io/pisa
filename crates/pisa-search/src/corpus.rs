@@ -4,6 +4,7 @@
 //! On disk a corpus is a directory with `manifest.json`, `decls.ndjson.zst`
 //! (sorted by name) and `modules.ndjson.zst` (module docstrings).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -261,30 +262,60 @@ pub fn is_syntax(d: &Decl) -> bool {
 }
 
 pub fn compute_hashes(decls: &mut [Decl]) {
-    for d in decls.iter_mut() {
-        d.statement_hash = hash(&[&d.name, &d.signature, d.docstring.as_deref().unwrap_or("")]);
+    fn as_is(doc: &str) -> Cow<'_, str> {
+        Cow::Borrowed(doc)
     }
-    let statements: HashMap<&str, &str> = decls
-        .iter()
-        .map(|d| (d.name.as_str(), d.statement_hash.as_str()))
-        .collect();
-    let content: Vec<String> = decls
+    let (statements, content) = hashes(decls, as_is);
+    for ((d, s), c) in decls.iter_mut().zip(statements).zip(content) {
+        d.statement_hash = s;
+        d.content_hash = c;
+    }
+}
+
+/// Content hashes as [`compute_hashes`] gives them, but with every docstring's
+/// whitespace collapsed. Lean releases reformat docstrings (v4.36 trims
+/// trailing whitespace), which changes content hashes without changing what a
+/// description says; see [`crate::carry`].
+pub fn hashes_ignoring_doc_whitespace(decls: &[Decl]) -> Vec<String> {
+    fn collapsed(doc: &str) -> Cow<'_, str> {
+        Cow::Owned(doc.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+    hashes(decls, collapsed).1
+}
+
+/// Statement and content hashes, with docstrings passed through `doc`.
+fn hashes(decls: &[Decl], doc: impl Fn(&str) -> Cow<'_, str>) -> (Vec<String>, Vec<String>) {
+    let statements: Vec<String> = decls
         .iter()
         .map(|d| {
+            hash(&[
+                &d.name,
+                &d.signature,
+                &doc(d.docstring.as_deref().unwrap_or("")),
+            ])
+        })
+        .collect();
+    let by_name: HashMap<&str, &str> = decls
+        .iter()
+        .zip(&statements)
+        .map(|(d, s)| (d.name.as_str(), s.as_str()))
+        .collect();
+    let content = decls
+        .iter()
+        .zip(&statements)
+        .map(|(d, s)| {
             let mut deps: Vec<&str> = d
                 .description_deps()
-                .filter_map(|n| statements.get(n.as_str()).copied())
+                .filter_map(|n| by_name.get(n.as_str()).copied())
                 .collect();
             deps.sort_unstable();
             deps.dedup();
-            let mut parts = vec![d.statement_hash.as_str()];
+            let mut parts = vec![s.as_str()];
             parts.extend(deps);
             hash(&parts)
         })
         .collect();
-    for (d, h) in decls.iter_mut().zip(content) {
-        d.content_hash = h;
-    }
+    (statements, content)
 }
 
 /// URL prefixes per library, from `lake-manifest.json`, e.g. `Mathlib` →
@@ -310,12 +341,16 @@ pub fn source_prefixes(lake_manifest: &str) -> anyhow::Result<BTreeMap<String, S
         if !base.starts_with("https://github.com/") {
             continue;
         }
-        let root = match p.name.as_str() {
-            "mathlib" => "Mathlib",
-            "batteries" => "Batteries",
-            other => other,
+        // A package's libraries; Physlib's repository holds three.
+        let roots = match p.name.as_str() {
+            "mathlib" => vec!["Mathlib"],
+            "batteries" => vec!["Batteries"],
+            "Physlib" => vec!["Physlib", "QuantumInfo", "PhyslibAlpha"],
+            other => vec![other],
         };
-        out.insert(root.to_string(), format!("{base}/blob/{rev}/"));
+        for root in roots {
+            out.insert(root.to_string(), format!("{base}/blob/{rev}/"));
+        }
     }
     Ok(out)
 }
@@ -466,6 +501,35 @@ pub mod tests {
     }
 
     #[test]
+    fn hashes_are_stable_because_the_store_is_keyed_by_them() {
+        let mut v = vec![
+            Decl {
+                docstring: Some("An A. ".into()),
+                ..decl("A", "def", "A : Type", &[])
+            },
+            decl("b", "theorem", "b : A", &["A"]),
+        ];
+        compute_hashes(&mut v);
+        let got: Vec<_> = v
+            .iter()
+            .map(|d| (d.statement_hash.as_str(), d.content_hash.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "19716f794bdd204196b1a1fc93af58ce",
+                    "0920c5feb6d5e5b3a9e25580e3c8ec25"
+                ),
+                (
+                    "254e9dbb8c5a6d9be7d811ff0dd8745c",
+                    "3da744ec981f6503fe7820eea6dd09b4"
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn ingest_reads_export_lines_and_writes_a_corpus() {
         let dir = tempfile::tempdir().unwrap();
         let export = dir.path().join("e.ndjson");
@@ -509,6 +573,10 @@ pub mod tests {
         assert_eq!(
             source_url(&corpus.manifest.sources, &corpus.decls[1]).unwrap(),
             "https://github.com/leanprover-community/physlib/blob/def/Physlib/M.lean#L3-L4"
+        );
+        assert_eq!(
+            corpus.manifest.sources["PhyslibAlpha"],
+            "https://github.com/leanprover-community/physlib/blob/def/"
         );
 
         let out = dir.path().join("corpus");

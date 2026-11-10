@@ -70,6 +70,18 @@ enum Command {
         #[arg(long)]
         informal: String,
     },
+    /// Carry stored descriptions over to a rebuilt corpus, for declarations
+    /// unchanged but for docstring whitespace (which Lean releases reformat).
+    Carry {
+        /// The corpus the stored descriptions were made for.
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Description and vector store (a directory or s3:// URL).
+        #[arg(long)]
+        informal: String,
+    },
     /// Embed document views through an embedding server, caching the vectors.
     Embed {
         #[arg(long)]
@@ -333,6 +345,24 @@ async fn main() -> anyhow::Result<()> {
             store
                 .write_batch(&format!("0000-{}", pisa_search::lsv2::SOURCE), &entries)
                 .await?;
+            println!("{report:#?}");
+        }
+        Command::Carry {
+            from,
+            corpus,
+            informal,
+        } => {
+            let old = Corpus::read(&from)?;
+            let c = Corpus::read(&corpus)?;
+            let store = Store::open(&informal)?;
+            let (entries, report) =
+                pisa_search::carry::carry(&old.decls, &c.decls, &store.load_all().await?);
+            if !entries.is_empty() {
+                // Timestamped like informalize's batches, so later runs win.
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+                let batch = format!("{}-carry-{}", now.as_millis(), c.manifest.env_id);
+                store.write_batch(&batch, &entries).await?;
+            }
             println!("{report:#?}");
         }
         Command::Embed {
