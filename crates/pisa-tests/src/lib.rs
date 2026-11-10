@@ -33,10 +33,15 @@ pub fn is_module(code: &str) -> bool {
 }
 
 /// The modules `code`'s import lines name, with or without `public`, `meta`
-/// and `all`.
+/// and `all`. As in Lean, a `/- … -/` comment before an import on its line
+/// doesn't hide it.
 pub fn imports(code: &str) -> Vec<&str> {
     code.lines()
         .filter_map(|l| {
+            let l = match (l.trim_start().strip_prefix("/-"), l.find("-/")) {
+                (Some(_), Some(end)) => &l[end + 2..],
+                _ => l,
+            };
             let words: Vec<&str> = l.split_whitespace().collect();
             let at = words.iter().position(|w| *w == "import")?;
             let modules: Vec<&str> = words[at + 1..]

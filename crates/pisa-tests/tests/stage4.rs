@@ -134,6 +134,24 @@ async fn snapshots_chain_and_merge() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_import_the_header_split_misses_is_refused() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let root = kept(&c, ROOT).await;
+    // Lean reads the import after the comment, and the worker has the module
+    // cached, so the code builds; the line-by-line split misses it, so the
+    // record wouldn't say what the module builds on.
+    let code = format!(
+        "import Foo\n/- c -/ import {}\n\ntheorem t : 2 = 2 := rfl\nneeds base",
+        module(&root)
+    );
+    let r = create(&c, &code).await;
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "bad_request", "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap();
+    assert!(message.contains("its own line"), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rejected_code_is_not_kept() {
     let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |mut w| {
         w.import_timeout_secs = 1;

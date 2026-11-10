@@ -355,6 +355,10 @@ POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double
 A create that keeps nothing has no `snapshot`, and its `check` says why. That
 includes `verify: true` on code that is already kept but fails the re-check:
 `check.error` has the reason, as new code that fails the re-check isn't kept.
+It also includes a header whose imports Lean reads differently from its lines,
+such as an import after a block comment on the same line: the record would
+miss what the module builds on, so it is a `bad_request` that asks for each
+import on its own line.
 
 `GET /snapshots/{id}` adds the module's `code`, its `check`, and its
 `exports`: the declarations that code importing it sees, each `{name, kind,

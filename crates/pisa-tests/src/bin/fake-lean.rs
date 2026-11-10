@@ -9,6 +9,9 @@
 //! marker (standing in for the kernel catching a forged declaration). A
 //! `SLOW_KERNEL <ms>` marker in the code makes it take that long.
 //!
+//! `lean --deps <file>` prints the `.olean` path of each module the file
+//! imports.
+//!
 //! `lean -R <root> -o <olean> --json <file>` compiles a module: the "olean" is
 //! a copy of the code, and module-system code also gets the `.olean.server`,
 //! `.olean.private`, `.ir` and `.ir.sig` files Lean writes for it. It reports
@@ -19,7 +22,7 @@
 
 use std::io::Read;
 
-use pisa_tests::{declarations, declares, find_module, imported_code, is_module, needs};
+use pisa_tests::{declarations, declares, find_module, imported_code, imports, is_module, needs};
 use serde_json::json;
 
 fn main() {
@@ -27,10 +30,33 @@ fn main() {
     if args.first().map(String::as_str) == Some("--run") {
         // `lean --run <verifier> <module>`: re-verify a snapshot module.
         verify(args.last().unwrap());
+    } else if args.first().map(String::as_str) == Some("--deps") {
+        deps(args.last().unwrap());
     } else if let Some(i) = args.iter().position(|a| a == "-o") {
         compile(&args[i + 1], args.last().unwrap());
     } else {
         diagnose();
+    }
+}
+
+/// `lean --deps <file>`: the `.olean` path of each module the file imports,
+/// as Lean's header parser reads them (see `pisa_tests::imports`). A snapshot
+/// module is found on LEAN_PATH, or placed under its first root with a
+/// `PisaSnap` directory; other modules get a made-up path.
+fn deps(file: &str) {
+    let code = std::fs::read_to_string(file).unwrap();
+    for module in imports(&code) {
+        let path = find_module(module).unwrap_or_else(|| {
+            let lean_path = std::env::var_os("LEAN_PATH").unwrap_or_default();
+            let root = std::env::split_paths(&lean_path)
+                .find(|r| r.join("PisaSnap").is_dir())
+                .unwrap_or_else(|| "/fake".into());
+            module
+                .split('.')
+                .fold(root, |p, part| p.join(part))
+                .with_extension("olean")
+        });
+        println!("{}", path.display());
     }
 }
 

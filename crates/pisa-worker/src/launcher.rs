@@ -237,6 +237,44 @@ impl Launcher {
         })
     }
 
+    /// The `.olean` files of the modules `file` imports, as Lean's own header
+    /// parser reads them (`lean --deps`), set up like
+    /// [`compile`](Self::compile). The error is Lean's, or why it didn't run.
+    pub async fn deps(
+        &self,
+        slot: usize,
+        file: &Path,
+        timeout: Duration,
+    ) -> Result<Vec<PathBuf>, String> {
+        let file = file.to_string_lossy().into_owned();
+        let args = ["--deps", file.as_str()];
+        let run = async {
+            let mut cmd = self.command(slot, &self.lean, &args)?;
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            cmd.spawn()?.wait_with_output().await
+        };
+        let output = match tokio::time::timeout(timeout, run).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(format!("running Lean failed: {e}")),
+            Err(_) => return Err("Lean took too long to read the imports".into()),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("{} {}", stdout.trim(), stderr.trim())
+                .trim()
+                .to_string());
+        }
+        Ok(stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(PathBuf::from)
+            .collect())
+    }
+
     /// Re-verifies snapshot `module` through the kernel with `lean --run`, in
     /// the slot's sandbox and cgroup. A timeout or a missing `PISA_VERIFY`
     /// line is reported as `ok: false`.

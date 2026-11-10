@@ -486,6 +486,33 @@ fn outputs(dir: &Path, id: &str) -> std::io::Result<Vec<(String, PathBuf)>> {
     Ok(files)
 }
 
+/// The snapshots among the `.olean` files `lean --deps` printed, by id.
+fn snapshot_imports(paths: &[PathBuf]) -> Result<BTreeSet<String>, Error> {
+    let mut ids = BTreeSet::new();
+    for path in paths {
+        let parent = path.parent().and_then(Path::file_name);
+        if parent != Some(std::ffi::OsStr::new(snapshot::ROOT)) {
+            continue;
+        }
+        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+        match snapshot::parse_module(&format!("{}.{stem}", snapshot::ROOT)) {
+            Ok(Some(id)) => {
+                ids.insert(id);
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::BadRequest,
+                    format!(
+                        "Lean reads an import that isn't a snapshot: {}",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(ids)
+}
+
 /// Removes every file of module `s<id>` from `dir`.
 fn remove_module(dir: &Path, id: &str) {
     let prefix = format!("s{id}.");
@@ -1378,6 +1405,26 @@ impl Snapshots {
                 .judge(outcome.response.as_ref().unwrap(), None);
             outcome.verification = Some(judged);
             return Err(Box::new(outcome));
+        }
+        // What the module imports is what Lean's own header parser read,
+        // which can differ from the line-by-line split the record holds.
+        let read = match slot.deps(&file, limit).await {
+            Ok(paths) => snapshot_imports(&paths),
+            Err(e) => Err(internal(format!("reading the imports failed: {e}"))),
+        };
+        let listed = snapshot::imports(&split.header).unwrap_or_default();
+        if let Err(e) = read.and_then(|read| {
+            let listed: BTreeSet<String> = listed.into_iter().collect();
+            (read == listed).then_some(()).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::BadRequest,
+                    "Lean reads other snapshot imports than the header's lines say: \
+                     put each import on its own line",
+                )
+            })
+        }) {
+            remove_module(&dir, id);
+            return fail(outcome, e);
         }
 
         // Judge it in the slot that will serve code on top of it.
