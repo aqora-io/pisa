@@ -60,6 +60,6 @@ unsafe def main (args : List String) : IO UInt32 := do
     return 0
   let env := Environment.ofKernelEnv kenv
   let ctx : Core.Context := { fileName := "", fileMap := default, maxHeartbeats := 0 }
-  let (decls, _) ← (CoreM.toIO · ctx { env }) (Pisa.describeAll data.constNames)
+  let (decls, _) ← (CoreM.toIO · ctx { env }) (Pisa.describeAll target data.constNames)
   emit (Json.mkObj [("ok", true), ("declarations", Json.arr decls)])
   return 0

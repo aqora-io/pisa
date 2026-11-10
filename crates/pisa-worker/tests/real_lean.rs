@@ -39,10 +39,11 @@ struct Snapshots {
     root: tempfile::TempDir,
 }
 
-/// A built module: its id, and its declarations as the builder's report and
-/// the verifier give them.
+/// A built module: its id, whether it is module-system code, and its
+/// declarations as the builder's report and the verifier give them.
 struct Built {
     id: String,
+    module_system: bool,
     reported: Vec<Declaration>,
     verified: Vec<Declaration>,
 }
@@ -88,6 +89,7 @@ impl Snapshots {
             String::from_utf8_lossy(&out.stderr)
         );
         Built {
+            module_system: split_header(code).header.lines().next() == Some("module"),
             reported: self.report(code, &id),
             verified: self.verify(&id),
             id,
@@ -153,23 +155,22 @@ impl Snapshots {
 }
 
 impl Built {
-    /// Asserts that the report and the verifier agree, apart from what only
-    /// the report can tell (`generated`), and returns the declarations.
+    /// The declarations the worker records: the verifier's for module-system
+    /// code, which the builder sees only as importers do (it is always
+    /// re-checked), and otherwise the report's, which must agree with the
+    /// verifier's.
     fn agreed(&self) -> &[Declaration] {
-        let plain = |decls: &[Declaration]| -> Vec<Declaration> {
-            let mut decls: Vec<Declaration> = decls
-                .iter()
-                .map(|d| Declaration {
-                    generated: false,
-                    ..d.clone()
-                })
-                .collect();
+        if self.module_system {
+            return &self.verified;
+        }
+        let sorted = |decls: &[Declaration]| -> Vec<Declaration> {
+            let mut decls = decls.to_vec();
             decls.sort_by(|a, b| a.name.cmp(&b.name));
             decls
         };
         assert_eq!(
-            plain(&self.reported),
-            plain(&self.verified),
+            sorted(&self.reported),
+            sorted(&self.verified),
             "the report and the verifier disagree on s{}",
             self.id
         );
@@ -244,4 +245,35 @@ fn names_that_read_alike_are_told_apart() {
         changes(&spec, &swapped),
         ["statement: t has a different type"]
     );
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_binder_made_implicit_is_refused() {
+    let explicit = "theorem u (n : Nat) (h : 0 < n) : n ≠ 0 := sorry\n";
+    let implicit = "theorem u {n : Nat} {h : 0 < n} : n ≠ 0 := sorry\n";
+    assert_eq!(
+        changes(explicit, implicit),
+        ["statement: u has a different type"]
+    );
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn an_imported_private_cannot_stand_in_for_the_specs() {
+    // With `import all`, `h` in the head's `t` is the other module's private
+    // `h` (1), not the head's own (0), which it declares after `t`.
+    let snapshots = Snapshots::new();
+    let other = snapshots.build("module\nprivate def h : Nat := 1\n");
+    let spec = snapshots.build("module\nprivate def h : Nat := 0\ntheorem t : h = 1 := sorry\n");
+    let head = snapshots.build(&format!(
+        "module\nimport all {}\ntheorem t : h = 1 := rfl\nprivate def h : Nat := 0\n",
+        snapshot::module(&other.id)
+    ));
+    let changes: Vec<String> = statement_changes(spec.agreed(), head.agreed())
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let t = format!("_private.{}.0.t", snapshot::module(&spec.id));
+    assert_eq!(changes, [format!("statement: {t} has a different type")]);
 }
