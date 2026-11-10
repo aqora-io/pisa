@@ -1475,7 +1475,7 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 | Endpoint | Request → response |
 | --- | --- |
 | `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, libraries?, kinds?, limit?, include_sorried?, snapshots?}], version?}` → `{version, results: [{hits, warnings?, dense_pending?}]}`, at most 64 queries |
-| `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, suggestions}]}` |
+| `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}` |
 | `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 
 Each hit carries:

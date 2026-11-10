@@ -650,8 +650,6 @@ impl Prompts {
 /// them as often as not.
 const PHYSICS: &[&str] = &["Physlib", "PhyslibAlpha", "QuantumInfo", "PisaSnap"];
 
-impl Prompts {}
-
 /// Sends each `(i, declaration, prompt)` to the model, at most
 /// `cfg.concurrency` at once and at most as many as `limit` lets through,
 /// and yields `i` with the answer as each lands.
@@ -1143,6 +1141,9 @@ pub fn report(input: &ReportInput, outcomes: &[Outcome], corpus: &Corpus) -> Str
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::corpus::tests::decl;
+
     #[test]
     fn physics_libraries_and_snapshots_get_the_physics_glossary() {
         let prompts = Prompts::new().unwrap();
@@ -1167,9 +1168,6 @@ mod tests {
         }
         assert!(!glossary("Mathlib").contains("`MState d`"));
     }
-
-    use super::*;
-    use crate::corpus::tests::decl;
 
     #[test]
     fn levels_put_dependencies_first() {
