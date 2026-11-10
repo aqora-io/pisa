@@ -574,8 +574,17 @@ async fn with_replacers_must_be_a_boolean() {
             "{query}: {r}"
         );
         let message = r["error"]["message"].as_str().unwrap();
-        assert!(message.contains("true or false"), "{query}: {message}");
+        assert!(message.contains("with_replacers"), "{query}: {message}");
+        assert!(message.contains("`true` or `false`"), "{query}: {message}");
     }
+    // A repeated parameter is refused, not read as its last value.
+    let query = "?with_replacers=true&with_replacers=false";
+    let (status, r) = delete(&c, id(&s0), query).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{query}: {r}"
+    );
     // Nothing was deleted.
     let (status, _) = get(&c, &format!("/snapshots/{}", id(&s0))).await;
     assert_eq!(status, 200);

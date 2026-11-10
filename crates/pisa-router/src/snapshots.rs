@@ -23,10 +23,12 @@ use pisa_protocol::wire::{
     Job, JobResult, SnapshotAuditJob, SnapshotCreateJob, SnapshotDeleteJob, SnapshotDependentsJob,
     SnapshotJob, SnapshotLabelsJob, SnapshotListJob, SnapshotRebuildJob,
 };
+use serde::Deserialize;
+use utoipa::IntoParams;
 
 use crate::dispatch::{DispatchError, Prepared, Priority, Route};
 use crate::http::{ApiError, App, Body};
-use crate::jobs::{Prefer, accepted, respond};
+use crate::jobs::{Params, Prefer, accepted, respond};
 use crate::rebuild;
 use crate::sessions::unexpected;
 
@@ -463,23 +465,18 @@ pub async fn update(
         nothing: a whole branch of a run goes, and what the snapshot replaced is a head \
         again if nothing else replaces it. `deleted` lists the snapshots that went, the \
         asked one first.",
-    params(
-        ("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"),
-        ("with_replacers" = Option<bool>, Query, description = "`true` to delete the snapshots that replace it too, directly or through others; `false` by default"),
-    ),
+    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), DeleteParams),
     responses((status = 200, description = "What went", body = DeleteSnapshotResponse), ApiErrors),
 )]
-/// `DELETE /snapshots/{id}`. The query is parsed here so that a bad
-/// `with_replacers` is an [`ApiError`], not the extractor's plain-text
-/// rejection.
+/// `DELETE /snapshots/{id}`. The query is taken as a `Result` so that the id
+/// is checked first.
 pub async fn delete(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    RawQuery(query): RawQuery,
+    q: Result<Params<DeleteParams>, ApiError>,
 ) -> Result<Json<DeleteSnapshotResponse>, ApiError> {
     let version = parse_id(&id)?.version;
-    let with_replacers = delete_query(query.as_deref().unwrap_or_default())
-        .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    let Params(DeleteParams { with_replacers }) = q?;
     let job = Job::SnapshotDelete(SnapshotDeleteJob {
         entry: id,
         with_replacers,
@@ -490,20 +487,13 @@ pub async fn delete(
     }
 }
 
-/// Whether the query of `DELETE /snapshots/{id}` sets `with_replacers`.
-/// Other parameters are ignored.
-fn delete_query(query: &str) -> Result<bool, String> {
-    let mut with_replacers = false;
-    for (name, value) in form_urlencoded::parse(query.as_bytes()) {
-        if name == "with_replacers" {
-            with_replacers = match &*value {
-                "true" => true,
-                "false" => false,
-                _ => return Err(format!("with_replacers {value:?} must be true or false")),
-            };
-        }
-    }
-    Ok(with_replacers)
+/// `DELETE /snapshots/{id}`'s query. Other parameters are ignored.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct DeleteParams {
+    /// `true` to delete the snapshots that replace it too, directly or through others; `false` by default
+    #[serde(default)]
+    with_replacers: bool,
 }
 
 #[utoipa::path(
