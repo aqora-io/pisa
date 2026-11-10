@@ -58,6 +58,10 @@ pub struct NewJob {
     /// The proof state the job continues, by version and hash. The worker
     /// that stored it is preferred.
     pub state: Option<(String, String)>,
+    /// The open document it works on, by id within `version`. Only workers
+    /// with Beam slots claim it, and the worker holding the document open is
+    /// preferred.
+    pub document: Option<String>,
     pub job: Value,
     /// How long it may wait for a worker, from now or from a lapsed claim.
     pub max_wait: Duration,
@@ -106,9 +110,12 @@ pub struct Candidate {
     pub id: i64,
     pub priority: i16,
     pub header_key: Option<String>,
-    /// The worker that stored the proof state the job continues.
+    /// The worker that stored the proof state the job continues, or that
+    /// holds open the document it works on.
     pub affinity: Option<String>,
     pub enqueued_micros: i64,
+    /// The open document it works on.
+    pub document: Option<String>,
 }
 
 /// A live worker, as another picks jobs around it.
@@ -116,10 +123,12 @@ pub struct Candidate {
 pub struct Peer {
     pub name: String,
     pub slots: u32,
-    /// Jobs it holds live claims on.
+    /// Jobs on its REPL slots it holds live claims on.
     pub busy: u32,
     pub warm: Vec<String>,
     pub draining: bool,
+    /// The Lean Beam processes it runs for documents.
+    pub beam_slots: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -214,22 +223,48 @@ impl Queue {
         dispatch!(&self.db, sweep_jobs(&self.name, now))
     }
 
-    /// Adds or resets `worker`'s row, and lets its claims from before, of a
-    /// process under the same name, lapse at once. Returns when, which
-    /// [`Queue::heartbeat`] takes.
-    pub async fn register(&self, worker: &str, version: &str, slots: u32) -> Result<i64, DbError> {
-        dispatch!(&self.db, register(&self.name, worker, version, slots))
+    /// Adds or resets `worker`'s row, with its REPL slots and Beam slots, and
+    /// lets its claims from before, of a process under the same name, lapse at
+    /// once. Returns when, which [`Queue::heartbeat`] takes.
+    pub async fn register(
+        &self,
+        worker: &str,
+        version: &str,
+        slots: u32,
+        beam_slots: u32,
+    ) -> Result<i64, DbError> {
+        dispatch!(
+            &self.db,
+            register(&self.name, worker, version, slots, beam_slots)
+        )
     }
 
-    /// Up to `limit` jobs that a worker of `version` could claim, the
-    /// interactive ones first, then oldest first.
+    /// Up to `limit` jobs that a worker of `version` could claim for its REPL
+    /// slots, the interactive ones first, then oldest first. Jobs on
+    /// documents are left out: see [`Queue::document_candidates`].
     pub async fn candidates(&self, version: &str, limit: usize) -> Result<Vec<Candidate>, DbError> {
-        dispatch!(&self.db, candidates(&self.name, version, limit))
+        dispatch!(&self.db, candidates(&self.name, version, limit, false))
+    }
+
+    /// As [`Queue::candidates`], for the jobs on documents, which only
+    /// workers with Beam slots claim.
+    pub async fn document_candidates(
+        &self,
+        version: &str,
+        limit: usize,
+    ) -> Result<Vec<Candidate>, DbError> {
+        dispatch!(&self.db, candidates(&self.name, version, limit, true))
     }
 
     /// The workers of `version` seen within `stale`.
     pub async fn registry(&self, version: &str, stale: Duration) -> Result<Vec<Peer>, DbError> {
         dispatch!(&self.db, registry(&self.name, version, stale))
+    }
+
+    /// How many workers of `version` seen within `stale` serve documents:
+    /// those with Beam slots that aren't draining.
+    pub async fn serving_documents(&self, version: &str, stale: Duration) -> Result<u64, DbError> {
+        dispatch!(&self.db, serving_documents(&self.name, version, stale))
     }
 
     /// Claims those of `ids` still claimable for `worker`, for `lease`;
@@ -308,6 +343,7 @@ mod tests {
             header_key: Some("k".into()),
             header: Some("import Mathlib".into()),
             state: None,
+            document: None,
             job: json!({"kind": "check"}),
             max_wait: Duration::from_secs(60),
             max_attempts: 3,
@@ -581,15 +617,79 @@ mod tests {
         }
     }
 
+    fn document_job(id: &str) -> NewJob {
+        NewJob {
+            document: Some(id.into()),
+            ..job(Some("v"), 0)
+        }
+    }
+
+    #[tokio::test]
+    async fn jobs_on_documents_are_candidates_apart() {
+        for q in queues().await {
+            let repl = q.enqueue(&job(Some("v"), 1)).await.unwrap();
+            let on_doc = q.enqueue(&document_job("d")).await.unwrap();
+            assert_eq!(ids(&q, "v").await, [repl]);
+            let found = q.document_candidates("v", 10).await.unwrap();
+            assert_eq!(
+                found
+                    .iter()
+                    .map(|c| (c.id, c.document.as_deref()))
+                    .collect::<Vec<_>>(),
+                [(on_doc, Some("d"))]
+            );
+            assert!(q.document_candidates("w", 10).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn the_worker_holding_a_document_is_its_jobs_affinity() {
+        for q in queues().await {
+            let records = Records::new(q.db().clone(), "v".into());
+            let id = uuid::Uuid::new_v4().simple().to_string();
+            records
+                .put_document(&id, "theorem t : True := trivial", "w1", 0)
+                .await
+                .unwrap();
+            q.enqueue(&document_job(&id)).await.unwrap();
+            q.enqueue(&document_job("nope")).await.unwrap();
+            let affinity: Vec<_> = q
+                .document_candidates("v", 10)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.affinity)
+                .collect();
+            assert_eq!(affinity, [Some("w1".to_string()), None]);
+            records.delete_document(&id).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn only_live_workers_with_beam_slots_serve_documents() {
+        for q in queues().await {
+            assert_eq!(q.serving_documents("v", LEASE).await.unwrap(), 0);
+            q.register("repl", "v", 2, 0).await.unwrap();
+            q.register("beam", "v", 2, 1).await.unwrap();
+            q.register("leaving", "v", 2, 1).await.unwrap();
+            q.register("other", "w", 2, 1).await.unwrap();
+            q.set_draining("leaving").await.unwrap();
+            assert_eq!(q.serving_documents("v", LEASE).await.unwrap(), 1);
+            assert_eq!(q.serving_documents("v", Duration::ZERO).await.unwrap(), 0);
+        }
+    }
+
     #[tokio::test]
     async fn the_registry_has_live_workers_and_their_claims() {
         for q in queues().await {
-            q.register("w1", "v", 2).await.unwrap();
-            q.register("w2", "v", 1).await.unwrap();
-            q.register("x", "other", 4).await.unwrap();
+            q.register("w1", "v", 2, 1).await.unwrap();
+            q.register("w2", "v", 1, 0).await.unwrap();
+            q.register("x", "other", 4, 0).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 0)).await.unwrap();
             q.enqueue(&job(Some("v"), 1)).await.unwrap();
-            q.claim("w1", &[id], LEASE).await.unwrap();
+            // A job on a document takes none of its REPL slots.
+            let on_doc = q.enqueue(&document_job("d")).await.unwrap();
+            q.claim("w1", &[id, on_doc], LEASE).await.unwrap();
             q.set_warm("w2", &["k".into()]).await.unwrap();
             q.set_draining("w2").await.unwrap();
             let mut peers = q.registry("v", LEASE).await.unwrap();
@@ -602,14 +702,16 @@ mod tests {
                         slots: 2,
                         busy: 1,
                         warm: Vec::new(),
-                        draining: false
+                        draining: false,
+                        beam_slots: 1,
                     },
                     Peer {
                         name: "w2".into(),
                         slots: 1,
                         busy: 0,
                         warm: vec!["k".into()],
-                        draining: true
+                        draining: true,
+                        beam_slots: 0,
                     },
                 ]
             );
@@ -617,7 +719,7 @@ mod tests {
                 q.counts(LEASE).await.unwrap(),
                 Counts {
                     queued: [0, 1],
-                    running: 1,
+                    running: 2,
                     workers: 3,
                     slots: 7
                 }
@@ -631,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeats_renew_only_this_registrations_claims() {
         for q in queues().await {
-            let since = q.register("w", "v", 1).await.unwrap();
+            let since = q.register("w", "v", 1, 0).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             q.claim("w", &[id], Duration::from_millis(1)).await.unwrap();
             q.heartbeat("w", since, LEASE).await.unwrap();
@@ -640,7 +742,7 @@ mod tests {
 
             // A new process under the same name doesn't run the old one's
             // jobs: they lapse, and its heartbeats don't renew them.
-            let since = q.register("w", "v", 1).await.unwrap();
+            let since = q.register("w", "v", 1, 0).await.unwrap();
             q.heartbeat("w", since, LEASE).await.unwrap();
             assert_eq!(ids(&q, "v").await, [id]);
         }

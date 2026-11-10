@@ -81,6 +81,17 @@ diesel::table! {
 }
 
 diesel::table! {
+    documents (version, id) {
+        version -> Text,
+        id -> Text,
+        code -> Text,
+        revision -> BigInt,
+        holder -> Nullable<Text>,
+        updated -> BigInt,
+    }
+}
+
+diesel::table! {
     jobs (id) {
         id -> BigInt,
         queue -> Text,
@@ -101,6 +112,7 @@ diesel::table! {
         done_micros -> Nullable<BigInt>,
         token -> Nullable<Text>,
         kind -> Nullable<Text>,
+        document -> Nullable<Text>,
     }
 }
 
@@ -113,5 +125,6 @@ diesel::table! {
         warm -> Jsonb,
         draining -> Bool,
         seen_micros -> BigInt,
+        beam_slots -> Integer,
     }
 }

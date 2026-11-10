@@ -17,7 +17,7 @@ use crate::queue::{
     ASYNC_RETENTION, Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION,
     STALE_RETENTION, Stage, Status,
 };
-use crate::schema::{jobs, states, workers};
+use crate::schema::{documents, jobs, states, workers};
 
 /// How long a server's own giving up gets before a sweep deletes a job
 /// nobody can claim any more.
@@ -92,15 +92,22 @@ async fn insert(
 ) -> Result<(i64, Option<String>), DbError> {
     retry(|| async {
         let mut c = conn(db).await?;
-        let affinity = match &job.state {
-            Some((v, hash)) => states::table
+        let affinity = match (&job.state, &job.version, &job.document) {
+            (Some((v, hash)), _, _) => states::table
                 .find((v, hash))
                 .select(states::holder)
                 .first::<Option<String>>(&mut *c)
                 .await
                 .optional()?
                 .flatten(),
-            None => None,
+            (None, Some(v), Some(id)) => documents::table
+                .find((v, id))
+                .select(documents::holder)
+                .first::<Option<String>>(&mut *c)
+                .await
+                .optional()?
+                .flatten(),
+            _ => None,
         };
         let token = kind.map(|_| uuid::Uuid::new_v4().simple().to_string());
         let id = diesel::insert_into(jobs::table)
@@ -113,6 +120,7 @@ async fn insert(
                 jobs::header_key.eq(&job.header_key),
                 jobs::header.eq(&job.header),
                 jobs::affinity.eq(&affinity),
+                jobs::document.eq(&job.document),
                 jobs::job.eq(&job.job),
                 jobs::enqueued_micros.eq(now()),
                 jobs::max_wait_micros.eq(micros(job.max_wait)),
@@ -422,6 +430,7 @@ pub(crate) async fn register(
     worker: &str,
     version: &str,
     slots: u32,
+    beam_slots: u32,
 ) -> Result<i64, DbError> {
     let now = now();
     retry(|| async {
@@ -430,6 +439,7 @@ pub(crate) async fn register(
             (
                 workers::version.eq(version),
                 workers::slots.eq(slots as i32),
+                workers::beam_slots.eq(beam_slots as i32),
                 workers::warm.eq(Value::Array(Vec::new())),
                 workers::draining.eq(false),
                 workers::seen_micros.eq(now),
@@ -461,12 +471,14 @@ pub(crate) async fn candidates(
     q: &str,
     version: &str,
     limit: usize,
+    documents: bool,
 ) -> Result<Vec<Candidate>, DbError> {
     let now = now();
     let rows = jobs::table
         .filter(jobs::queue.eq(q))
         .filter(jobs::result.is_null())
         .filter(jobs::version.eq(version).or(jobs::version.is_null()))
+        .filter(jobs::document.is_not_null().eq(documents))
         .filter(claimable!(now))
         .order((jobs::priority, jobs::id))
         .limit(limit as i64)
@@ -476,18 +488,22 @@ pub(crate) async fn candidates(
             jobs::header_key,
             jobs::affinity,
             jobs::enqueued_micros,
+            jobs::document,
         ))
-        .load::<(i64, i16, Option<String>, Option<String>, i64)>(&mut *conn(db).await?)
+        .load::<(i64, i16, Option<String>, Option<String>, i64, Option<String>)>(
+            &mut *conn(db).await?,
+        )
         .await?;
     Ok(rows
         .into_iter()
         .map(
-            |(id, priority, header_key, affinity, enqueued_micros)| Candidate {
+            |(id, priority, header_key, affinity, enqueued_micros, document)| Candidate {
                 id,
                 priority,
                 header_key,
                 affinity,
                 enqueued_micros,
+                document,
             },
         )
         .collect())
@@ -504,6 +520,7 @@ pub(crate) async fn registry(
     let busy: HashMap<String, i64> = jobs::table
         .filter(jobs::queue.eq(q))
         .filter(jobs::result.is_null())
+        .filter(jobs::document.is_null())
         .filter(jobs::lease_micros.ge(now))
         .group_by(jobs::worker)
         .select((jobs::worker, diesel::dsl::count_star()))
@@ -521,19 +538,39 @@ pub(crate) async fn registry(
             workers::slots,
             workers::warm,
             workers::draining,
+            workers::beam_slots,
         ))
-        .load::<(String, i32, Value, bool)>(&mut *c)
+        .load::<(String, i32, Value, bool, i32)>(&mut *c)
         .await?;
     Ok(rows
         .into_iter()
-        .map(|(name, slots, warm, draining)| Peer {
+        .map(|(name, slots, warm, draining, beam_slots)| Peer {
             busy: busy.get(&name).copied().unwrap_or(0) as u32,
             name,
             slots: slots as u32,
             warm: serde_json::from_value(warm).unwrap_or_default(),
             draining,
+            beam_slots: beam_slots as u32,
         })
         .collect())
+}
+
+pub(crate) async fn serving_documents(
+    db: &Handle,
+    q: &str,
+    version: &str,
+    stale: Duration,
+) -> Result<u64, DbError> {
+    let now = now();
+    Ok(workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::version.eq(version))
+        .filter(workers::beam_slots.gt(0))
+        .filter(workers::draining.eq(false))
+        .filter(workers::seen_micros.ge(now - micros(stale)))
+        .count()
+        .get_result::<i64>(&mut *conn(db).await?)
+        .await? as u64)
 }
 
 pub(crate) async fn claim(

@@ -226,7 +226,7 @@ impl Shared {
         let since = loop {
             match self
                 .queue
-                .register(&self.me, &self.version, slots as u32)
+                .register(&self.me, &self.version, slots as u32, 0)
                 .await
             {
                 Ok(since) => break since,
@@ -390,6 +390,7 @@ mod tests {
             header_key: Some(key.into()),
             affinity: affinity.map(String::from),
             enqueued_micros: NOW - age.as_micros() as i64,
+            document: None,
         }
     }
 
@@ -400,6 +401,7 @@ mod tests {
             busy,
             warm: warm.iter().map(|k| k.to_string()).collect(),
             draining: false,
+            beam_slots: 0,
         }
     }
 

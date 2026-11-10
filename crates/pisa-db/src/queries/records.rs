@@ -6,7 +6,10 @@ use diesel_async::RunQueryDsl;
 use serde_json::Value;
 
 use crate::db::{DbError, retry};
-use crate::schema::{described, entries, leases, module_imports, modules, sessions, states};
+use crate::records::DocumentRow;
+use crate::schema::{
+    described, documents, entries, leases, module_imports, modules, sessions, states,
+};
 
 pub(crate) async fn put_state(
     db: &Handle,
@@ -85,6 +88,117 @@ pub(crate) async fn session(db: &Handle, v: &str, id: &str) -> Result<Option<Val
         .optional()?)
 }
 
+pub(crate) async fn put_document(
+    db: &Handle,
+    v: &str,
+    id: &str,
+    code: &str,
+    holder: &str,
+    now: u64,
+) -> Result<(), DbError> {
+    retry(|| async {
+        diesel::insert_into(documents::table)
+            .values((
+                documents::version.eq(v),
+                documents::id.eq(id),
+                documents::code.eq(code),
+                documents::revision.eq(1i64),
+                documents::holder.eq(holder),
+                documents::updated.eq(now as i64),
+            ))
+            .on_conflict((documents::version, documents::id))
+            .do_update()
+            .set((
+                documents::code.eq(code),
+                documents::revision.eq(1i64),
+                documents::holder.eq(holder),
+                documents::updated.eq(now as i64),
+            ))
+            .execute(&mut *conn(db).await?)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn document(
+    db: &Handle,
+    v: &str,
+    id: &str,
+) -> Result<Option<DocumentRow>, DbError> {
+    let row = documents::table
+        .find((v, id))
+        .select((documents::code, documents::revision, documents::holder))
+        .first::<(String, i64, Option<String>)>(&mut *conn(db).await?)
+        .await
+        .optional()?;
+    Ok(row.map(|(code, revision, holder)| DocumentRow {
+        code,
+        revision: revision as u64,
+        holder,
+    }))
+}
+
+pub(crate) async fn edit_document(
+    db: &Handle,
+    v: &str,
+    id: &str,
+    code: &str,
+    revision: u64,
+    holder: &str,
+    now: u64,
+) -> Result<Option<u64>, DbError> {
+    retry(|| async {
+        let revision = diesel::update(
+            documents::table
+                .find((v, id))
+                .filter(documents::revision.eq(revision as i64)),
+        )
+        .set((
+            documents::code.eq(code),
+            documents::revision.eq(documents::revision + 1),
+            documents::holder.eq(holder),
+            documents::updated.eq(now as i64),
+        ))
+        .returning(documents::revision)
+        .get_result::<i64>(&mut *conn(db).await?)
+        .await
+        .optional()?;
+        Ok(revision.map(|r| r as u64))
+    })
+    .await
+}
+
+pub(crate) async fn hold_document(
+    db: &Handle,
+    v: &str,
+    id: &str,
+    holder: &str,
+    now: u64,
+) -> Result<bool, DbError> {
+    retry(|| async {
+        let n = diesel::update(documents::table.find((v, id)))
+            .set((
+                documents::holder.eq(holder),
+                documents::updated.eq(now as i64),
+            ))
+            .execute(&mut *conn(db).await?)
+            .await?;
+        Ok(n == 1)
+    })
+    .await
+}
+
+pub(crate) async fn delete_document(db: &Handle, v: &str, id: &str) -> Result<bool, DbError> {
+    retry(|| async {
+        let n = diesel::delete(documents::table.find((v, id)))
+            .execute(&mut *conn(db).await?)
+            .await?;
+        Ok(n == 1)
+    })
+    .await
+}
+
 pub(crate) async fn sweep(db: &Handle, v: &str, cutoff: u64) -> Result<usize, DbError> {
     let cutoff = cutoff as i64;
     retry(|| async {
@@ -103,7 +217,14 @@ pub(crate) async fn sweep(db: &Handle, v: &str, cutoff: u64) -> Result<usize, Db
         )
         .execute(&mut *c)
         .await?;
-        Ok(states + sessions)
+        let documents = diesel::delete(
+            documents::table
+                .filter(documents::version.eq(v))
+                .filter(documents::updated.lt(cutoff)),
+        )
+        .execute(&mut *c)
+        .await?;
+        Ok(states + sessions + documents)
     })
     .await
 }
@@ -168,6 +289,14 @@ pub(crate) async fn rows(db: &Handle, v: &str) -> Result<Vec<Vec<String>>, DbErr
         .await?
     {
         rows.push(named("sessions", vec![id]));
+    }
+    for id in documents::table
+        .filter(documents::version.eq(v))
+        .select(documents::id)
+        .load::<String>(c)
+        .await?
+    {
+        rows.push(named("documents", vec![id]));
     }
     Ok(rows)
 }

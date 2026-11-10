@@ -198,6 +198,7 @@ async fn run_raw(queue: &pisa_worker::queue::Queue, job: Value) -> Value {
             header_key: None,
             header: None,
             state: None,
+            document: None,
             job,
             max_wait: std::time::Duration::from_secs(10),
             max_attempts: 1,

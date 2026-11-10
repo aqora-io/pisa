@@ -251,6 +251,7 @@ impl Dispatcher {
             header_key: None,
             header: None,
             state: None,
+            document: None,
             job: serde_json::to_value(job)
                 .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?,
             max_wait: self.cfg.max_wait,
@@ -413,6 +414,7 @@ impl Dispatcher {
             priority: p.priority as i16,
             header_key: route.header_key,
             header: route.header,
+            document: None,
             job,
             max_wait: self.cfg.max_wait,
             max_attempts: self.cfg.max_retries + 1,
