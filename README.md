@@ -238,6 +238,11 @@ pnpm -C web generate
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
+| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
+| `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
+| `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
+| `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}]}` |
+| `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
 | `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
@@ -317,9 +322,50 @@ and within `timeout` (see `bench/infotree/2026-11-06/report.md`). Nothing is
 kept between checks, so ask about every position in one: each check
 elaborates the code again.
 
+<a id="documents"></a>
+**Documents.** A check elaborates its code again each time. To ask about one
+proof many times, open it as a document on Lean Beam, which keeps the
+elaborated file. Then ask for the goals at positions, and try candidate
+tactics at a `sorry`:
+- `POST /documents` opens the code, and answers Lean's errors and warnings
+  (`messages`) and the `sorries`, each with its goal. The `id` carries the
+  version, as a snapshot's does.
+- `/documents/{id}/goals` takes 1 to 64 positions, as checks do. A position
+  with only a `line` is that line's first tactic, after any `·` or `.`
+  bullet, and the answer gives the column it used. There are no goals in the
+  imports or outside a proof. `mode: "after"` gives the goals after the
+  tactic at the position.
+- `/documents/{id}/probes` runs 1 to 64 candidates at one place: a `sorry`
+  (`{sorry: n}`, an index into `sorries`), or a position in the body.
+  - Each runs on the document as it is, in turn, within one `timeout`.
+  - The policy refuses a candidate as it refuses code, in its `error`, and
+    the others still run.
+  - `closed` means the candidate ran without errors, left no goals, and
+    doesn't say `sorry` or `admit`. It is no verdict: Lean Beam checks
+    neither termination nor what a tactic elaborated to. Check the finished
+    proof with `/check`.
+- `PATCH` replaces the code. It names the `revision` it replaces, and is a
+  409 `conflict` if the document is at another. Goals and probes may name a
+  `revision` too.
+- `DELETE` closes the document. An unused one expires with the proof states,
+  after `PISA_STATE_TTL_SECS`.
+- A document's jobs run one at a time, on the worker that holds it open,
+  while that worker is live. If it goes, another reopens the stored code,
+  which takes as long as elaborating it.
+- Only workers with Beam slots serve documents. Without one, the endpoints
+  answer 503 `unavailable`; a 429 means no Beam worker took the job in time.
+  The worker settings:
+  - `PISA_BEAM_SLOTS` (default 0): `lean-beam-mcp` processes beside the REPL
+    slots, each in a sandbox and cgroup of its own.
+  - `PISA_BEAM_DOCUMENTS` (default 4): the documents each keeps open. To
+    open another, it closes the least recently used one that no job holds.
+  - `PISA_BEAM_MEMORY_MAX_MB` (default 0, none): each one's memory limit.
+  - `PISA_BEAM_BIN`: `lean-beam-mcp`, by default the one in Lean's
+    toolchain.
+
 `version` selects a worker pool, by label (such as `v4.35.0-1a2b3c4d`) or by
-an alias set with `PISA_ALIASES`. Session, state and snapshot ids carry their
-version, so the requests that take one take no `version`. `timeout` is Lean's
+an alias set with `PISA_ALIASES`. Session, state, snapshot and document ids
+carry their version, so the requests that take one take no `version`. `timeout` is Lean's
 limit in seconds (default 60).
 
 **Errors** always look like `{"error": {"kind", "message"}}`.
@@ -334,7 +380,7 @@ limit in seconds (default 60).
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
 | `bad_request`, `not_found` | 400, 404 | Malformed request; unknown or expired job, state or session; unknown snapshot or declaration |
-| `conflict` | 409 | A create replaces a snapshot that another already replaces; in-band, in `check.error` (see [Replacing](#replacing)) |
+| `conflict` | 409 | A create replaces a snapshot that another already replaces, in-band in `check.error` (see [Replacing](#replacing)); or a document is at another revision than the request names |
 | `internal` | 500 | A bug |
 
 ## Snapshots

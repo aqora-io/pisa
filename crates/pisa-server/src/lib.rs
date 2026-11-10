@@ -108,6 +108,7 @@ pub fn openapi() -> Value {
             (name = "checks", description = "Checking code"),
             (name = "sessions", description = "Proving `sorry`s a tactic at a time"),
             (name = "snapshots", description = "Keeping code for later code to import"),
+            (name = "documents", description = "Goals and candidate tactics on code kept open on Lean Beam"),
             (name = "search", description = "Finding declarations"),
             (name = "jobs", description = "Answers to async requests, made with `Prefer: respond-async`"),
             (name = "health", description = "Whether a server can take requests"),

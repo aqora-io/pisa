@@ -558,16 +558,20 @@ pub(crate) async fn registry(
 pub(crate) async fn serving_documents(
     db: &Handle,
     q: &str,
-    version: &str,
+    version: Option<&str>,
     stale: Duration,
 ) -> Result<u64, DbError> {
     let now = now();
-    Ok(workers::table
+    let mut serving = workers::table
         .filter(workers::queue.eq(q))
-        .filter(workers::version.eq(version))
         .filter(workers::beam_slots.gt(0))
         .filter(workers::draining.eq(false))
         .filter(workers::seen_micros.ge(now - micros(stale)))
+        .into_boxed();
+    if let Some(version) = version {
+        serving = serving.filter(workers::version.eq(version));
+    }
+    Ok(serving
         .count()
         .get_result::<i64>(&mut *conn(db).await?)
         .await? as u64)

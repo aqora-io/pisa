@@ -14,6 +14,8 @@ use pisa_protocol::wire::{
 };
 use pisa_worker::queue::{NewJob, Poll};
 use pisa_worker::records::Records;
+use reqwest::Method;
+use serde_json::json;
 
 const CODE: &str = "import Foo\n\ntheorem t : 𝓝 = 𝓝 := by\n  sorry\n";
 
@@ -295,4 +297,118 @@ async fn a_worker_without_beam_takes_no_job_on_a_document() {
         }
     ));
     assert_eq!(c.queue.give_up(job).await.unwrap(), Some(0));
+}
+
+async fn beam_cluster() -> Cluster {
+    Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_api_opens_asks_edits_and_closes_a_document() {
+    let c = beam_cluster().await;
+    let (status, d) = c
+        .post("/documents", json!({"code": CODE, "version": "v"}))
+        .await;
+    assert_eq!(status, 200, "{d}");
+    let id = d["id"].as_str().unwrap().to_string();
+    assert_eq!(d["revision"], 1);
+    assert_eq!(d["sorries"][0]["pos"], json!({"line": 4, "column": 2}));
+
+    let path = |p: &str| format!("/documents/{id}{p}");
+    let (status, g) = c.post(&path("/goals"), json!({"at": [{"line": 4}]})).await;
+    assert_eq!(status, 200, "{g}");
+    assert_eq!(g["at"][0]["pos"], json!({"line": 4, "column": 2}));
+    assert_eq!(g["at"][0]["goals"], json!(["⊢ sorry"]));
+    let probes = json!({"at": {"sorry": 0}, "candidates": ["rfl", "omega"]});
+    let (status, p) = c.post(&path("/probes"), probes).await;
+    assert_eq!(status, 200, "{p}");
+    assert_eq!(
+        (&p["results"][0]["closed"], &p["results"][1]["ok"]),
+        (&json!(true), &json!(false))
+    );
+
+    let edit = |revision| json!({"code": "theorem t : 1 = 1 := by\n  rfl\n", "revision": revision});
+    let (status, d) = c.request(Method::PATCH, &path(""), Some(edit(1))).await;
+    assert_eq!((status, &d["revision"]), (200, &json!(2)), "{d}");
+    let (status, e) = c.request(Method::PATCH, &path(""), Some(edit(1))).await;
+    assert_eq!(
+        (status, &e["error"]["kind"]),
+        (409, &json!("conflict")),
+        "{e}"
+    );
+    let (status, e) = c
+        .post(&path("/goals"), json!({"revision": 1, "at": [{"line": 1}]}))
+        .await;
+    assert_eq!(status, 409, "{e}");
+
+    assert_eq!(c.request(Method::DELETE, &path(""), None).await.0, 204);
+    let (status, e) = c.request(Method::DELETE, &path(""), None).await;
+    assert_eq!(
+        (status, &e["error"]["kind"]),
+        (404, &json!("not_found")),
+        "{e}"
+    );
+    let (status, _) = c.post(&path("/goals"), json!({"at": [{"line": 1}]})).await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_out_of_bounds_are_bad_requests() {
+    let c = beam_cluster().await;
+    let (_, d) = c
+        .post("/documents", json!({"code": CODE, "version": "v"}))
+        .await;
+    let id = d["id"].as_str().unwrap();
+    let goals = format!("/documents/{id}/goals");
+    let probes = format!("/documents/{id}/probes");
+    let many: Vec<_> = (0..65).map(|_| json!({"line": 1})).collect();
+    let rfl: Vec<_> = (0..65).map(|_| "rfl").collect();
+    for (path, body) in [
+        (goals.as_str(), json!({"at": []})),
+        (&goals, json!({"at": many})),
+        (&goals, json!({"at": [{"line": 0}]})),
+        (&probes, json!({"at": {"sorry": 0}, "candidates": []})),
+        (&probes, json!({"at": {"sorry": 0}, "candidates": rfl})),
+        (&probes, json!({"at": {"line": 1}, "candidates": ["rfl"]})),
+        (&probes, json!({"at": {"sorry": 3}, "candidates": ["rfl"]})),
+        ("/documents/v~nope/goals", json!({"at": [{"line": 1}]})),
+    ] {
+        let (status, e) = c.post(path, body.clone()).await;
+        assert_eq!(
+            (status, &e["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{body}: {e}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_beam_documents_are_unavailable_and_checks_still_run() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let (status, e) = c
+        .post("/documents", json!({"code": CODE, "version": "v"}))
+        .await;
+    assert_eq!(
+        (status, &e["error"]["kind"]),
+        (503, &json!("unavailable")),
+        "{e}"
+    );
+    let id = format!("{}~{}", c.version("v"), new_id());
+    let (status, _) = c
+        .post(
+            &format!("/documents/{id}/goals"),
+            json!({"at": [{"line": 1}]}),
+        )
+        .await;
+    assert_eq!(status, 503);
+    let (status, r) = c
+        .post(
+            "/check",
+            json!({"code": "theorem t : True := trivial", "version": "v"}),
+        )
+        .await;
+    assert_eq!(status, 200, "{r}");
 }

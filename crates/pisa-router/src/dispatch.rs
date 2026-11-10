@@ -297,7 +297,23 @@ impl Dispatcher {
     /// more times than `max_retries` allows, or no other one claimed it
     /// within `max_wait` after.
     pub async fn submit(&self, p: Prepared) -> Result<JobResult, DispatchError> {
-        let id = self.queue.enqueue(&self.new_job(p)?).await?;
+        self.submit_new(self.new_job(p)?).await
+    }
+
+    /// [`submit`](Self::submit) for a job on open document `document`, which
+    /// only workers with Beam slots run, the one holding it first.
+    pub async fn submit_document(
+        &self,
+        p: Prepared,
+        document: String,
+    ) -> Result<JobResult, DispatchError> {
+        let mut new = self.new_job(p)?;
+        new.document = Some(document);
+        self.submit_new(new).await
+    }
+
+    async fn submit_new(&self, new: NewJob) -> Result<JobResult, DispatchError> {
+        let id = self.queue.enqueue(&new).await?;
         let mut waiting = Waiting {
             dispatcher: self,
             id: Some(id),

@@ -261,9 +261,13 @@ impl Queue {
         dispatch!(&self.db, registry(&self.name, version, stale))
     }
 
-    /// How many workers of `version` seen within `stale` serve documents:
-    /// those with Beam slots that aren't draining.
-    pub async fn serving_documents(&self, version: &str, stale: Duration) -> Result<u64, DbError> {
+    /// How many workers of `version` (of any, for `None`) seen within `stale`
+    /// serve documents: those with Beam slots that aren't draining.
+    pub async fn serving_documents(
+        &self,
+        version: Option<&str>,
+        stale: Duration,
+    ) -> Result<u64, DbError> {
         dispatch!(&self.db, serving_documents(&self.name, version, stale))
     }
 
@@ -668,14 +672,16 @@ mod tests {
     #[tokio::test]
     async fn only_live_workers_with_beam_slots_serve_documents() {
         for q in queues().await {
-            assert_eq!(q.serving_documents("v", LEASE).await.unwrap(), 0);
+            assert_eq!(q.serving_documents(Some("v"), LEASE).await.unwrap(), 0);
             q.register("repl", "v", 2, 0).await.unwrap();
             q.register("beam", "v", 2, 1).await.unwrap();
             q.register("leaving", "v", 2, 1).await.unwrap();
             q.register("other", "w", 2, 1).await.unwrap();
             q.set_draining("leaving").await.unwrap();
-            assert_eq!(q.serving_documents("v", LEASE).await.unwrap(), 1);
-            assert_eq!(q.serving_documents("v", Duration::ZERO).await.unwrap(), 0);
+            assert_eq!(q.serving_documents(Some("v"), LEASE).await.unwrap(), 1);
+            assert_eq!(q.serving_documents(None, LEASE).await.unwrap(), 2);
+            let stale = Duration::ZERO;
+            assert_eq!(q.serving_documents(Some("v"), stale).await.unwrap(), 0);
         }
     }
 

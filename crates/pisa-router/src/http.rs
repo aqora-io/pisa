@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::extract::{FromRequest, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::future::join_all;
 use pisa_protocol::api::{
@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 
 use crate::dispatch::{DispatchError, Dispatcher, Prepared, Priority, Route};
 use crate::jobs::{self, Prefer};
-use crate::{sessions, snapshots};
+use crate::{documents, sessions, snapshots};
 
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
@@ -52,6 +52,11 @@ pub struct App {
         snapshots::dependents,
         snapshots::rebuild,
         snapshots::audit,
+        documents::open,
+        documents::edit,
+        documents::goals,
+        documents::probe,
+        documents::close,
         jobs::get,
         jobs::cancel,
     )
@@ -77,6 +82,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/snapshots/{id}/dependents", get(snapshots::dependents))
         .route("/snapshots/rebuild", post(snapshots::rebuild))
         .route("/snapshots/audit", get(snapshots::audit))
+        .route("/documents", post(documents::open))
+        .route(
+            "/documents/{id}",
+            patch(documents::edit).delete(documents::close),
+        )
+        .route("/documents/{id}/goals", post(documents::goals))
+        .route("/documents/{id}/probes", post(documents::probe))
         .route("/jobs/{id}", get(jobs::get).delete(jobs::cancel))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)

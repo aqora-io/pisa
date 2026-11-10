@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub mod dispatch;
+pub mod documents;
 pub mod http;
 pub mod jobs;
 mod rebuild;

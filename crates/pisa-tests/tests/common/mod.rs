@@ -249,6 +249,28 @@ impl Cluster {
         (status, r.json().await.unwrap())
     }
 
+    /// `method` on `path`, with `body` if given; the status and the JSON
+    /// answer, `null` when there is none.
+    pub async fn request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> (u16, Value) {
+        let mut req = self.client.request(method, self.url(path));
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        let r = req.send().await.unwrap();
+        let status = r.status().as_u16();
+        let text = r.text().await.unwrap();
+        let body = match text.is_empty() {
+            true => Value::Null,
+            false => serde_json::from_str(&text).unwrap(),
+        };
+        (status, body)
+    }
+
     /// Every object in the store under `snapshots`.
     pub async fn stored_blobs(&self) -> Vec<String> {
         let mut out = Vec::new();

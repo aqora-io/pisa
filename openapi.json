@@ -886,6 +886,176 @@
         ],
         "type": "string"
       },
+      "Document": {
+        "description": "An open document, as Lean elaborated its code.",
+        "properties": {
+          "id": {
+            "description": "Its id, `<version>~<32 hex>`.",
+            "type": "string"
+          },
+          "messages": {
+            "description": "Lean's errors and warnings.",
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "1 when opened, then one more for each edit.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sorries": {
+            "description": "The code's `sorry`s in source order, each with its goals.",
+            "items": {
+              "$ref": "#/components/schemas/Sorry"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "messages",
+          "sorries"
+        ],
+        "type": "object"
+      },
+      "DocumentGoals": {
+        "properties": {
+          "at": {
+            "description": "One per position asked about, in order.",
+            "items": {
+              "$ref": "#/components/schemas/GoalsAt"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "at"
+        ],
+        "type": "object"
+      },
+      "DocumentGoalsRequest": {
+        "description": "`POST /documents/{id}/goals`.",
+        "properties": {
+          "at": {
+            "description": "1 to [`MAX_AT`] positions.",
+            "items": {
+              "$ref": "#/components/schemas/LinePos"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/GoalsMode"
+          },
+          "revision": {
+            "description": "The revision asked about; if the document is at another, a 409\n`conflict`. Without it, the latest.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout": {
+            "description": "Lean's time limit in seconds, which reopening the document counts\nagainst.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "at"
+        ],
+        "type": "object"
+      },
+      "DocumentProbes": {
+        "properties": {
+          "pos": {
+            "$ref": "#/components/schemas/Pos",
+            "description": "Where the candidates ran."
+          },
+          "results": {
+            "description": "One per candidate, in order.",
+            "items": {
+              "$ref": "#/components/schemas/ProbeResult"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "revision",
+          "pos",
+          "results"
+        ],
+        "type": "object"
+      },
+      "DocumentProbesRequest": {
+        "description": "`POST /documents/{id}/probes`: runs each candidate at one position, each\non the document as it is: nothing a candidate does stays.",
+        "properties": {
+          "at": {
+            "$ref": "#/components/schemas/ProbeAt"
+          },
+          "candidates": {
+            "description": "1 to [`MAX_CANDIDATES`] tactics.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "description": "As for goals.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout": {
+            "description": "Lean's time limit in seconds, for all of them.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "at",
+          "candidates"
+        ],
+        "type": "object"
+      },
+      "EditDocumentRequest": {
+        "description": "`PATCH /documents/{id}`: replaces the document's code.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "revision": {
+            "description": "The revision the edit replaces; if the document is at another, the\nedit is a 409 `conflict`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "timeout": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "revision"
+        ],
+        "type": "object"
+      },
       "Error": {
         "properties": {
           "kind": {
@@ -996,6 +1166,34 @@
           "declaration"
         ],
         "type": "object"
+      },
+      "GoalsAt": {
+        "properties": {
+          "goals": {
+            "description": "The goals there, as Lean prints them: none in the imports or outside\na proof.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pos": {
+            "$ref": "#/components/schemas/Pos",
+            "description": "The position, its column filled in."
+          }
+        },
+        "required": [
+          "pos",
+          "goals"
+        ],
+        "type": "object"
+      },
+      "GoalsMode": {
+        "description": "Goals before the tactic at a position, or after it.",
+        "enum": [
+          "before",
+          "after"
+        ],
+        "type": "string"
       },
       "Health": {
         "description": "`GET /health`: 200, or 503 once the server is stopping.",
@@ -1175,6 +1373,25 @@
         ],
         "type": "string"
       },
+      "LinePos": {
+        "description": "A position in a document's code, as for [`Pos`]. Without `column`, it is\nthe line's first tactic: its first character that isn't blank, after a\n`·` or `.` bullet.",
+        "properties": {
+          "column": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "line": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "line"
+        ],
+        "type": "object"
+      },
       "ListDependentsResponse": {
         "description": "`GET /snapshots/{id}/dependents`: the snapshots of every module that\nimports the snapshot's module, directly or through others, parents first:\nby level, where a module that imports it is at level 1 and one that\nimports that at 2, by its longest chain, then oldest first. With\n`label=key:value` filters, as in a listing, only the snapshots with every\nlabel.",
         "properties": {
@@ -1232,6 +1449,27 @@
         ],
         "type": "object"
       },
+      "OpenDocumentRequest": {
+        "description": "`POST /documents`: opens code on Lean Beam, for the goals at positions in\nit and candidate tactics probed there. A worker keeps it open, and the\ncode is stored so that another can reopen it. Nothing a document says is a\nverdict: check finished code with `/check`.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Lean's time limit in seconds.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
       "Pos": {
         "description": "A position in the submitted code: lines count from 1, and columns from 0\nin Unicode code points, not UTF-16 units.",
         "properties": {
@@ -1249,6 +1487,62 @@
         "required": [
           "line",
           "column"
+        ],
+        "type": "object"
+      },
+      "ProbeAt": {
+        "description": "Where probes run: at one of the document's `sorry`s, by its index in\n[`Document::sorries`], or at a position in the code's body.",
+        "oneOf": [
+          {
+            "properties": {
+              "sorry": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sorry"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/LinePos"
+          }
+        ]
+      },
+      "ProbeResult": {
+        "properties": {
+          "closed": {
+            "description": "It ran without errors, left no goals, and doesn't say `sorry` or\n`admit`. This is no verdict: Lean Beam checks neither termination nor\nwhat the tactic elaborated to, so check the finished code with\n`/check`.",
+            "type": "boolean"
+          },
+          "error": {
+            "$ref": "#/components/schemas/Error",
+            "description": "Why it didn't run: the policy refused it, or the time ran out."
+          },
+          "goals": {
+            "description": "The goals it left, when it ran without errors.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "description": "It ran without errors.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "closed",
+          "goals",
+          "messages"
         ],
         "type": "object"
       },
@@ -2528,6 +2822,521 @@
         "summary": "A declaration's details",
         "tags": [
           "search"
+        ]
+      }
+    },
+    "/documents": {
+      "post": {
+        "description": "Opens the code on Lean Beam, and answers Lean's errors and warnings and the goals of its `sorry`s. The document stays open, for goals at positions and candidate tactics probed there. A worker holds it open, and the code is stored, so another worker reopens it if that one goes; unused, it expires with the workers' proof states. Nothing here is a verdict: check finished code with `/check`. A 503 means no worker serves documents.",
+        "operationId": "openDocument",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenDocumentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            },
+            "description": "The open document"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Open code for goals and probes",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/documents/{id}": {
+      "delete": {
+        "description": "Closes the document and deletes its code.",
+        "operationId": "closeDocument",
+        "parameters": [
+          {
+            "description": "A document's id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Closed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Close a document",
+        "tags": [
+          "documents"
+        ]
+      },
+      "patch": {
+        "description": "Opens the new code as the document's next revision. An edit names the revision it replaces: if the document is at another, it is a 409 `conflict`, and nothing changes.",
+        "operationId": "editDocument",
+        "parameters": [
+          {
+            "description": "A document's id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditDocumentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Document"
+                }
+              }
+            },
+            "description": "The document at its new revision"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`conflict`: the document is at another revision"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Replace a document's code",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/documents/{id}/goals": {
+      "post": {
+        "description": "The goals before (or after) the tactic at each position, as Lean prints them. A position with only a line is the line's first tactic. There are none in the imports or outside a proof.",
+        "operationId": "documentGoals",
+        "parameters": [
+          {
+            "description": "A document's id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentGoalsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentGoals"
+                }
+              }
+            },
+            "description": "The goals at each position"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`conflict`: the document is at another revision"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "The goals at positions in a document",
+        "tags": [
+          "documents"
+        ]
+      }
+    },
+    "/documents/{id}/probes": {
+      "post": {
+        "description": "Runs each candidate at a `sorry` of the document, or a position in its body, in turn and within one time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.",
+        "operationId": "probeDocument",
+        "parameters": [
+          {
+            "description": "A document's id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentProbesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentProbes"
+                }
+              }
+            },
+            "description": "A result per candidate, in order"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`conflict`: the document is at another revision"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Try candidate tactics at a position",
+        "tags": [
+          "documents"
         ]
       }
     },
@@ -4408,6 +5217,10 @@
     {
       "description": "Keeping code for later code to import",
       "name": "snapshots"
+    },
+    {
+      "description": "Goals and candidate tactics on code kept open on Lean Beam",
+      "name": "documents"
     },
     {
       "description": "Finding declarations",

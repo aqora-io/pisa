@@ -64,6 +64,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/documents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Open code for goals and probes
+         * @description Opens the code on Lean Beam, and answers Lean's errors and warnings and the goals of its `sorry`s. The document stays open, for goals at positions and candidate tactics probed there. A worker holds it open, and the code is stored, so another worker reopens it if that one goes; unused, it expires with the workers' proof states. Nothing here is a verdict: check finished code with `/check`. A 503 means no worker serves documents.
+         */
+        post: operations["openDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/documents/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Close a document
+         * @description Closes the document and deletes its code.
+         */
+        delete: operations["closeDocument"];
+        options?: never;
+        head?: never;
+        /**
+         * Replace a document's code
+         * @description Opens the new code as the document's next revision. An edit names the revision it replaces: if the document is at another, it is a 409 `conflict`, and nothing changes.
+         */
+        patch: operations["editDocument"];
+        trace?: never;
+    };
+    "/documents/{id}/goals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The goals at positions in a document
+         * @description The goals before (or after) the tactic at each position, as Lean prints them. A position with only a line is the line's first tactic. There are none in the imports or outside a proof.
+         */
+        post: operations["documentGoals"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/documents/{id}/probes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Try candidate tactics at a position
+         * @description Runs each candidate at a `sorry` of the document, or a position in its body, in turn and within one time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.
+         */
+        post: operations["probeDocument"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -934,6 +1018,83 @@ export interface components {
          * @enum {string}
          */
         Detail: "tactics" | "terms";
+        /** @description An open document, as Lean elaborated its code. */
+        Document: {
+            /** @description Its id, `<version>~<32 hex>`. */
+            id: string;
+            /** @description Lean's errors and warnings. */
+            messages: components["schemas"]["Message"][];
+            /**
+             * Format: int64
+             * @description 1 when opened, then one more for each edit.
+             */
+            revision: number;
+            /** @description The code's `sorry`s in source order, each with its goals. */
+            sorries: components["schemas"]["Sorry"][];
+        };
+        DocumentGoals: {
+            /** @description One per position asked about, in order. */
+            at: components["schemas"]["GoalsAt"][];
+            /** Format: int64 */
+            revision: number;
+        };
+        /** @description `POST /documents/{id}/goals`. */
+        DocumentGoalsRequest: {
+            /** @description 1 to [`MAX_AT`] positions. */
+            at: components["schemas"]["LinePos"][];
+            mode?: components["schemas"]["GoalsMode"];
+            /**
+             * Format: int64
+             * @description The revision asked about; if the document is at another, a 409
+             *     `conflict`. Without it, the latest.
+             */
+            revision?: number;
+            /**
+             * Format: int64
+             * @description Lean's time limit in seconds, which reopening the document counts
+             *     against.
+             */
+            timeout?: number;
+        };
+        DocumentProbes: {
+            /** @description Where the candidates ran. */
+            pos: components["schemas"]["Pos"];
+            /** @description One per candidate, in order. */
+            results: components["schemas"]["ProbeResult"][];
+            /** Format: int64 */
+            revision: number;
+        };
+        /**
+         * @description `POST /documents/{id}/probes`: runs each candidate at one position, each
+         *     on the document as it is: nothing a candidate does stays.
+         */
+        DocumentProbesRequest: {
+            at: components["schemas"]["ProbeAt"];
+            /** @description 1 to [`MAX_CANDIDATES`] tactics. */
+            candidates: string[];
+            /**
+             * Format: int64
+             * @description As for goals.
+             */
+            revision?: number;
+            /**
+             * Format: int64
+             * @description Lean's time limit in seconds, for all of them.
+             */
+            timeout?: number;
+        };
+        /** @description `PATCH /documents/{id}`: replaces the document's code. */
+        EditDocumentRequest: {
+            code: string;
+            /**
+             * Format: int64
+             * @description The revision the edit replaces; if the document is at another, the
+             *     edit is a 409 `conflict`.
+             */
+            revision: number;
+            /** Format: int64 */
+            timeout?: number;
+        };
         Error: {
             kind: components["schemas"]["ErrorKind"];
             message: string;
@@ -977,6 +1138,20 @@ export interface components {
             /** @description The version the index was built from. */
             version: string;
         };
+        GoalsAt: {
+            /**
+             * @description The goals there, as Lean prints them: none in the imports or outside
+             *     a proof.
+             */
+            goals: string[];
+            /** @description The position, its column filled in. */
+            pos: components["schemas"]["Pos"];
+        };
+        /**
+         * @description Goals before the tactic at a position, or after it.
+         * @enum {string}
+         */
+        GoalsMode: "before" | "after";
         /** @description `GET /health`: 200, or 503 once the server is stopping. */
         Health: {
             search: components["schemas"]["SearchHealth"] | null;
@@ -1059,6 +1234,17 @@ export interface components {
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
         /**
+         * @description A position in a document's code, as for [`Pos`]. Without `column`, it is
+         *     the line's first tactic: its first character that isn't blank, after a
+         *     `·` or `.` bullet.
+         */
+        LinePos: {
+            /** Format: int64 */
+            column?: number;
+            /** Format: int64 */
+            line: number;
+        };
+        /**
          * @description `GET /snapshots/{id}/dependents`: the snapshots of every module that
          *     imports the snapshot's module, directly or through others, parents first:
          *     by level, where a module that imports it is at level 1 and one that
@@ -1093,6 +1279,21 @@ export interface components {
             text: string;
         };
         /**
+         * @description `POST /documents`: opens code on Lean Beam, for the goals at positions in
+         *     it and candidate tactics probed there. A worker keeps it open, and the
+         *     code is stored so that another can reopen it. Nothing a document says is a
+         *     verdict: check finished code with `/check`.
+         */
+        OpenDocumentRequest: {
+            code: string;
+            /**
+             * Format: int64
+             * @description Lean's time limit in seconds.
+             */
+            timeout?: number;
+            version?: string;
+        };
+        /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
          *     in Unicode code points, not UTF-16 units.
          */
@@ -1101,6 +1302,29 @@ export interface components {
             column: number;
             /** Format: int64 */
             line: number;
+        };
+        /**
+         * @description Where probes run: at one of the document's `sorry`s, by its index in
+         *     [`Document::sorries`], or at a position in the code's body.
+         */
+        ProbeAt: {
+            sorry: number;
+        } | components["schemas"]["LinePos"];
+        ProbeResult: {
+            /**
+             * @description It ran without errors, left no goals, and doesn't say `sorry` or
+             *     `admit`. This is no verdict: Lean Beam checks neither termination nor
+             *     what the tactic elaborated to, so check the finished code with
+             *     `/check`.
+             */
+            closed: boolean;
+            /** @description Why it didn't run: the policy refused it, or the time ran out. */
+            error?: components["schemas"]["Error"];
+            /** @description The goals it left, when it ran without errors. */
+            goals: string[];
+            messages: components["schemas"]["Message"][];
+            /** @description It ran without errors. */
+            ok: boolean;
         };
         /**
          * @description What a declaration's axioms make it, besides the allowed ones (by default
@@ -1663,12 +1887,20 @@ export type DeclarationDetail = components['schemas']['DeclarationDetail'];
 export type DeleteSnapshotResponse = components['schemas']['DeleteSnapshotResponse'];
 export type Description = components['schemas']['Description'];
 export type Detail = components['schemas']['Detail'];
+export type Document = components['schemas']['Document'];
+export type DocumentGoals = components['schemas']['DocumentGoals'];
+export type DocumentGoalsRequest = components['schemas']['DocumentGoalsRequest'];
+export type DocumentProbes = components['schemas']['DocumentProbes'];
+export type DocumentProbesRequest = components['schemas']['DocumentProbesRequest'];
+export type EditDocumentRequest = components['schemas']['EditDocumentRequest'];
 export type Error = components['schemas']['Error'];
 export type ErrorKind = components['schemas']['ErrorKind'];
 export type ErrorResponse = components['schemas']['ErrorResponse'];
 export type Export = components['schemas']['Export'];
 export type Flags = components['schemas']['Flags'];
 export type GetDeclarationResponse = components['schemas']['GetDeclarationResponse'];
+export type GoalsAt = components['schemas']['GoalsAt'];
+export type GoalsMode = components['schemas']['GoalsMode'];
 export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
 export type Hit = components['schemas']['Hit'];
@@ -1676,10 +1908,14 @@ export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
 export type JobStatus = components['schemas']['JobStatus'];
+export type LinePos = components['schemas']['LinePos'];
 export type ListDependentsResponse = components['schemas']['ListDependentsResponse'];
 export type ListSnapshotsResponse = components['schemas']['ListSnapshotsResponse'];
 export type Message = components['schemas']['Message'];
+export type OpenDocumentRequest = components['schemas']['OpenDocumentRequest'];
 export type Pos = components['schemas']['Pos'];
+export type ProbeAt = components['schemas']['ProbeAt'];
+export type ProbeResult = components['schemas']['ProbeResult'];
 export type ProofStatus = components['schemas']['ProofStatus'];
 export type Query = components['schemas']['Query'];
 export type QueryResult = components['schemas']['QueryResult'];
@@ -1944,6 +2180,459 @@ export interface operations {
              *     declaration.
              */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    openDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description The open document */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    closeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A document's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    editDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A document's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditDocumentRequest"];
+            };
+        };
+        responses: {
+            /** @description The document at its new revision */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Document"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `conflict`: the document is at another revision */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    documentGoals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A document's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DocumentGoalsRequest"];
+            };
+        };
+        responses: {
+            /** @description The goals at each position */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentGoals"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `conflict`: the document is at another revision */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    probeDocument: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description A document's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DocumentProbesRequest"];
+            };
+        };
+        responses: {
+            /** @description A result per candidate, in order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentProbes"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `conflict`: the document is at another revision */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

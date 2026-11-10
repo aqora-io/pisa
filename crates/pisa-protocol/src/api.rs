@@ -22,6 +22,11 @@
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
 //! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
+//! | `POST /documents` | [`OpenDocumentRequest`] → [`Document`] |
+//! | `PATCH /documents/{id}` | [`EditDocumentRequest`] → [`Document`] |
+//! | `POST /documents/{id}/goals` | [`DocumentGoalsRequest`] → [`DocumentGoals`] |
+//! | `POST /documents/{id}/probes` | [`DocumentProbesRequest`] → [`DocumentProbes`] |
+//! | `DELETE /documents/{id}` | → 204 |
 //! | `GET /jobs/{id}` | `?wait=` ([`JobWait`]) → the request's answer, or [`Job`] (202) |
 //! | `DELETE /jobs/{id}` | → [`Job`] |
 //!
