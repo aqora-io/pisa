@@ -1,7 +1,15 @@
 # What the worker's axiom report and the kernel verifier share: how a
-# declaration is described (see Pisa/Report.lean). Imports only Lean core.
+# declaration is described (see Pisa/Report.lean), and the `pisa` executable
+# that builds and re-checks snapshot modules. Imports only Lean core.
 name = "pisa"
-defaultTargets = ["Pisa"]
+defaultTargets = ["Pisa", "pisa"]
 
 [[lean_lib]]
 name = "Pisa"
+
+[[lean_exe]]
+name = "pisa"
+root = "Pisa.Main"
+# Elaborating code that imports Mathlib runs its tactics and initializers in
+# the interpreter, which needs the executable's symbols.
+supportInterpreter = true

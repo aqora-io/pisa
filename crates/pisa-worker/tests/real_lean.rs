@@ -1,6 +1,7 @@
 //! The axiom report and the kernel verifier on real Lean: code is compiled to
 //! snapshot modules as a worker builds them, reported as the builder reports
-//! them, and re-checked by `docker/verifier/PisaVerify.lean`. Each test needs
+//! them, and re-checked by `docker/verifier/PisaVerify.lean`; the `pisa` tool
+//! (`docker/pisa-lean`) is checked against them. Each test needs
 //! elan on `PATH` and the `Pisa` library built, and runs on the library's
 //! toolchain, so they are ignored by default:
 //!
@@ -628,4 +629,249 @@ fn the_export_prints_a_definitions_value_without_notation() {
     );
     // A proof isn't printed.
     assert_eq!(value("t"), None);
+}
+
+/// What the `pisa` tool printed: its `PISA_*` lines by marker, in order, and
+/// whether it exited 0.
+struct Tooled {
+    ok: bool,
+    lines: Vec<(String, serde_json::Value)>,
+    output: String,
+}
+
+impl Tooled {
+    fn all(&self, marker: &str) -> Vec<&serde_json::Value> {
+        self.lines
+            .iter()
+            .filter(|(m, _)| m == marker)
+            .map(|(_, v)| v)
+            .collect()
+    }
+
+    fn one(&self, marker: &str) -> &serde_json::Value {
+        let all = self.all(marker);
+        assert_eq!(all.len(), 1, "{marker} in:\n{}", self.output);
+        all[0]
+    }
+}
+
+impl Snapshots {
+    /// Runs the `pisa` tool on the snapshot modules, on the library's
+    /// toolchain.
+    fn tool(&self, args: &[&str]) -> Tooled {
+        let toolchain = std::fs::read_to_string(docker().join("pisa-lean/lean-toolchain")).unwrap();
+        let out = Command::new(docker().join("pisa-lean/.lake/build/bin/pisa"))
+            .args(args)
+            .current_dir(self.root.path())
+            .env("ELAN_TOOLCHAIN", toolchain.trim())
+            .env("LEAN_PATH", self.root.path())
+            .output()
+            .expect("running pisa (is docker/pisa-lean built?)");
+        let output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let lines = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let (marker, json) = l.split_once(' ')?;
+                marker.starts_with("PISA_").then_some(())?;
+                Some((marker.to_string(), serde_json::from_str(json).ok()?))
+            })
+            .collect();
+        Tooled {
+            ok: out.status.success(),
+            lines,
+            output,
+        }
+    }
+
+    /// `code`'s module file, and its `.olean`.
+    fn file(&self, code: &str) -> (PathBuf, PathBuf) {
+        let file = self
+            .root
+            .path()
+            .join(snapshot::ROOT)
+            .join(format!("s{}.lean", snapshot::id(code)));
+        std::fs::write(&file, code).unwrap();
+        let olean = file.with_extension("olean");
+        (file, olean)
+    }
+
+    /// Builds `code` with `pisa build`, as the worker does.
+    fn tool_build(&self, code: &str) -> Tooled {
+        let (file, olean) = self.file(code);
+        let root = self.root.path().to_string_lossy().into_owned();
+        let (file, olean) = (file.to_string_lossy(), olean.to_string_lossy());
+        let built = self.tool(&[
+            "build",
+            "-R",
+            &root,
+            "-o",
+            &olean,
+            "-D",
+            "autoImplicit=false",
+            "--value-chars",
+            "4000",
+            &file,
+        ]);
+        assert!(built.ok, "pisa build failed:\n{}", built.output);
+        built
+    }
+
+    /// The verdicts of `pisa verify` on the modules of `ids`, in order.
+    fn tool_verify(&self, ids: &[&str]) -> Vec<serde_json::Value> {
+        let modules: Vec<String> = ids.iter().map(|id| snapshot::module(id)).collect();
+        let mut args = vec!["verify"];
+        args.extend(modules.iter().map(String::as_str));
+        let verified = self.tool(&args);
+        assert!(verified.ok, "pisa verify failed:\n{}", verified.output);
+        verified.one("PISA_IMPORTED");
+        verified.all("PISA_VERIFY").into_iter().cloned().collect()
+    }
+
+    /// The files of module `id`, by extension.
+    fn files(&self, id: &str) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let dir = self.root.path().join(snapshot::ROOT);
+        let prefix = format!("s{id}.");
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().into_string().ok()?;
+                let ext = name.strip_prefix(&prefix)?.to_string();
+                (ext != "lean").then(|| (ext, std::fs::read(dir.join(&name)).unwrap()))
+            })
+            .collect()
+    }
+}
+
+/// A verdict's declarations, judged as the worker judges them.
+fn verdict_declarations(verdict: &serde_json::Value) -> Vec<Declaration> {
+    assert_eq!(verdict["ok"], true, "{verdict}");
+    let decls = parse_declarations(verdict["declarations"].clone()).unwrap();
+    policy().judge_decls(false, Some(decls)).declarations
+}
+
+const PLAIN: &str = "/-- Doubles. -/\ndef double (n : Nat) : Nat := 2 * n\n\n\
+                     theorem double_two : double 2 = 4 := rfl\n\naxiom cheat : 1 = 2\n\n\
+                     theorem uses_cheat : 1 = 2 := cheat\n";
+const MODULE: &str = "module\n\n/-- Doubles. -/\n@[expose] public def double (n : Nat) : Nat := 2 * n\n\n\
+                      public theorem double_two : double 2 = 4 := rfl\n\n\
+                      def hidden : Nat := 7\n\ntheorem hidden_eq : hidden = 7 := rfl\n";
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_tool_writes_what_lean_writes() {
+    let (by_lean, by_tool) = (Snapshots::new(), Snapshots::new());
+    let on = |id: &str| {
+        format!(
+            "module\n\npublic import {}\n\npublic theorem four : double 2 = 4 := double_two\n",
+            snapshot::module(id)
+        )
+    };
+    let module_id = snapshot::id(MODULE);
+    for code in [PLAIN, MODULE, &on(&module_id)] {
+        let id = by_lean.build(code).id;
+        by_tool.tool_build(code);
+        let (lean, tool) = (by_lean.files(&id), by_tool.files(&id));
+        assert!(lean.contains_key("olean"), "{:?}", lean.keys());
+        assert_eq!(
+            lean.keys().collect::<Vec<_>>(),
+            tool.keys().collect::<Vec<_>>()
+        );
+        for (ext, bytes) in &lean {
+            assert!(tool[ext] == *bytes, "s{id}.{ext} differs");
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_builds_report_is_the_verifiers_and_the_old_reports() {
+    let s = Snapshots::new();
+    let built = s.build(PLAIN);
+    let tooled = Snapshots::new().tool_build(PLAIN);
+    let decls = parse_declarations(tooled.one("PISA_DECLS").clone()).unwrap();
+    let sorted = |decls: &[Declaration]| -> Vec<Declaration> {
+        let mut decls = decls.to_vec();
+        decls.sort_by(|a, b| a.name.cmp(&b.name));
+        decls
+    };
+    let reported = sorted(&policy().judge_decls(false, Some(decls)).declarations);
+    assert_eq!(reported, sorted(built.agreed()));
+    let verified = s.tool_verify(&[&built.id]);
+    assert_eq!(sorted(&verdict_declarations(&verified[0])), reported);
+    // Module-system code is described by the verifier alone.
+    assert!(
+        Snapshots::new()
+            .tool_build(MODULE)
+            .all("PISA_DECLS")
+            .is_empty()
+    );
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_build_names_its_imports_and_exports_what_importers_see() {
+    let s = Snapshots::new();
+    let base = s.tool_build(MODULE);
+    let id = snapshot::id(MODULE);
+    let export = base.one("PISA_EXPORT").as_array().unwrap();
+    let names: Vec<&str> = export.iter().map(|d| d["name"].as_str().unwrap()).collect();
+    assert!(!names.contains(&"hidden"), "{names:?}");
+    let double = export.iter().find(|d| d["name"] == "double").unwrap();
+    assert_eq!(double["docstring"], "Doubles.");
+    // Importers see a module-system theorem as an axiom.
+    let theorem = export.iter().find(|d| d["name"] == "double_two").unwrap();
+    assert_eq!(theorem["kind"], "axiom");
+    let on = format!(
+        "module\n\npublic import {}\n\npublic theorem four : double 2 = 4 := double_two\n",
+        snapshot::module(&id)
+    );
+    let imports = s.tool_build(&on).one("PISA_IMPORTS").clone();
+    let imports: Vec<String> = serde_json::from_value(imports).unwrap();
+    assert!(imports.contains(&snapshot::module(&id)), "{imports:?}");
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_chain_is_verified_as_its_modules_are_one_by_one() {
+    let s = Snapshots::new();
+    let base = snapshot::id(MODULE);
+    s.tool_build(MODULE);
+    let on = format!(
+        "module\n\npublic import {}\n\npublic theorem four : double 2 = 4 := double_two\n",
+        snapshot::module(&base)
+    );
+    let all = format!(
+        "module\n\nimport all {}\n\ntheorem seven : hidden = 7 := hidden_eq\n",
+        snapshot::module(&base)
+    );
+    s.tool_build(&on);
+    s.tool_build(&all);
+    let ids = [base.clone(), snapshot::id(&on), snapshot::id(&all)];
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let chain = s.tool_verify(&ids);
+    let one_by_one: Vec<serde_json::Value> =
+        ids.iter().flat_map(|id| s.tool_verify(&[*id])).collect();
+    assert_eq!(chain.len(), 3);
+    assert_eq!(chain, one_by_one);
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_declaration_added_without_the_kernel_is_rejected_and_ends_the_chain() {
+    let s = Snapshots::new();
+    let forged = "import Lean\n\nopen Lean Elab Command in\nset_option debug.skipKernelTC true in\n\
+                  run_cmd liftCoreM (addDecl (.thmDecl { name := `bad, levelParams := [], \
+                  type := mkConst ``False, value := mkConst ``True.intro }))\n\n\
+                  theorem oops : False := bad\n";
+    s.tool_build(forged);
+    s.tool_build(PLAIN);
+    let verdicts = s.tool_verify(&[&snapshot::id(forged), &snapshot::id(PLAIN)]);
+    assert_eq!(verdicts.len(), 1, "{verdicts:?}");
+    assert_eq!(verdicts[0]["ok"], false);
+    let reason = verdicts[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("bad"), "{reason}");
 }
