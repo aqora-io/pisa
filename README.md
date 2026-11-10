@@ -1582,10 +1582,10 @@ This scan is a conservative pre-filter, not the last word: it over-approximates
 "the kernel checked every declaration with sound options" by forbidding
 anything that could subvert the kernel or the report. A `verified`
 [snapshot](#verifying) doesn't rely on it. The re-check runs after the build,
-in a separate clean process (`docker/verifier/PisaVerify.lean`, run with
-`lean --run`): it re-adds the module's own declarations to an environment of
-just its dependencies, with the kernel checking each one, and collects their
-axioms by walking the re-checked constants. So a declaration added during the
+in a separate clean process (`pisa verify`, built from `docker/pisa-lean`):
+it re-adds the module's own declarations to an environment of just its
+dependencies, with the kernel checking each one, and collects their axioms by
+walking the re-checked constants. So a declaration added during the
 build with the kernel check skipped is caught even though no forbidden keyword
 appears in the source. Because that verdict doesn't depend on the build being
 honest, snapshot creation allows the **macro family** (`macro`, `macro_rules`,

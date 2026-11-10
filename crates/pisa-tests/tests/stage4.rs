@@ -707,7 +707,7 @@ async fn module_system_snapshots_keep_all_their_files() {
     delete_all(&c, &[&root, &child]).await;
 }
 
-/// fake-lean's verifier rejects any module whose code contains `forge`, so
+/// fake-pisa's verifier rejects any module whose code contains `forge`, so
 /// whether this code is kept shows whether the verifier ran.
 const FORGED: &str = "import Foo\n\ntheorem forge : False := by trivial";
 const MACRO: &str = "import Foo\n\nmacro \"twice\" : term => `(2)\ndef m : Nat := twice";

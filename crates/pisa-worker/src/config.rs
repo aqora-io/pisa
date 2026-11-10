@@ -19,23 +19,23 @@ pub struct WorkerConfig {
     #[arg(long, env = "PISA_REPL", default_value = "repl")]
     pub repl: PathBuf,
     /// The `lean` executable, used to explain imports the REPL fails to load,
-    /// to compile snapshots, and to re-verify them.
+    /// and to compile snapshots.
     #[arg(long, env = "PISA_LEAN", default_value = "lean")]
     pub lean: PathBuf,
     /// `lake`, which runs `lake comparator` on a run's export. Elan's picks
     /// the toolchain the export names, which is the project's.
     #[arg(long, env = "PISA_LAKE", default_value = "lake")]
     pub lake: PathBuf,
-    /// The script `lean --run` executes to re-verify a snapshot module through
-    /// the kernel.
+    /// The `pisa` tool (`docker/pisa-lean`), which re-verifies snapshot
+    /// modules through the kernel.
     #[arg(
         long,
-        env = "PISA_VERIFIER",
-        default_value = "/opt/verifier/PisaVerify.lean"
+        env = "PISA_TOOL",
+        default_value = "/opt/pisa/.lake/build/bin/pisa"
     )]
-    pub verifier: PathBuf,
+    pub tool: PathBuf,
     /// The built `Pisa` library (`docker/pisa-lean`), whose report every
-    /// header imports and the verifier runs: its `.olean` root.
+    /// header imports: its `.olean` root.
     #[arg(
         long,
         env = "PISA_LEAN_LIB",

@@ -12,7 +12,7 @@ use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplRespon
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
-use crate::launcher::{Compiled, Launcher, Verified};
+use crate::launcher::{Compiled, Launcher, VerifyRun};
 use crate::policy::{Policy, header_command};
 use crate::snapshots::Snapshots;
 
@@ -372,10 +372,17 @@ impl Lease {
         self.pool.launcher.deps(self.id, file, timeout).await
     }
 
-    /// Re-verifies a snapshot module through the kernel; see
-    /// [`Launcher::verify`].
-    pub async fn verify(&self, module: &str, timeout: Duration) -> Verified {
-        self.pool.launcher.verify(self.id, module, timeout).await
+    /// Starts re-checking snapshot modules through the kernel, imports
+    /// first; see [`Launcher::verify`].
+    pub fn verify(
+        &self,
+        modules: &[String],
+        imports: Duration,
+        per_module: Duration,
+    ) -> std::io::Result<VerifyRun<'_>> {
+        self.pool
+            .launcher
+            .verify(self.id, modules, imports, per_module)
     }
 
     pub fn policy(&self) -> &Policy {

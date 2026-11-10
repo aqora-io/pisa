@@ -3,12 +3,6 @@
 //! `lean --stdin --json` reports an import conflict for each `import Clash`
 //! line on stdin, as Lean does.
 //!
-//! `lean --run <verifier> <module>` re-verifies a snapshot: it loads the
-//! module's own code from its fake olean and prints a `PISA_VERIFY` line with
-//! its declarations, reporting `ok:false` when the code contains a `forge`
-//! marker (standing in for the kernel catching a forged declaration). A
-//! `SLOW_KERNEL <ms>` marker in the code makes it take that long.
-//!
 //! `lean --deps <file>` prints the `.olean` path of each module the file
 //! imports.
 //!
@@ -22,15 +16,12 @@
 
 use std::io::Read;
 
-use pisa_tests::{declarations, declares, find_module, imported_code, imports, is_module, needs};
+use pisa_tests::{declares, find_module, imported_code, imports, is_module, needs};
 use serde_json::json;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.first().map(String::as_str) == Some("--run") {
-        // `lean --run <verifier> <module>`: re-verify a snapshot module.
-        verify(args.last().unwrap());
-    } else if args.first().map(String::as_str) == Some("--deps") {
+    if args.first().map(String::as_str) == Some("--deps") {
         deps(args.last().unwrap());
     } else if let Some(i) = args.iter().position(|a| a == "-o") {
         compile(&args[i + 1], args.last().unwrap());
@@ -58,26 +49,6 @@ fn deps(file: &str) {
         });
         println!("{}", path.display());
     }
-}
-
-/// The snapshot verifier's stand-in: load the module's own code from its fake
-/// olean on LEAN_PATH, report its declarations, and reject it when the code
-/// carries a `forge` marker (standing in for the kernel catching a forgery).
-fn verify(module: &str) {
-    let code = find_module(module)
-        .and_then(|f| std::fs::read_to_string(f).ok())
-        .unwrap_or_default();
-    if let Some(ms) = code.split("SLOW_KERNEL ").nth(1) {
-        let ms: u64 = ms.lines().next().unwrap().trim().parse().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-    }
-    let verdict = if code.contains("forge") {
-        json!({"ok": false, "reason": "kernel re-check: forged declaration"})
-    } else {
-        let decls: serde_json::Value = serde_json::from_str(&declarations(&code)).unwrap();
-        json!({"ok": true, "declarations": decls})
-    };
-    println!("PISA_VERIFY {verdict}");
 }
 
 fn report(line: usize, severity: &str, data: &str) {

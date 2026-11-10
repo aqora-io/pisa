@@ -121,7 +121,7 @@ const MARKER: &str = "PISA_DECLS ";
 /// that its type and value use (`type_refs`, `value_refs`; an inductive's
 /// "value" is its constructors and recursor). `generated` marks what Lean
 /// makes on demand, such as equation lemmas, which a replacement needn't
-/// have. The kernel verifier (`docker/verifier/PisaVerify.lean`) describes
+/// have. The kernel verifier (`pisa verify`, `docker/pisa-lean`) describes
 /// declarations with the same code. Rooted, so user declarations can't shadow
 /// it.
 pub const AXIOM_REPORT: &str = "run_cmd _root_.Pisa.reportNew";

@@ -1,8 +1,8 @@
 //! The axiom report and the kernel verifier on real Lean: code is compiled to
 //! snapshot modules as a worker builds them, reported as the builder reports
-//! them, and re-checked by `docker/verifier/PisaVerify.lean`; the `pisa` tool
-//! (`docker/pisa-lean`) is checked against them. Each test needs
-//! elan on `PATH` and the `Pisa` library built, and runs on the library's
+//! them, and re-checked by `pisa verify` (`docker/pisa-lean`); `pisa build`
+//! is checked against them. Each test needs
+//! elan on `PATH` and `docker/pisa-lean` built, and runs on the library's
 //! toolchain, so they are ignored by default:
 //!
 //! ```text
@@ -17,7 +17,7 @@ use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{CommandResponse, Message};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
-use pisa_worker::launcher::{Verified, compile_args};
+use pisa_worker::launcher::compile_args;
 use pisa_worker::policy::{
     DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_export, module_report,
     parse_declarations, parse_export, parse_report,
@@ -169,25 +169,7 @@ impl Snapshots {
 
     /// The kernel verifier's declarations.
     fn verify(&self, id: &str) -> Vec<Declaration> {
-        let verifier = docker().join("verifier/PisaVerify.lean");
-        let out = self.lean(
-            &["--run", &verifier.to_string_lossy(), &snapshot::module(id)],
-            true,
-        );
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout
-            .lines()
-            .find_map(|l| l.strip_prefix("PISA_VERIFY "))
-            .unwrap_or_else(|| {
-                panic!(
-                    "no verdict for s{id}:\n{stdout}{}",
-                    String::from_utf8_lossy(&out.stderr)
-                )
-            });
-        let verified: Verified = serde_json::from_str(line).unwrap();
-        assert!(verified.ok, "s{id} rejected: {:?}", verified.reason);
-        let decls = parse_declarations(verified.declarations).unwrap();
-        policy().judge_decls(false, Some(decls)).declarations
+        verdict_declarations(&self.tool_verify(&[id])[0])
     }
 }
 

@@ -20,16 +20,16 @@ pub struct Launcher {
     repl: PathBuf,
     lean: PathBuf,
     lake: PathBuf,
-    verifier: PathBuf,
+    tool: PathBuf,
     project: Option<PathBuf>,
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
     env: Option<Vec<(OsString, OsString)>>,
     /// The project's module search path plus the snapshot cache and the
-    /// `Pisa` library, for the REPL and the verifier.
+    /// `Pisa` library, for the REPL.
     lean_path: OsString,
     /// The same without the `Pisa` library, for building submitted code,
-    /// which has no use for it.
+    /// which has no use for it, and re-checking it.
     build_path: OsString,
     sandbox: Sandbox,
     work_dir: PathBuf,
@@ -62,16 +62,104 @@ pub struct Ran {
 /// among them.
 const LAKE_ENV: [&str; 5] = ["PATH", "HOME", "ELAN_HOME", "LANG", "TMPDIR"];
 
-/// The snapshot verifier's `PISA_VERIFY` verdict. `ok` is false when the
-/// kernel rejected a declaration; `report` carries its axiom report (the
-/// JSON array the policy already parses).
-#[derive(Debug, serde::Deserialize)]
-pub struct Verified {
+/// The kernel re-check's verdict on one module, from a `PISA_VERIFY` line of
+/// `pisa verify`.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Verdict {
+    /// The module, e.g. `PisaSnap.s0f…`.
+    pub module: String,
+    /// False when the kernel rejected a declaration.
     pub ok: bool,
+    /// Why the kernel rejected it.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Its declarations as the verifier describes them: the JSON array the
+    /// policy parses.
     #[serde(default)]
     pub declarations: serde_json::Value,
+}
+
+/// Why a re-check gave no verdict on a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unfinished {
+    /// It ran out of time, loading the imports or on the module.
+    Timeout(Duration),
+    /// The slot's memory limit killed it.
+    OutOfMemory,
+    /// It couldn't start, or ended without a verdict.
+    Crash(String),
+}
+
+impl std::fmt::Display for Unfinished {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unfinished::Timeout(limit) => {
+                write!(f, "the re-check took more than {}s", limit.as_secs())
+            }
+            Unfinished::OutOfMemory => write!(f, "the re-check exceeded its memory limit"),
+            Unfinished::Crash(why) => write!(f, "the re-check failed: {why}"),
+        }
+    }
+}
+
+/// A run of `pisa verify` over modules, imports first, whose verdicts are
+/// read as they come: see [`next`](Self::next). The process is killed when
+/// the run is dropped.
+pub struct VerifyRun<'a> {
+    launcher: &'a Launcher,
+    slot: usize,
+    child: tokio::process::Child,
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    oom_before: u64,
+    /// The time left for the imports, until `PISA_IMPORTED`.
+    imports: Option<Duration>,
+    per_module: Duration,
+    ended: bool,
+}
+
+impl VerifyRun<'_> {
+    /// The verdict on the next module, an [`Unfinished`] if there is none,
+    /// or `None` once the run has ended without fault. A rejection ends it.
+    pub async fn next(&mut self) -> Option<Result<Verdict, Unfinished>> {
+        if self.ended {
+            return None;
+        }
+        let verdict = self.read().await;
+        if !matches!(verdict, Some(Ok(Verdict { ok: true, .. }))) {
+            self.ended = true;
+        }
+        verdict
+    }
+
+    async fn read(&mut self) -> Option<Result<Verdict, Unfinished>> {
+        loop {
+            let limit = self.imports.unwrap_or(Duration::ZERO) + self.per_module;
+            let line = match tokio::time::timeout(limit, self.lines.next_line()).await {
+                Err(_) => return Some(Err(Unfinished::Timeout(limit))),
+                Ok(Err(e)) => return Some(Err(Unfinished::Crash(e.to_string()))),
+                Ok(Ok(line)) => line,
+            };
+            let Some(line) = line else {
+                let status = self.child.wait().await;
+                if self.launcher.oom_kills(self.slot) > self.oom_before {
+                    return Some(Err(Unfinished::OutOfMemory));
+                }
+                return match status {
+                    Ok(s) if s.success() => None,
+                    Ok(s) => Some(Err(Unfinished::Crash(format!("it exited with {s}")))),
+                    Err(e) => Some(Err(Unfinished::Crash(e.to_string()))),
+                };
+            };
+            if line.starts_with("PISA_IMPORTED ") {
+                self.imports = None;
+            } else if let Some(json) = line.strip_prefix("PISA_VERIFY ") {
+                return Some(
+                    serde_json::from_str(json)
+                        .map_err(|e| Unfinished::Crash(format!("an unreadable verdict: {e}"))),
+                );
+            }
+        }
+    }
 }
 
 impl Launcher {
@@ -128,7 +216,7 @@ impl Launcher {
             // Usually a bare `lean`, found on the project environment's PATH.
             lean: cfg.lean.clone(),
             lake: cfg.lake.clone(),
-            verifier: cfg.verifier.clone(),
+            tool: cfg.tool.clone(),
             project: cfg.project.clone(),
             env,
             lean_path,
@@ -316,38 +404,37 @@ impl Launcher {
             .collect())
     }
 
-    /// Re-verifies snapshot `module` through the kernel with `lean --run`, in
-    /// the slot's sandbox and cgroup. A timeout or a missing `PISA_VERIFY`
-    /// line is reported as `ok: false`.
-    pub async fn verify(&self, slot: usize, module: &str, timeout: Duration) -> Verified {
-        let not_ok = |reason: String| Verified {
-            ok: false,
-            reason: Some(reason),
-            declarations: serde_json::Value::Null,
-        };
-        let verifier = self.verifier.to_string_lossy().into_owned();
-        let args = ["--run", &verifier, module];
-        let run = async {
-            let mut cmd = self.command(slot, &self.lean, &args)?;
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .kill_on_drop(true);
-            cmd.spawn()?.wait_with_output().await
-        };
-        let output = match tokio::time::timeout(timeout, run).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return not_ok(format!("running the verifier failed: {e}")),
-            Err(_) => return not_ok("the verifier timed out".into()),
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let Some(line) = stdout.lines().find_map(|l| l.strip_prefix("PISA_VERIFY ")) else {
-            return not_ok("the verifier produced no verdict".into());
-        };
-        match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => not_ok(format!("unreadable verifier verdict: {e}")),
-        }
+    /// Starts `pisa verify` on `modules`, imports first, in the slot's
+    /// sandbox and cgroup. It has `imports` to load what they import, and
+    /// then `per_module` for each module.
+    pub fn verify(
+        &self,
+        slot: usize,
+        modules: &[String],
+        imports: Duration,
+        per_module: Duration,
+    ) -> std::io::Result<VerifyRun<'_>> {
+        use tokio::io::AsyncBufReadExt;
+        let oom_before = self.oom_kills(slot);
+        let mut args = vec!["verify"];
+        args.extend(modules.iter().map(String::as_str));
+        let mut cmd = self.command_on(slot, &self.tool, &args, &self.build_path)?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn()?;
+        let stdout = child.stdout.take().expect("piped stdout");
+        Ok(VerifyRun {
+            launcher: self,
+            slot,
+            child,
+            lines: tokio::io::BufReader::new(stdout).lines(),
+            oom_before,
+            imports: Some(imports),
+            per_module,
+            ended: false,
+        })
     }
 
     /// Runs `lake` with `args` in `dir`, in `slot`'s cgroup but outside the

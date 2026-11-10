@@ -60,6 +60,7 @@ use crate::catalog::{
 };
 use crate::check::{header_error, policy_error, run, unexpected};
 use crate::db::Db;
+use crate::launcher::Verdict;
 use crate::policy::{
     Policy, module_export, module_report, parse_declarations, parse_export, parse_report,
     uses_macros,
@@ -628,7 +629,6 @@ enum Recheck {
     /// The module was deleted and built again since the chain was read, so
     /// this run doesn't verify it.
     Changed,
-    Failed(String),
 }
 
 /// Every module a snapshot needs: its imports' modules, then its own.
@@ -719,13 +719,24 @@ fn failure_error(f: &VerifyFailure) -> Error {
 /// declarations with their axioms from there, so that they don't depend on
 /// whatever ran during the build. The error is why the re-check failed.
 async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<ReportedDeclaration>, String> {
-    let verified = slot.verify(&snapshot::module(id), REPORT_TIMEOUT).await;
-    if !verified.ok {
-        return Err(verified
-            .reason
-            .unwrap_or_else(|| "snapshot rejected".into()));
+    let modules = [snapshot::module(id)];
+    let mut run = slot
+        .verify(&modules, slot.import_timeout(), REPORT_TIMEOUT)
+        .map_err(|e| format!("the re-check failed to start: {e}"))?;
+    match run.next().await {
+        Some(Ok(verdict)) => verified_declarations(verdict),
+        Some(Err(unfinished)) => Err(unfinished.to_string()),
+        None => Err("the re-check gave no verdict".into()),
     }
-    parse_declarations(verified.declarations)
+}
+
+/// A verdict's declarations, or why there are none: the kernel rejected the
+/// module, or the verdict is unreadable.
+fn verified_declarations(verdict: Verdict) -> Result<Vec<ReportedDeclaration>, String> {
+    if !verdict.ok {
+        return Err(verdict.reason.unwrap_or_else(|| "snapshot rejected".into()));
+    }
+    parse_declarations(verdict.declarations)
         .ok_or_else(|| "unreadable verifier declarations".to_string())
 }
 
@@ -1285,12 +1296,13 @@ impl Snapshots {
             }
         }
         if job.verify == Some(true) {
-            for import in snapshot::imports(&split.header).unwrap_or_default() {
-                let error = match self.verify_chain(pool, &import).await {
-                    Ok((_, Some(failure))) => failure_error(&failure),
-                    Ok((_, None)) => continue,
-                    Err(e) => e,
-                };
+            let imports = snapshot::imports(&split.header).unwrap_or_default();
+            let error = match self.verify_chain(pool, &imports).await {
+                Ok((_, Some(failure))) => Some(failure_error(&failure)),
+                Ok((_, None)) => None,
+                Err(e) => Some(e),
+            };
+            if let Some(error) = error {
                 response.check.error = Some(error);
                 return Some(response);
             }
@@ -1332,7 +1344,7 @@ impl Snapshots {
     ) -> Option<CreateSnapshotResponse> {
         let meta = if job.verify == Some(true) && !meta.verified {
             let verified = async {
-                let (_, failure) = self.verify_chain(pool, id).await?;
+                let (_, failure) = self.verify_chain(pool, &[id.to_string()]).await?;
                 Ok::<_, Error>((self.catalog.module(id).await?, failure))
             };
             match verified.await {
@@ -1801,7 +1813,7 @@ impl Snapshots {
     ) -> Result<VerifySnapshotResponse, Error> {
         let entry = self.parse(entry)?;
         let id = self.catalog.entry(&entry).await?.module;
-        let (checked, failure) = self.verify_chain(pool, &id).await?;
+        let (checked, failure) = self.verify_chain(pool, &[id]).await?;
         // As the entry and its module are now.
         let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
@@ -1812,58 +1824,84 @@ impl Snapshots {
         })
     }
 
-    /// Walks `meta.modules`, which lists imports before what imports them, so
-    /// a module is only marked verified once its imports are. Stops at the
-    /// first module that fails, or that was deleted and built again since:
-    /// that one isn't verified this run, which isn't an error. Returns the
-    /// modules that passed, in order, and the one that failed.
+    /// Re-checks the modules that the modules `ids` need, theirs included,
+    /// in one run of the verifier. Each module's record lists imports before
+    /// what imports them, so a module is only marked verified once its imports
+    /// are. Stops at the first module that fails, or that was deleted and
+    /// built again since: that one isn't verified this run, which isn't an
+    /// error. Returns the modules that passed, in order, and the one that
+    /// failed.
+    ///
+    /// This doesn't take the snapshots' locks, which every check on them
+    /// needs: they shouldn't wait for the kernel, and two re-checks of a
+    /// module agree.
     async fn verify_chain(
         &self,
         pool: &Arc<Pool>,
-        id: &str,
+        ids: &[String],
     ) -> Result<(Vec<String>, Option<VerifyFailure>), Error> {
-        self.ensure_one(id).await?;
-        let modules = self.catalog.module(id).await?.modules;
-        let mut checked = Vec::new();
-        let mut failure = None;
-        for module in &modules {
-            match self.verify_module(pool, module).await? {
-                Recheck::Passed => checked.push(snapshot::module(&module.id)),
-                Recheck::AlreadyVerified => {}
-                // Whatever imports it was built again too, or is gone.
-                Recheck::Changed => break,
-                Recheck::Failed(reason) => {
-                    failure = Some(VerifyFailure {
-                        module: snapshot::module(&module.id),
-                        reason,
-                    });
-                    break;
+        let mut modules: Vec<Module> = Vec::new();
+        for id in ids {
+            self.ensure_one(id).await?;
+            for module in self.catalog.module(id).await?.modules {
+                if !modules.contains(&module) {
+                    modules.push(module);
                 }
             }
         }
-        Ok((checked, failure))
-    }
-
-    /// Re-checks one module build, whose imports must be verified and in the
-    /// local cache, unless it is already verified. Its axioms then come from
-    /// the re-check, replacing what the build's report said.
-    ///
-    /// This doesn't take the snapshot's lock, which every check on it needs:
-    /// they shouldn't wait for the kernel, and two re-checks of a module agree.
-    async fn verify_module(&self, pool: &Arc<Pool>, module: &Module) -> Result<Recheck, Error> {
-        if let Some(done) = self.before_recheck(module).await? {
-            return Ok(done);
+        // Those this run re-checks, as far as the first built again.
+        let mut todo = Vec::new();
+        for module in modules {
+            match self.before_recheck(&module).await? {
+                // Whatever imports it was built again too, or is gone.
+                Some(Recheck::Changed) => break,
+                Some(_) => {}
+                None => todo.push(module),
+            }
+        }
+        let mut checked = Vec::new();
+        if todo.is_empty() {
+            return Ok((checked, None));
         }
         // No header to prefer: this takes a slot with nothing warm if it can.
         let mut slot = pool.acquire("").await;
         // The verifier imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
-        let verification = match recheck_module(&slot, &module.id).await {
-            Ok(decls) => slot.policy().judge_decls(false, Some(decls)),
-            Err(reason) => return Ok(Recheck::Failed(reason)),
+        let names: Vec<String> = todo.iter().map(|m| snapshot::module(&m.id)).collect();
+        let mut run = match slot.verify(&names, slot.import_timeout(), REPORT_TIMEOUT) {
+            Ok(run) => run,
+            Err(e) => {
+                let failure = VerifyFailure {
+                    module: names[0].clone(),
+                    reason: format!("the re-check failed to start: {e}"),
+                };
+                return Ok((checked, Some(failure)));
+            }
         };
-        drop(slot);
-        self.record_recheck(module, &verification).await
+        let mut failure = None;
+        for (module, name) in todo.iter().zip(names) {
+            let verdict = match run.next().await {
+                Some(Ok(verdict)) => verified_declarations(verdict),
+                Some(Err(unfinished)) => Err(unfinished.to_string()),
+                None => Err("the re-check gave no verdict".into()),
+            };
+            let decls = match verdict {
+                Ok(decls) => decls,
+                Err(reason) => {
+                    failure = Some(VerifyFailure {
+                        module: name,
+                        reason,
+                    });
+                    break;
+                }
+            };
+            let verification = slot.policy().judge_decls(false, Some(decls));
+            match self.record_recheck(module, &verification).await? {
+                Recheck::Passed => checked.push(name),
+                _ => break,
+            }
+        }
+        Ok((checked, failure))
     }
 
     /// Gets a re-check of a module build ready: `Changed` if the module's

@@ -8,8 +8,8 @@ public import Pisa.Canon
 /-!
 How the worker describes a declaration, for its axiom report (`run_cmd
 _root_.Pisa.reportNew` after code, `_root_.Pisa.reportModule` for an imported
-snapshot) and for the kernel verifier (`docker/verifier/PisaVerify.lean`),
-which call the same `describe`.
+snapshot) and for the kernel verifier (`pisa verify`, `Pisa.Verify`), which
+call the same `describe`.
 
 A description is `{name, kind, axioms, assumes, type, value, type_refs,
 value_refs, generated, parent}`:

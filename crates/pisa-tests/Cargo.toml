@@ -15,6 +15,10 @@ name = "fake-lean"
 path = "src/bin/fake-lean.rs"
 
 [[bin]]
+name = "fake-pisa"
+path = "src/bin/fake-pisa.rs"
+
+[[bin]]
 name = "fake-lake"
 path = "src/bin/fake-lake.rs"
 
