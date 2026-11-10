@@ -38,6 +38,31 @@ async fn check(c: &Cluster, session: &Value, code: &str) -> Value {
 const CODE: &str = "import Foo\ntheorem t : 1 = 1 := by sorry";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_session_says_when_its_states_cant_see_what_its_code_declares() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    // The lines of the warning that a state misses the code's declarations.
+    let hidden = |s: &Value| -> Vec<u64> {
+        let messages = s["messages"].as_array().unwrap();
+        let warned = messages.iter().filter(|m| {
+            m["severity"] == "warning"
+                && m["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("can't use what its code declares")
+        });
+        warned.map(|m| m["pos"]["line"].as_u64().unwrap()).collect()
+    };
+    let s = start(
+        &c,
+        "import Foo\ndef foo : Nat := 1\ntheorem t : foo = 1 := by sorry",
+    )
+    .await;
+    assert_eq!(hidden(&s), [2], "{s}");
+    let s = start(&c, CODE).await;
+    assert_eq!(hidden(&s), Vec::<u64>::new(), "{s}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn session_is_a_tree_of_states_with_a_final_check() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let s = start(&c, CODE).await;

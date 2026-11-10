@@ -92,7 +92,12 @@ The REPL's failures aren't the workload's. Running the REPL by hand on `IsDistBo
 2. `#check @Space.IsDistBounded` in the env after the body succeeds.
 3. A `Tactic` on the first sorry's fresh proof state answers `Lean error: Unknown constant 'Space.IsDistBounded'`.
 
-So on these module-system files, the REPL's tactic mode can't see the file's own declarations even before any reload. This is not C10's reload problem, and replaying sessions (C10's fix) would not cure it. It affects pisa's sessions on such code today.
+So the REPL's tactic mode can't see the file's own declarations, even before any reload. The cause is how the body was sent, not the module system:
+- The bench sends the whole body as one REPL command on the header's environment, as pisa's sessions do, and the REPL makes each sorry's proof state on the environment that command started from.
+- A plain file fails the same way. With `def foo : Nat := 1` and then `theorem t : foo = 1 := by sorry` sent as one command, `decide` on the state fails on `foo`; sent as two commands it works, as the review measured by hand with the REPL of the 4.35.0 worker image (C14). The end-to-end script checks the first on 4.36.0-rc2, and that the same theorem started on a snapshot that declares `foo` works.
+- The eight modules here are all module-system files, so the bench couldn't tell the two causes apart.
+
+The replay row therefore measures this way of sending the body, not what the REPL could do with the body split into commands. Splitting it would serve fresh states, but a reload on another worker would then have to rebuild the environment before the sorry. This is not C10's reload problem either, and C10's replay would not cure it. pisa's sessions now warn when their code declares something before a `sorry`.
 
 Beam's 23 unclosed blocks are in `Derivatives.Basic` (18), `IsDistBounded` (4) and `Space.Basic` (1). They weren't investigated. `IsDistBounded`'s body elaborates without errors under the worker's header, so the `autoImplicit` errors below don't explain all of them.
 
@@ -121,15 +126,15 @@ A file always has a module name, so Beam's report can't stand in for the REPL's 
 | --- | --- |
 | Beam runs in the unchanged sandbox | met |
 | Warm goals within 100 ms at p95 | met: p90 at most 13.8 ms, max 21 ms |
-| A step no slower than the REPL's tactic plus pickle | met where both work (18.8 against 25.8 ms on `Unbounded`); the single `PhysHermite` block is 13.5 against 10.9 ms. Mostly moot: the REPL replays 10 of 198 blocks |
-| Candidate throughput at least twice the REPL's at equal memory | not shown. Per document, probes don't scale with concurrency. The REPL's exploration path fails on this code, so there is no throughput to compare; acceptance-style items are 1.0 to 2.4 times faster on Beam |
+| A step no slower than the REPL's tactic plus pickle | met where both work (18.8 against 25.8 ms on `Unbounded`); the single `PhysHermite` block is 13.5 against 10.9 ms. Mostly moot: the REPL replays 10 of 198 blocks with the body sent as one command |
+| Candidate throughput at least twice the REPL's at equal memory | not shown. Per document, probes don't scale with concurrency. The REPL's exploration path fails on this code sent as one command, so there is no throughput to compare; acceptance-style items are 1.0 to 2.4 times faster on Beam |
 | Goals equal at 99% of positions | not met: 77% equal or equal up to layout. Most of the rest is the REPL answering nothing (21%); 2% are different tactics |
 | Reports equal | not met as a stand-in for acceptance (24 of 32, only module-derived names differ). Met for reading statuses in interactive work |
 
 ## Recommendation
 
 - **Use Beam for the interactive path.** That covers sessions and tactic steps, goals at positions and candidate exploration, the jobs that work on a file the client keeps editing.
-  - On Physlib's module-system code it is the only one of the two that works: 175 against 10 proofs replayed.
+  - On these files, sent as pisa sends a session's code, it is the only one of the two that works: 175 against 10 proofs replayed.
   - It answers goals in milliseconds once a document is open, and re-elaborates an edit in under 2 s.
 - **Keep acceptance where it is.** Whole-file checks, the axiom report for verdicts, snapshots and the kernel re-check stay on the REPL and `lean`.
   - Beam's reports name private and Lean-named declarations after the document's module.

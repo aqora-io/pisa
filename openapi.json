@@ -1804,6 +1804,7 @@
             "type": "string"
           },
           "messages": {
+            "description": "What Lean said about the code, and a warning, at its first line, if\nthe code declares something before a `sorry`: each state starts from\nthe imports alone, so its tactics can't use what the code declares.",
             "items": {
               "$ref": "#/components/schemas/Message"
             },
@@ -2953,7 +2954,7 @@
     },
     "/sessions": {
       "post": {
-        "description": "Checks code with `sorry`s and returns a state for each, to apply tactics to.",
+        "description": "Checks code with `sorry`s and returns a state for each, to apply tactics to. Each state starts from the imports alone: a tactic can't use what the code declares before its `sorry`, which a warning in `messages` points out. Declarations to use go in a snapshot that the code imports.",
         "operationId": "startSession",
         "parameters": [
           {

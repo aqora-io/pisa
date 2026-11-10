@@ -468,6 +468,9 @@ pub struct Session {
     pub id: String,
     /// One per `sorry`, in source order.
     pub states: Vec<State>,
+    /// What Lean said about the code, and a warning, at its first line, if
+    /// the code declares something before a `sorry`: each state starts from
+    /// the imports alone, so its tactics can't use what the code declares.
     #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,

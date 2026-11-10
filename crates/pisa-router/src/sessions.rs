@@ -33,7 +33,10 @@ pub(crate) fn unexpected(result: JobResult) -> ApiError {
 #[utoipa::path(
     post, path = "/sessions", operation_id = "startSession", tag = "sessions",
     summary = "Start a proof session",
-    description = "Checks code with `sorry`s and returns a state for each, to apply tactics to.",
+    description = "Checks code with `sorry`s and returns a state for each, to apply tactics to. \
+        Each state starts from the imports alone: a tactic can't use what the code declares \
+        before its `sorry`, which a warning in `messages` points out. Declarations to use go in \
+        a snapshot that the code imports.",
     params(PreferAsync),
     request_body = StartSessionRequest,
     responses((status = 200, description = "The session, with a state for each `sorry`", body = Session), Accepted, ApiErrors),

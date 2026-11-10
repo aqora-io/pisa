@@ -159,7 +159,7 @@ export interface paths {
         put?: never;
         /**
          * Start a proof session
-         * @description Checks code with `sorry`s and returns a state for each, to apply tactics to.
+         * @description Checks code with `sorry`s and returns a state for each, to apply tactics to. Each state starts from the imports alone: a tactic can't use what the code declares before its `sorry`, which a warning in `messages` points out. Declarations to use go in a snapshot that the code imports.
          */
         post: operations["startSession"];
         delete?: never;
@@ -1441,6 +1441,11 @@ export interface components {
         Session: {
             /** @description Its id, for checking the finished proof at `/sessions/{id}/check`. */
             id: string;
+            /**
+             * @description What Lean said about the code, and a warning, at its first line, if
+             *     the code declares something before a `sorry`: each state starts from
+             *     the imports alone, so its tactics can't use what the code declares.
+             */
             messages: components["schemas"]["Message"][];
             /** @description One per `sorry`, in source order. */
             states: components["schemas"]["State"][];

@@ -1414,5 +1414,12 @@ code on top of it does, seeing only what it exports. `/check` and
 - REPL tactic mode can't write a finished tactic script back into the `sorry`.
   Clients submit the assembled proof to `/sessions/{id}/check`.
 - Scoped extensions, such as scoped notation, don't survive pickling.
+- A session's states start from its imports alone: the REPL makes each on
+  the environment the code started from. So a tactic can't use what the
+  session's own code declares before the `sorry`, and answers that it
+  doesn't know the name; the session's `messages` warn at the first such
+  declaration. Put those declarations in a [snapshot](#snapshots) and start
+  the session on its header: what a snapshot declares is in the environment
+  of the code that imports it.
 - Not built yet: auth and per-tenant fairness, `/jobs` async batches, and
   human workspaces (stage 4).

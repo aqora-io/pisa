@@ -281,6 +281,28 @@ def auto_implicit():
     step("autoImplicit is off unless code turns it on")
 
 
+def sessions_and_their_own_declarations():
+    hidden = "can't use what its code declares"
+
+    def warned(session):
+        return [m["pos"]["line"] for m in session["messages"] if m["severity"] == "warning" and hidden in m["text"]]
+
+    # The REPL makes each state on the environment the code started from.
+    s = post("/sessions", {"code": "def foo : Nat := 1\n\ntheorem t : foo = 1 := by sorry"})
+    assert warned(s) == [1], s
+    status, out = call("POST", f"/states/{s['states'][0]['id']}/tactic", {"tactic": "decide"})
+    errors = [m for m in out.get("messages", []) if m["severity"] == "error"]
+    assert (status == 422 or errors) and "foo" in json.dumps(out), (status, out)
+    # A snapshot's declarations are in the environment of what imports it.
+    base = create_snapshot("def foo : Nat := 1")
+    s = post("/sessions", {"code": f"{base['snapshot']['header']}\n\ntheorem t : foo = 1 := by sorry"})
+    assert warned(s) == [], s
+    done = post(f"/states/{s['states'][0]['id']}/tactic", {"tactic": "decide"})
+    assert done["complete"], done
+    delete_snapshots([base])
+    step("sessions: a state can't use what its code declares before the sorry, and can a snapshot's")
+
+
 def create_snapshot(code, **extra):
     r = post("/snapshots", {"code": code, "timeout": 600, **extra})
     assert "snapshot" in r, r
@@ -569,6 +591,7 @@ if __name__ == "__main__":
     core(failover=not args.no_failover)
     snapshots()
     auto_implicit()
+    sessions_and_their_own_declarations()
     spec_audit()
     statements_under_replaces()
     allow_by_name()
