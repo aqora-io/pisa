@@ -362,3 +362,52 @@ fn a_private_well_founded_body_cannot_change() {
         ]
     );
 }
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn an_instance_field_proved_by_a_lemma_keeps_its_value() {
+    let class = "class C (n : Nat) : Prop where h : n + 0 = n\n";
+    let stub = format!("{class}instance : C 1 := ⟨sorry⟩\n");
+    let proved = format!("{class}instance : C 1 := ⟨Nat.add_zero 1⟩\n");
+    assert_eq!(changes(&stub, &proved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_field_with_a_parameter_proved_by_a_lemma_keeps_its_value() {
+    let structure = "structure S (n : Nat) where\n  x : Nat\n  h : n + 0 = n\n";
+    let stub = format!("{structure}def s (n : Nat) : S n := ⟨n, sorry⟩\n");
+    let proved = format!("{structure}def s (n : Nat) : S n := ⟨n, Nat.add_zero n⟩\n");
+    assert_eq!(changes(&stub, &proved), Vec::<String>::new());
+    // Data still counts.
+    let other = format!("{structure}def s (n : Nat) : S n := ⟨n + 1, Nat.add_zero n⟩\n");
+    assert_eq!(
+        changes(&stub, &other),
+        ["statement: s has a different value"]
+    );
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_proof_refers_to_what_it_proves_not_to_the_lemma() {
+    let snapshots = Snapshots::new();
+    let lemmas = snapshots.build(
+        "structure S (n : Nat) where\n  x : Nat\n  h : n + 0 = n\n\
+         theorem lem (n : Nat) : n + 0 = n := Nat.add_zero n\n",
+    );
+    let code = format!(
+        "import {}\ndef s (n : Nat) : S n := ⟨n, lem n⟩\n",
+        snapshot::module(&lemmas.id)
+    );
+    let built = snapshots.build(&code);
+    let s = built.agreed().iter().find(|d| d.name == "s").unwrap();
+    assert_eq!(s.value_refs, ["S.mk"]);
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_universe_polymorphic_proof_in_a_definition_keeps_its_value() {
+    let stub = "def c.{u} (α : Sort u) (x : α) : {y : α // y = x} := ⟨x, sorry⟩\n";
+    let proved = "def c.{u} (α : Sort u) (x : α) : {y : α // y = x} := ⟨x, rfl⟩\n";
+    assert_eq!(changes(stub, proved), Vec::<String>::new());
+}

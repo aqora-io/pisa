@@ -65,8 +65,8 @@ def auxName (n : Name) : Bool :=
 
 /-- An auxiliary: a definition or theorem with an auxiliary's name. It isn't
 described; what uses one reads, in its place, its value, or for a theorem the
-proof of its type. Others with such a name, such as `native_decide`'s axiom,
-are described. -/
+proposition it proves (see `canon`). Others with such a name, such as
+`native_decide`'s axiom, are described. -/
 def auxiliary (n : Name) : Option ConstantInfo → Bool
   | some (.defnInfo _) | some (.thmInfo _) => auxName n
   | _ => false
@@ -119,68 +119,127 @@ def generated (env : Environment) (n : Name) : Bool :=
     s == "hinj" && p matches .str _ "ctorIdx" && defn.isSome
   | _ => false
 
-
-/-- `e` with each `sorry` as one marker, the anonymous constant, which no
-declaration can be: `sorryAx α s` is `_ α s`. A `sorry` that Lean labels with
-where it was written, `sorryAx (Unit → α) s label` (or `Name → α`), is `_ α s`
-too, so the same `sorry` reads the same in another module or place; the
-universe level is the type's. Any further arguments stay. -/
-partial def sorries (e : Expr) : Expr :=
-  e.replace fun x => do
-    guard (x.isAppOf ``sorryAx)
-    let args := x.getAppArgs
-    guard (args.size ≥ 2)
-    let (type, rest) :=
-      match (Meta.isLabeledSorry? x).isSome, args[0]! with
-      | true, .forallE _ _ body _ => (body.lowerLooseBVars 1 1, args.extract 3 args.size)
-      | _, type => (type, args.extract 2 args.size)
-    return mkAppN (mkApp2 (.const .anonymous []) (sorries type) args[1]!) (rest.map sorries)
+/-- The marker for a `sorry`: `sorry α s` (the anonymous constant, which no
+declaration can be). -/
+def sorryMarker : Expr := .const .anonymous []
 
 /-- The marker for a proof: `proof T` stands for any proof of `T`, as the
 kernel takes any two proofs of a proposition to be equal. The constant `_.0`,
 which no declaration can be. -/
 def proofMarker : Expr := .const (.num .anonymous 0) []
 
-/-- The auxiliaries `e` uses, tracked ones only: Lean's and Mathlib's are
-fixed by the version. -/
-def auxiliariesIn (env : Environment) (e : Expr) : Array Name :=
-  e.getUsedConstants.filter fun m => tracked env m && auxiliary m (env.find? m)
+/-- Whether `type`, its binders aside, is a proposition: its head is a
+constant whose own type ends in `Prop`, such as `Eq`, `LE.le` or `Not`, so
+that a term of this type is a proof. Read from the expression as it is,
+without unfolding anything; it is fully applied, as a type must be. -/
+def isProp (env : Environment) (type : Expr) : Bool := Id.run do
+  let .const i _ := type.getForallBody.getAppFn | return false
+  let some ci := env.find? i | return false
+  return ci.type.getForallBody matches .sort .zero
 
-/-- `e` with each auxiliary in `forms` read as its form there, at the levels
-it is used at. -/
-def unfold (env : Environment) (forms : Std.HashMap Name Expr) (e : Expr) : Expr :=
+/-- Whether an application of `c` is a proof: `c` is a theorem, or its type
+is a proposition (`Eq.refl`, `rfl`, `And.intro`). -/
+def proofHead (env : Environment) (c : Name) : Bool :=
+  match env.find? c with
+  | some (.thmInfo _) => true
+  | some ci => isProp env ci.type
+  | none => false
+
+/-- `e` with every β- and ζ-redex reduced. -/
+partial def betaZeta (e : Expr) : Expr :=
   e.replace fun
-    | .const m ls => do
-      let form ← forms[m]?
-      let ci ← env.find? m
-      return form.instantiateLevelParams ci.levelParams ls
+    | .letE _ _ v b _ => some (betaZeta (b.instantiate1 v))
+    | x@(.app ..) => if x.getAppFn.isLambda then some (betaZeta x.headBeta) else none
     | _ => none
 
-/-- The canonical form of each auxiliary `m` reaches, into `forms`, then
-`m`'s: its value with what it uses read the same way, or for a theorem the
-proof of its type. Lean's constants don't refer to themselves, but one that
-did would be left as it is, `visiting` holding those on the way. -/
+/-- What a proof of `type` applied to `args` proves, as far as `type` takes
+arguments without unfolding anything, β- and ζ-reduced, and the arguments left
+over. -/
+def proves (type : Expr) (args : Array Expr) : Expr × Array Expr := Id.run do
+  let mut type := type
+  let mut i := 0
+  while h : i < args.size do
+    let .forallE _ _ body _ := type | break
+    type := body.instantiate1 args[i]
+    i := i + 1
+  return (betaZeta type, args.extract i args.size)
+
+/-- The canonical form of `e`:
+- each proof, an application of a theorem or of another constant whose type is
+  a proposition, as `proof T`, `T` the proposition it proves, so that a lemma
+  and Lean's auxiliary `_proof_1` for the same proposition read the same;
+- each `sorry` as one marker, `sorry α s` for `sorryAx α s`, or `proof α` if
+  `α` is a proposition, as `sorry` there is a proof like any other; a `sorry`
+  that Lean labels with where it was written, `sorryAx (Unit → α) s label`
+  (or `Name → α`), reads as one of `α`, so the same `sorry` reads the same in
+  another module or place, and the universe level is the type's;
+- each auxiliary definition in `forms` as its form there, at the levels it is
+  used at.
+Any further arguments stay, read the same way. -/
+partial def canon (env : Environment) (forms : Std.HashMap Name Expr) (e : Expr) : Expr :=
+  e.replace fun x => do
+    let .const c ls := x.getAppFn | none
+    let args := x.getAppArgs
+    let proof (type : Expr) (args : Array Expr) :=
+      let (type, rest) := proves type args
+      mkAppN (mkApp proofMarker (canon env forms type)) (rest.map (canon env forms))
+    if c == ``sorryAx && args.size ≥ 2 then
+      let (type, rest) :=
+        match (Meta.isLabeledSorry? x).isSome, args[0]! with
+        | true, .forallE _ _ body _ => (body.lowerLooseBVars 1 1, args.extract 3 args.size)
+        | _, type => (type, args.extract 2 args.size)
+      if ls.head!.normalize == .zero || isProp env type then
+        return proof type rest
+      return mkAppN (mkApp2 sorryMarker (canon env forms type) args[1]!)
+        (rest.map (canon env forms))
+    if proofHead env c then
+      let ci ← env.find? c
+      return proof (ci.instantiateTypeLevelParams ls) args
+    let form ← forms[c]?
+    let ci ← env.find? c
+    return mkAppN (form.instantiateLevelParams ci.levelParams ls) (args.map (canon env forms))
+
+/-- The tracked auxiliary definitions that the canonical form of `e` reads:
+those it uses, and those that what it reads in their place uses (their
+values, and the types of the proofs in them). -/
+def auxiliariesReached (env : Environment) (e : Expr) : Array Name := Id.run do
+  let mut seen : NameSet := {}
+  let mut out := #[]
+  let mut todo := e.getUsedConstants.toList
+  repeat
+    match todo with
+    | [] => break
+    | m :: rest =>
+      todo := rest
+      if seen.contains m then continue
+      seen := seen.insert m
+      let some ci := env.find? m | continue
+      if tracked env m && auxiliary m ci && ci matches .defnInfo _ then
+        out := out.push m
+        todo := ci.value!.getUsedConstants.toList ++ todo
+      if proofHead env m then
+        todo := ci.type.getUsedConstants.toList ++ todo
+  return out
+
+/-- The canonical form of auxiliary definition `m`, into `forms`, after those
+of the auxiliary definitions its value uses. Lean's constants don't refer to
+themselves, but one that did would be left as it is, `visiting` holding those
+on the way. -/
 partial def auxiliaryForm (env : Environment) (visiting : NameSet) (m : Name) :
     StateM (Std.HashMap Name Expr) Unit := do
   if (← get).contains m || visiting.contains m then return
-  let some ci := env.find? m | return
-  let body := match ci with
-    | .thmInfo t => t.type
-    | _ => ci.value?.getD ci.type
-  for a in auxiliariesIn env body do
-    auxiliaryForm env (visiting.insert m) a
-  let body := unfold env (← get) (sorries body)
-  let form := match ci with
-    | .thmInfo _ => mkApp proofMarker body
-    | _ => body
-  modify (·.insert m form)
+  let some (.defnInfo d) := env.find? m | return
+  for a in auxiliariesReached env d.value do
+    if a != m then auxiliaryForm env (visiting.insert m) a
+  let forms ← get
+  modify (·.insert m (canon env forms d.value))
 
-/-- The canonical form of `e`: each `sorry` as one marker, and each auxiliary
-read as its form (see `auxiliaryForm`). -/
+/-- The canonical form of `e` (see `canon`), its auxiliary definitions read
+as their values. -/
 def canonical (env : Environment) (e : Expr) : Expr :=
-  let forms := (auxiliariesIn env e).foldl (init := {}) fun forms m =>
+  let forms := (auxiliariesReached env e).foldl (init := {}) fun forms m =>
     ((auxiliaryForm env {} m).run forms).2
-  unfold env forms (sorries e)
+  canon env forms e
 
 /-- The text of `e`, part of declaration `self` of module `mod`, and the
 constants of this code and of snapshots its canonical form uses, `self`
@@ -188,7 +247,7 @@ aside. -/
 def text (env : Environment) (mod self : Name) (e : Expr) :
     Except String (String × Array Name) := do
   let c := canonical env e
-  let markers := [Name.anonymous, proofMarker.constName!]
+  let markers := [sorryMarker.constName!, proofMarker.constName!]
   let refs := c.getUsedConstants.filter fun m => m != self && tracked env m && !markers.contains m
   let ((), t) ← (discard <| write (constant mod) c : TextM Unit).run {}
   return (t.render, refs.qsort Name.lt)
