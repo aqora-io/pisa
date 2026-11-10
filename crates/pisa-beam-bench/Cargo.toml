@@ -1,0 +1,22 @@
+[package]
+name = "pisa-beam-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Compares Lean Beam with the REPL inside the worker's sandbox; see
+# bench/beam/. Run it in a fresh pisa-worker container, never a live worker.
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+pisa-beam.workspace = true
+pisa-protocol.workspace = true
+pisa-repl.workspace = true
+pisa-worker.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

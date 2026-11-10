@@ -139,7 +139,7 @@ impl Launcher {
 
     /// `program` set up like a REPL for `slot`: same environment, sandbox and
     /// cgroup.
-    fn command(&self, slot: usize, program: &Path, args: &[&str]) -> std::io::Result<Command> {
+    pub fn command(&self, slot: usize, program: &Path, args: &[&str]) -> std::io::Result<Command> {
         self.command_on(slot, program, args, &self.lean_path)
     }
 
