@@ -580,6 +580,46 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   like any head, and with `retire` its old id is deleted: find its copy in
   `created` and audit against that.
 
+<a id="agent-runs"></a>
+**Running agents on snapshots.** A leader hands targets to agents, and
+[replacing](#replacing) keeps their submissions in one run:
+- **The leader.** It creates the spec snapshots, skeletons with `sorry` and
+  one or a few targets each, with their [witnesses](#witnesses), labels the
+  run (see [Labels](#labels)) and holds the spec ids. They stay valid through
+  rebuilds.
+- **Agents.** Each gets its target's spec id and labels every snapshot with
+  the run's labels. Scratch work goes to `/check` (see
+  [Snapshots](#snapshots)), which makes none. To submit, an agent creates its
+  code with `replaces` the snapshot it last submitted for the target, or the
+  spec snapshot at first. [Search](#snapshot-search) shows heads only, so what
+  an agent imports from a hit is a head.
+- **On a `conflict`.** The run moved under the agent: a rebuild copied its
+  last version onto a new base, or another agent extended it. Nothing was
+  built. The agent takes a head from the answer's `heads`, moves its code onto
+  it, its imports becoming those of the head's `code` (`GET /snapshots/{id}`),
+  and submits again, replacing that head.
+- **Parallel attempts.** Agents on one target pass `"fork": true` on their
+  first submission and extend their own branches. The leader keeps one and
+  drops the others with `DELETE /snapshots/{id}?with_replacers=true`, on the
+  ids [`forks`](#spec-audit) names (see [Retention](#retention)). Every fork
+  in the audit is one of these.
+- **Re-checks.** When something below the run changes, such as a helper
+  proved, the leader [rebuilds](#rebuilding) without `retire` while agents
+  work. Agents meet the copies as `conflict`s and move onto them. A rebuild
+  item that loses a race to an agent's submission fails; send the rebuild
+  again and it copies the agent's version. The run doesn't fork, and no
+  submission is lost. `retire` would delete versions agents hold, so their
+  submissions would answer `not_found` without `heads`.
+- **Accepting.** The run is accepted when `audit?against=` its spec ids is
+  `clean` (see [Auditing a run](#spec-audit)), after the leader has reviewed
+  each link in `links`.
+- **Afterwards.** The leader may retire and delete superseded versions.
+  Deletes splice, so the run stays whole, and its links merge once reviewed
+  (see [Retention](#retention)).
+- **On a `not_found`** for its `replaces`, the create lost a race with a
+  delete. The agent finds the run's heads with `audit?against=<its spec id>`
+  and goes on as for a `conflict`.
+
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports
 included, so replacing B with B′ leaves every chunk above B importing B.

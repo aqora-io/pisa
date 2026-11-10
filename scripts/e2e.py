@@ -432,11 +432,11 @@ def snapshot_search():
             "theorem e2e_triple (n : Nat) : 3 * n = n + n + n := by omega\n")
     created = post("/snapshots", {"code": code, "labels": {"e2e-search": run}, "timeout": 600})["snapshot"]
 
-    def hits(scope):
+    def hits(scope, *modules):
         query = {"description": "tripling a number", "name": "e2e_triple", "snapshots": scope}
         status, out = call("POST", "/search", {"queries": [query]})
         assert status == 200, out
-        return [h for h in out["results"][0]["hits"] if h["module"] == created["module"]]
+        return [h for h in out["results"][0]["hits"] if h["module"] in (modules or [created["module"]])]
 
     def until(f, what):
         for _ in range(60):
@@ -455,13 +455,23 @@ def snapshot_search():
     assert not hits({"labels": {"e2e-search": "other"}}) and not hits("none")
     step("snapshot search: a new snapshot is found by label, and its header loads it")
 
+    # The same statement, so the replacement is kept.
+    proof = post("/snapshots", {"code": code.replace(f"-- e2e {run}", f"-- e2e {run} proof"),
+                                "labels": {"e2e-search": run}, "timeout": 600,
+                                "replaces": {"snapshot_id": created["id"]}})["snapshot"]
+    until(lambda: hits(labelled, proof["module"]) and not hits(labelled), "a replacement")
+    assert hits(labelled, proof["module"])[0]["snapshot_ids"] == [proof["id"]]
+    step("snapshot search: a replaced snapshot gives way to what replaces it")
+
+    both = (created["module"], proof["module"])
     moved = {"labels": {"e2e-search": run + "-moved"}}
-    status, _ = call("PATCH", f"/snapshots/{created['id']}", {"labels": moved["labels"]})
+    status, _ = call("PATCH", f"/snapshots/{proof['id']}", {"labels": moved["labels"]})
     assert status == 200
-    until(lambda: hits(moved) and not hits(labelled), "a relabel")
-    status, _ = call("DELETE", f"/snapshots/{created['id']}")
-    assert status == 200
-    until(lambda: not hits("all"), "a delete")
+    until(lambda: hits(moved, proof["module"]) and not hits(labelled, *both), "a relabel")
+    for snapshot in (proof, created):
+        status, _ = call("DELETE", f"/snapshots/{snapshot['id']}")
+        assert status == 200
+    until(lambda: not hits("all", *both), "a delete")
     step("snapshot search: follows relabels and deletes")
 
 

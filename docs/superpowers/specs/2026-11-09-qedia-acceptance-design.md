@@ -126,6 +126,8 @@ and a vacuity probe).
   gets a struct.
 
 ### Rebuild links mirror the run
+*Superseded by [the jj rebuilds design](2026-11-09-jj-rebuilds-design.md).*
+
 For each plan item that rebuilds an entry X:
 1. **X replaced a Y that this plan also rebuilds.**
    - X's copy replaces Y's copy, with X's own `allow`.
@@ -171,6 +173,8 @@ again still replays.
 
 **`level`** becomes "the wave a create runs in: after every item it imports or
 replaces". Its doc and the README say so.
+
+*Superseded by [the jj rebuilds design](2026-11-09-jj-rebuilds-design.md).*
 
 **`retire` keeps `from`.** It deletes the old snapshots the plan rebuilt, top
 down, and no longer deletes `from`. (My call.)
