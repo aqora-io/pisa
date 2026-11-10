@@ -953,11 +953,9 @@ pub struct AuditSnapshotsResponse {
     pub not_proved: Vec<AuditUnproved>,
     /// With `against`: whether the run is done. There is no fork, no spec
     /// snapshot was copied from one that is gone (as a rebuild with `retire`
-    /// leaves it), and every target is accepted on its head: the spec snapshot's module and the
-    /// head's are verified, the head declares the target as the same kind of
-    /// declaration with the same type, and the target is `proved`, or
-    /// `conditional` on assumptions the spec permits (see
-    /// [`AuditAssumption::in_spec`]).
+    /// leaves it), every [comparison](Self::comparisons) found the spec's
+    /// statements kept, and every target is
+    /// [accepted](AuditTarget::accepted) on its head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<bool>,
     /// With `against`: the snapshots the run ends at, which nothing
@@ -982,6 +980,32 @@ pub struct AuditSnapshotsResponse {
     /// replaced, as far as those snapshots exist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<AuditLink>,
+    /// With `against`: each head compared with each spec snapshot it is
+    /// reached from, from their verified records, as a create that replaced
+    /// the spec snapshot with the head's code would compare them, under what
+    /// the links on the way allow. Links record what a create's build
+    /// reported; this is what acceptance rests on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comparisons: Vec<AuditComparison>,
+}
+
+/// A head compared with a spec snapshot it is reached from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditComparison {
+    /// The spec snapshot.
+    pub spec: String,
+    /// The head.
+    pub head: String,
+    /// Why the head doesn't keep the spec's statements, as a refused create
+    /// says it, e.g. `statement: t has a different type`. Empty if it keeps
+    /// them, or if either record isn't verified, which leaves the targets
+    /// unaccepted anyway.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    /// What the head changed that the links on the way allow, and what it
+    /// filled, if it keeps the spec's statements and both are verified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<Replacement>,
 }
 
 /// A snapshot that more than one snapshot replaces.
@@ -1008,6 +1032,13 @@ pub struct AuditTarget {
     pub status: ProofStatus,
     /// The head's module has passed the kernel re-check.
     pub verified: bool,
+    /// What a clean run needs of it: the spec snapshot's module and the
+    /// head's are verified, so that both records come from the kernel
+    /// re-check rather than from a build's report; the head keeps the spec's
+    /// statements (see [`AuditSnapshotsResponse::comparisons`]); and the
+    /// target is `proved`, or `conditional` on assumptions the spec permits
+    /// (see [`AuditAssumption::in_spec`]).
+    pub accepted: bool,
 }
 
 /// A link that let definitions change: `snapshot_id` replaces another

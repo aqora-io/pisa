@@ -55,8 +55,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditFork, AuditLink,
-    AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, CheckResult,
+    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditComparison, AuditFork,
+    AuditLink, AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, CheckResult,
     CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Detail, ErrorKind, Export, Health,
     HealthStatus, JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, Message, Pos,
     ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped,

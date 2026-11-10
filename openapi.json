@@ -115,6 +115,35 @@
         ],
         "type": "object"
       },
+      "AuditComparison": {
+        "description": "A head compared with a spec snapshot it is reached from.",
+        "properties": {
+          "head": {
+            "description": "The head.",
+            "type": "string"
+          },
+          "reasons": {
+            "description": "Why the head doesn't keep the spec's statements, as a refused create\nsays it, e.g. `statement: t has a different type`. Empty if it keeps\nthem, or if either record isn't verified, which leaves the targets\nunaccepted anyway.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "replacement": {
+            "$ref": "#/components/schemas/Replacement",
+            "description": "What the head changed that the links on the way allow, and what it\nfilled, if it keeps the spec's statements and both are verified."
+          },
+          "spec": {
+            "description": "The spec snapshot.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "spec",
+          "head"
+        ],
+        "type": "object"
+      },
       "AuditFork": {
         "description": "A snapshot that more than one snapshot replaces.",
         "properties": {
@@ -170,8 +199,15 @@
             "type": "array"
           },
           "clean": {
-            "description": "With `against`: whether the run is done. There is no fork, no spec\nsnapshot was copied from one that is gone (as a rebuild with `retire`\nleaves it), and every target is accepted on its head: the spec snapshot's module and the\nhead's are verified, the head declares the target as the same kind of\ndeclaration with the same type, and the target is `proved`, or\n`conditional` on assumptions the spec permits (see\n[`AuditAssumption::in_spec`]).",
+            "description": "With `against`: whether the run is done. There is no fork, no spec\nsnapshot was copied from one that is gone (as a rebuild with `retire`\nleaves it), every [comparison](Self::comparisons) found the spec's\nstatements kept, and every target is\n[accepted](AuditTarget::accepted) on its head.",
             "type": "boolean"
+          },
+          "comparisons": {
+            "description": "With `against`: each head compared with each spec snapshot it is\nreached from, from their verified records, as a create that replaced\nthe spec snapshot with the head's code would compare them, under what\nthe links on the way allow. Links record what a create's build\nreported; this is what acceptance rests on.",
+            "items": {
+              "$ref": "#/components/schemas/AuditComparison"
+            },
+            "type": "array"
           },
           "forks": {
             "description": "With `against`: the snapshots on the run that more than one snapshot\nreplaces. The run isn't clean until all but one branch are deleted.",
@@ -261,6 +297,10 @@
       "AuditTarget": {
         "description": "A spec declaration, as a head of the run declares it.",
         "properties": {
+          "accepted": {
+            "description": "What a clean run needs of it: the spec snapshot's module and the\nhead's are verified, so that both records come from the kernel\nre-check rather than from a build's report; the head keeps the spec's\nstatements (see [`AuditSnapshotsResponse::comparisons`]); and the\ntarget is `proved`, or `conditional` on assumptions the spec permits\n(see [`AuditAssumption::in_spec`]).",
+            "type": "boolean"
+          },
           "head": {
             "description": "The head, reached from `spec`, whose declaration this is.",
             "type": "string"
@@ -287,7 +327,8 @@
           "spec",
           "head",
           "status",
-          "verified"
+          "verified",
+          "accepted"
         ],
         "type": "object"
       },

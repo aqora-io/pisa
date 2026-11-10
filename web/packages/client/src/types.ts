@@ -12,6 +12,7 @@ export type {
   ApplyTacticResponse,
   AtPosition,
   AuditAssumption,
+  AuditComparison,
   AuditFork,
   AuditLink,
   AuditSnapshotsResponse,

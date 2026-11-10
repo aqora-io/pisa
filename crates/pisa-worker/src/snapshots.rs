@@ -33,11 +33,11 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    Allow, AuditAssumption, AuditFork, AuditLink, AuditSnapshotsResponse, AuditTarget,
-    AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Error,
-    ErrorKind, Export, ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildReplaced,
-    RebuildSnapshotsResponse, Replacement, Replaces, Snapshot, SnapshotDetail, SnapshotId,
-    VerifyFailure, VerifySnapshotResponse,
+    Allow, AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditSnapshotsResponse,
+    AuditTarget, AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration,
+    DeleteSnapshotResponse, Error, ErrorKind, Export, ListDependentsResponse,
+    ListSnapshotsResponse, RebuildItem, RebuildReplaced, RebuildSnapshotsResponse, Replacement,
+    Replaces, Snapshot, SnapshotDetail, SnapshotId, VerifyFailure, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
@@ -2199,9 +2199,10 @@ impl Snapshots {
             }
         };
         let mut forks = Vec::new();
-        // Each head once, as `(entry, module)`, and those each spec reaches.
+        // Each head once, as `(entry, module)`, and those each spec reaches,
+        // each with what the links on the way there allow.
         let mut heads: Vec<(String, String)> = Vec::new();
-        let mut reached: Vec<Vec<String>> = Vec::new();
+        let mut reached: Vec<Vec<(String, Vec<String>)>> = Vec::new();
         // Whether a spec's chain back reaches a snapshot that is gone.
         let mut cut = false;
         for (spec, spec_meta) in &specs {
@@ -2220,23 +2221,26 @@ impl Snapshots {
                 cut |= older.is_none();
                 back = older.map(|m| (replaces.snapshot_id.clone(), m));
             }
-            // Forward through what replaces it, to the heads.
+            // Forward through what replaces it, to the heads. A head has one
+            // way back, as each snapshot replaces at most one.
             let mut ends = Vec::new();
-            let mut stack = vec![(spec.clone(), spec_meta.clone())];
+            let mut stack = vec![(spec.clone(), spec_meta.clone(), Vec::new())];
             let mut seen = HashSet::new();
-            while let Some((e, entry_meta)) = stack.pop() {
+            while let Some((e, entry_meta, mut allowed)) = stack.pop() {
                 if !seen.insert(e.clone()) {
                     continue;
                 }
                 if e != *spec {
                     add_link(&e, &entry_meta);
+                    let allow = entry_meta.replaces.as_ref().and_then(|r| r.allow.as_ref());
+                    allowed.extend(allow.into_iter().flat_map(|a| a.definitions.clone()));
                 }
                 let replacers = self.catalog.replacers(&e).await?;
                 if replacers.is_empty() {
                     if !heads.iter().any(|(h, _)| *h == e) {
                         heads.push((e.clone(), entry_meta.module));
                     }
-                    ends.push(e);
+                    ends.push((e, allowed));
                     continue;
                 }
                 if replacers.len() > 1
@@ -2250,7 +2254,8 @@ impl Snapshots {
                     });
                 }
                 // Oldest first.
-                stack.extend(replacers.into_iter().rev());
+                let replacers = replacers.into_iter().rev();
+                stack.extend(replacers.map(|(r, m)| (r, m, allowed.clone())));
             }
             reached.push(ends);
         }
@@ -2280,10 +2285,35 @@ impl Snapshots {
                 permitted.extend(axioms.map(|d| normalised(&d.name).into_owned()));
             }
         }
-        let (targets, accepted) = self.targets(&specs, &reached, &heads, &metas, &permitted);
+        let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
+        let mut comparisons = Vec::new();
+        for ((spec, spec_meta), ends) in specs.iter().zip(&reached) {
+            for (head, allowed) in ends {
+                let head_module = module_of[head];
+                let compared = self
+                    .rederive(&spec_meta.module, head_module, allowed, &mut metas)
+                    .await?;
+                let (reasons, replacement) = match compared {
+                    Some(Ok(r)) => (Vec::new(), Some(r)),
+                    Some(Err(reasons)) => (reasons, None),
+                    None => (Vec::new(), None),
+                };
+                comparisons.push(AuditComparison {
+                    spec: self.id(spec),
+                    head: self.id(head),
+                    reasons,
+                    replacement,
+                });
+            }
+        }
+        let (targets, accepted) =
+            self.targets(&specs, &reached, &heads, &metas, &permitted, &comparisons);
         // A spec copied from a snapshot that is gone, as a retiring rebuild
         // leaves it, can't be shown to state what the original did.
-        let clean = forks.is_empty() && accepted && !cut;
+        // Every head keeps its spec's statements, whether or not the spec has
+        // targets, such as one of assumptions only.
+        let kept = comparisons.iter().all(|c| c.replacement.is_some());
+        let clean = forks.is_empty() && accepted && kept && !cut;
 
         // Each head stands for its module.
         let mut entries: BTreeMap<String, String> = BTreeMap::new();
@@ -2299,7 +2329,60 @@ impl Snapshots {
         audit.forks = forks;
         audit.targets = targets;
         audit.links = links;
+        audit.comparisons = comparisons;
         Ok(audit)
+    }
+
+    /// Compares head module `head` with spec module `spec` from their
+    /// records, as a create that replaced the spec with the head's code, under
+    /// an `allow` of `allowed`, would: what it changed, or why it can't
+    /// replace it. `None` if either isn't verified, or is gone: their records
+    /// are then the build's report, which the code judged could have
+    /// influenced. Verified, their imports are too.
+    async fn rederive(
+        &self,
+        spec: &String,
+        head: &str,
+        allowed: &[String],
+        metas: &mut HashMap<String, ModuleMeta>,
+    ) -> Result<Option<Result<Replacement, Vec<String>>>, Error> {
+        let (Some(spec_meta), Some(head_meta)) = (
+            self.cached(spec, metas).await?.cloned(),
+            self.cached(head, metas).await?.cloned(),
+        ) else {
+            return Ok(None);
+        };
+        if !spec_meta.verified || !head_meta.verified {
+            return Ok(None);
+        }
+        let replacing = Replacing {
+            replaced: Replaces {
+                snapshot_id: spec.clone(),
+                allow: (!allowed.is_empty()).then(|| Allow {
+                    definitions: allowed.to_vec(),
+                }),
+            },
+            entry: spec.clone(),
+            declarations: spec_meta.result.declarations,
+            needs: ids(&spec_meta.modules)
+                .filter(|m| *m != spec)
+                .cloned()
+                .collect(),
+        };
+        let needs: Vec<String> = ids(&head_meta.modules).cloned().collect();
+        let swapped = match self
+            .predicted_swap(&replacing, &needs, head, &HashMap::new(), metas)
+            .await
+        {
+            Ok(swapped) => swapped,
+            Err(e) if e.kind == ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        Ok(Some(compare(
+            &replacing,
+            &head_meta.result.declarations,
+            &swapped,
+        )))
     }
 
     /// The targets of an audit against `specs`: each declaration of a spec
@@ -2311,10 +2394,11 @@ impl Snapshots {
     fn targets(
         &self,
         specs: &[(String, EntryMeta)],
-        reached: &[Vec<String>],
+        reached: &[Vec<(String, Vec<String>)>],
         heads: &[(String, String)],
         metas: &HashMap<String, ModuleMeta>,
         permitted: &HashSet<String>,
+        comparisons: &[AuditComparison],
     ) -> (Vec<AuditTarget>, bool) {
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
         let mut targets = Vec::new();
@@ -2329,7 +2413,7 @@ impl Snapshots {
             let declared = meta.result.declarations.iter();
             for d in declared.filter(|d| !d.generated && d.kind != "axiom") {
                 let name = normalised(&d.name);
-                for head in ends {
+                for (head, _) in ends {
                     let Some(head_meta) = metas.get(module_of[head]) else {
                         all_accepted = false;
                         continue;
@@ -2342,12 +2426,15 @@ impl Snapshots {
                         continue;
                     };
                     // Both records come from the kernel re-check, not from a
-                    // build's report, and the head keeps the statement:
-                    // its link alone doesn't say so.
+                    // build's report, and comparing them shows that the head
+                    // keeps the spec's statements: its link alone doesn't.
+                    let (spec_id, head_id) = (self.id(spec), self.id(head));
+                    let kept = comparisons
+                        .iter()
+                        .any(|c| c.spec == spec_id && c.head == head_id && c.replacement.is_some());
                     let accepted = meta.verified
                         && head_meta.verified
-                        && h.kind == d.kind
-                        && h.type_hash == d.type_hash
+                        && kept
                         && match h.status {
                             ProofStatus::Proved => true,
                             ProofStatus::Conditional => h
@@ -2359,10 +2446,11 @@ impl Snapshots {
                     all_accepted &= accepted;
                     targets.push(AuditTarget {
                         name: d.name.clone(),
-                        spec: self.id(spec),
-                        head: self.id(head),
+                        spec: spec_id,
+                        head: head_id,
                         status: h.status,
                         verified: head_meta.verified,
+                        accepted,
                     });
                 }
             }
@@ -3410,11 +3498,18 @@ mod tests {
             ..built(m, b"")
         };
         let specs = [("spec".to_string(), entry("s"))];
-        let reached = [vec!["head".to_string()]];
+        let reached = [vec![("head".to_string(), Vec::new())]];
         let heads = [("head".to_string(), "h".to_string())];
+        // Their comparison found the statements kept.
+        let compared = [AuditComparison {
+            spec: s.id("spec"),
+            head: s.id("head"),
+            reasons: Vec::new(),
+            replacement: Some(Replacement::default()),
+        }];
         let judged = |modules: &[&str]| {
             let metas = modules.iter().map(|m| (m.to_string(), module(m))).collect();
-            s.targets(&specs, &reached, &heads, &metas, &HashSet::new())
+            s.targets(&specs, &reached, &heads, &metas, &HashSet::new(), &compared)
         };
         let (targets, accepted) = judged(&["s", "h"]);
         assert_eq!((targets.len(), accepted), (1, true));

@@ -416,6 +416,25 @@ export interface components {
             /** @description Its module has passed the kernel re-check. */
             verified: boolean;
         };
+        /** @description A head compared with a spec snapshot it is reached from. */
+        AuditComparison: {
+            /** @description The head. */
+            head: string;
+            /**
+             * @description Why the head doesn't keep the spec's statements, as a refused create
+             *     says it, e.g. `statement: t has a different type`. Empty if it keeps
+             *     them, or if either record isn't verified, which leaves the targets
+             *     unaccepted anyway.
+             */
+            reasons?: string[];
+            /**
+             * @description What the head changed that the links on the way allow, and what it
+             *     filled, if it keeps the spec's statements and both are verified.
+             */
+            replacement?: components["schemas"]["Replacement"];
+            /** @description The spec snapshot. */
+            spec: string;
+        };
         /** @description A snapshot that more than one snapshot replaces. */
         AuditFork: {
             /** @description The snapshots that replace it, oldest first. */
@@ -467,13 +486,19 @@ export interface components {
             /**
              * @description With `against`: whether the run is done. There is no fork, no spec
              *     snapshot was copied from one that is gone (as a rebuild with `retire`
-             *     leaves it), and every target is accepted on its head: the spec snapshot's module and the
-             *     head's are verified, the head declares the target as the same kind of
-             *     declaration with the same type, and the target is `proved`, or
-             *     `conditional` on assumptions the spec permits (see
-             *     [`AuditAssumption::in_spec`]).
+             *     leaves it), every [comparison](Self::comparisons) found the spec's
+             *     statements kept, and every target is
+             *     [accepted](AuditTarget::accepted) on its head.
              */
             clean?: boolean;
+            /**
+             * @description With `against`: each head compared with each spec snapshot it is
+             *     reached from, from their verified records, as a create that replaced
+             *     the spec snapshot with the head's code would compare them, under what
+             *     the links on the way allow. Links record what a create's build
+             *     reported; this is what acceptance rests on.
+             */
+            comparisons?: components["schemas"]["AuditComparison"][];
             /**
              * @description With `against`: the snapshots on the run that more than one snapshot
              *     replaces. The run isn't clean until all but one branch are deleted.
@@ -526,6 +551,15 @@ export interface components {
         };
         /** @description A spec declaration, as a head of the run declares it. */
         AuditTarget: {
+            /**
+             * @description What a clean run needs of it: the spec snapshot's module and the
+             *     head's are verified, so that both records come from the kernel
+             *     re-check rather than from a build's report; the head keeps the spec's
+             *     statements (see [`AuditSnapshotsResponse::comparisons`]); and the
+             *     target is `proved`, or `conditional` on assumptions the spec permits
+             *     (see [`AuditAssumption::in_spec`]).
+             */
+            accepted: boolean;
             /** @description The head, reached from `spec`, whose declaration this is. */
             head: string;
             /**
@@ -1523,6 +1557,7 @@ export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
 export type ApplyTacticResponse = components['schemas']['ApplyTacticResponse'];
 export type AtPosition = components['schemas']['AtPosition'];
 export type AuditAssumption = components['schemas']['AuditAssumption'];
+export type AuditComparison = components['schemas']['AuditComparison'];
 export type AuditFork = components['schemas']['AuditFork'];
 export type AuditLink = components['schemas']['AuditLink'];
 export type AuditSnapshotsResponse = components['schemas']['AuditSnapshotsResponse'];

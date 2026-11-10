@@ -392,7 +392,8 @@ def test_audit_against(url):
     audit = client.audit_snapshots(against=[spec["id"]])
     assert audit["clean"] is True and audit["heads"] == [proof["id"]]
     assert audit["targets"] == [
-        {"name": "py_target", "spec": spec["id"], "head": proof["id"], "status": "proved", "verified": True}
+        {"name": "py_target", "spec": spec["id"], "head": proof["id"], "status": "proved", "verified": True,
+         "accepted": True}
     ]
     with pytest.raises(ValueError):
         client.audit_snapshots({"suite": "audit"}, against=[spec["id"]])

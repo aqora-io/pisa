@@ -177,6 +177,7 @@ class AuditTarget(TypedDict):
     head: str
     status: ProofStatus
     verified: bool
+    accepted: bool
 
 class AuditLink(TypedDict):
     """A link that let definitions change: the snapshot, its `replaces` as
@@ -185,6 +186,15 @@ class AuditLink(TypedDict):
     snapshot_id: str
     replaces: Replaces
     replacement: Replacement
+
+class AuditComparison(TypedDict):
+    """A head compared with a spec snapshot it is reached from, from their
+    verified records: why it doesn't keep the spec's statements, or what it
+    changed that the links on the way allow."""
+    spec: str
+    head: str
+    reasons: NotRequired[list[str]]
+    replacement: NotRequired[Replacement]
 
 class AuditSnapshotsResponse(TypedDict):
     summary: AuditSummary
@@ -195,6 +205,7 @@ class AuditSnapshotsResponse(TypedDict):
     forks: NotRequired[list[AuditFork]]
     targets: NotRequired[list[AuditTarget]]
     links: NotRequired[list[AuditLink]]
+    comparisons: NotRequired[list[AuditComparison]]
 
 class RebuildItem(TypedDict):
     """An item without `snapshot_id` is a support item: it has no labels and

@@ -182,6 +182,128 @@ async fn a_head_whose_verified_statement_differs_from_the_spec_is_not_clean() {
         targets(&r),
         [format!("t {} {} proved true", id(&s), id(&p))]
     );
+    assert_eq!(r["targets"][0]["accepted"], false, "{r}");
+    // The audit compares the head with the spec from the verified records,
+    // as the create would have.
+    assert_eq!(
+        r["comparisons"],
+        json!([{"spec": id(&s), "head": id(&p),
+                "reasons": ["statement: t has a different type"]}]),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_whose_verified_definition_differs_from_the_spec_is_not_clean() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ndef f : Nat := 1\ntheorem t : f = f := sorry",
+               "verify": true}),
+    )
+    .await;
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\n-- reported-as: def f : Nat := 1\ndef f : Nat := 2\ntheorem t : f = f := rfl",
+               "replaces": replacing(&s)}),
+    )
+    .await;
+    let (status, v) = c
+        .post(&format!("/snapshots/{}/verify", id(&p)), json!({}))
+        .await;
+    assert_eq!(
+        (status, &v["snapshot"]["verified"]),
+        (200, &json!(true)),
+        "{v}"
+    );
+
+    let r = audit(&c, &[id(&s)]).await;
+    assert_eq!(r["clean"], false, "{r}");
+    assert_eq!(
+        r["comparisons"][0]["reasons"],
+        json!(["statement: f has a different value"]),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spec_without_targets_is_clean_only_if_its_head_keeps_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    // Only an assumption: no targets, but a statement all the same.
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\naxiom a : 1 = 1", "verify": true}),
+    )
+    .await;
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\n-- reported-as: axiom a : 1 = 1\naxiom a : 2 = 2",
+               "replaces": replacing(&s)}),
+    )
+    .await;
+    let (status, v) = c
+        .post(&format!("/snapshots/{}/verify", id(&p)), json!({}))
+        .await;
+    assert_eq!(
+        (status, &v["snapshot"]["verified"]),
+        (200, &json!(true)),
+        "{v}"
+    );
+
+    let r = audit(&c, &[id(&s)]).await;
+    assert!(r.get("targets").is_none(), "{r}");
+    assert_eq!(
+        r["comparisons"][0]["reasons"],
+        json!(["statement: a has a different type"]),
+        "{r}"
+    );
+    assert_eq!(r["clean"], false, "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_base_swapped_under_the_run_is_compared_from_its_verified_record() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ndef g : Nat := 1", "verify": true}),
+    )
+    .await;
+    let s = create(
+        &c,
+        json!({"code": on(&b, "theorem t : g = g := sorry"), "verify": true}),
+    )
+    .await;
+    // The new base's build claims the old `g`; the head builds on it, and
+    // its create compares against that claim.
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\n-- reported-as: def g : Nat := 1\ndef g : Nat := 2"}),
+    )
+    .await;
+    let p = create(
+        &c,
+        json!({"code": on(&b2, "theorem t : g = g := rfl"), "replaces": replacing(&s)}),
+    )
+    .await;
+    let (status, v) = c
+        .post(&format!("/snapshots/{}/verify", id(&p)), json!({}))
+        .await;
+    assert_eq!(
+        (status, &v["snapshot"]["verified"]),
+        (200, &json!(true)),
+        "{v}"
+    );
+
+    let r = audit(&c, &[id(&s)]).await;
+    assert_eq!(r["clean"], false, "{r}");
+    let b_module = b["snapshot"]["module"].as_str().unwrap();
+    assert_eq!(
+        r["comparisons"][0]["reasons"],
+        json!([format!(
+            "statement: g, from {b_module}, has a different value"
+        )]),
+        "{r}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

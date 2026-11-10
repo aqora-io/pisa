@@ -228,7 +228,7 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -479,8 +479,10 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   and no longer do. The new snapshot records `replaces: {snapshot_id,
   allow?}`, which listings and `GET /snapshots/{id}` show. It is set by a
   create that passed the comparison, or composed when the snapshot between is
-  deleted (see [Retention](#retention)), so it can be trusted. A key replay
-  returns the snapshot as it is, without `replacement`.
+  deleted (see [Retention](#retention)). That comparison ran on what the
+  create's build reported, so acceptance doesn't rest on it: the
+  [spec audit](#spec-audit) compares again from verified records. A key
+  replay returns the snapshot as it is, without `replacement`.
 
 <a id="witnesses"></a>
 **Witnesses.** A target whose hypotheses can't hold together can be proved
@@ -542,7 +544,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   → {"summary": {"proved": 1, "conditional": 0, "sorry": 0, "rejected": 0, "unverified_modules": 0},
      "assumptions": [], "not_proved": [], "clean": true, "heads": ["v4.35.0-1a2b3c4d~4b7a…"],
      "targets": [{"name": "t", "spec": "v4.35.0-1a2b3c4d~9c0e…", "head": "v4.35.0-1a2b3c4d~4b7a…",
-                  "status": "proved", "verified": true}]}
+                  "status": "proved", "verified": true, "accepted": true}],
+     "comparisons": [{"spec": "v4.35.0-1a2b3c4d~9c0e…", "head": "v4.35.0-1a2b3c4d~4b7a…",
+                      "replacement": {"filled": ["t"]}}]}
 ```
 
 - **The walk.** From each spec snapshot it follows the snapshots that replace
@@ -559,17 +563,29 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 - **Targets.** Each declaration of a spec snapshot's module, other than its
   assumptions and what Lean generated, is a target. `targets` has a row for
   each target and each head reached from its spec snapshot, with its `status`
-  there and whether the head is `verified`. A replacement keeps every
-  statement of what it replaces, so every head has them all.
+  there, whether the head is `verified`, and whether the target is
+  `accepted` there.
+- **Comparisons.** The audit doesn't take a link's word that the head keeps
+  the spec's statements: that word is what a create's build reported, and the
+  code being judged runs in that build. For each spec snapshot and each head
+  it reaches, `comparisons` has the comparison a create replacing the spec
+  snapshot with the head's code would run (see [Replacing](#replacing)), on
+  their records once the kernel has re-checked both, under every `allow` on
+  the links between them: `reasons` if the head doesn't keep the spec's
+  statements, as a refused create says them, or else `replacement`, what it
+  filled and what allowed changes it made. For review, these are what the
+  head changed, whatever its links say.
 - **`clean`.** There is no fork, no spec snapshot was copied from one that
-  is gone (see *Parameters*), and every target is accepted on its head:
-  the spec snapshot and the head are verified, the head declares the target
-  as the same kind of declaration with the same type, and the target is
-  `proved`, or `conditional` only on assumptions the spec permits, those
-  declared in a spec snapshot's module or in a module it builds on. The
-  records of a module the kernel hasn't re-checked come from its build's
-  report, which the code being judged could influence, so they don't count.
-  Each of `assumptions` says whether the spec permits it (`in_spec`).
+  is gone (see *Parameters*), every comparison found the spec's statements
+  kept (a spec of assumptions only has no targets, but statements all the
+  same), and every target is `accepted` on its head: the
+  spec snapshot and the head are verified, their comparison found the
+  spec's statements kept, and the target is `proved`, or `conditional` only
+  on assumptions the spec permits, those declared in a spec snapshot's module
+  or in a module it builds on. The records of a module the kernel hasn't
+  re-checked come from its build's report, which the code being judged could
+  influence, so they don't count. Each of `assumptions` says whether the spec
+  permits it (`in_spec`).
 - **Links.** For review, `links` lists every link that let definitions change
   (with an `allow`): those on the way to the heads, and those of each spec
   snapshot's own chain back through what it replaced, as far as those
@@ -577,7 +593,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   allows what `to` changed under it. Each is `{snapshot_id, replaces: {snapshot_id, allow},
   replacement: {filled, changed_definitions?, affected?}}`: the link as the
   snapshot's own `replaces` shows it, and what its comparison found: its
-  create's, or the union of two if the snapshot between was deleted.
+  create's, or the union of two if the snapshot between was deleted. Those
+  comparisons are the builds' reports; `comparisons` holds what the audit
+  found from verified records.
 - **Counts.** `summary`, `assumptions` and `not_proved` are those of the
   heads, each standing for its module.
 - **Parameters.** The ids are of one version, which the audit uses; ids of
@@ -625,7 +643,7 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   submissions would answer `not_found` without `heads`.
 - **Accepting.** The run is accepted when `audit?against=` its spec ids is
   `clean` (see [Auditing a run](#spec-audit)), after the leader has reviewed
-  each link in `links`.
+  what each head changed under an `allow`, in `comparisons`.
 - **Afterwards.** The leader may retire and delete superseded versions.
   Deletes splice, so the run stays whole, and its links merge once reviewed
   (see [Retention](#retention)).
