@@ -165,9 +165,12 @@ pub fn exports(code: &str) -> String {
     Value::Array(decls).to_string()
 }
 
-/// The text of a declaration line between `name` and `:=`, and after `:=`.
+/// The text of a declaration line (its keyword, then `name`) between `name`
+/// and `:=`, and after `:=`.
 fn statement_and_value(line: &str, name: &str) -> (String, String) {
-    let rest = line.split_once(name).map_or("", |(_, rest)| rest);
+    let after_keyword = line.trim_start().split_once(char::is_whitespace);
+    let rest = after_keyword.map_or("", |(_, rest)| rest.trim_start());
+    let rest = rest.strip_prefix(name).unwrap_or(rest);
     let (statement, value) = rest.split_once(":=").unwrap_or((rest, ""));
     (statement.trim().to_string(), value.trim().to_string())
 }

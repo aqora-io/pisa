@@ -7,7 +7,7 @@ use std::time::Duration;
 use pisa_protocol::api::{self, ApplyTacticResponse, Error, ErrorKind, Key, Session, State};
 use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{ReplCommand, ReplResponse};
-use pisa_protocol::verify::statement_changes;
+use pisa_protocol::verify::{grouped, parent_in, statement_changes};
 use pisa_protocol::wire::{
     CheckJob, CheckOutcome, SessionCheckJob, SessionChecked, SessionStartJob, SessionTacticJob,
 };
@@ -204,6 +204,7 @@ impl Sessions {
                 verification: None,
             },
             statement_reasons: Vec::new(),
+            statement_changes: Vec::new(),
         };
         let key = match self.parse(&job.session) {
             Ok(k) => k,
@@ -235,15 +236,16 @@ impl Sessions {
             .as_ref()
             .map(|v| v.declarations.as_slice())
             .unwrap_or_default();
-        let mut statement_reasons: Vec<String> = statement_changes(&session.declarations, now)
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let changes = grouped(statement_changes(&session.declarations, now), |c| {
+            parent_in(&session.declarations, &c.name)
+        });
+        let mut statement_reasons: Vec<String> = changes.iter().map(ToString::to_string).collect();
         if !same_imports {
             statement_reasons.push("statement: the imports differ from the session's".into());
         }
         SessionChecked {
             statement_reasons,
+            statement_changes: changes,
             outcome,
         }
     }

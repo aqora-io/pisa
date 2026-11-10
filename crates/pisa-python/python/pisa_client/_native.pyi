@@ -37,6 +37,22 @@ class Declaration(TypedDict):
     type_refs: list[str]
     value_refs: list[str]
     generated: NotRequired[bool]
+    parent: NotRequired[str]
+
+Change = Literal[
+    "missing", "kind", "type", "value", "derived", "added_assumption", "assumption", "ambiguous"
+]
+
+class DeclarationChange(TypedDict):
+    """A declaration that new code doesn't keep as it was, or an assumption
+    it adds; one of a check's `reasons`. `was` and `now` are signatures from
+    the modules' exports, for a changed type or assumption."""
+    name: str
+    module: NotRequired[str]
+    change: Change
+    was: NotRequired[str]
+    now: NotRequired[str]
+    includes: NotRequired[list[str]]
 
 class TacticInfo(TypedDict):
     tactic: str
@@ -64,6 +80,7 @@ class CheckResult(TypedDict):
     messages: list[Message]
     sorries: list[Sorry]
     reasons: list[str]
+    changes: NotRequired[list[DeclarationChange]]
     declarations: list[Declaration]
     tactics: NotRequired[list[TacticInfo]]
     at: NotRequired[list[AtPosition]]
@@ -194,6 +211,7 @@ class AuditComparison(TypedDict):
     spec: str
     head: str
     reasons: NotRequired[list[str]]
+    changes: NotRequired[list[DeclarationChange]]
     replacement: NotRequired[Replacement]
 
 class AuditSnapshotsResponse(TypedDict):

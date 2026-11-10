@@ -47,7 +47,8 @@ use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
 use pisa_protocol::search::{Description, Informal};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{
-    Change, ProofStatus, ReportedDeclaration, Verification, normalised, statement_changes,
+    Change, DeclarationChange, ProofStatus, ReportedDeclaration, Verification, grouped, normalised,
+    parent_in, statement_changes,
 };
 use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
 use sha2::{Digest, Sha256};
@@ -102,6 +103,8 @@ struct Replacing {
     replaced: Replaces,
     /// The replaced entry, which the new entry's link names.
     entry: String,
+    /// The replaced entry's module.
+    module: String,
     /// The declarations of the replaced entry's module.
     declarations: Vec<Declaration>,
     /// The snapshot modules it needs, other than its own.
@@ -142,23 +145,22 @@ fn compare(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
-) -> Result<Replacement, Vec<String>> {
+) -> Result<Replacement, Vec<DeclarationChange>> {
     let allowed = |name: &str| allows(replacing.replaced.allow.as_ref(), name);
-    let (values, changed): (Vec<_>, Vec<_>) = statement_changes(&replacing.declarations, now)
+    let (values, mut refused): (Vec<_>, Vec<_>) = statement_changes(&replacing.declarations, now)
         .into_iter()
         .partition(|c| c.change == Change::Value && allowed(&c.name));
-    let mut refused: Vec<String> = changed.iter().map(ToString::to_string).collect();
     let mut changed_definitions: Vec<String> = values.into_iter().map(|c| c.name).collect();
     for reached in walk(replacing, now, swapped)? {
         if reached.change == Change::Value && allowed(&reached.name) {
             changed_definitions.push(reached.name);
         } else {
-            refused.push(reached.to_string());
+            refused.push(reached);
         }
     }
     refused.extend(added_assumptions(replacing, now, swapped));
     if !refused.is_empty() {
-        return Err(refused);
+        return Err(grouped(refused, |c| parent(replacing, swapped, c)));
     }
     let affected = if changed_definitions.is_empty() {
         Vec::new()
@@ -265,42 +267,41 @@ fn declared_assumptions<'a>(
 /// doesn't, declares must be declared by the replaced module or a snapshot
 /// it no longer builds on, with the same statement. The snapshots both build
 /// on are the same. Otherwise a `sorry` could be "filled" by assuming it.
-fn added_assumptions(replacing: &Replacing, now: &[Declaration], swapped: &Swapped) -> Vec<String> {
+fn added_assumptions(
+    replacing: &Replacing,
+    now: &[Declaration],
+    swapped: &Swapped,
+) -> Vec<DeclarationChange> {
     let lost = swapped.lost.iter().flat_map(|(_, d)| d);
     let before = declared_assumptions(replacing.declarations.iter().chain(lost));
     // The replaced module's own are compared as its statements.
     let own = declared_assumptions(&replacing.declarations);
     let gained = swapped.gained.iter().flat_map(|(_, d)| d);
-    let mut reasons: Vec<String> = declared_assumptions(now.iter().chain(gained))
+    let mut changes: Vec<DeclarationChange> = declared_assumptions(now.iter().chain(gained))
         .into_iter()
         .filter_map(|(name, statement)| match before.get(&name) {
             Some(was) if *was == statement => None,
             Some(_) if own.contains_key(&name) => None,
-            Some(_) => Some(format!(
-                "statement: the assumption {name} has a different statement"
-            )),
-            None => Some(format!("statement: the code adds the assumption {name}")),
+            Some(_) => Some(DeclarationChange::new(name, Change::Assumption)),
+            None => Some(DeclarationChange::new(name, Change::AddedAssumption)),
         })
         .collect();
-    reasons.sort();
-    reasons
+    changes.sort_by_key(ToString::to_string);
+    changes
 }
 
-/// A constant of a snapshot that a replacement no longer builds on, reached
-/// from what the replaced module's declarations use, that the replacement
-/// doesn't keep as it was.
-#[derive(Debug, PartialEq, Eq)]
-struct Reached {
-    name: String,
-    module: String,
-    change: Change,
-}
-
-impl std::fmt::Display for Reached {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let module = snapshot::module(&self.module);
-        let what = self.change.says();
-        write!(f, "statement: {}, from {module}, {what}", self.name)
+/// The parent of the declaration a change to what `replacing` declares is
+/// about: of the replaced module, or of the lost snapshot it names.
+fn parent(replacing: &Replacing, swapped: &Swapped, c: &DeclarationChange) -> Option<String> {
+    match &c.module {
+        None => parent_in(&replacing.declarations, &c.name),
+        Some(module) => {
+            let (_, decls) = swapped
+                .lost
+                .iter()
+                .find(|(id, _)| snapshot::module(id) == *module)?;
+            parent_in(decls, &c.name)
+        }
     }
 }
 
@@ -324,7 +325,7 @@ fn walk(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
-) -> Result<Vec<Reached>, Vec<String>> {
+) -> Result<Vec<DeclarationChange>, Vec<DeclarationChange>> {
     if swapped.lost.is_empty() {
         return Ok(Vec::new());
     }
@@ -356,14 +357,14 @@ fn walk(
         let Some(&(module, c)) = old.get(r.as_str()) else {
             continue;
         };
+        let from = |change| DeclarationChange {
+            module: Some(snapshot::module(module)),
+            ..DeclarationChange::new(c.name.clone(), change)
+        };
         let change = match new.get(&normalised(r)) {
             None => Some(Change::Missing),
             Some(None) => {
-                ambiguous.push(format!(
-                    "statement: {r}, from {}, matches more than one declaration of the code \
-                     and what it builds on",
-                    snapshot::module(module)
-                ));
+                ambiguous.push(from(Change::Ambiguous));
                 None
             }
             Some(Some(n)) if n.kind != c.kind => Some(Change::Kind),
@@ -372,11 +373,7 @@ fn walk(
             Some(Some(_)) => None,
         };
         if let Some(change) = change {
-            reached.push(Reached {
-                name: c.name.clone(),
-                module: module.to_string(),
-                change,
-            });
+            reached.push(from(change));
         }
         todo.extend(refs_of(c));
     }
@@ -1021,6 +1018,7 @@ impl Snapshots {
         Ok(Replacing {
             replaced: r.clone(),
             entry,
+            module: entry_meta.module.clone(),
             declarations: meta.result.declarations,
             needs: ids(&meta.modules)
                 .filter(|m| **m != entry_meta.module)
@@ -1246,9 +1244,17 @@ impl Snapshots {
                 }
                 match compare(r, &meta.result.declarations, &swapped) {
                     Ok(replacement) => Some(replacement),
-                    Err(reasons) => {
+                    Err(mut changes) => {
+                        let mut new = vec![id.to_string()];
+                        new.extend(swapped.gained.iter().map(|(m, _)| m.clone()));
+                        let now = self.exports_of(&new).await;
+                        self.sign(&mut changes, r, &swapped, &now).await;
                         let mut refused = self.refused(meta);
-                        refused.check.reasons.extend(reasons);
+                        refused
+                            .check
+                            .reasons
+                            .extend(changes.iter().map(ToString::to_string));
+                        refused.check.changes = changes;
                         return Some(refused);
                     }
                 }
@@ -1478,10 +1484,19 @@ impl Snapshots {
         let replacement = match replacing.zip(swapped.as_ref()) {
             Some((r, swapped)) => match compare(r, &verification.declarations, swapped) {
                 Ok(replacement) => Some(replacement),
-                Err(reasons) => {
+                Err(mut changes) => {
                     self.unbuild(slot, id);
+                    let gained: Vec<String> =
+                        swapped.gained.iter().map(|(m, _)| m.clone()).collect();
+                    let mut now = self.exports_of(&gained).await;
+                    let own = exported.iter().flatten();
+                    now.extend(own.map(|d| (d.name.clone(), d.signature.clone())));
+                    self.sign(&mut changes, r, swapped, &now).await;
                     verification.ok = false;
-                    verification.reasons.extend(reasons);
+                    verification
+                        .reasons
+                        .extend(changes.iter().map(ToString::to_string));
+                    verification.changes = changes;
                     outcome.verification = Some(verification);
                     return Err(Box::new(outcome));
                 }
@@ -1573,6 +1588,40 @@ impl Snapshots {
     fn unbuild(&self, slot: &mut Lease, id: &str) {
         slot.retire("snapshot_failed");
         self.discard(id);
+    }
+
+    /// The signatures the search exports of `modules` show, by name.
+    async fn exports_of(&self, modules: &[String]) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for m in modules {
+            if let Ok(Some(exported)) = self.catalog.decls(m).await {
+                out.extend(exported.decls.into_iter().map(|d| (d.name, d.signature)));
+            }
+        }
+        out
+    }
+
+    /// Fills `was` and `now` of each change to a type or an assumption: the
+    /// signature in the replaced module or the lost snapshot it is from, by
+    /// their search exports, and in `now`, the new side's signatures by name.
+    async fn sign(
+        &self,
+        changes: &mut [DeclarationChange],
+        replacing: &Replacing,
+        swapped: &Swapped,
+        now: &HashMap<String, String>,
+    ) {
+        let signed = |c: &DeclarationChange| matches!(c.change, Change::Type | Change::Assumption);
+        if !changes.iter().any(signed) {
+            return;
+        }
+        let mut old = vec![replacing.module.clone()];
+        old.extend(swapped.lost.iter().map(|(m, _)| m.clone()));
+        let was = self.exports_of(&old).await;
+        for c in changes.iter_mut().filter(|c| signed(c)) {
+            c.was = was.get(&c.name).cloned();
+            c.now = now.get(&c.name).cloned();
+        }
     }
 
     /// The records of the modules `header` imports.
@@ -1911,6 +1960,7 @@ impl Snapshots {
                 allow,
             },
             entry: from.clone(),
+            module: old.clone(),
             declarations: old_meta.result.declarations.clone(),
             needs: ids(&old_meta.modules)
                 .filter(|m| **m != old)
@@ -1924,7 +1974,12 @@ impl Snapshots {
         let link = to_entry.replaces.filter(|r| r.snapshot_id == from);
         let changes = match link {
             Some(_) => Vec::new(),
-            None => compare(&strict, now, &swapped).err().unwrap_or_default(),
+            None => compare(&strict, now, &swapped)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         };
         // Under its own `allow` if `to` replaces `from`, else any definition.
         let allow = match &link {
@@ -2090,6 +2145,7 @@ impl Snapshots {
                         allow: None,
                     },
                     entry: e.clone(),
+                    module: m.clone(),
                     declarations: meta.result.declarations.clone(),
                     needs: needs_before.clone(),
                 };
@@ -2293,15 +2349,16 @@ impl Snapshots {
                 let compared = self
                     .rederive(&spec_meta.module, head_module, allowed, &mut metas)
                     .await?;
-                let (reasons, replacement) = match compared {
+                let (changes, replacement) = match compared {
                     Some(Ok(r)) => (Vec::new(), Some(r)),
-                    Some(Err(reasons)) => (reasons, None),
+                    Some(Err(changes)) => (changes, None),
                     None => (Vec::new(), None),
                 };
                 comparisons.push(AuditComparison {
                     spec: self.id(spec),
                     head: self.id(head),
-                    reasons,
+                    reasons: changes.iter().map(ToString::to_string).collect(),
+                    changes,
                     replacement,
                 });
             }
@@ -2345,7 +2402,7 @@ impl Snapshots {
         head: &str,
         allowed: &[String],
         metas: &mut HashMap<String, ModuleMeta>,
-    ) -> Result<Option<Result<Replacement, Vec<String>>>, Error> {
+    ) -> Result<Option<Result<Replacement, Vec<DeclarationChange>>>, Error> {
         let (Some(spec_meta), Some(head_meta)) = (
             self.cached(spec, metas).await?.cloned(),
             self.cached(head, metas).await?.cloned(),
@@ -2363,6 +2420,7 @@ impl Snapshots {
                 }),
             },
             entry: spec.clone(),
+            module: spec.clone(),
             declarations: spec_meta.result.declarations,
             needs: ids(&spec_meta.modules)
                 .filter(|m| *m != spec)
@@ -2378,11 +2436,14 @@ impl Snapshots {
             Err(e) if e.kind == ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        Ok(Some(compare(
-            &replacing,
-            &head_meta.result.declarations,
-            &swapped,
-        )))
+        let mut compared = compare(&replacing, &head_meta.result.declarations, &swapped);
+        if let Err(changes) = &mut compared {
+            let mut new = vec![head.to_string()];
+            new.extend(swapped.gained.iter().map(|(m, _)| m.clone()));
+            let now = self.exports_of(&new).await;
+            self.sign(changes, &replacing, &swapped, &now).await;
+        }
+        Ok(Some(compared))
     }
 
     /// The targets of an audit against `specs`: each declaration of a spec
@@ -2702,6 +2763,16 @@ mod tests {
         })
     }
 
+    /// [`super::compare`], its refusals as the reasons they read as.
+    fn compare(
+        replacing: &Replacing,
+        now: &[Declaration],
+        swapped: &Swapped,
+    ) -> Result<Replacement, Vec<String>> {
+        super::compare(replacing, now, swapped)
+            .map_err(|changes| changes.iter().map(ToString::to_string).collect())
+    }
+
     fn replacing(old: Vec<Declaration>, allow: Option<Allow>) -> Replacing {
         Replacing {
             replaced: Replaces {
@@ -2709,6 +2780,7 @@ mod tests {
                 allow,
             },
             entry: "e".into(),
+            module: "m".into(),
             declarations: old,
             needs: vec!["a".into()],
         }
@@ -3250,6 +3322,7 @@ mod tests {
             ok: true,
             reasons: Vec::new(),
             declarations: Vec::new(),
+            changes: Vec::new(),
         };
         let old = &old.modules[0];
         assert_eq!(s.before_recheck(old).await.unwrap(), Some(Recheck::Changed));
@@ -3505,6 +3578,7 @@ mod tests {
             spec: s.id("spec"),
             head: s.id("head"),
             reasons: Vec::new(),
+            changes: Vec::new(),
             replacement: Some(Replacement::default()),
         }];
         let judged = |modules: &[&str]| {

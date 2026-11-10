@@ -185,10 +185,14 @@ async fn a_head_whose_verified_statement_differs_from_the_spec_is_not_clean() {
     assert_eq!(r["targets"][0]["accepted"], false, "{r}");
     // The audit compares the head with the spec from the verified records,
     // as the create would have.
+    // Its signatures are the exports the builds printed, so the head's is
+    // what it claimed; the hashes the comparison reads are the kernel's.
     assert_eq!(
         r["comparisons"],
         json!([{"spec": id(&s), "head": id(&p),
-                "reasons": ["statement: t has a different type"]}]),
+                "reasons": ["statement: t has a different type"],
+                "changes": [{"name": "t", "change": "type",
+                             "was": "t : 2 = 2", "now": "t : 2 = 2"}]}]),
         "{r}"
     );
 }

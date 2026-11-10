@@ -17,6 +17,10 @@ pub struct Verification {
     pub reasons: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declarations: Vec<Declaration>,
+    /// What keeps the code from replacing what it replaces, or from keeping
+    /// a session's statements, each also one of `reasons`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<DeclarationChange>,
 }
 
 /// A new declaration and the axioms it depends on.
@@ -48,6 +52,12 @@ pub struct Declaration {
     /// statements needn't have it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub generated: bool,
+    /// The inductive type it is made from, when it is one of the
+    /// declarations Lean makes for one: a constructor, the recursor,
+    /// `casesOn`, `noConfusion`, `injEq`, `sizeOf_spec`, a projection and
+    /// the like. A change to it is a change to that type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 /// A declaration as Lean's report prints it (`Pisa.describe`): a
@@ -67,6 +77,8 @@ pub struct DescribedDeclaration {
     pub value_refs: Vec<String>,
     #[serde(default)]
     pub generated: bool,
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 /// The SHA-256 of `text`, as hex: what a declaration's hashes are.
@@ -86,6 +98,7 @@ impl From<DescribedDeclaration> for ReportedDeclaration {
             type_refs: d.type_refs,
             value_refs: d.value_refs,
             generated: d.generated,
+            parent: d.parent,
         }
     }
 }
@@ -104,6 +117,7 @@ pub struct ReportedDeclaration {
     pub type_refs: Vec<String>,
     pub value_refs: Vec<String>,
     pub generated: bool,
+    pub parent: Option<String>,
 }
 
 impl ReportedDeclaration {
@@ -120,6 +134,7 @@ impl ReportedDeclaration {
             type_refs: self.type_refs,
             value_refs: self.value_refs,
             generated: self.generated,
+            parent: self.parent,
         }
     }
 }
@@ -166,8 +181,10 @@ pub fn normalised(name: &str) -> Cow<'_, str> {
     }
 }
 
-/// How a declaration of the original code changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a declaration of the original code changed, or what else keeps new
+/// code from replacing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum Change {
     Missing,
     /// What it is, e.g. an `axiom` where it was a `theorem`.
@@ -175,32 +192,140 @@ pub enum Change {
     Type,
     /// A definition's value; its type is the same.
     Value,
+    /// An inductive type's constructors, or what Lean makes from them (see
+    /// [`Declaration::parent`]), listed in
+    /// [`includes`](DeclarationChange::includes); its own type is the same.
+    Derived,
+    /// An assumption the new code declares, or a snapshot it newly builds on
+    /// does, that the original didn't.
+    AddedAssumption,
+    /// An assumption the original declared, with another statement.
+    Assumption,
+    /// A constant of a snapshot the new code no longer builds on, which more
+    /// than one declaration of the code and what it builds on matches.
+    Ambiguous,
 }
 
 impl Change {
-    /// How a reason says it, e.g. `has a different type`.
+    /// How a reason says it of a declaration, e.g. `has a different type`.
     pub fn says(self) -> &'static str {
         match self {
             Change::Missing => "is missing",
             Change::Kind => "is a different kind of declaration",
             Change::Type => "has a different type",
             Change::Value => "has a different value",
+            Change::Derived => "has different constructors or what Lean makes from them",
+            Change::AddedAssumption => "is an assumption the code adds",
+            Change::Assumption => "is an assumption with a different statement",
+            Change::Ambiguous => {
+                "matches more than one declaration of the code and what it builds on"
+            }
         }
     }
 }
 
-/// A declaration of the original code that the new code doesn't keep as it
-/// was. Displays as a reason, e.g. `statement: t has a different type`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StatementChange {
+/// A declaration of the original code that new code doesn't keep as it
+/// was, or an assumption it adds. Displays as a reason, e.g.
+/// `statement: t has a different type`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DeclarationChange {
+    /// The declaration, as the original code, or the snapshot `module`,
+    /// names it; an added assumption as the new code does.
     pub name: String,
+    /// The snapshot module it is from, when that is a snapshot the new code
+    /// no longer builds on, rather than the original code itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
     pub change: Change,
+    /// For a changed type or assumption, its signature before, and `now`
+    /// after, from the search exports of the modules, where they have them.
+    /// The exports are what the builds printed; the comparison is of the
+    /// declarations' hashes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now: Option<String>,
+    /// For a change to what Lean makes from an inductive type, the
+    /// declarations that changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub includes: Vec<String>,
 }
 
-impl std::fmt::Display for StatementChange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "statement: {} {}", self.name, self.change.says())
+impl DeclarationChange {
+    pub fn new(name: impl Into<String>, change: Change) -> Self {
+        DeclarationChange {
+            name: name.into(),
+            module: None,
+            change,
+            was: None,
+            now: None,
+            includes: Vec::new(),
+        }
     }
+}
+
+impl std::fmt::Display for DeclarationChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = &self.name;
+        match (self.change, &self.module) {
+            (Change::AddedAssumption, _) => {
+                write!(f, "statement: the code adds the assumption {name}")
+            }
+            (Change::Assumption, _) => {
+                write!(
+                    f,
+                    "statement: the assumption {name} has a different statement"
+                )
+            }
+            (change, Some(module)) => {
+                write!(f, "statement: {name}, from {module}, {}", change.says())
+            }
+            (change, None) => write!(f, "statement: {name} {}", change.says()),
+        }?;
+        if !self.includes.is_empty() {
+            write!(f, " ({})", self.includes.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+/// `changes`, those of declarations Lean made from an inductive type
+/// (`parent` gives it, by the change's name and module) folded into one for
+/// that type, which lists them in `includes`: a [`Change::Derived`], unless
+/// the type itself changed.
+pub fn grouped(
+    changes: Vec<DeclarationChange>,
+    parent: impl Fn(&DeclarationChange) -> Option<String>,
+) -> Vec<DeclarationChange> {
+    let mut out: Vec<DeclarationChange> = Vec::new();
+    let mut folded: Vec<(DeclarationChange, String)> = Vec::new();
+    for c in changes {
+        match parent(&c) {
+            Some(p) => folded.push((c, p)),
+            None => out.push(c),
+        }
+    }
+    for (c, p) in folded {
+        let at = out.iter().position(|o| o.name == p && o.module == c.module);
+        let group = match at {
+            Some(i) => &mut out[i],
+            None => {
+                out.push(DeclarationChange {
+                    module: c.module.clone(),
+                    ..DeclarationChange::new(p, Change::Derived)
+                });
+                out.last_mut().unwrap()
+            }
+        };
+        group.includes.push(c.name);
+    }
+    out
+}
+
+/// The parent of the declaration named `name` among `decls`, if it has one
+/// (see [`Declaration::parent`]).
+pub fn parent_in(decls: &[Declaration], name: &str) -> Option<String> {
+    decls.iter().find(|d| d.name == name)?.parent.clone()
 }
 
 /// Every declaration of the original code must still exist as the same kind
@@ -208,7 +333,7 @@ impl std::fmt::Display for StatementChange {
 /// and definitions with the same value. New declarations may be added, and
 /// what Lean generated needn't stay. Names are matched across modules (see
 /// [`normalised`]).
-pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<StatementChange> {
+pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<DeclarationChange> {
     original
         .iter()
         .filter(|d| !d.generated)
@@ -221,10 +346,7 @@ pub fn statement_changes(original: &[Declaration], now: &[Declaration]) -> Vec<S
                 Some(n) if n.value_hash != d.value_hash => Change::Value,
                 Some(_) => return None,
             };
-            Some(StatementChange {
-                name: d.name.clone(),
-                change,
-            })
+            Some(DeclarationChange::new(d.name.clone(), change))
         })
         .collect()
 }
@@ -242,6 +364,60 @@ mod tests {
             ..Default::default()
         };
         reported.with_status(ProofStatus::Proved)
+    }
+
+    #[test]
+    fn a_change_reads_as_the_reason_a_refusal_gives() {
+        let from = |name: &str, change| DeclarationChange {
+            module: Some("PisaSnap.sa".into()),
+            ..DeclarationChange::new(name, change)
+        };
+        for (change, reason) in [
+            (
+                DeclarationChange::new("t", Change::Type),
+                "statement: t has a different type",
+            ),
+            (
+                from("foo", Change::Value),
+                "statement: foo, from PisaSnap.sa, has a different value",
+            ),
+            (
+                DeclarationChange::new("helper", Change::AddedAssumption),
+                "statement: the code adds the assumption helper",
+            ),
+            (
+                DeclarationChange::new("kun", Change::Assumption),
+                "statement: the assumption kun has a different statement",
+            ),
+            (
+                from("foo", Change::Ambiguous),
+                "statement: foo, from PisaSnap.sa, matches more than one declaration of the code \
+                 and what it builds on",
+            ),
+        ] {
+            assert_eq!(change.to_string(), reason);
+        }
+    }
+
+    #[test]
+    fn changes_lean_made_from_an_inductive_fold_into_it() {
+        let changes = ["S.mk", "t", "S.rec", "T", "T.mk"]
+            .map(|n| DeclarationChange::new(n, Change::Type))
+            .to_vec();
+        let parent = |c: &DeclarationChange| match c.name.as_str() {
+            "S.mk" | "S.rec" => Some("S".to_string()),
+            "T.mk" => Some("T".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            reasons(grouped(changes, parent)),
+            [
+                "statement: t has a different type",
+                "statement: T has a different type (T.mk)",
+                "statement: S has different constructors or what Lean makes from them \
+                 (S.mk, S.rec)",
+            ]
+        );
     }
 
     #[test]
@@ -300,7 +476,7 @@ mod tests {
         );
     }
 
-    fn reasons(changes: Vec<StatementChange>) -> Vec<String> {
+    fn reasons(changes: Vec<DeclarationChange>) -> Vec<String> {
         changes.iter().map(ToString::to_string).collect()
     }
 

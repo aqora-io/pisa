@@ -170,5 +170,6 @@ pub(crate) fn checked(done: JobResult) -> Result<CheckResult, ApiError> {
     let mut result = CheckResult::from(checked.outcome);
     result.ok &= checked.statement_reasons.is_empty();
     result.reasons.extend(checked.statement_reasons);
+    result.changes.extend(checked.statement_changes);
     Ok(result)
 }

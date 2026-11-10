@@ -298,6 +298,7 @@ impl Policy {
             ok: true,
             reasons: Vec::new(),
             declarations: Vec::new(),
+            changes: Vec::new(),
         };
         if errors {
             v.reasons.push("error: Lean reported errors".into());

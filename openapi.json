@@ -118,6 +118,13 @@
       "AuditComparison": {
         "description": "A head compared with a spec snapshot it is reached from.",
         "properties": {
+          "changes": {
+            "description": "The same, as the declarations that changed.",
+            "items": {
+              "$ref": "#/components/schemas/DeclarationChange"
+            },
+            "type": "array"
+          },
           "head": {
             "description": "The head.",
             "type": "string"
@@ -360,6 +367,20 @@
         ],
         "type": "object"
       },
+      "Change": {
+        "description": "How a declaration of the original code changed, or what else keeps new\ncode from replacing it.",
+        "enum": [
+          "missing",
+          "kind",
+          "type",
+          "value",
+          "derived",
+          "added_assumption",
+          "assumption",
+          "ambiguous"
+        ],
+        "type": "string"
+      },
       "CheckBatchItem": {
         "properties": {
           "code": {
@@ -465,6 +486,13 @@
             "description": "With `at`, what Lean recorded at each position, in request order.",
             "items": {
               "$ref": "#/components/schemas/AtPosition"
+            },
+            "type": "array"
+          },
+          "changes": {
+            "description": "What keeps the code from replacing the snapshot it replaces, or from\nkeeping a session's statements, each also one of `reasons`.",
+            "items": {
+              "$ref": "#/components/schemas/DeclarationChange"
             },
             "type": "array"
           },
@@ -644,6 +672,10 @@
           "name": {
             "type": "string"
           },
+          "parent": {
+            "description": "The inductive type it is made from, when it is one of the\ndeclarations Lean makes for one: a constructor, the recursor,\n`casesOn`, `noConfusion`, `injEq`, `sizeOf_spec`, a projection and\nthe like. A change to it is a change to that type.",
+            "type": "string"
+          },
           "status": {
             "$ref": "#/components/schemas/ProofStatus",
             "description": "What its axioms make it, by [`ProofStatus`]."
@@ -680,6 +712,41 @@
           "type_hash",
           "type_refs",
           "value_refs"
+        ],
+        "type": "object"
+      },
+      "DeclarationChange": {
+        "description": "A declaration of the original code that new code doesn't keep as it\nwas, or an assumption it adds. Displays as a reason, e.g.\n`statement: t has a different type`.",
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/Change"
+          },
+          "includes": {
+            "description": "For a change to what Lean makes from an inductive type, the\ndeclarations that changed.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "module": {
+            "description": "The snapshot module it is from, when that is a snapshot the new code\nno longer builds on, rather than the original code itself.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The declaration, as the original code, or the snapshot `module`,\nnames it; an added assumption as the new code does.",
+            "type": "string"
+          },
+          "now": {
+            "type": "string"
+          },
+          "was": {
+            "description": "For a changed type or assumption, its signature before, and `now`\nafter, from the search exports of the modules, where they have them.\nThe exports are what the builds printed; the comparison is of the\ndeclarations' hashes.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "change"
         ],
         "type": "object"
       },

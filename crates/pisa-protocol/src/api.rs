@@ -40,7 +40,7 @@ use utoipa::{IntoParams, IntoResponses, ToSchema};
 
 use crate::repl;
 use crate::search::Description;
-pub use crate::verify::{Declaration, ProofStatus};
+pub use crate::verify::{Change, Declaration, DeclarationChange, ProofStatus};
 
 fn default_timeout() -> u64 {
     60
@@ -386,6 +386,10 @@ pub struct CheckResult {
     #[schema(required = true)]
     #[serde(default)]
     pub reasons: Vec<String>,
+    /// What keeps the code from replacing the snapshot it replaces, or from
+    /// keeping a session's statements, each also one of `reasons`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<DeclarationChange>,
     /// Declarations the code added, with the axioms each depends on.
     #[schema(required = true)]
     #[serde(default)]
@@ -1002,6 +1006,9 @@ pub struct AuditComparison {
     /// unaccepted anyway.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
+    /// The same, as the declarations that changed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<DeclarationChange>,
     /// What the head changed that the links on the way allow, and what it
     /// filled, if it keeps the spec's statements and both are verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]

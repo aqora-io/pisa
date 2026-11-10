@@ -36,6 +36,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
             ok: false,
             reasons: rejected,
             declarations: Vec::new(),
+            changes: Vec::new(),
         });
         return outcome;
     }

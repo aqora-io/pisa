@@ -76,6 +76,48 @@ async fn a_proof_replaces_its_skeleton_and_the_link_is_kept() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_refusal_says_what_changed_and_how() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let retyped = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+    let r = create(&c, json!({"code": retyped, "replaces": replacing(&old)})).await;
+    // `was` and `now` are the signatures the modules' exports show.
+    assert_eq!(
+        r["check"]["changes"],
+        json!([{"name": "t", "change": "type", "was": "t : 1 = 1", "now": "t : 2 = 2"}]),
+        "{r}"
+    );
+    assert_eq!(
+        r["check"]["reasons"],
+        json!(["statement: t has a different type"])
+    );
+
+    let own = "import Foo\n\naxiom helper : 1 = 1\ntheorem t : 1 = 1 := helper";
+    let r = create(&c, json!({"code": own, "replaces": replacing(&old)})).await;
+    assert_eq!(
+        r["check"]["changes"],
+        json!([{"name": "helper", "change": "added_assumption"}]),
+        "{r}"
+    );
+
+    // A constant of a snapshot the code no longer builds on names it.
+    let a = create(&c, json!({"code": "import Foo\n\ndef foo : Nat := 1"})).await;
+    let skeleton = create(&c, json!({"code": on(&a, "theorem s : foo = 1 := sorry")})).await;
+    let other = create(&c, json!({"code": "import Foo\n\ndef foo : Nat := 2"})).await;
+    let proof = on(&other, "theorem s : foo = 1 := rfl");
+    let r = create(
+        &c,
+        json!({"code": proof, "replaces": replacing(entry(&skeleton))}),
+    )
+    .await;
+    assert_eq!(
+        r["check"]["changes"],
+        json!([{"name": "foo", "module": module(&a), "change": "value"}]),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_changed_statement_is_not_kept() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();

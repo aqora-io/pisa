@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api;
 use crate::repl::CommandResponse;
-use crate::verify::Verification;
+use crate::verify::{DeclarationChange, Verification};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -201,9 +201,10 @@ impl From<CheckOutcome> for api::CheckResult {
             let at = r.at.into_iter().map(Into::into).collect();
             (api::messages(r.messages), sorries, tactics, at)
         });
-        let (verified, reasons, declarations) =
-            o.verification.map_or((false, Vec::new(), Vec::new()), |v| {
-                (v.ok, v.reasons, v.declarations)
+        let (verified, reasons, declarations, changes) = o
+            .verification
+            .map_or((false, Vec::new(), Vec::new(), Vec::new()), |v| {
+                (v.ok, v.reasons, v.declarations, v.changes)
             });
         api::CheckResult {
             ok: verified && o.error.is_none(),
@@ -212,6 +213,7 @@ impl From<CheckOutcome> for api::CheckResult {
             messages,
             sorries,
             reasons,
+            changes,
             declarations,
             tactics,
             at,
@@ -224,6 +226,9 @@ pub struct SessionChecked {
     pub outcome: CheckOutcome,
     /// Reasons the completed code does not prove the session's statements.
     pub statement_reasons: Vec<String>,
+    /// The declarations among them that changed.
+    #[serde(default)]
+    pub statement_changes: Vec<DeclarationChange>,
 }
 
 #[cfg(test)]

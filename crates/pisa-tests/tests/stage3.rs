@@ -79,6 +79,8 @@ async fn session_is_a_tree_of_states_with_a_final_check() {
         weaker["reasons"],
         json!(["statement: t has a different type"])
     );
+    // A session has no exports, so no signatures.
+    assert_eq!(weaker["changes"], json!([{"name": "t", "change": "type"}]));
 
     let renamed = check(&c, session, "import Foo\ntheorem u : 1 = 1 := by rfl").await;
     assert_eq!(renamed["reasons"], json!(["statement: t is missing"]));

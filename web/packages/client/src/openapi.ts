@@ -418,6 +418,8 @@ export interface components {
         };
         /** @description A head compared with a spec snapshot it is reached from. */
         AuditComparison: {
+            /** @description The same, as the declarations that changed. */
+            changes?: components["schemas"]["DeclarationChange"][];
             /** @description The head. */
             head: string;
             /**
@@ -583,6 +585,12 @@ export interface components {
             snapshot_id: string;
             status: components["schemas"]["ProofStatus"];
         };
+        /**
+         * @description How a declaration of the original code changed, or what else keeps new
+         *     code from replacing it.
+         * @enum {string}
+         */
+        Change: "missing" | "kind" | "type" | "value" | "derived" | "added_assumption" | "assumption" | "ambiguous";
         CheckBatchItem: {
             code: string;
         };
@@ -619,6 +627,11 @@ export interface components {
         CheckResult: {
             /** @description With `at`, what Lean recorded at each position, in request order. */
             at?: components["schemas"]["AtPosition"][];
+            /**
+             * @description What keeps the code from replacing the snapshot it replaces, or from
+             *     keeping a session's statements, each also one of `reasons`.
+             */
+            changes?: components["schemas"]["DeclarationChange"][];
             /** @description Declarations the code added, with the axioms each depends on. */
             declarations: components["schemas"]["Declaration"][];
             /** @description Why the check could not complete (timeout, crash, policy, ...). */
@@ -773,6 +786,13 @@ export interface components {
             generated?: boolean;
             kind: string;
             name: string;
+            /**
+             * @description The inductive type it is made from, when it is one of the
+             *     declarations Lean makes for one: a constructor, the recursor,
+             *     `casesOn`, `noConfusion`, `injEq`, `sizeOf_spec`, a projection and
+             *     the like. A change to it is a change to that type.
+             */
+            parent?: string;
             /** @description What its axioms make it, by [`ProofStatus`]. */
             status: components["schemas"]["ProofStatus"];
             /**
@@ -796,6 +816,37 @@ export interface components {
              *     recursor.
              */
             value_refs: string[];
+        };
+        /**
+         * @description A declaration of the original code that new code doesn't keep as it
+         *     was, or an assumption it adds. Displays as a reason, e.g.
+         *     `statement: t has a different type`.
+         */
+        DeclarationChange: {
+            change: components["schemas"]["Change"];
+            /**
+             * @description For a change to what Lean makes from an inductive type, the
+             *     declarations that changed.
+             */
+            includes?: string[];
+            /**
+             * @description The snapshot module it is from, when that is a snapshot the new code
+             *     no longer builds on, rather than the original code itself.
+             */
+            module?: string;
+            /**
+             * @description The declaration, as the original code, or the snapshot `module`,
+             *     names it; an added assumption as the new code does.
+             */
+            name: string;
+            now?: string;
+            /**
+             * @description For a changed type or assumption, its signature before, and `now`
+             *     after, from the search exports of the modules, where they have them.
+             *     The exports are what the builds printed; the comparison is of the
+             *     declarations' hashes.
+             */
+            was?: string;
         };
         DeclarationDetail: {
             /** @description Declarations it uses, in its statement and its proof or body. */
@@ -1564,6 +1615,7 @@ export type AuditSnapshotsResponse = components['schemas']['AuditSnapshotsRespon
 export type AuditSummary = components['schemas']['AuditSummary'];
 export type AuditTarget = components['schemas']['AuditTarget'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
+export type Change = components['schemas']['Change'];
 export type CheckBatchItem = components['schemas']['CheckBatchItem'];
 export type CheckBatchRequest = components['schemas']['CheckBatchRequest'];
 export type CheckBatchResponse = components['schemas']['CheckBatchResponse'];
@@ -1573,6 +1625,7 @@ export type CheckSessionRequest = components['schemas']['CheckSessionRequest'];
 export type CreateSnapshotRequest = components['schemas']['CreateSnapshotRequest'];
 export type CreateSnapshotResponse = components['schemas']['CreateSnapshotResponse'];
 export type Declaration = components['schemas']['Declaration'];
+export type DeclarationChange = components['schemas']['DeclarationChange'];
 export type DeclarationDetail = components['schemas']['DeclarationDetail'];
 export type DeleteSnapshotResponse = components['schemas']['DeleteSnapshotResponse'];
 export type Description = components['schemas']['Description'];

@@ -12,7 +12,7 @@ snapshot) and for the kernel verifier (`docker/verifier/PisaVerify.lean`),
 which call the same `describe`.
 
 A description is `{name, kind, axioms, assumes, type, value, type_refs,
-value_refs, generated}`:
+value_refs, generated, parent}`:
 - `axioms`, all the axioms it depends on, and `assumes`, those declared as
   `axiom` in this code or a snapshot;
 - `type`, and for a definition `value`, their canonical text (see
@@ -20,7 +20,9 @@ value_refs, generated}`:
 - `type_refs` and `value_refs`, the constants of this code and of snapshots
   they use (an inductive's "value" is its constructors and recursor);
 - `generated`, for what Lean makes on demand, such as equation lemmas, which a
-  replacement needn't have.
+  replacement needn't have;
+- `parent`, the inductive type of the same code that it is one of Lean's
+  declarations for, such as a constructor or a projection (see `parentOf`).
 
 Auxiliaries Lean makes, such as the `f._unary` holding the body of a
 well-founded definition or the matcher `f.match_1`, aren't described: what
@@ -261,9 +263,72 @@ def kindOf : ConstantInfo → String
   | .recInfo _ => "recursor"
 
 
+/-- The names Lean gives what it makes from an inductive type, after the
+type's name, and from a constructor, after the constructor's. -/
+def typeDerived : List String :=
+  ["casesOn", "recOn", "below", "brecOn", "binductionOn", "ibelow", "noConfusion",
+    "noConfusionType", "ctorIdx", "toCtorIdx", "ctorElim", "ctorElimType"]
+def constructorDerived : List String := ["injEq", "inj", "sizeOf_spec", "hinj", "noConfusion"]
+
+/-- The inductive type of `own`, the declarations described with `n`, that
+`n` is one of Lean's declarations for, by name and by shape, as the verifier
+finds the same, and so that what code declares isn't taken for it:
+- a constructor or the recursor;
+- named after the type (`casesOn`, `noConfusion`, `below`, …), a definition
+  built from the type's recursor, `casesOn` or `noConfusionType`, or its
+  `ctorIdx`;
+- named after a constructor (`injEq`, `inj`, `sizeOf_spec`, …), a lemma
+  about the constructor;
+- a projection: a definition `fun … self => self.i` named after the
+  structure's `i`th field. -/
+def parentOf (env : Environment) (own : NameSet) (n : Name) (ci : ConstantInfo) :
+    Option Name := do
+  let inductive_ (i : Name) : Option InductiveVal := do
+    guard (own.contains i)
+    let some (.inductInfo v) := env.find? i | none
+    return v
+  let projection : Option Name := do
+    let .defnInfo d := ci | none
+    let .str _ field := n | none
+    let mut body := d.value
+    while body.isLambda do
+      body := body.bindingBody!
+    let .proj s i (.bvar 0) := body | none
+    let v ← inductive_ s
+    let [c] := v.ctors | none
+    let some (.ctorInfo cv) := env.find? c | none
+    let mut type := cv.type
+    for _ in [0:cv.numParams + i] do
+      let .forallE _ _ b _ := type | none
+      type := b
+    let .forallE name _ _ _ := type | none
+    guard (name == .mkSimple field)
+    return s
+  match ci with
+  | .ctorInfo c => return (← inductive_ c.induct).name
+  | .recInfo _ => return (← inductive_ n.getPrefix).name
+  | _ =>
+    let .str p s := n | projection
+    let afterType : Option Name := do
+      guard (typeDerived.contains s)
+      let v ← inductive_ p
+      let .defnInfo d := ci | none
+      let used := d.value.getUsedConstants
+      -- Lean makes `ctorIdx` for every inductive type, so code can't name
+      -- one so; for a single constructor it is a constant.
+      guard (s == "ctorIdx" ||
+        [mkRecName p, p ++ `casesOn, p ++ `noConfusionType].any used.contains)
+      return v.name
+    let afterConstructor : Option Name := do
+      guard (constructorDerived.contains s && own.contains p)
+      let some (.ctorInfo c) := env.find? p | none
+      guard (ci.type.getUsedConstants.contains p)
+      return (← inductive_ c.induct).name
+    afterType <|> afterConstructor <|> projection
+
 /-- The description of the declaration `n` of module `mod`, whose constant is
-`ci`. -/
-def describe (mod n : Name) (ci : ConstantInfo) : CoreM Json := do
+`ci`, among `own`, the declarations described with it. -/
+def describe (mod n : Name) (ci : ConstantInfo) (own : NameSet := {}) : CoreM Json := do
   let env ← getEnv
   let axioms ← collectAxioms n
   -- Declared as `axiom` here or in a snapshot. Lean's own, and the ones it
@@ -285,17 +350,19 @@ def describe (mod n : Name) (ci : ConstantInfo) : CoreM Json := do
     ("axioms", toJson axioms), ("assumes", toJson assumes),
     ("type", Json.str type), ("value", value),
     ("type_refs", toJson typeRefs), ("value_refs", toJson valueRefs),
-    ("generated", toJson (generated env n))]
+    ("generated", toJson (generated env n)),
+    ("parent", toJson (parentOf env own n ci))]
 
 /-- The descriptions of the declarations `names` of module `mod` that are
 described. -/
 def describeAll (mod : Name) (names : Array Name) : CoreM (Array Json) := do
   let env ← getEnv
+  let own := names.foldl (·.insert ·) ({} : NameSet)
   let mut out := #[]
   for n in names do
     let some ci := env.find? n | continue
     if auxiliary n ci then continue
-    out := out.push (← describe mod n ci)
+    out := out.push (← describe mod n ci own)
   return out
 
 /-- Logs `PISA_DECLS <descriptions>`, which the worker reads. -/

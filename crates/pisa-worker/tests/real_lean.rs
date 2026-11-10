@@ -15,7 +15,7 @@ use std::process::Command;
 use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{CommandResponse, Message};
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::{Declaration, statement_changes};
+use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
 use pisa_worker::launcher::{Verified, compile_args};
 use pisa_worker::policy::{
     DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_report, parse_declarations,
@@ -438,4 +438,57 @@ fn a_universe_polymorphic_proof_in_a_definition_keeps_its_value() {
     let stub = "def c.{u} (α : Sort u) (x : α) : {y : α // y = x} := ⟨x, sorry⟩\n";
     let proved = "def c.{u} (α : Sort u) (x : α) : {y : α // y = x} := ⟨x, rfl⟩\n";
     assert_eq!(changes(stub, proved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn what_code_declares_isnt_what_lean_makes_from_a_type() {
+    let snapshots = Snapshots::new();
+    // Named as Lean names what it makes, or shaped like a projection, but
+    // written by the code.
+    let built = snapshots.build(
+        "structure S where\n  x : Nat\n\
+         def S.below : Nat := 5\n\
+         def S.foo (s : S) : Nat := s.1\n\
+         theorem S.mk.inj' : True := trivial\n",
+    );
+    let parent = |name: &str| {
+        let d = built.agreed().iter().find(|d| d.name == name).unwrap();
+        d.parent.clone()
+    };
+    for own in ["S.below", "S.foo", "S.mk.inj'"] {
+        assert_eq!(parent(own), None, "{own}");
+    }
+    for made in ["S.mk", "S.x", "S.rec", "S.casesOn", "S.mk.injEq"] {
+        assert_eq!(parent(made).as_deref(), Some("S"), "{made}");
+    }
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_structure_with_another_field_is_one_change() {
+    let one = "structure S where\n  x : Nat\ntheorem t (s : S) : s.x = s.x := rfl\n";
+    let two = "structure S where\n  x : Nat\n  y : Nat\ntheorem t (s : S) : s.x = s.x := rfl\n";
+    let snapshots = Snapshots::new();
+    let (one, two) = (snapshots.build(one), snapshots.build(two));
+    let parents: Vec<(&str, Option<&str>)> = one
+        .agreed()
+        .iter()
+        .filter(|d| d.name.starts_with("S."))
+        .map(|d| (d.name.as_str(), d.parent.as_deref()))
+        .collect();
+    for (name, parent) in &parents {
+        assert_eq!(*parent, Some("S"), "{name}: {parents:?}");
+    }
+    let changes = grouped(statement_changes(one.agreed(), two.agreed()), |c| {
+        parent_in(one.agreed(), &c.name)
+    });
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].name, "S");
+    for derived in ["S.mk", "S.rec"] {
+        assert!(
+            changes[0].includes.iter().any(|n| n == derived),
+            "{changes:?}"
+        );
+    }
 }

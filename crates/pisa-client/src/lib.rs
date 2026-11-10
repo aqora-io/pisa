@@ -56,12 +56,13 @@ use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
     self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditComparison, AuditFork,
-    AuditLink, AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, CheckResult,
-    CreateSnapshotResponse, Declaration, DeleteSnapshotResponse, Detail, ErrorKind, Export, Health,
-    HealthStatus, JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, Message, Pos,
-    ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped,
-    RebuildSnapshotsResponse, Replacement, Replaces, Session, Severity, Snapshot, SnapshotDetail,
-    Sorry, State, TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
+    AuditLink, AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, Change,
+    CheckResult, CreateSnapshotResponse, Declaration, DeclarationChange, DeleteSnapshotResponse,
+    Detail, ErrorKind, Export, Health, HealthStatus, JobKind, JobStatus, ListDependentsResponse,
+    ListSnapshotsResponse, Message, Pos, ProofStatus, RebuildCreated, RebuildFailed, RebuildItem,
+    RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse, Replacement, Replaces, Session,
+    Severity, Snapshot, SnapshotDetail, Sorry, State, TacticInfo, TermInfo, VerifyFailure,
+    VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,

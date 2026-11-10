@@ -228,7 +228,7 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -262,10 +262,14 @@ would have:
 - `/check/batch`, and the snapshot reads and edits, answer at once whatever
   `Prefer` says: send a batch's items to `/check` instead.
 
-A check result is `{ok, time, error?, messages, sorries, reasons, declarations}`:
+A check result is `{ok, time, error?, messages, sorries, reasons, changes?, declarations}`:
 - `ok` is the verdict.
 - `messages` are Lean's, each `{severity, pos, end_pos?, text}`.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
+- `changes` lists, for a [replacement](#replacing) or a session's final
+  check, the declarations that don't keep the statements they must, each also
+  one of `reasons`: `{name, module?, change, was?, now?, includes?}`, see
+  *Refused* under [Replacing](#replacing).
 - `declarations` lists each new declaration with the axioms it uses.
 
 With `detail: ["tactics"]`, a check result also has `tactics`, the goals at
@@ -429,8 +433,22 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   create the code without `replaces`.
 - **Refused.** Code that changes a statement is not kept, and has no
   `snapshot`: `check.ok` is false and `check.reasons` says what changed, e.g.
-  `statement: t has a different type`. To change a statement on purpose,
-  create the code without `replaces`.
+  `statement: t has a different type`. `check.changes` says the same of each
+  declaration, `{name, module?, change, was?, now?, includes?}`:
+  - `change` is `missing`, `kind`, `type`, `value`, `derived`,
+    `added_assumption`, `assumption` (an assumption with another statement)
+    or `ambiguous`;
+  - `module` names the snapshot a constant is from, when the code no longer
+    builds on it (see *Imports*);
+  - `was` and `now` are its signature before and after, for a changed type or
+    assumption, from the modules' search exports. Those are what the builds
+    printed; the comparison reads the declarations' hashes;
+  - what Lean makes for an inductive type (its constructors, recursor,
+    `casesOn`, `injEq`, projections and the like) is one change, to that
+    type, whose `includes` lists them: `derived` unless the type itself
+    changed.
+
+  To change a statement on purpose, create the code without `replaces`.
 - **Only a head.** A create may replace only a head, a snapshot that nothing
   replaces. Otherwise nothing is built or kept: `check.error` is a `conflict`
   that names what replaces it, and `heads` lists the snapshots to replace
@@ -571,10 +589,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   it reaches, `comparisons` has the comparison a create replacing the spec
   snapshot with the head's code would run (see [Replacing](#replacing)), on
   their records once the kernel has re-checked both, under every `allow` on
-  the links between them: `reasons` if the head doesn't keep the spec's
-  statements, as a refused create says them, or else `replacement`, what it
-  filled and what allowed changes it made. For review, these are what the
-  head changed, whatever its links say.
+  the links between them: `reasons` and `changes` if the head doesn't keep
+  the spec's statements, as a refused create says them, or else
+  `replacement`, what it filled and what allowed changes it made. For review,
+  these are what the head changed, whatever its links say.
 - **`clean`.** There is no fork, no spec snapshot was copied from one that
   is gone (see *Parameters*), every comparison found the spec's statements
   kept (a spec of assumptions only has no targets, but statements all the
