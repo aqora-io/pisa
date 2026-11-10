@@ -25,6 +25,7 @@
 //! that uses macros or asks for it, and later on request. A module's record
 //! is rewritten once it passes.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -109,6 +110,9 @@ struct Replacing {
     declarations: Vec<Declaration>,
     /// The snapshot modules it needs, other than its own.
     needs: Vec<String>,
+    /// The replaced entry's holes, which the replacement may change without
+    /// `allow`, and inherits.
+    holes: Vec<String>,
 }
 
 impl Replacing {
@@ -146,7 +150,9 @@ fn compare(
     now: &[Declaration],
     swapped: &Swapped,
 ) -> Result<Replacement, Vec<DeclarationChange>> {
-    let allowed = |name: &str| allows(replacing.replaced.allow.as_ref(), name);
+    let allowed = |name: &str| {
+        allows(replacing.replaced.allow.as_ref(), name) || named(&replacing.holes, name)
+    };
     let reached = walk(replacing, now, swapped)?;
     let mut refused = Vec::new();
     let mut changed_definitions: Vec<String> = Vec::new();
@@ -213,8 +219,13 @@ fn compare(
 /// may then change its value, or an inductive type, whose constructors and
 /// what Lean makes from them may then change.
 fn allows(allow: Option<&Allow>, name: &str) -> bool {
+    allow.is_some_and(|a| named(&a.definitions, name))
+}
+
+/// Whether `names` names `name`, by [`normalised`] name.
+fn named(names: &[String], name: &str) -> bool {
     let name = normalised(name);
-    allow.is_some_and(|a| a.definitions.iter().any(|n| normalised(n) == name))
+    names.iter().any(|n| normalised(n) == name)
 }
 
 /// What a replacement's `allow` may name, the definitions (declarations with
@@ -229,7 +240,26 @@ fn allowable<'a>(
         .declarations
         .iter()
         .chain(lost)
-        .filter(|d| d.value_hash.is_some() || d.kind == "inductive")
+        .filter(|d| changeable(d))
+}
+
+/// Whether `allow` or `holes` may name `d`: a definition (a declaration with a
+/// value) or an inductive type.
+fn changeable(d: &Declaration) -> bool {
+    d.value_hash.is_some() || d.kind == "inductive"
+}
+
+/// The first of `wanted` that isn't among `names`, by [`normalised`] name,
+/// with a hint if its private form is.
+fn misnamed<'a>(wanted: &'a [String], names: &HashSet<Cow<'_, str>>) -> Option<(&'a str, String)> {
+    let name = wanted.iter().find(|n| !names.contains(&normalised(n)))?;
+    let private = format!("_private.{}", normalised(name));
+    let hint = if names.contains(private.as_str()) {
+        format!(" (for a private definition, write {private})")
+    } else {
+        String::new()
+    };
+    Some((name, hint))
 }
 
 /// The error for a replacement whose `allow` names something other than a
@@ -239,16 +269,7 @@ fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Error> {
     let names: HashSet<_> = allowable(replacing, swapped)
         .map(|d| normalised(&d.name))
         .collect();
-    let name = allow
-        .definitions
-        .iter()
-        .find(|n| !names.contains(&normalised(n)))?;
-    let private = format!("_private.{}", normalised(name));
-    let hint = if names.contains(private.as_str()) {
-        format!(" (for a private definition, write {private})")
-    } else {
-        String::new()
-    };
+    let (name, hint) = misnamed(&allow.definitions, &names)?;
     Some(Error::new(
         ErrorKind::BadRequest,
         format!(
@@ -949,6 +970,7 @@ impl Snapshots {
                 snapshot_id: self.id(&r.snapshot_id),
                 ..r
             }),
+            holes: entry_meta.holes,
             status: meta.status,
             verified: meta.verified,
             created: entry_meta.created_micros / 1_000_000,
@@ -1093,7 +1115,41 @@ impl Snapshots {
                 .filter(|m| **m != entry_meta.module)
                 .cloned()
                 .collect(),
+            holes: entry_meta.holes,
         })
+    }
+
+    /// The error for a spec's `holes` that name something other than a
+    /// definition or inductive type of its module, which declares
+    /// `declarations`, or of the snapshot modules it builds on, `closure`.
+    async fn holes_error(
+        &self,
+        holes: &[String],
+        declarations: &[Declaration],
+        closure: &[String],
+    ) -> Result<Option<Error>, Error> {
+        if holes.is_empty() {
+            return Ok(None);
+        }
+        let mut below = Vec::new();
+        for m in closure.iter().collect::<BTreeSet<_>>() {
+            below.extend(self.catalog.module(m).await?.result.declarations);
+        }
+        let names: HashSet<_> = declarations
+            .iter()
+            .chain(&below)
+            .filter(|d| changeable(d))
+            .map(|d| normalised(&d.name))
+            .collect();
+        Ok(misnamed(holes, &names).map(|(name, hint)| {
+            Error::new(
+                ErrorKind::BadRequest,
+                format!(
+                    "holes names {name}, which isn't a definition or inductive type of the \
+                     snapshot or of a snapshot it builds on{hint}"
+                ),
+            )
+        }))
     }
 
     /// The refusal of a create that replaces `entry` when another entry
@@ -1330,12 +1386,24 @@ impl Snapshots {
             }
             None => None,
         };
+        let closure: Vec<String> = ids(&meta.modules).filter(|m| *m != id).cloned().collect();
+        match self
+            .holes_error(&job.holes, &meta.result.declarations, &closure)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(e)) | Err(e) => {
+                response.check.error = Some(e);
+                return Some(response);
+            }
+        }
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
             replaces: replacing.map(Replacing::link),
             replacement: replacement.clone(),
             fork: job.fork,
+            holes: replacing.map_or_else(|| job.holes.clone(), |r| r.holes.clone()),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -1572,6 +1640,23 @@ impl Snapshots {
             },
             None => None,
         };
+        // A spec's holes, now that its own declarations are known.
+        let closure: Vec<String> = parents
+            .iter()
+            .flat_map(|p| ids(&p.modules))
+            .cloned()
+            .collect();
+        match self
+            .holes_error(&job.holes, &verification.declarations, &closure)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(e)) | Err(e) => {
+                self.unbuild(slot, id);
+                outcome.verification = Some(verification);
+                return fail(outcome, e);
+            }
+        }
         outcome.verification = Some(verification);
 
         let meta = ModuleMeta {
@@ -1602,6 +1687,7 @@ impl Snapshots {
             replaces: replacing.map(Replacing::link),
             replacement: replacement.clone(),
             fork: job.fork,
+            holes: replacing.map_or_else(|| job.holes.clone(), |r| r.holes.clone()),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)
@@ -2004,8 +2090,11 @@ impl Snapshots {
             return Err(bad("a rebuild takes labels: which dependents to rebuild"));
         }
         check_labels(&job.labels).map_err(|e| bad(&e))?;
-        let to_entry = self.catalog.entry(&to).await?;
-        let (old, new) = (self.catalog.entry(&from).await?.module, to_entry.module);
+        let (from_entry, to_entry) = (
+            self.catalog.entry(&from).await?,
+            self.catalog.entry(&to).await?,
+        );
+        let (old, new) = (from_entry.module, to_entry.module);
         if old == new {
             return Err(bad(
                 "from and to are on the same module: there is nothing to rebuild",
@@ -2035,6 +2124,7 @@ impl Snapshots {
                 .filter(|m| **m != old)
                 .cloned()
                 .collect(),
+            holes: from_entry.holes.clone(),
         };
         let strict = replacing(None);
         let needs: Vec<String> = ids(&new_meta.modules).cloned().collect();
@@ -2217,6 +2307,7 @@ impl Snapshots {
                     module: m.clone(),
                     declarations: meta.result.declarations.clone(),
                     needs: needs_before.clone(),
+                    holes: entry_meta.holes.clone(),
                 };
                 let swapped = self
                     .predicted_swap(&copied, &needs_now, &id, &originals, &mut metas)
@@ -2426,12 +2517,14 @@ impl Snapshots {
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
         let mut comparisons = Vec::new();
         // The links' allows are what their creates asked for, by whoever
-        // made them: the comparison takes only what the leader allows.
+        // made them: the comparison takes only what the leader allows, the
+        // spec's holes and the audit's `allow`.
         for ((spec, spec_meta), ends) in specs.iter().zip(&reached) {
+            let allowed: Vec<String> = spec_meta.holes.iter().chain(allow).cloned().collect();
             for head in ends {
                 let head_module = module_of[head];
                 let compared = self
-                    .rederive(&spec_meta.module, head_module, allow, &mut metas)
+                    .rederive(&spec_meta.module, head_module, &allowed, &mut metas)
                     .await?;
                 let (changes, replacement) = match compared {
                     Some(Ok(r)) => (Vec::new(), Some(r)),
@@ -2511,6 +2604,7 @@ impl Snapshots {
                 .filter(|m| *m != spec)
                 .cloned()
                 .collect(),
+            holes: Vec::new(),
         };
         let needs: Vec<String> = ids(&head_meta.modules).cloned().collect();
         let swapped = match self
@@ -2604,9 +2698,17 @@ impl Snapshots {
         (targets, all_accepted)
     }
 
-    /// Entry `e`'s link, as an audit lists it, if it allowed changes.
+    /// Entry `e`'s link, as an audit lists it, if it let definitions change:
+    /// under an `allow`, or filling holes.
     fn audit_link(&self, e: &str, entry_meta: &EntryMeta) -> Option<AuditLink> {
-        let replaces = entry_meta.replaces.as_ref().filter(|r| r.allow.is_some())?;
+        let changed = entry_meta
+            .replacement
+            .as_ref()
+            .is_some_and(|r| !r.changed_definitions.is_empty());
+        let replaces = entry_meta
+            .replaces
+            .as_ref()
+            .filter(|r| r.allow.is_some() || changed)?;
         Some(AuditLink {
             snapshot_id: self.id(e),
             replaces: Replaces {
@@ -2868,6 +2970,7 @@ mod tests {
             module: "m".into(),
             declarations: old,
             needs: vec!["a".into()],
+            holes: Vec::new(),
         }
     }
 
@@ -3348,6 +3451,7 @@ mod tests {
             key: None,
             replaces: None,
             replacement: None,
+            holes: Vec::new(),
             fork: false,
         }
     }
@@ -3694,6 +3798,7 @@ mod tests {
             created_micros: 0,
             replaces: None,
             replacement: None,
+            holes: Vec::new(),
         };
         // Each module declares `t`, proved and verified.
         let module = |m: &str| ModuleMeta {

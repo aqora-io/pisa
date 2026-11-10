@@ -223,8 +223,8 @@ pnpm -C web generate
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}` |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
-| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
+| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
@@ -500,6 +500,18 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     nothing is kept. For
     `h` where a `private def h` would match, it adds `(for a private
     definition, write _private.h)`.
+- **Holes.** A spec snapshot may leave definitions for the snapshots that
+  replace it to change: `"holes": ["program", "cost"]` at its create, named
+  as `allow` names them, each a definition or inductive type of its module
+  or of a snapshot it builds on (else a `bad_request` in `check.error`, `holes
+  names nope, which isn't a definition or inductive type of the snapshot or
+  of a snapshot it builds on`, and nothing is kept). A snapshot that
+  replaces it inherits them, as `holes` in `GET /snapshots/{id}` shows, and
+  may change them without `allow`; `changed_definitions` lists them as it
+  lists what `allow` lets change. The [spec audit](#spec-audit) allows them
+  to change, and `allow`s nothing else the leader didn't. `holes` is a 400
+  with `replaces`, since a replacement inherits the replaced snapshot's, and
+  when empty.
 - **The link.** `replacement.filled` lists the declarations that used `sorry`
   and no longer do. The new snapshot records `replaces: {snapshot_id,
   allow?}`, which listings and `GET /snapshots/{id}` show. It is set by a
@@ -600,17 +612,18 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   head doesn't keep the spec's statements, as a refused create says them, or
   else `replacement`, what it filled and what allowed changes it made. For
   review, these are what the head changed, whatever its links say.
-- **What may change.** `allow=<name>`, repeated, names the definitions the
-  leader lets the heads change, as `allow` names them in `replaces`
-  (`_private.h` for a private one; an inductive type for its constructors
-  and what Lean derives from it). A link's own `allow` is what its create
-  asked for, written by whoever submitted it, so it doesn't count: by default
-  no definition may change, and a head that changed one under its link's
-  `allow` is shown with `reasons` and isn't `clean`. A statement only names
-  the definitions it uses, so redefining one would change what it says.
+- **What may change.** A spec snapshot's [holes](#replacing), and the
+  definitions `allow=<name>`, repeated, names: those the leader lets the
+  heads change, as `allow` names them in `replaces` (`_private.h` for a
+  private one; an inductive type for its constructors and what Lean derives
+  from it), such as one its own base edit changed. A link's own `allow` is
+  what its create asked for, written by whoever submitted it, so it doesn't
+  count: a head that changed anything else is shown with `reasons` and isn't
+  `clean`. A statement only names the definitions it uses, so redefining one
+  would change what it says.
 - **`clean`.** There is no fork, no spec snapshot was copied from one that
   is gone (see *Parameters*), every comparison found the spec's statements
-  kept with no definition changed but those `allow` names (a spec of
+  kept with no definition changed but its holes and those `allow` names (a spec of
   assumptions only has no targets, but statements all the same), and every
   target is `accepted` on its head: the
   spec snapshot and the head are verified, their comparison found the
@@ -621,7 +634,7 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   influence, so they don't count. Each of `assumptions` says whether the spec
   permits it (`in_spec`).
 - **Links.** For review, `links` lists every link that let definitions change
-  (with an `allow`): those on the way to the heads, and those of each spec
+  (with an `allow`, or filling holes): those on the way to the heads, and those of each spec
   snapshot's own chain back through what it replaced, as far as those
   snapshots exist, such as a rebuilt spec's link to the original, which
   allows what `to` changed under it. Each is `{snapshot_id, replaces: {snapshot_id, allow},
@@ -649,7 +662,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 [replacing](#replacing) keeps their submissions in one run:
 - **The leader.** It creates the spec snapshots, skeletons with `sorry` and
   one or a few targets each, with their [witnesses](#witnesses), with
-  `verify: true` (see [Verifying](#verifying)), labels the
+  `verify: true` (see [Verifying](#verifying)) and, where agents are to fill
+  in definitions as well as proofs, with those definitions as `holes` (see
+  [Replacing](#replacing)), labels the
   run (see [Labels](#labels)) and holds the spec ids. They stay valid through
   [rebuilds](#rebuilding) without `retire`.
 - **Agents.** Each gets its target's spec id and labels every snapshot with
@@ -678,9 +693,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   submissions would answer `not_found` without `heads`.
 - **Accepting.** The run is accepted when `audit?against=` its spec ids is
   `clean` (see [Auditing a run](#spec-audit)), with `allow=` each definition
-  the leader decided may change, such as one its own base edit changed. What
-  the agents' links allowed doesn't count; `comparisons` and `links` show
-  what each head changed, for review.
+  the leader decided later may change, such as one its own base edit
+  changed; the spec's holes may change already. What the agents' links
+  allowed doesn't count; `comparisons` and `links` show what each head
+  changed, for review, holes' values included.
 - **Afterwards.** The leader may retire and delete superseded versions.
   Deletes splice, so the run stays whole, and its links merge once reviewed
   (see [Retention](#retention)).

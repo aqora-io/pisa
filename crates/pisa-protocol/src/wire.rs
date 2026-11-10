@@ -83,6 +83,9 @@ pub struct SnapshotCreateJob {
     /// Whether `replaces` may name a snapshot that another replaces.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fork: bool,
+    /// A spec's holes; empty with `replaces`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +264,7 @@ mod tests {
                 allow: None,
             }),
             fork: true,
+            holes: Vec::new(),
         };
         let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();
         assert_eq!(job["kind"], "snapshot_replace");

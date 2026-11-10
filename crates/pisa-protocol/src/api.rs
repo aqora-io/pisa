@@ -560,8 +560,9 @@ pub struct CreateSnapshotRequest {
     /// The snapshot this code replaces, e.g. the skeleton a proof fills in.
     /// The code is kept only if it still declares everything that snapshot's
     /// module declares, each the same kind of declaration with the same type
-    /// and, for definitions, the same value unless `allow` names them, and
-    /// adds no assumptions (`axiom`s, its own or a newly imported
+    /// and, for definitions, the same value unless `allow` or that
+    /// snapshot's [`holes`](Snapshot::holes) name them, and adds no
+    /// assumptions (`axiom`s, its own or a newly imported
     /// snapshot's); it may add other declarations and imports. If it no
     /// longer builds on a snapshot that module does, what the module's
     /// declarations use from there must be unchanged in what the code builds
@@ -579,6 +580,17 @@ pub struct CreateSnapshotRequest {
     /// this check. It does nothing without `replaces`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fork: bool,
+    /// The definitions a spec snapshot leaves for the snapshots that replace
+    /// it to change, its holes, named as [`allow`](Allow) names them:
+    /// definitions or inductive types of its module or of a snapshot it
+    /// builds on. The snapshots that replace it inherit them and may change
+    /// them without `allow`, and a [spec audit](AuditSnapshotsResponse)
+    /// allows them to change. Not with `replaces`, as a replacement
+    /// inherits the replaced snapshot's, and not empty (`bad_request`); a
+    /// name that isn't such a definition keeps nothing (`check.error` is a
+    /// `bad_request`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holes: Option<Vec<String>>,
 }
 
 /// A snapshot that a create replaces, and what the replacement may change:
@@ -659,6 +671,11 @@ pub struct Snapshot {
     /// two links composed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
+    /// The definitions it leaves for the snapshots that replace it to
+    /// change: a spec snapshot's [`holes`](CreateSnapshotRequest::holes), or
+    /// those of the snapshot it replaced.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<String>,
     /// The worst status among its module's declarations, by the build's
     /// report or, once `verified`, the kernel re-check.
     pub status: ProofStatus,

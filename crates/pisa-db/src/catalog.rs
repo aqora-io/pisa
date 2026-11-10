@@ -96,6 +96,10 @@ pub struct EntryMeta {
     /// splice, which an audit lists later. Set exactly when `replaces` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<Replacement>,
+    /// The definitions it leaves for the entries that replace it to change:
+    /// a spec's own, or those of the entry it replaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<String>,
 }
 
 impl EntryMeta {
@@ -209,6 +213,8 @@ pub struct NewEntry {
     pub replaces: Option<Replaces>,
     /// What the comparison with it found; set exactly when `replaces` is.
     pub replacement: Option<Replacement>,
+    /// The definitions it leaves for the entries that replace it to change.
+    pub holes: Vec<String>,
     /// Whether it may replace an entry that another entry replaces already,
     /// making a fork. It isn't stored.
     pub fork: bool,
@@ -302,7 +308,8 @@ fn has_nul(value: &Value) -> bool {
 }
 
 /// An entry's id, module, labels, key, creation time, the entry it replaces
-/// with what it allowed and the comparison, both as JSON text, as selected.
+/// with what it allowed and the comparison, and its holes, the last three
+/// as JSON text, as selected.
 pub(crate) type EntryRow = (
     String,
     String,
@@ -312,10 +319,11 @@ pub(crate) type EntryRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail> {
-    let (e, module, labels, key, created, replaces, allow, replacement) = row;
+    let (e, module, labels, key, created, replaces, allow, replacement, holes) = row;
     let replaces = match replaces {
         Some(entry) => Some(Replaces {
             snapshot_id: entry,
@@ -332,6 +340,10 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
         replacement: replacement
             .map(|text| serde_json::from_str(&text))
             .transpose()?,
+        holes: holes
+            .map(|text| serde_json::from_str(&text))
+            .transpose()?
+            .unwrap_or_default(),
     };
     Ok((e, meta))
 }
@@ -768,6 +780,7 @@ mod tests {
             key: None,
             replaces: None,
             replacement: None,
+            holes: Vec::new(),
             fork: false,
         }
     }
@@ -781,6 +794,7 @@ mod tests {
             key: None,
             replaces: None,
             replacement: None,
+            holes: Vec::new(),
             fork: false,
         }
     }
@@ -791,6 +805,7 @@ mod tests {
             key: Some(k.into()),
             replaces: None,
             replacement: None,
+            holes: Vec::new(),
             fork: false,
         }
     }
@@ -923,6 +938,24 @@ mod tests {
             assert_eq!(dropped.unwrap_err().message, unknown);
             let labelled = catalog.set_labels(&e, &BTreeMap::new()).await;
             assert_eq!(labelled.unwrap_err().message, unknown);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_entry_keeps_its_holes() {
+        for catalog in catalogs().await {
+            for holes in [Vec::new(), names(&["f", "_private.h"])] {
+                let entry = NewEntry {
+                    holes: holes.clone(),
+                    ..no_labels()
+                };
+                let (e, added, _) = catalog.commit("x", &meta("x"), None, entry).await.unwrap();
+                assert_eq!(added.holes, holes);
+                assert_eq!(catalog.entry(&e).await.unwrap().holes, holes);
+                let (listed, _) = catalog.list(&[], 10, None, false).await.unwrap();
+                let found = listed.iter().find(|(id, _)| *id == e).unwrap();
+                assert_eq!(found.1.holes, holes);
+            }
         }
     }
 
@@ -1098,6 +1131,7 @@ mod tests {
             created_micros: 0,
             replaces,
             replacement,
+            holes: Vec::new(),
         };
         let root = entry(None, None);
         let top = entry(link("p1", &["f"]), Some(replacement(&[], &["f"], &[])));
@@ -1156,6 +1190,7 @@ mod tests {
             created_micros: 0,
             replaces,
             replacement,
+            holes: Vec::new(),
         };
         // The comparisons are what the creates' builds reported; the allows
         // are what the links' authors declared, which an audit reads.

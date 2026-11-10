@@ -31,6 +31,7 @@ const ENTRY: (
     entries::replaces,
     entries::replaces_allow,
     entries::replacement,
+    entries::holes,
 ) = (
     entries::id,
     entries::module,
@@ -40,6 +41,7 @@ const ENTRY: (
     entries::replaces,
     entries::replaces_allow,
     entries::replacement,
+    entries::holes,
 );
 
 /// The entry ids a query of [`replacers_among`] takes, so that SQLite's limit
@@ -178,8 +180,12 @@ async fn add(
         created_micros: now_micros(),
         replaces: entry.replaces.clone(),
         replacement: entry.replacement.clone(),
+        holes: entry.holes.clone(),
     };
     let allow = meta.replaces.as_ref().map(allow_column).transpose()?;
+    let holes = (!meta.holes.is_empty())
+        .then(|| serde_json::to_string(&meta.holes))
+        .transpose()?;
     let replacement = meta
         .replacement
         .as_ref()
@@ -196,6 +202,7 @@ async fn add(
             entries::replaces.eq(meta.replaces.as_ref().map(|r| r.snapshot_id.as_str())),
             entries::replaces_allow.eq(allow.flatten()),
             entries::replacement.eq(replacement),
+            entries::holes.eq(holes),
         ))
         .execute(conn)
         .await?;

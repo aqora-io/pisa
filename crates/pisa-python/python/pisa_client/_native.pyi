@@ -123,6 +123,7 @@ class Snapshot(TypedDict):
     imports: list[str]
     labels: dict[str, str]
     replaces: NotRequired[Replaces]
+    holes: NotRequired[list[str]]
     status: ProofStatus
     verified: bool
     created: int
@@ -376,6 +377,7 @@ class Client:
         key: str | None = None,
         replaces: Replaces | None = None,
         fork: bool = False,
+        holes: list[str] | None = None,
     ) -> CreateSnapshotResponse:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module that later code can import, with a new `snapshot` carrying
@@ -419,7 +421,14 @@ class Client:
         `conflict`, and `heads` lists the snapshots to replace instead, oldest
         first. Another create can replace it while this one builds, which is
         refused the same way. `fork=True` replaces it anyway, which forks the
-        run. A `key` replay comes before this check."""
+        run. A `key` replay comes before this check.
+
+        `holes` makes this a spec snapshot that leaves those definitions for
+        the snapshots that replace it to change: each a definition of its
+        module or of a snapshot it builds on, else `check["error"]` is a
+        `bad_request`. Snapshots that replace it inherit them and may change
+        them without `allow`, and an audit against it allows them to change.
+        Not with `replaces` (a `PisaError` of kind `bad_request`)."""
     def submit_create_snapshot(
         self,
         code: str,
@@ -429,6 +438,7 @@ class Client:
         key: str | None = None,
         replaces: Replaces | None = None,
         fork: bool = False,
+        holes: list[str] | None = None,
     ) -> Job:
         """Like `create_snapshot`, as a job."""
     def get_snapshot(self, id: str) -> SnapshotDetail:

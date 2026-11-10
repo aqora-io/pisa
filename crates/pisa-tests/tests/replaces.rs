@@ -673,3 +673,78 @@ async fn a_replacement_landing_during_a_build_wins() {
     assert_eq!(listed["snapshots"].as_array().unwrap().len(), 2, "{listed}");
     assert_eq!(c.stored_blobs().await, blobs);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spec_leaves_its_holes_for_replacements_to_fill() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef f : Nat := 1\ndef h : Nat := 1\ntheorem t : f = h := sorry";
+    let s = create(&c, json!({"code": spec, "holes": ["f"]})).await;
+    assert_eq!(s["snapshot"]["holes"], json!(["f"]), "{s}");
+    // A hole changes without `allow`, and another definition doesn't.
+    let both = "import Foo\n\ndef f : Nat := 2\ndef h : Nat := 2\ntheorem t : f = h := sorry";
+    let r = create(&c, json!({"code": both, "replaces": replacing(entry(&s))})).await;
+    refused(&r, "statement: h has a different value");
+    let filled = "import Foo\n\ndef f : Nat := 2\ndef h : Nat := 1\ntheorem t : f = h := sorry";
+    let p = create(
+        &c,
+        json!({"code": filled, "replaces": replacing(entry(&s))}),
+    )
+    .await;
+    assert_eq!(p["replacement"]["changed_definitions"], json!(["f"]), "{p}");
+    // What replaces it inherits them.
+    assert_eq!(p["snapshot"]["holes"], json!(["f"]), "{p}");
+    let again = "import Foo\n\ndef f : Nat := 3\ndef h : Nat := 1\ntheorem t : f = h := sorry";
+    let q = create(&c, json!({"code": again, "replaces": replacing(entry(&p))})).await;
+    assert_eq!(q["replacement"]["changed_definitions"], json!(["f"]), "{q}");
+    let got = get(&c, &format!("/snapshots/{}", entry(&q))).await;
+    assert_eq!(got["holes"], json!(["f"]), "{got}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn holes_name_definitions_of_the_spec_or_of_what_it_builds_on() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let b = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let spec = on(&b, "def f : Nat := 1\ntheorem t : f = g := sorry");
+
+    // An empty list isn't a request, and a replacement inherits its holes.
+    let bodies = [
+        json!({"code": spec, "holes": []}),
+        json!({"code": spec, "holes": ["f"], "replaces": replacing(entry(&b))}),
+    ];
+    for body in bodies {
+        let (status, r) = c.post("/snapshots", body).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{r}"
+        );
+    }
+
+    // A name that isn't a definition, such as a theorem's, keeps nothing.
+    let unknown = |r: &Value, name: &str| {
+        assert!(r.get("snapshot").is_none(), "{r}");
+        assert_eq!(r["check"]["error"]["kind"], "bad_request", "{r}");
+        let message = format!(
+            "holes names {name}, which isn't a definition or inductive type of the snapshot or of \
+             a snapshot it builds on"
+        );
+        assert_eq!(r["check"]["error"]["message"], message, "{r}");
+    };
+    for name in ["nope", "t"] {
+        let r = create(&c, json!({"code": spec, "holes": ["f", name]})).await;
+        unknown(&r, name);
+    }
+    // Code that is kept already gets no new snapshot either.
+    create(&c, json!({"code": spec})).await;
+    let r = create(&c, json!({"code": spec, "holes": ["nope"]})).await;
+    unknown(&r, "nope");
+
+    // A definition of a snapshot it builds on may be one, and change on
+    // another base.
+    let s = create(&c, json!({"code": spec, "holes": ["g"]})).await;
+    assert_eq!(s["snapshot"]["holes"], json!(["g"]), "{s}");
+    let b2 = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 2"})).await;
+    let moved = on(&b2, "def f : Nat := 1\ntheorem t : f = g := sorry");
+    let r = create(&c, json!({"code": moved, "replaces": replacing(entry(&s))})).await;
+    assert_eq!(r["replacement"]["changed_definitions"], json!(["g"]), "{r}");
+}

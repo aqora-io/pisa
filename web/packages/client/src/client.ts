@@ -106,7 +106,7 @@ export interface GetDeclarationOptions extends VersionOptions {
 }
 
 export type CreateSnapshotOptions = RunOptions &
-  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces" | "fork">;
+  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces" | "fork" | "holes">;
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -438,6 +438,7 @@ export class PisaClient {
     if (options.key !== undefined) body.key = options.key;
     if (options.replaces !== undefined) body.replaces = options.replaces;
     if (options.fork !== undefined) body.fork = options.fork;
+    if (options.holes !== undefined) body.holes = options.holes;
     return body;
   }
 

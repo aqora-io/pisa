@@ -98,10 +98,12 @@ describe("PisaClient", () => {
     await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: { snapshot_id: "v1~e1" }, key: "k" });
     await client.createSnapshot("def f := 2", { replaces: { snapshot_id: "v1~e2", allow: { definitions: ["f"] } } });
     await client.createSnapshot("theorem t : 1 = 1 := by simp", { replaces: { snapshot_id: "v1~e1" }, fork: true });
+    await client.createSnapshot("def f := sorry", { holes: ["f"] });
     expect(sent.map((s) => s.body)).toEqual([
       { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: { snapshot_id: "v1~e1" } },
       { code: "def f := 2", version: "v1", replaces: { snapshot_id: "v1~e2", allow: { definitions: ["f"] } } },
       { code: "theorem t : 1 = 1 := by simp", version: "v1", replaces: { snapshot_id: "v1~e1" }, fork: true },
+      { code: "def f := sorry", version: "v1", holes: ["f"] },
     ]);
   });
 

@@ -581,6 +581,13 @@
             "description": "Lets `replaces` name a snapshot that another snapshot replaces\nalready, which forks the run. Otherwise such a create keeps nothing\nand builds nothing: `check.error` is a `conflict`, and the response's\n`heads` are the snapshots to replace instead. Another create can\nreplace the snapshot while this one builds, and then it is refused\nthe same way, with its build discarded. A `key` replay comes before\nthis check. It does nothing without `replaces`.",
             "type": "boolean"
           },
+          "holes": {
+            "description": "The definitions a spec snapshot leaves for the snapshots that replace\nit to change, its holes, named as [`allow`](Allow) names them:\ndefinitions or inductive types of its module or of a snapshot it\nbuilds on. The snapshots that replace it inherit them and may change\nthem without `allow`, and a [spec audit](AuditSnapshotsResponse)\nallows them to change. Not with `replaces`, as a replacement\ninherits the replaced snapshot's, and not empty (`bad_request`); a\nname that isn't such a definition keeps nothing (`check.error` is a\n`bad_request`).",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "key": {
             "description": "Makes the create safe to retry: while a snapshot made with this key\nexists, a create with it on the same code returns that snapshot as it\nis, instead of adding another; on other code it is a `bad_request`.\nSuch a replay ignores the request's other fields, `labels` and\n`verify` included, so it can be `verified: false` with no error after\n`verify: true`. Creates that keep nothing don't use the key up, and\ndeleting the snapshot frees it. See\n[`check_key`](crate::labels::check_key) for the rules.",
             "type": "string"
@@ -597,7 +604,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` names them, and\nadds no assumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link. The replaced snapshot\nmust be a head, one that no snapshot replaces, unless `fork` is set."
+            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` or that\nsnapshot's [`holes`](Snapshot::holes) name them, and adds no\nassumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link. The replaced snapshot\nmust be a head, one that no snapshot replaces, unless `fork` is set."
           },
           "timeout": {
             "description": "Lean's time limit in seconds, for building the module including its\nimports.",
@@ -1838,6 +1845,13 @@
           "header": {
             "description": "The header to start code on top of this snapshot with: its code's\nimports with its snapshots replaced by this one. Code with exactly\nthis header reuses the Lean process the snapshot's builder keeps warm.",
             "type": "string"
+          },
+          "holes": {
+            "description": "The definitions it leaves for the snapshots that replace it to\nchange: a spec snapshot's [`holes`](CreateSnapshotRequest::holes), or\nthose of the snapshot it replaced.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "id": {
             "description": "Its id, `<version>~<32 lowercase hex>`, which the other snapshot\nendpoints take. It carries the version, so they need no other.",

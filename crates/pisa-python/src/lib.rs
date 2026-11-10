@@ -162,6 +162,7 @@ fn create_snapshot_options(
     key: Option<String>,
     replaces: Option<Bound<'_, PyAny>>,
     fork: bool,
+    holes: Option<Vec<String>>,
 ) -> PyResult<pisa_client::CreateSnapshotOptions> {
     Ok(pisa_client::CreateSnapshotOptions {
         verify,
@@ -169,6 +170,7 @@ fn create_snapshot_options(
         key,
         replaces: replaces.as_ref().map(replaces_of).transpose()?,
         fork,
+        holes: holes.unwrap_or_default(),
     })
 }
 
@@ -267,7 +269,7 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None))]
     #[allow(clippy::too_many_arguments)]
     fn create_snapshot<'py>(
         &self,
@@ -278,14 +280,15 @@ impl Client {
         key: Option<String>,
         replaces: Option<Bound<'py, PyAny>>,
         fork: bool,
+        holes: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces, fork)?;
+        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes)?;
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None))]
     #[allow(clippy::too_many_arguments)]
     fn submit_create_snapshot<'py>(
         &self,
@@ -296,8 +299,9 @@ impl Client {
         key: Option<String>,
         replaces: Option<Bound<'py, PyAny>>,
         fork: bool,
+        holes: Option<Vec<String>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces, fork)?;
+        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes)?;
         call(py, async move {
             let job = self.inner.submit_create_snapshot_with(&code, &opts).await?;
             Ok(queued(job))

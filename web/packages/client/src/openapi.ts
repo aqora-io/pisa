@@ -694,6 +694,18 @@ export interface components {
              */
             fork?: boolean;
             /**
+             * @description The definitions a spec snapshot leaves for the snapshots that replace
+             *     it to change, its holes, named as [`allow`](Allow) names them:
+             *     definitions or inductive types of its module or of a snapshot it
+             *     builds on. The snapshots that replace it inherit them and may change
+             *     them without `allow`, and a [spec audit](AuditSnapshotsResponse)
+             *     allows them to change. Not with `replaces`, as a replacement
+             *     inherits the replaced snapshot's, and not empty (`bad_request`); a
+             *     name that isn't such a definition keeps nothing (`check.error` is a
+             *     `bad_request`).
+             */
+            holes?: string[];
+            /**
              * @description Makes the create safe to retry: while a snapshot made with this key
              *     exists, a create with it on the same code returns that snapshot as it
              *     is, instead of adding another; on other code it is a `bad_request`.
@@ -715,8 +727,9 @@ export interface components {
              * @description The snapshot this code replaces, e.g. the skeleton a proof fills in.
              *     The code is kept only if it still declares everything that snapshot's
              *     module declares, each the same kind of declaration with the same type
-             *     and, for definitions, the same value unless `allow` names them, and
-             *     adds no assumptions (`axiom`s, its own or a newly imported
+             *     and, for definitions, the same value unless `allow` or that
+             *     snapshot's [`holes`](Snapshot::holes) name them, and adds no
+             *     assumptions (`axiom`s, its own or a newly imported
              *     snapshot's); it may add other declarations and imports. If it no
              *     longer builds on a snapshot that module does, what the module's
              *     declarations use from there must be unchanged in what the code builds
@@ -1448,6 +1461,12 @@ export interface components {
              *     this header reuses the Lean process the snapshot's builder keeps warm.
              */
             header: string;
+            /**
+             * @description The definitions it leaves for the snapshots that replace it to
+             *     change: a spec snapshot's [`holes`](CreateSnapshotRequest::holes), or
+             *     those of the snapshot it replaced.
+             */
+            holes?: string[];
             /**
              * @description Its id, `<version>~<32 lowercase hex>`, which the other snapshot
              *     endpoints take. It carries the version, so they need no other.

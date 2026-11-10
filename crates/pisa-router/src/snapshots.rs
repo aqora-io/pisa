@@ -67,6 +67,21 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         .version
         .as_deref()
         .and_then(|v| app.versions.resolve(Some(v)));
+    match &req.holes {
+        Some(holes) if holes.is_empty() => {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "holes is empty: to leave no definition to change, leave holes out",
+            ));
+        }
+        Some(_) if req.replaces.is_some() => {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "holes are a spec's: a snapshot that replaces another inherits its holes",
+            ));
+        }
+        _ => {}
+    }
     if let Some(r) = &req.replaces {
         if r.allow.as_ref().is_some_and(|a| a.definitions.is_empty()) {
             return Err(ApiError::new(
@@ -107,6 +122,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         key: req.key,
         replaces: req.replaces,
         fork: req.fork,
+        holes: req.holes.unwrap_or_default(),
     };
     let job = if replace {
         Job::SnapshotReplace(create)

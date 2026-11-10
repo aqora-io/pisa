@@ -277,6 +277,40 @@ async fn a_definition_changed_under_a_links_allow_is_clean_only_if_the_audit_all
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_fills_its_specs_holes_is_clean() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ndef f : Nat := 1\ntheorem t : f = f := sorry",
+               "holes": ["f"], "verify": true}),
+    )
+    .await;
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\ndef f : Nat := 2\ntheorem t : f = f := rfl",
+               "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    assert_eq!(p["snapshot"]["verified"], true, "{p}");
+
+    let r = audit(&c, &[id(&s)]).await;
+    assert_eq!(r["clean"], true, "{r}");
+    assert_eq!(
+        r["comparisons"][0]["replacement"]["changed_definitions"],
+        json!(["f"]),
+        "{r}"
+    );
+    // The link filled a hole without `allow`, and is listed for review.
+    assert_eq!(
+        r["links"],
+        json!([{"snapshot_id": id(&p), "replaces": replacing(&s),
+                "replacement": {"filled": ["t"], "changed_definitions": ["f"],
+                                "affected": ["t"]}}]),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_spec_without_targets_is_clean_only_if_its_head_keeps_it() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     // Only an assumption: no targets, but a statement all the same.
@@ -563,6 +597,7 @@ async fn assumptions_permitted_by_the_spec() {
             affected: Vec::new(),
         }),
         fork: false,
+        holes: Vec::new(),
     };
     let (linked, _) = catalog
         .add_entry(module.strip_prefix("PisaSnap.s").unwrap(), entry)
@@ -860,14 +895,13 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
     let s0 = create(
         &c,
         json!({"code": on(&b, "def f : Nat := 0\ntheorem t : f = g := sorry"), "labels": p1,
-               "verify": true}),
+               "holes": ["f"], "verify": true}),
     )
     .await;
-    let allow_f = json!({"definitions": ["f"]});
     let p1_ = create(
         &c,
         json!({"code": on(&b, "def f : Nat := 1\ntheorem t : f = g := rfl"), "labels": p1,
-               "replaces": {"snapshot_id": id(&s0), "allow": allow_f}}),
+               "replaces": replacing(&s0)}),
     )
     .await;
     let allow_g = json!({"definitions": ["g"]});
@@ -885,9 +919,9 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
     // S0 is obsolete, so it is neither rebuilt nor retired.
     assert_eq!(rebuilt["retired"], json!([id(&p1_)]), "{rebuilt}");
     let p1_new = made(&rebuilt, &p1_);
-    // The new proof replaces S0 across both edits: its own, and B′'s.
-    let allow_f_g = json!({"definitions": ["f", "g"]});
-    let p1_link = json!({"snapshot_id": id(&s0), "allow": allow_f_g});
+    // The new proof replaces S0 across both edits: its own, which fills the
+    // hole `f`, and B′'s, which `allow`s `g`.
+    let p1_link = json!({"snapshot_id": id(&s0), "allow": allow_g});
     assert_eq!(link(&c, &p1_new).await, p1_link);
 
     let r = audit(&c, &[id(&s0)]).await;
@@ -901,10 +935,14 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
         ]),
         "{r}"
     );
-    // Clean once the leader allows both edits.
+    // `f` is a hole, and `g` changed by the leader's edit, which the audit
+    // must allow.
     assert_eq!(r["clean"], false, "{r}");
-    let r = audit_allowing(&c, &[id(&s0)], &["f", "g"]).await;
+    let r = audit_allowing(&c, &[id(&s0)], &["g"]).await;
     assert_eq!(r["clean"], true, "{r}");
+    // The copy kept the holes.
+    let (_, copy) = get(&c, &format!("/snapshots/{p1_new}")).await;
+    assert_eq!(copy["holes"], json!(["f"]), "{copy}");
 }
 
 /// A rebuild onto a base that changes a statement the skeleton uses gives

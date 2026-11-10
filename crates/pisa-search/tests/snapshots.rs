@@ -365,6 +365,7 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
         replaces: None,
         replacement: None,
         fork: false,
+        holes: Vec::new(),
     }
 }
 

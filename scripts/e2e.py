@@ -350,6 +350,28 @@ def allow_by_name():
     step("allow: a pattern-matching definition's value can change by name")
 
 
+def holes():
+    f = "def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => {}\n\ndef g : Nat := {}\n\ntheorem t : f 0 = g := {}"
+    skeleton = create_snapshot(f.format("n", "0", "sorry"), holes=["f"], verify=True)
+    assert skeleton["snapshot"]["holes"] == ["f"], skeleton
+    # A replacement fills the hole without `allow`.
+    filled = create_snapshot(f.format("n + 2", "0", "rfl"), replaces={"snapshot_id": skeleton["snapshot"]["id"]},
+                             verify=True)
+    assert filled["replacement"]["changed_definitions"] == ["f"], filled
+    out = audit_against(skeleton)
+    assert out["clean"] is True, out
+    delete_snapshots([filled])
+    # `g` isn't a hole: changed under the link's own `allow`, the run isn't clean.
+    replaces = {"snapshot_id": skeleton["snapshot"]["id"], "allow": {"definitions": ["g"]}}
+    changed = create_snapshot(f.format("n", "f 0", "rfl"), replaces=replaces, verify=True)
+    assert changed["replacement"]["changed_definitions"] == ["g"], changed
+    out = audit_against(skeleton)
+    assert out["comparisons"][0]["reasons"] == ["statement: g has a different value"], out
+    assert out["clean"] is False, out
+    delete_snapshots([changed, skeleton])
+    step("holes: a spec's holes are filled without allow, and nothing else changes in a clean run")
+
+
 def allow_through_a_lost_snapshot():
     f = "def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => {}"
     allow = {"definitions": ["f"]}
@@ -546,6 +568,7 @@ if __name__ == "__main__":
     spec_audit()
     statements_under_replaces()
     allow_by_name()
+    holes()
     allow_through_a_lost_snapshot()
     labels()
     module_snapshots()

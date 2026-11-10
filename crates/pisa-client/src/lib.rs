@@ -146,6 +146,10 @@ pub struct CreateSnapshotOptions {
     /// forks the run. Otherwise the check's error is a `conflict`, and the
     /// response's `heads` are the snapshots to replace instead.
     pub fork: bool,
+    /// A spec's holes: the definitions it leaves for the snapshots that
+    /// replace it to change, which those inherit and may change without
+    /// `allow`. Not with `replaces`; empty sends none.
+    pub holes: Vec<String>,
 }
 
 /// Options for [`Client::delete_snapshot_with`].
@@ -557,6 +561,7 @@ impl Client {
             key: opts.key.clone(),
             replaces: opts.replaces.clone(),
             fork: opts.fork,
+            holes: (!opts.holes.is_empty()).then(|| opts.holes.clone()),
         }
     }
 

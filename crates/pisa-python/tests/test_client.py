@@ -403,6 +403,18 @@ def test_audit_against(url):
         client.audit_snapshots({"suite": "audit"}, allow=["f"])
 
 
+def test_holes(url):
+    client = Client(url, timeout=5)
+    spec = client.create_snapshot("import Foo\ndef py_hole : Nat := 1\ntheorem py_h : py_hole = py_hole := sorry",
+                                  holes=["py_hole"], verify=True)["snapshot"]
+    assert spec["holes"] == ["py_hole"]
+    filled = client.create_snapshot("import Foo\ndef py_hole : Nat := 2\ntheorem py_h : py_hole = py_hole := rfl",
+                                    replaces={"snapshot_id": spec["id"]}, verify=True)
+    assert filled["replacement"]["changed_definitions"] == ["py_hole"]
+    assert filled["snapshot"]["holes"] == ["py_hole"]
+    assert client.audit_snapshots(against=[spec["id"]])["clean"] is True
+
+
 def test_audit_allowing(url):
     client = Client(url, timeout=5)
     spec = client.create_snapshot("import Foo\ndef py_f : Nat := 1\ntheorem py_t : py_f = py_f := sorry",

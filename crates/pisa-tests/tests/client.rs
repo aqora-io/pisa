@@ -484,6 +484,37 @@ async fn client_audits_a_run_allowing_definitions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn client_creates_a_spec_with_holes() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let opts = CreateSnapshotOptions {
+        verify: Some(true),
+        holes: vec!["f".into()],
+        ..Default::default()
+    };
+    let code = "import Foo\ndef f : Nat := 1\ntheorem t : f = f := sorry";
+    let spec = client.create_snapshot_with(code, &opts).await.unwrap();
+    let spec = spec.snapshot.unwrap();
+    assert_eq!(spec.holes, ["f"]);
+    let opts = CreateSnapshotOptions {
+        verify: Some(true),
+        replaces: Some(Replaces {
+            snapshot_id: spec.id.clone(),
+            allow: None,
+        }),
+        ..Default::default()
+    };
+    let code = "import Foo\ndef f : Nat := 2\ntheorem t : f = f := rfl";
+    let filled = client.create_snapshot_with(code, &opts).await.unwrap();
+    assert_eq!(filled.snapshot.unwrap().holes, ["f"]);
+    let audit = client
+        .audit_snapshots_against([&spec.id], &[])
+        .await
+        .unwrap();
+    assert_eq!(audit.clean, Some(true), "{audit:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_audits_a_run_against_its_spec() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
