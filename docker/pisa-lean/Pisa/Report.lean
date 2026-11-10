@@ -22,9 +22,10 @@ value_refs, generated}`:
 - `generated`, for what Lean makes on demand, such as equation lemmas, which a
   replacement needn't have.
 
-Internal auxiliaries, such as the `f._unary` holding the body of a
-well-founded definition, aren't described: what uses one has their text
-follow its own, and its refs go through to what they use. The private names
+Auxiliaries Lean makes, such as the `f._unary` holding the body of a
+well-founded definition or the matcher `f.match_1`, aren't described: what
+uses one reads its value in its place (see `auxiliary`), and its refs go
+through to what that uses. The private names
 of the module described are written without the module, which differs
 between a module and its replacement; another module's are written whole,
 so that one can't stand in for the other.
@@ -42,8 +43,33 @@ def tracked (env : Environment) (m : Name) : Bool :=
   | some i => (`PisaSnap).isPrefixOf (env.header.moduleNames[i.toNat]!)
   | none => true
 
-/-- Auxiliaries the description leaves out; what uses one carries what it is. -/
-def hidden (m : Name) : Bool := m.isInternal && !isPrivateName m
+/-- Whether `n`, its private prefix aside, is a name Lean makes: one of its
+components starts with `_`. -/
+def leanMade (n : Name) : Bool := (privateToUserName n).isInternal
+
+/-- The name of an auxiliary Lean makes for a declaration: an internal one
+(`f._unary`, `f._proof_1`, a private one's too), a matcher (`f.match_1`, and
+`t.match_1_1` in a theorem's body) or what Lean makes from one (its equations
+`f.match_1.eq_1`, `f.match_1.splitter`), or `grind`'s (`f.grind_1`). By name
+alone, so that the verifier, which has no more than the constants, finds the
+same. -/
+def auxName (n : Name) : Bool :=
+  let numbered (s : String) := !s.isEmpty && (s.splitOn "_").all fun k => !k.isEmpty && k.isNat
+  let matcher : Name → Bool
+    | .str _ s => "match_".isPrefixOf s && numbered (s.drop 6).toString
+    | _ => false
+  let user := privateToUserName n
+  leanMade n || user.components.any matcher || match user with
+    | .str _ s => "grind_".isPrefixOf s && (s.drop 6).toString.isNat
+    | _ => false
+
+/-- An auxiliary: a definition or theorem with an auxiliary's name. It isn't
+described; what uses one reads, in its place, its value, or for a theorem the
+proof of its type. Others with such a name, such as `native_decide`'s axiom,
+are described. -/
+def auxiliary (n : Name) : Option ConstantInfo → Bool
+  | some (.defnInfo _) | some (.thmInfo _) => auxName n
+  | _ => false
 
 /-- The module that declared the private name `n`. -/
 def privateModule? (n : Name) : Option Name :=
@@ -93,29 +119,6 @@ def generated (env : Environment) (n : Name) : Bool :=
     s == "hinj" && p matches .str _ "ctorIdx" && defn.isSome
   | _ => false
 
-/-- The tracked constants `e` uses, seeing through hidden ones, and the hidden
-ones it reaches, by name. -/
-def reach (env : Environment) (self : Name) (e : Expr) : Array Name × Array Name := Id.run do
-  let mut seen : NameSet := {}
-  let mut refs : NameSet := {}
-  let mut reached : Array Name := #[]
-  let mut todo : List Name := e.getUsedConstants.toList
-  repeat
-    match todo with
-    | [] => break
-    | m :: rest =>
-      todo := rest
-      if seen.contains m || !tracked env m then continue
-      seen := seen.insert m
-      if hidden m then
-        reached := reached.push m
-        if let some ci := env.find? m then
-          todo := ci.type.getUsedConstants.toList ++ todo
-          if let .defnInfo d := ci then
-            todo := d.value.getUsedConstants.toList ++ todo
-      else if m != self then
-        refs := refs.insert m
-  return (refs.toArray.qsort Name.lt, reached.qsort (fun a b => a.toString < b.toString))
 
 /-- `e` with each `sorry` as one marker, the anonymous constant, which no
 declaration can be: `sorryAx α s` is `_ α s`. A `sorry` that Lean labels with
@@ -133,21 +136,62 @@ partial def sorries (e : Expr) : Expr :=
       | _, type => (type, args.extract 2 args.size)
     return mkAppN (mkApp2 (.const .anonymous []) (sorries type) args[1]!) (rest.map sorries)
 
-/-- The text of `e`, part of declaration `self` of module `mod`, then of each
-hidden constant it reaches, and its refs. -/
+/-- The marker for a proof: `proof T` stands for any proof of `T`, as the
+kernel takes any two proofs of a proposition to be equal. The constant `_.0`,
+which no declaration can be. -/
+def proofMarker : Expr := .const (.num .anonymous 0) []
+
+/-- The auxiliaries `e` uses, tracked ones only: Lean's and Mathlib's are
+fixed by the version. -/
+def auxiliariesIn (env : Environment) (e : Expr) : Array Name :=
+  e.getUsedConstants.filter fun m => tracked env m && auxiliary m (env.find? m)
+
+/-- `e` with each auxiliary in `forms` read as its form there, at the levels
+it is used at. -/
+def unfold (env : Environment) (forms : Std.HashMap Name Expr) (e : Expr) : Expr :=
+  e.replace fun
+    | .const m ls => do
+      let form ← forms[m]?
+      let ci ← env.find? m
+      return form.instantiateLevelParams ci.levelParams ls
+    | _ => none
+
+/-- The canonical form of each auxiliary `m` reaches, into `forms`, then
+`m`'s: its value with what it uses read the same way, or for a theorem the
+proof of its type. Lean's constants don't refer to themselves, but one that
+did would be left as it is, `visiting` holding those on the way. -/
+partial def auxiliaryForm (env : Environment) (visiting : NameSet) (m : Name) :
+    StateM (Std.HashMap Name Expr) Unit := do
+  if (← get).contains m || visiting.contains m then return
+  let some ci := env.find? m | return
+  let body := match ci with
+    | .thmInfo t => t.type
+    | _ => ci.value?.getD ci.type
+  for a in auxiliariesIn env body do
+    auxiliaryForm env (visiting.insert m) a
+  let body := unfold env (← get) (sorries body)
+  let form := match ci with
+    | .thmInfo _ => mkApp proofMarker body
+    | _ => body
+  modify (·.insert m form)
+
+/-- The canonical form of `e`: each `sorry` as one marker, and each auxiliary
+read as its form (see `auxiliaryForm`). -/
+def canonical (env : Environment) (e : Expr) : Expr :=
+  let forms := (auxiliariesIn env e).foldl (init := {}) fun forms m =>
+    ((auxiliaryForm env {} m).run forms).2
+  unfold env forms (sorries e)
+
+/-- The text of `e`, part of declaration `self` of module `mod`, and the
+constants of this code and of snapshots its canonical form uses, `self`
+aside. -/
 def text (env : Environment) (mod self : Name) (e : Expr) :
     Except String (String × Array Name) := do
-  let (refs, reached) := reach env self e
-  let ((), t) ← (do
-      discard <| write (constant mod) (sorries e)
-      for m in reached do
-        let some ci := env.find? m | continue
-        mark s!"H {nameText m}"
-        discard <| write (constant mod) (sorries ci.type)
-        if let .defnInfo d := ci then
-          discard <| write (constant mod) (sorries d.value)
-    : TextM Unit).run {}
-  return (t.render, refs)
+  let c := canonical env e
+  let markers := [Name.anonymous, proofMarker.constName!]
+  let refs := c.getUsedConstants.filter fun m => m != self && tracked env m && !markers.contains m
+  let ((), t) ← (discard <| write (constant mod) c : TextM Unit).run {}
+  return (t.render, refs.qsort Name.lt)
 
 def kindOf : ConstantInfo → String
   | .thmInfo _ => "theorem"
@@ -159,8 +203,6 @@ def kindOf : ConstantInfo → String
   | .ctorInfo _ => "constructor"
   | .recInfo _ => "recursor"
 
-/-- Whether `n` is described: auxiliaries aren't, unless private. -/
-def described (n : Name) : Bool := !hidden n
 
 /-- The description of the declaration `n` of module `mod`, whose constant is
 `ci`. -/
@@ -169,7 +211,7 @@ def describe (mod n : Name) (ci : ConstantInfo) : CoreM Json := do
   let axioms ← collectAxioms n
   -- Declared as `axiom` here or in a snapshot. Lean's own, and the ones it
   -- makes, such as `native_decide`'s (internal names), aren't assumptions.
-  let assumes := axioms.filter fun a => tracked env a && !hidden a &&
+  let assumes := axioms.filter fun a => tracked env a && !leanMade a &&
     (match env.find? a with | some (.axiomInfo _) => true | _ => false)
   let ofExcept {α} (r : Except String α) : CoreM α := match r with
     | .ok a => pure a
@@ -194,9 +236,9 @@ def describeAll (mod : Name) (names : Array Name) : CoreM (Array Json) := do
   let env ← getEnv
   let mut out := #[]
   for n in names do
-    if !described n then continue
-    if let some ci := env.find? n then
-      out := out.push (← describe mod n ci)
+    let some ci := env.find? n | continue
+    if auxiliary n ci then continue
+    out := out.push (← describe mod n ci)
   return out
 
 /-- Logs `PISA_DECLS <descriptions>`, which the worker reads. -/
