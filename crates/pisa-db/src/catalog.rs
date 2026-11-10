@@ -1486,6 +1486,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_added_entry_logs_the_entry_it_replaces() {
+        for catalog in catalogs().await {
+            let (s, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p = added(&catalog, step(&s, &[], &[], &[])).await;
+
+            let rows: Vec<_> = catalog
+                .changes(0, None, 1000)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|l| (l.change.entry, l.change.module))
+                .collect();
+            let row = |e: &str| (Some(e.to_string()), Some("x".to_string()));
+            let own = rows.iter().position(|r| *r == row(&p)).unwrap();
+            let replaced = rows.iter().rposition(|r| *r == row(&s)).unwrap();
+            assert!(replaced > own, "{rows:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn which_entries_are_heads() {
         for catalog in catalogs().await {
             let (s, _, _) = catalog

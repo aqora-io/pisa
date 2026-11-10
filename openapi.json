@@ -181,7 +181,7 @@
             "type": "array"
           },
           "heads": {
-            "description": "With `against`: the snapshots the run ends at, which nothing\nreplaces, each once, in the order the walk reached them. Deleting a\nhead makes the snapshot it replaced a head again.",
+            "description": "With `against`: the snapshots the run ends at, which nothing\nreplaces, each once, in the order the walk reached them. Deleting a\nhead makes the snapshot it replaced a head again, unless something\nelse replaces it.",
             "items": {
               "type": "string"
             },
@@ -1757,7 +1757,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The snapshot it replaced, if it was created to. If that one was\ndeleted, the snapshot that one replaced, with the two links composed."
+            "description": "The snapshot it replaced, if it was created to. If that one was\ndeleted, and it replaced one, the snapshot that one replaced, with the\ntwo links composed."
           },
           "status": {
             "$ref": "#/components/schemas/ProofStatus",

@@ -479,7 +479,8 @@ export interface components {
             /**
              * @description With `against`: the snapshots the run ends at, which nothing
              *     replaces, each once, in the order the walk reached them. Deleting a
-             *     head makes the snapshot it replaced a head again.
+             *     head makes the snapshot it replaced a head again, unless something
+             *     else replaces it.
              */
             heads?: string[];
             /**
@@ -1369,7 +1370,8 @@ export interface components {
             module: string;
             /**
              * @description The snapshot it replaced, if it was created to. If that one was
-             *     deleted, the snapshot that one replaced, with the two links composed.
+             *     deleted, and it replaced one, the snapshot that one replaced, with the
+             *     two links composed.
              */
             replaces?: components["schemas"]["Replaces"];
             /**

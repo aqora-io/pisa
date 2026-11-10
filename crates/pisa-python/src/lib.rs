@@ -268,6 +268,7 @@ impl Client {
     }
 
     #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false))]
+    #[allow(clippy::too_many_arguments)]
     fn create_snapshot<'py>(
         &self,
         py: Python<'py>,
@@ -285,6 +286,7 @@ impl Client {
     }
 
     #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false))]
+    #[allow(clippy::too_many_arguments)]
     fn submit_create_snapshot<'py>(
         &self,
         py: Python<'py>,

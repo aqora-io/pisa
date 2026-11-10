@@ -413,6 +413,8 @@ pub(crate) async fn remove_entry(
                 return Err(Fail::Api(unknown_entry(v, e)));
             };
             let mut repointed = Vec::new();
+            // Load-bearing even for a root: under SERIALIZABLE this read makes
+            // the delete conflict with a create replacing the entry.
             for (r, replacer) in replacers_in(conn, v, e).await? {
                 // A root has no link to give: what replaces it keeps its own.
                 let Some((replaces, replacement)) = splice(&meta, &replacer) else {

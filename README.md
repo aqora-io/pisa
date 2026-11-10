@@ -546,11 +546,12 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   snapshot replaced more than once is a fork, listed in `forks` with what
   replaced it: there is no merge, so delete all but one branch. A deleted
   snapshot on the way doesn't cut the run, as what replaced it now replaces
-  what it replaced; deleting a head makes what it replaced a head again. To
-  drop a losing branch, `DELETE /snapshots/{id}?with_replacers=true` on the
-  snapshot `forks` names for it: it takes the branch with it, and `deleted`
-  lists what went. A plain delete of that snapshot moves the rest of the
-  branch down, and the fork stays.
+  what it replaced; deleting a head makes what it replaced a head again,
+  unless something else replaces it. To drop a losing branch,
+  `DELETE /snapshots/{id}?with_replacers=true` on the snapshot `forks` names
+  for it: it takes the branch with it, and `deleted` lists what went. A plain
+  delete of that snapshot moves the rest of the branch down, and the fork
+  stays.
 - **Targets.** Each declaration of a spec snapshot's module, other than its
   assumptions and what Lean generated, is a target. `targets` has a row for
   each target and each head reached from its spec snapshot, with its `status`
@@ -577,8 +578,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   snapshot that doesn't exist is a 404. A [rebuild](#rebuilding) copies
   only a run's heads, so audit against the same ids after it. A spec
   snapshot that was still a head, with nothing replacing it yet, is copied
-  like any head, and with `retire` its old id is deleted: find its copy in
-  `created` and audit against that.
+  like any head, and with `retire` its old id is deleted if its copy replaces
+  it: find its copy in `created` and audit against that.
 
 <a id="agent-runs"></a>
 **Running agents on snapshots.** A leader hands targets to agents, and
@@ -691,6 +692,10 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   `fork`: if an agent replaced its snapshot after the plan was made, the item
   fails with a `conflict`, and sending the rebuild again plans the agent's
   head instead.
+- **Later edits.** A rebuild follows the run's heads. After one from `from` to
+  `to` without `retire`, the originals are replaced by their copies on `to`,
+  so a later edit is rebuilt from `to`, the base the heads now build on: a
+  rebuild from `from` would find nothing left to copy.
 - **Async.** A run can take minutes, so it takes `Prefer: respond-async` (see
   [Async requests](#async-requests)): the 202's job, of kind
   `rebuild_snapshots`, is run by the server that answered, and
@@ -810,9 +815,10 @@ snapshot that replaces it, directly or through others, in one step and
 splices nothing; what the snapshot replaced is a head again if nothing else
 replaces it, and `deleted` lists every snapshot that went, the asked one
 first (a plain delete lists one). A create that replaces a snapshot deleted
-while it was being built is a 404. Each worker checks a module it has cached against the store at most
-every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere
-within that time.
+while it was being built answers with a `not_found` in `check.error`. Each
+worker checks a module it has cached against the store at most every
+`PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere within
+that time.
 
 **Trust.** A snapshot that isn't `verified` has the same guarantee as a
 `/check`: the policy scan and an axiom report from the process that imported
@@ -1116,8 +1122,8 @@ Each hit carries:
 - flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
 - a score, comparable only within one query, and a source link;
 - `text`, about 150 tokens ready for a model's context;
-- for a snapshot declaration, `snapshot_ids` (its module's heads), `status` and
-  `verified` (see [below](#snapshot-search)).
+- for a snapshot declaration, `snapshot_ids` (the scope's heads on its
+  module), `status` and `verified` (see [below](#snapshot-search)).
 
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists

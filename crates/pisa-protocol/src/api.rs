@@ -650,7 +650,8 @@ pub struct Snapshot {
     pub imports: Vec<String>,
     pub labels: BTreeMap<String, String>,
     /// The snapshot it replaced, if it was created to. If that one was
-    /// deleted, the snapshot that one replaced, with the two links composed.
+    /// deleted, and it replaced one, the snapshot that one replaced, with the
+    /// two links composed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
     /// The worst status among its module's declarations, by the build's
@@ -958,7 +959,8 @@ pub struct AuditSnapshotsResponse {
     pub clean: Option<bool>,
     /// With `against`: the snapshots the run ends at, which nothing
     /// replaces, each once, in the order the walk reached them. Deleting a
-    /// head makes the snapshot it replaced a head again.
+    /// head makes the snapshot it replaced a head again, unless something
+    /// else replaces it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heads: Vec<String>,
     /// With `against`: the snapshots on the run that more than one snapshot
