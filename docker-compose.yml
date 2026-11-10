@@ -132,6 +132,10 @@ services:
       PISA_MEMORY_MAX_MB: ${PISA_MEMORY_MAX_MB:-16000}
       PISA_MAX_RSS_MB: ${PISA_MAX_RSS_MB:-12000}
       PISA_PREWARM: ${PISA_PREWARM:-}
+      # Lean Beam processes for /documents, beside the slots (0 serves none).
+      PISA_BEAM_SLOTS: ${PISA_BEAM_SLOTS:-0}
+      PISA_BEAM_DOCUMENTS: ${PISA_BEAM_DOCUMENTS:-4}
+      PISA_BEAM_MEMORY_MAX_MB: ${PISA_BEAM_MEMORY_MAX_MB:-8000}
       PISA_STORE: s3
       PISA_DATABASE_URL: *database-url
       PISA_STATE_TTL_SECS: 86400

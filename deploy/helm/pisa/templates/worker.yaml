@@ -43,6 +43,9 @@ spec:
             - { name: PISA_MEMORY_MAX_MB, value: {{ $w.memoryMaxMb | quote }} }
             - { name: PISA_MAX_RSS_MB, value: {{ $w.maxRssMb | quote }} }
             - { name: PISA_PREWARM, value: {{ $w.prewarm | quote }} }
+            - { name: PISA_BEAM_SLOTS, value: {{ $w.beamSlots | quote }} }
+            - { name: PISA_BEAM_DOCUMENTS, value: {{ $w.beamDocuments | quote }} }
+            - { name: PISA_BEAM_MEMORY_MAX_MB, value: {{ $w.beamMemoryMaxMb | quote }} }
             - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ $w.drainTimeoutSecs | quote }} }
             - { name: PISA_STORE, value: s3 }
             - name: PISA_DATABASE_URL
@@ -73,8 +76,8 @@ spec:
             {{- else }}
             # About a core per Lean process; memory for every process at its cap.
             requests:
-              cpu: {{ $w.slots | quote }}
+              cpu: {{ add $w.slots $w.beamSlots | quote }}
               memory: "{{ $w.overheadMemoryMb }}Mi"
             limits:
-              memory: "{{ add (mul $w.slots $w.memoryMaxMb) $w.overheadMemoryMb }}Mi"
+              memory: "{{ add (mul $w.slots $w.memoryMaxMb) (mul $w.beamSlots $w.beamMemoryMaxMb) $w.overheadMemoryMb }}Mi"
             {{- end }}

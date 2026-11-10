@@ -65,13 +65,20 @@ worker:
   maxRssMb: 6000
   # Headers to import at startup, separated by ';', e.g. "import Mathlib".
   prewarm: ""
+  # Lean Beam processes per pod for /documents, beside the slots (0 serves
+  # none), and the documents each keeps open.
+  beamSlots: 0
+  beamDocuments: 4
+  # memory.max per Beam process (MiB); also sizes the pod's memory limit.
+  beamMemoryMaxMb: 8000
   # On scale-down a worker stops taking jobs and finishes the ones it has, for
   # at most this long. The pod's grace period is 30s longer.
   drainTimeoutSecs: 600
   # Extra pod resources besides the per-process memory.
   overheadMemoryMb: 512
-  # Pod resources. Empty means: one CPU per slot requested, and a memory
-  # limit of slots × memoryMaxMb + overheadMemoryMb.
+  # Pod resources. Empty means: one CPU per slot and Beam slot requested, and
+  # a memory limit of slots × memoryMaxMb + beamSlots × beamMemoryMaxMb +
+  # overheadMemoryMb.
   resources: {}
   extraEnv: []
 

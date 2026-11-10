@@ -6,6 +6,8 @@
     python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
     python3 scripts/e2e.py --search   # also snapshot search (PISA_SEARCH_QDRANT
                                       # set and compose --profile search)
+    python3 scripts/e2e.py --beam     # also open documents (workers started
+                                      # with PISA_BEAM_SLOTS=1)
 
 It stops and restarts each of the stack's two workers to check that tactic
 sessions resume on the other (gate 3), so run it against a dev stack only.
@@ -560,6 +562,53 @@ def snapshot_search():
     step("snapshot search: follows relabels and deletes")
 
 
+def documents(failover=True):
+    code = "theorem t (a b : Nat) : a + b = b + a := by\n  sorry"
+    d = post("/documents", {"code": code, "timeout": 600})
+    assert d["revision"] == 1 and len(d["sorries"]) == 1, d
+    sorry = d["sorries"][0]
+    assert sorry["pos"] == {"line": 2, "column": 2} and "⊢ a + b = b + a" in sorry["goal"], d
+    path = f"/documents/{d['id']}"
+    g = post(path + "/goals", {"at": [{"line": 2}, {"line": 1, "column": 0}]})
+    at_sorry, outside = g["at"]
+    assert at_sorry["pos"] == {"line": 2, "column": 2} and at_sorry["goals"] == [sorry["goal"]], g
+    assert outside["goals"] == [], g
+    step("document goals")
+
+    candidates = ["omega", "rfl", "#eval 1", "sorry"]
+    omega, rfl, ev, admitted = post(path + "/probes", {"at": {"sorry": 0}, "candidates": candidates})["results"]
+    assert omega["ok"] and omega["closed"], omega
+    assert not rfl["ok"] and rfl["messages"], rfl
+    assert ev["error"]["kind"] == "policy", ev
+    assert admitted["ok"] and not admitted["closed"], admitted
+    step("document probes")
+
+    proved = "theorem t (a b : Nat) : a + b = b + a := by\n  omega"
+    status, e = call("PATCH", path, {"code": proved, "revision": 1, "timeout": 600})
+    assert status == 200 and e["revision"] == 2 and e["sorries"] == [], (status, e)
+    status, e = call("PATCH", path, {"code": code, "revision": 1})
+    assert status == 409 and e["error"]["kind"] == "conflict", (status, e)
+    step("document edits")
+
+    # With each worker stopped in turn, the other answers, reopening the
+    # document if it didn't hold it.
+    if failover:
+        for worker in worker_containers():
+            docker("stop", worker)
+            wait_for_workers(1)
+            g = post(path + "/goals", {"at": [{"line": 2}], "timeout": 600})
+            assert g["revision"] == 2 and g["at"][0]["goals"], g
+            docker("start", worker)
+            wait_for_workers(2)
+        step("documents reopen on another worker")
+
+    status, _ = call("DELETE", path)
+    assert status == 204, status
+    status, e = call("POST", path + "/goals", {"at": [{"line": 1}]})
+    assert status == 404, (status, e)
+    step("document close")
+
+
 def mathlib():
     r = check("import Mathlib\n\ntheorem t (a b : ℝ) : (a + b)^2 = a^2 + 2*a*b + b^2 := by ring")
     assert r["ok"], r
@@ -585,6 +634,7 @@ if __name__ == "__main__":
     p.add_argument("--mathlib", action="store_true")
     p.add_argument("--no-failover", action="store_true", help="don't stop workers (not using compose)")
     p.add_argument("--search", action="store_true", help="also check snapshot search")
+    p.add_argument("--beam", action="store_true", help="also check documents (PISA_BEAM_SLOTS)")
     args = p.parse_args()
     if not args.no_failover:
         wait_for_workers(2)
@@ -599,6 +649,8 @@ if __name__ == "__main__":
     allow_through_a_lost_snapshot()
     labels()
     module_snapshots()
+    if args.beam:
+        documents(failover=not args.no_failover)
     if args.mathlib:
         mathlib()
     if args.search:
