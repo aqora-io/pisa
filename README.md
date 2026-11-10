@@ -586,18 +586,19 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 - **The leader.** It creates the spec snapshots, skeletons with `sorry` and
   one or a few targets each, with their [witnesses](#witnesses), labels the
   run (see [Labels](#labels)) and holds the spec ids. They stay valid through
-  rebuilds.
+  [rebuilds](#rebuilding) without `retire`.
 - **Agents.** Each gets its target's spec id and labels every snapshot with
   the run's labels. Scratch work goes to `/check` (see
-  [Snapshots](#snapshots)), which makes none. To submit, an agent creates its
-  code with `replaces` the snapshot it last submitted for the target, or the
-  spec snapshot at first. [Search](#snapshot-search) shows heads only, so what
-  an agent imports from a hit is a head.
-- **On a `conflict`.** The run moved under the agent: a rebuild copied its
-  last version onto a new base, or another agent extended it. Nothing was
-  built. The agent takes a head from the answer's `heads`, moves its code onto
-  it, its imports becoming those of the head's `code` (`GET /snapshots/{id}`),
-  and submits again, replacing that head.
+  [Snapshots](#snapshots)), which keeps no snapshot. To submit, an agent
+  creates its code with `replaces` the snapshot it last submitted for the
+  target, or the spec snapshot at first. [Search](#snapshot-search) shows
+  heads only, so what an agent imports from a hit is a head.
+- **On a `conflict`** (see [Replacing](#replacing)). The run moved under the
+  agent: a rebuild copied its last version onto a new base, or another agent
+  extended it. Nothing was built. The agent takes a head from the answer's
+  `heads`, moves its code onto it, its imports becoming those of the head's
+  `code` (`GET /snapshots/{id}`, see [Snapshots](#snapshots)), and submits
+  again, replacing that head.
 - **Parallel attempts.** Agents on one target pass `"fork": true` on their
   first submission and extend their own branches. The leader keeps one and
   drops the others with `DELETE /snapshots/{id}?with_replacers=true`, on the
@@ -617,8 +618,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   Deletes splice, so the run stays whole, and its links merge once reviewed
   (see [Retention](#retention)).
 - **On a `not_found`** for its `replaces`, the create lost a race with a
-  delete. The agent finds the run's heads with `audit?against=<its spec id>`
-  and goes on as for a `conflict`.
+  delete (see [Retention](#retention)). The agent finds the run's heads with
+  `audit?against=<its spec id>` (see [Auditing a run](#spec-audit)) and goes
+  on as for a `conflict`.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports
