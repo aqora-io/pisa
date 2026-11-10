@@ -25,12 +25,17 @@ def nameText : Name → String
   | .str p s => nameText p ++ "." ++ s.quote
   | .num p k => nameText p ++ "." ++ toString k
 
-def levelText : Level → Except String String
+/-- A level, with the universe parameters `params` of the declaration written
+by position, so that renaming one, or Lean's hygienic names for those it
+makes, which carry the module, don't count. -/
+def levelText (params : List Name) : Level → Except String String
   | .zero => pure "0"
-  | .succ l => return s!"(+1 {← levelText l})"
-  | .max a b => return s!"(max {← levelText a} {← levelText b})"
-  | .imax a b => return s!"(imax {← levelText a} {← levelText b})"
-  | .param n => pure s!"(u {nameText n})"
+  | .succ l => return s!"(+1 {← levelText params l})"
+  | .max a b => return s!"(max {← levelText params a} {← levelText params b})"
+  | .imax a b => return s!"(imax {← levelText params a} {← levelText params b})"
+  | .param n => pure <| match params.findIdx? (· == n) with
+    | some i => s!"(u #{i})"
+    | none => s!"(u {nameText n})"
   | .mvar _ => throw "a universe metavariable"
 
 def binderText : BinderInfo → String
@@ -47,8 +52,7 @@ structure Key where
 instance : BEq Key := ⟨fun a b => a.expr.equal b.expr⟩
 instance : Hashable Key := ⟨fun k => k.expr.hash⟩
 
-/-- The lines written so far. `constant` writes a constant's line: how the
-names of private and auxiliary constants read is the report's to say. -/
+/-- The lines written so far. -/
 structure Text where
   lines : Array String := #[]
   index : Std.HashMap String Nat := {}
@@ -76,10 +80,12 @@ def parts : Expr → Array Expr
   | .mdata _ e | .proj _ _ e => #[e]
   | _ => #[]
 
-/-- Writes the lines of `e`, then `R <root>`, and returns the root's number.
-`constant` gives a constant's line. The walk keeps its own stack, as deep
-terms (a long list literal) are deeper than Lean's. -/
-def write (constant : Name → List Level → Except String String) (e : Expr) : TextM Nat := do
+/-- Writes the lines of `e`, part of a declaration with universe parameters
+`params`, then `R <root>`, and returns the root's number. `name` writes the
+name of a constant or of a projection's structure: how private names read is
+the report's to say. The walk keeps its own stack, as deep terms (a long list
+literal) are deeper than Lean's. -/
+def write (name : Name → String) (params : List Name) (e : Expr) : TextM Nat := do
   let mut stack : Array (Expr × Bool) := #[(e, false)]
   while h : stack.size > 0 do
     let (x, ready) := stack[stack.size - 1]
@@ -96,15 +102,17 @@ def write (constant : Name → List Level → Except String String) (e : Expr) :
       | none => throw "a subterm was written out of order"
     let i ← match x with
       | .bvar k => line s!"B {k}"
-      | .sort l => do line s!"S {← levelText l}"
-      | .const n ls => do line s!"C {← constant n ls}"
+      | .sort l => do line s!"S {← levelText params l}"
+      | .const n ls => do
+        let ls ← (ls.mapM (levelText params) : Except String (List String))
+        line s!"C {name n} [{" ".intercalate ls}]"
       | .app f a => do line s!"A {← at_ f} {← at_ a}"
       | .lam _ t b bi => do line s!"L {binderText bi} {← at_ t} {← at_ b}"
       | .forallE _ t b bi => do line s!"P {binderText bi} {← at_ t} {← at_ b}"
       | .letE _ t v b _ => do line s!"E {← at_ t} {← at_ v} {← at_ b}"
       | .lit (.natVal n) => line s!"N {n}"
       | .lit (.strVal s) => line s!"T {s.quote}"
-      | .proj s k p => do line s!"J {nameText s} {k} {← at_ p}"
+      | .proj s k p => do line s!"J {name s} {k} {← at_ p}"
       | .mdata _ p => at_ p
       | .fvar _ => throw "a free variable"
       | .mvar _ => throw "a metavariable"

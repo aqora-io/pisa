@@ -75,15 +75,13 @@ def auxiliary (n : Name) : Option ConstantInfo → Bool
 def privateModule? (n : Name) : Option Name :=
   (privatePrefix? n).map fun p => p.getPrefix.replacePrefix privateHeader .anonymous
 
-/-- A constant's line in a description of module `mod`: its name, and its
-universe levels. A private name of `mod` is written `own` and the name as
-written, which a replacement shares; any other name is written whole. -/
-def constant (mod : Name) (n : Name) (ls : List Level) : Except String String := do
-  let ls ← ls.mapM levelText
-  let name := match privateToUserName? n with
-    | some u => if privateModule? n == some mod then "own " ++ nameText u else nameText n
-    | none => nameText n
-  return s!"{name} [{" ".intercalate ls}]"
+/-- A constant's name in a description of module `mod`. A private name of
+`mod` is written `own` and the name as written, which a replacement shares;
+any other name is written whole. -/
+def naming (mod : Name) (n : Name) : String :=
+  match privateToUserName? n with
+  | some u => if privateModule? n == some mod then "own " ++ nameText u else nameText n
+  | none => nameText n
 
 /-- Whether definition `d` recurses, by its shape: structurally, through a
 `brecOn`, or by well-founded recursion, through `WellFounded.fix` or the
@@ -241,15 +239,15 @@ def canonical (env : Environment) (e : Expr) : Expr :=
     ((auxiliaryForm env {} m).run forms).2
   canon env forms e
 
-/-- The text of `e`, part of declaration `self` of module `mod`, and the
-constants of this code and of snapshots its canonical form uses, `self`
-aside. -/
-def text (env : Environment) (mod self : Name) (e : Expr) :
+/-- The text of `e`, part of declaration `self` of module `mod`, whose
+universe parameters are `params`, and the constants of this code and of
+snapshots its canonical form uses, `self` aside. -/
+def text (env : Environment) (mod self : Name) (params : List Name) (e : Expr) :
     Except String (String × Array Name) := do
   let c := canonical env e
   let markers := [sorryMarker.constName!, proofMarker.constName!]
   let refs := c.getUsedConstants.filter fun m => m != self && tracked env m && !markers.contains m
-  let ((), t) ← (discard <| write (constant mod) c : TextM Unit).run {}
+  let ((), t) ← (discard <| write (naming mod) params c : TextM Unit).run {}
   return (t.render, refs.qsort Name.lt)
 
 def kindOf : ConstantInfo → String
@@ -275,10 +273,10 @@ def describe (mod n : Name) (ci : ConstantInfo) : CoreM Json := do
   let ofExcept {α} (r : Except String α) : CoreM α := match r with
     | .ok a => pure a
     | .error e => throwError "describing {n}: {e}"
-  let (type, typeRefs) ← ofExcept (text env mod n ci.type)
+  let (type, typeRefs) ← ofExcept (text env mod n ci.levelParams ci.type)
   let (value, valueRefs) : Json × Array Name ← match ci with
     | .defnInfo d => do
-      let (v, refs) ← ofExcept (text env mod n d.value)
+      let (v, refs) ← ofExcept (text env mod n ci.levelParams d.value)
       pure (Json.str v, refs)
     | .inductInfo i => pure (Json.null, (i.ctors ++ [mkRecName i.name]).toArray)
     | _ => pure (Json.null, #[])

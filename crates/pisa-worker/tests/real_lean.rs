@@ -389,6 +389,34 @@ fn a_field_with_a_parameter_proved_by_a_lemma_keeps_its_value() {
 
 #[test]
 #[ignore = "needs elan Lean 4.35.0"]
+fn an_enumeration_reads_the_same_in_another_module() {
+    // `noConfusionType`'s universe is a hygienic name with the module in it.
+    let spec =
+        "inductive Color\n  | red\n  | green\ntheorem t : Color.red ≠ Color.green := sorry\n";
+    let moved = format!("-- another module\n{spec}");
+    assert_eq!(changes(spec, &moved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_private_structure_reads_the_same_in_another_module() {
+    // Its projections are `fun self => self.1` on the private structure.
+    let spec = "private structure P where\n  x : Nat\ntheorem t (p : P) : p.x = p.x := sorry\n";
+    let moved = format!("-- another module\n{spec}");
+    assert_eq!(changes(spec, &moved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn a_renamed_universe_variable_keeps_the_statement() {
+    let u =
+        "universe u\ndef idf (α : Sort u) (a : α) : α := a\ntheorem t : idf Nat 1 = 1 := sorry\n";
+    let v = u.replace('u', "v").replace("vniverse", "universe");
+    assert_eq!(changes(u, &v), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
 fn a_proof_refers_to_what_it_proves_not_to_the_lemma() {
     let snapshots = Snapshots::new();
     let lemmas = snapshots.build(
