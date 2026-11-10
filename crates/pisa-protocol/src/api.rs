@@ -702,8 +702,8 @@ pub struct CreateSnapshotRequest {
     /// than that snapshot's is a `bad_request`.
     #[serde(default)]
     pub version: Option<String>,
-    /// Lean's time limit in seconds, for building the module including its
-    /// imports.
+    /// Lean's time limit in seconds, for building the module, and again for
+    /// each module the kernel re-check covers, once their imports are loaded.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     /// Whether to re-check the code through the kernel. `true` also re-checks
@@ -880,6 +880,14 @@ pub struct CreateSnapshotResponse {
     /// following what replaces it, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heads: Vec<String>,
+    /// Set when the kernel re-check didn't finish, as it ran out of time or
+    /// memory, for code outside the module system with no macros, its own or
+    /// an import's: the snapshot is kept, not
+    /// [`verified`](Snapshot::verified), with the statuses of the build's own
+    /// report. `POST /snapshots/{id}/verify` finishes the re-check. Other
+    /// code isn't kept when its re-check doesn't finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified: Option<VerifyFailure>,
 }
 
 /// `GET /snapshots/{id}`: a snapshot with its module's code, check and

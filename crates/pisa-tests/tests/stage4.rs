@@ -1093,6 +1093,32 @@ async fn a_verify_that_runs_out_of_time_stops_at_the_module() {
     assert_eq!(verify(&c, &snapshot).await["snapshot"]["verified"], true);
 }
 
+/// A create's re-check has the job's time. Running out of it refuses code
+/// whose statuses only the kernel can vouch for: module-system code, code
+/// with macros, and code asked to be verified.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_check_out_of_time_refuses_what_only_the_kernel_vouches_for() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let slow = "\n-- SLOW_KERNEL 3000";
+    for (code, verify) in [
+        (format!("{MODULE_ROOT}{slow}"), None),
+        (format!("{MACRO}{slow}"), None),
+        (SLOW.to_string(), Some(true)),
+    ] {
+        let mut body = json!({"code": code, "timeout": 1});
+        if let Some(verify) = verify {
+            body["verify"] = json!(verify);
+        }
+        let (status, r) = c.post("/snapshots", body).await;
+        assert_eq!(status, 200, "{r}");
+        assert!(r["snapshot"].is_null(), "{code}: {r}");
+        assert_eq!(r["check"]["error"]["kind"], "timeout", "{code}: {r}");
+        let message = r["check"]["error"]["message"].as_str().unwrap();
+        assert!(message.contains("more than 1s"), "{message}");
+    }
+    assert_eq!(stored(&c).await, (vec![], vec![]));
+}
+
 /// A create that asks to verify a kept module whose last entry is deleted
 /// during the re-check starts over, and builds the module again.
 #[tokio::test(flavor = "multi_thread")]

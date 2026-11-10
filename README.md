@@ -239,7 +239,7 @@ pnpm -C web generate
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}`; see [Tactic sessions](#sessions) |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid, and a failing tactic is a 422 |
 | `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?}` → `{snapshot?, check, replacement?, heads?, unverified?}`; see [Snapshots](#snapshots), [Replacing](#replacing) and [Verifying](#verifying) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
@@ -1064,6 +1064,16 @@ end. It depends on `verify` in the request:
 `verified` means the snapshot and everything it imports have passed the
 re-check. So a macro chunk on top of unverified snapshots is re-checked but not
 yet `verified`.
+
+The re-check at creation has the request's `timeout` for each module, once
+their imports are loaded. If it runs out of time or memory, code outside the
+module system with no macros, its own or an import's, is kept, not
+`verified`, with the statuses of the build's own report, and the response's
+`unverified` says why; `POST /snapshots/{id}/verify` finishes the re-check.
+Other code, and code asked to be verified, isn't kept, and `check.error` is a
+`timeout` or `out_of_memory`: module-system code exports its theorems as
+axioms to what it imports, so only the kernel re-check can say what it
+proves, and macros could expand into what the policy forbids.
 
 `POST /snapshots/{id}/verify?timeout=60` re-checks the snapshot's module and
 everything it imports, imports first, in one process that loads their imports

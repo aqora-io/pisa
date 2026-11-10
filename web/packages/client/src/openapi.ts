@@ -958,8 +958,8 @@ export interface components {
             replaces?: components["schemas"]["Replaces"];
             /**
              * Format: int64
-             * @description Lean's time limit in seconds, for building the module including its
-             *     imports.
+             * @description Lean's time limit in seconds, for building the module, and again for
+             *     each module the kernel re-check covers, once their imports are loaded.
              */
             timeout?: number;
             /**
@@ -1006,6 +1006,15 @@ export interface components {
              *     the re-check (`check.error` says why).
              */
             snapshot?: components["schemas"]["Snapshot"];
+            /**
+             * @description Set when the kernel re-check didn't finish, as it ran out of time or
+             *     memory, for code outside the module system with no macros, its own or
+             *     an import's: the snapshot is kept, not
+             *     [`verified`](Snapshot::verified), with the statuses of the build's own
+             *     report. `POST /snapshots/{id}/verify` finishes the re-check. Other
+             *     code isn't kept when its re-check doesn't finish.
+             */
+            unverified?: components["schemas"]["VerifyFailure"];
         };
         /** @description A new declaration and the axioms it depends on. */
         Declaration: {

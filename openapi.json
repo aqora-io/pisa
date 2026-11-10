@@ -751,7 +751,7 @@
             "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` or that\nsnapshot's [`holes`](Snapshot::holes) name them, and adds no\nassumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link. The replaced snapshot\nmust be a head, one that no snapshot replaces, unless `fork` is set."
           },
           "timeout": {
-            "description": "Lean's time limit in seconds, for building the module including its\nimports.",
+            "description": "Lean's time limit in seconds, for building the module, and again for\neach module the kernel re-check covers, once their imports are loaded.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -790,6 +790,10 @@
           "snapshot": {
             "$ref": "#/components/schemas/Snapshot",
             "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept: Lean reported errors, the check\ncould not complete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), the snapshot it replaces is replaced already (a\n`conflict`, see `heads`), or `verify: true` found it kept but failing\nthe re-check (`check.error` says why)."
+          },
+          "unverified": {
+            "$ref": "#/components/schemas/VerifyFailure",
+            "description": "Set when the kernel re-check didn't finish, as it ran out of time or\nmemory, for code outside the module system with no macros, its own or\nan import's: the snapshot is kept, not\n[`verified`](Snapshot::verified), with the statuses of the build's own\nreport. `POST /snapshots/{id}/verify` finishes the re-check. Other\ncode isn't kept when its re-check doesn't finish."
           }
         },
         "required": [

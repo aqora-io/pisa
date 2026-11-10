@@ -60,12 +60,9 @@ use crate::catalog::{
 };
 use crate::check::{header_error, policy_error};
 use crate::db::Db;
-use crate::launcher::Verdict;
+use crate::launcher::{Unfinished, Verdict};
 use crate::policy::{Policy, parse_declarations, parse_export, uses_macros};
 use crate::pool::{Lease, Pool};
-
-/// Time allowed for the report on a snapshot's declarations.
-const REPORT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Snapshots {
     store: Arc<dyn ObjectStore>,
@@ -475,7 +472,12 @@ impl Permitted {
 
 /// What [`Snapshots::build`] kept: the module's record, the new entry, and
 /// what the replacement changed.
-type Built = Option<(ModuleMeta, (String, EntryMeta), Option<Replacement>)>;
+type Built = Option<(
+    ModuleMeta,
+    (String, EntryMeta),
+    Option<Replacement>,
+    Option<VerifyFailure>,
+)>;
 
 /// Puts what a create's comparison with `replacing` found into its
 /// response, if the entry the response has records that comparison: a create
@@ -700,19 +702,44 @@ fn failure_error(f: &VerifyFailure) -> Error {
     )
 }
 
-/// Re-checks the module through the kernel in a clean process, and returns its
-/// declarations with their axioms from there, so that they don't depend on
-/// whatever ran during the build. The error is why the re-check failed.
-async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<ReportedDeclaration>, String> {
+/// Why a module's re-check gave no declarations.
+enum Unchecked {
+    /// The kernel rejected it, or its verdict is unreadable.
+    Rejected(String),
+    /// The re-check ran out of time or memory, or failed.
+    Unfinished(Unfinished),
+}
+
+/// Re-checks the module through the kernel in a clean process, with the
+/// slot's import time and then `per_module`, and returns its declarations
+/// with their axioms from there, so that they don't depend on whatever ran
+/// during the build.
+async fn recheck_module(
+    slot: &Lease,
+    id: &str,
+    per_module: Duration,
+) -> Result<Vec<ReportedDeclaration>, Unchecked> {
     let modules = [snapshot::module(id)];
     let mut run = slot
-        .verify(&modules, slot.import_timeout(), REPORT_TIMEOUT)
-        .map_err(|e| format!("the re-check failed to start: {e}"))?;
+        .verify(&modules, slot.import_timeout(), per_module)
+        .map_err(|e| Unchecked::Unfinished(Unfinished::Crash(e.to_string())))?;
     match run.next().await {
-        Some(Ok(verdict)) => verified_declarations(verdict),
-        Some(Err(unfinished)) => Err(unfinished.to_string()),
-        None => Err("the re-check gave no verdict".into()),
+        Some(Ok(verdict)) => verified_declarations(verdict).map_err(Unchecked::Rejected),
+        Some(Err(unfinished)) => Err(Unchecked::Unfinished(unfinished)),
+        None => Err(Unchecked::Unfinished(Unfinished::Crash(
+            "it gave no verdict".into(),
+        ))),
     }
+}
+
+/// The error of a create whose re-check didn't finish.
+fn unfinished_error(unfinished: &Unfinished) -> Error {
+    let kind = match unfinished {
+        Unfinished::Timeout(_) => ErrorKind::Timeout,
+        Unfinished::OutOfMemory => ErrorKind::OutOfMemory,
+        Unfinished::Crash(_) => ErrorKind::Crash,
+    };
+    Error::new(kind, unfinished.to_string())
 }
 
 /// A verdict's declarations, or why there are none: the kernel rejected the
@@ -947,6 +974,7 @@ impl Snapshots {
             check: meta.result,
             replacement: None,
             heads: Vec::new(),
+            unverified: None,
         }
     }
 
@@ -961,6 +989,7 @@ impl Snapshots {
             check,
             replacement: None,
             heads: Vec::new(),
+            unverified: None,
         }
     }
 
@@ -976,6 +1005,7 @@ impl Snapshots {
             check: CheckResult::default(),
             replacement: None,
             heads: Vec::new(),
+            unverified: None,
         };
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
@@ -1239,7 +1269,8 @@ impl Snapshots {
         }
         if job.verify == Some(true) {
             let imports = snapshot::imports(&split.header).unwrap_or_default();
-            let error = match self.verify_chain(pool, &imports, REPORT_TIMEOUT).await {
+            let per_module = Duration::from_secs(job.timeout_secs);
+            let error = match self.verify_chain(pool, &imports, per_module).await {
                 Ok((_, Some(failure))) => Some(failure_error(&failure)),
                 Ok((_, None)) => None,
                 Err(e) => Some(e),
@@ -1256,9 +1287,10 @@ impl Snapshots {
             .await;
         slot.finish_job();
         Some(match built {
-            Ok(Some((meta, entry, replacement))) => {
+            Ok(Some((meta, entry, replacement, unverified))) => {
                 let mut done = self.created(meta, entry);
                 replaced(&mut done, replacing, replacement);
+                done.unverified = unverified;
                 done
             }
             Ok(None) => response,
@@ -1287,7 +1319,8 @@ impl Snapshots {
         let meta = if job.verify == Some(true) && !meta.verified {
             let verified = async {
                 let ids = [id.to_string()];
-                let (_, failure) = self.verify_chain(pool, &ids, REPORT_TIMEOUT).await?;
+                let per_module = Duration::from_secs(job.timeout_secs);
+                let (_, failure) = self.verify_chain(pool, &ids, per_module).await?;
                 Ok::<_, Error>((self.catalog.module(id).await?, failure))
             };
             match verified.await {
@@ -1535,16 +1568,33 @@ impl Snapshots {
                 return fail(outcome, e);
             }
         };
-        let rechecked = if recheck {
-            match recheck_module(slot, id).await {
-                Ok(decls) => Some(decls),
-                Err(reason) => {
+        // Without the re-check, the build's report stands only for code whose
+        // report can't say more than the code does: outside the module
+        // system, which exports theorems as axioms, and with no macros, which
+        // could expand into what the scan forbids.
+        let reported_stands = !module_system && !macros && job.verify != Some(true);
+        let per_module = Duration::from_secs(job.timeout_secs);
+        let (rechecked, unverified) = if recheck {
+            match recheck_module(slot, id, per_module).await {
+                Ok(decls) => (Some(decls), None),
+                Err(Unchecked::Unfinished(u)) if reported_stands => {
+                    let unverified = VerifyFailure {
+                        module: snapshot::module(id),
+                        reason: u.to_string(),
+                    };
+                    (None, Some(unverified))
+                }
+                Err(Unchecked::Unfinished(u)) => {
+                    self.unbuild(slot, id);
+                    return fail(outcome, unfinished_error(&u));
+                }
+                Err(Unchecked::Rejected(reason)) => {
                     self.unbuild(slot, id);
                     return fail(outcome, Error::new(ErrorKind::Lean, reason));
                 }
             }
         } else {
-            None
+            (None, None)
         };
 
         // Keep the builder warm on the snapshot so the next checks are hits.
@@ -1557,6 +1607,7 @@ impl Snapshots {
         }
         // The verifier's declarations, which don't depend on what ran in the
         // build, or else the build's report.
+        let kernel = rechecked.is_some();
         let decls = match rechecked {
             Some(decls) => decls,
             None => match compiled.report.take().and_then(parse_declarations) {
@@ -1621,7 +1672,7 @@ impl Snapshots {
             header: header.to_string(),
             code: job.code.clone(),
             status,
-            verified: recheck && parents.iter().all(|p| p.verified),
+            verified: kernel && parents.iter().all(|p| p.verified),
             macros,
             result: outcome.clone().into(),
             created: now(),
@@ -1649,7 +1700,7 @@ impl Snapshots {
             .commit(&own, &contents, &meta, search.as_ref(), entry)
             .await
         {
-            Ok((meta, entry)) => Ok(Some((meta, entry, replacement))),
+            Ok((meta, entry)) => Ok(Some((meta, entry, replacement, unverified))),
             Err(e) => {
                 self.unbuild(slot, id);
                 fail(outcome, e)
