@@ -1582,14 +1582,15 @@ hits[0]["module"], hits[0]["snapshot_ids"], hits[0]["status"]  # "PisaSnap.s1fâ€
   a full-run estimate, check pass rates and samples to review.
 
 **Imports.** Most of the index loads with `import Mathlib` and `import Physlib`.
-QuantumInfo (density matrices, entropies, channels) couldn't be imported
-alongside Mathlib up to Physlib v4.35.0, because both declared
-`Commute.log_left`. So its declarations are still exported from a second
-environment, and each hit carries the header that loads it in
-`flags.imports` (`import Physlib; import QuantumInfo`) and in its `text`.
-PhyslibAlpha (Physlib's lightly reviewed, often AI-written contributions) comes
-from a third, and its hits carry `import PhyslibAlpha`. It is searched by
-default; `libraries` narrows a search to the reviewed ones.
+Mathlib, Physlib, QuantumInfo (density matrices, entropies, channels) and
+PhyslibAlpha (Physlib's lightly reviewed, often AI-written contributions) import
+together, so the index is exported from one environment. A QuantumInfo or
+PhyslibAlpha hit carries the header that loads it, one import a line, in
+`flags.imports` (`import Mathlib`, `import Physlib`, `import QuantumInfo`) and
+in its `text`, and `/resolve` gives it for a name and each suggestion.
+PhyslibAlpha is searched by default; `libraries` narrows a search to the
+reviewed ones. An index exported before this, from three environments, has
+`import Physlib; import QuantumInfo` there, until it is exported again.
 
 ## Verification policy
 

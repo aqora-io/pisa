@@ -126,14 +126,31 @@ fn hash(parts: &[&str]) -> String {
     hex::encode(&h.finalize()[..16])
 }
 
+/// The headers `ingest` gives each library's declarations, from
+/// `LIBRARY=MODULE,MODULE,…`: an `import` line for each module.
+pub fn library_imports(args: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+    args.iter()
+        .map(|a| {
+            let (library, modules) = a.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--library-imports {a}: expected LIBRARY=MODULE,MODULE,…")
+            })?;
+            let lines: Vec<String> = modules
+                .split(',')
+                .map(|m| format!("import {}", m.trim()))
+                .collect();
+            Ok((library.to_string(), lines.join("\n")))
+        })
+        .collect()
+}
+
 /// Reads exporter output (plain or `.zst`, one or more files) into a corpus
 /// with hashes. A declaration in several exports keeps its first copy.
-/// Declarations from an environment in `env_imports` record its header.
+/// Declarations of a library in `library_imports` record its header.
 pub fn ingest(
     exports: &[&Path],
     env_id: String,
     lake_manifest: Option<&Path>,
-    env_imports: &BTreeMap<String, String>,
+    library_imports: &BTreeMap<String, String>,
 ) -> anyhow::Result<Corpus> {
     let mut decls = Vec::new();
     let mut modules = Vec::new();
@@ -157,7 +174,7 @@ pub fn ingest(
     decls.sort_by(|a, b| a.name.cmp(&b.name));
     decls.dedup_by(|a, b| a.name == b.name);
     for d in &mut decls {
-        d.imports = env_imports.get(&d.env).cloned();
+        d.imports = library_imports.get(&d.library).cloned();
         d.env.clear();
     }
     let index: HashMap<String, usize> = decls
@@ -587,51 +604,32 @@ pub mod tests {
     }
 
     #[test]
-    fn second_environment_adds_its_own_declarations_with_their_header() {
+    fn a_library_s_declarations_record_the_header_that_loads_them() {
         let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.ndjson");
+        let export = dir.path().join("all.ndjson");
         std::fs::write(
-            &main,
-            r#"{"record":"decl","env":"main","name":"a","kind":"def","module":"Mathlib.A","library":"Mathlib","signature":"a : Nat","type_pp_full":"Nat"}"#,
-        )
-        .unwrap();
-        let qi = dir.path().join("qi.ndjson");
-        std::fs::write(
-            &qi,
+            &export,
             concat!(
-                r#"{"record":"decl","env":"qi","name":"a","kind":"def","module":"QuantumInfo.A","library":"QuantumInfo","signature":"a : Int","type_pp_full":"Int"}"#,
+                r#"{"record":"decl","env":"all","name":"a","kind":"def","module":"Mathlib.A","library":"Mathlib","signature":"a : Nat","type_pp_full":"Nat"}"#,
                 "\n",
-                r#"{"record":"decl","env":"qi","name":"MState","kind":"structure","module":"QuantumInfo.MState","library":"QuantumInfo","signature":"MState : Type","type_pp_full":"Type"}"#,
+                r#"{"record":"decl","env":"all","name":"MState","kind":"structure","module":"QuantumInfo.MState","library":"QuantumInfo","signature":"MState : Type","type_pp_full":"Type"}"#,
             ),
         )
         .unwrap();
-        let headers = BTreeMap::from([(
-            "qi".to_string(),
-            "import Physlib; import QuantumInfo".to_string(),
-        )]);
-        let c = ingest(
-            &[main.as_path(), qi.as_path()],
-            "v4.35.0-x".into(),
-            None,
-            &headers,
-        )
-        .unwrap();
-        // The first export's copy of a shared name wins.
-        assert_eq!(
-            (c.decls[0].name.as_str(), c.decls[0].library.as_str()),
-            ("MState", "QuantumInfo")
-        );
+        let headers = library_imports(&["QuantumInfo=Mathlib,Physlib,QuantumInfo".into()]).unwrap();
+        let c = ingest(&[export.as_path()], "v4.36.0-x".into(), None, &headers).unwrap();
+        assert_eq!(c.decls[0].name, "MState");
         assert_eq!(
             c.decls[0].imports.as_deref(),
-            Some("import Physlib; import QuantumInfo")
+            Some("import Mathlib\nimport Physlib\nimport QuantumInfo")
         );
         assert_eq!(
-            (c.decls[1].name.as_str(), c.decls[1].library.as_str()),
-            ("a", "Mathlib")
+            (c.decls[1].name.as_str(), c.decls[1].imports.as_deref()),
+            ("a", None)
         );
-        assert_eq!(c.decls[1].imports, None);
         let out = dir.path().join("corpus");
         c.write(&out).unwrap();
         assert_eq!(Corpus::read(&out).unwrap().decls, c.decls);
+        assert!(library_imports(&["QuantumInfo".into()]).is_err());
     }
 }

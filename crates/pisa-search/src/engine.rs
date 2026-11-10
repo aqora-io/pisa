@@ -843,7 +843,14 @@ impl Engine {
     /// prominence.
     pub async fn resolve(&self, names: &[String]) -> anyhow::Result<Vec<Resolution>> {
         let base = is("source", "base");
-        let fields = json!(["name", "kind", "signature", "pagerank", "deprecated_to"]);
+        let fields = json!([
+            "name",
+            "kind",
+            "signature",
+            "pagerank",
+            "deprecated_to",
+            "imports"
+        ]);
         let mut searches = Vec::new();
         for name in names {
             let name = name.trim();
@@ -875,6 +882,7 @@ impl Engine {
                     name: name.to_string(),
                     exists: true,
                     deprecated_to: exact.payload.deprecated_to,
+                    imports: exact.payload.imports,
                     suggestions: Vec::new(),
                 });
                 continue;
@@ -902,6 +910,7 @@ impl Engine {
                 name: name.to_string(),
                 exists: false,
                 deprecated_to: None,
+                imports: None,
                 suggestions: ranked
                     .into_iter()
                     .take(5)
@@ -911,6 +920,7 @@ impl Engine {
                             name: d.name,
                             kind: d.kind,
                             signature: short_signature(&s),
+                            imports: d.imports,
                         }
                     })
                     .collect(),

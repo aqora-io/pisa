@@ -1296,7 +1296,7 @@
             "type": "string"
           },
           "imports": {
-            "description": "The import header that loads it, when the index's default header\n(`import Mathlib` and `import Physlib`) doesn't.",
+            "description": "The import header that loads it, one import a line, when the index's\ndefault header (`import Mathlib` and `import Physlib`) doesn't.",
             "type": "string"
           },
           "informal": {
@@ -2146,6 +2146,10 @@
           "exists": {
             "type": "boolean"
           },
+          "imports": {
+            "description": "For an existing name, the header that loads it if the default\nimports don't, as in a hit's `flags.imports`.",
+            "type": "string"
+          },
           "name": {
             "type": "string"
           },
@@ -2566,6 +2570,10 @@
       },
       "Suggestion": {
         "properties": {
+          "imports": {
+            "description": "The header that loads it if the default imports don't.",
+            "type": "string"
+          },
           "kind": {
             "type": "string"
           },

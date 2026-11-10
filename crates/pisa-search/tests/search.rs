@@ -221,6 +221,11 @@ fn corpus() -> Corpus {
     ];
     let mut decls: Vec<Decl> = specs.iter().map(decl).collect();
     let by = |decls: &mut Vec<Decl>, name: &str| decls.iter().position(|d| d.name == name).unwrap();
+    let i = by(
+        &mut decls,
+        "QuantumMechanics.state_uncertainty_of_raw_commutator",
+    );
+    decls[i].imports = Some(UNCERTAINTY_IMPORTS.into());
     let i = by(&mut decls, "Real.sqrt_mul_self_old");
     decls[i].deprecated_to = Some("Real.sqrt_mul_self".into());
     let i = by(&mut decls, "mul_comm");
@@ -355,6 +360,26 @@ async fn latex_and_patterns_reach_the_right_declarations() {
         })
         .await;
     assert_eq!(hits[0], "Matrix.trace_mul_comm", "{hits:?}");
+    t.done().await;
+}
+
+/// The header a fixture declaration records, as one outside the default
+/// imports does.
+const UNCERTAINTY_IMPORTS: &str = "import Mathlib\nimport Physlib\nimport QuantumInfo";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_resolves_with_the_imports_that_load_it() {
+    let Some(t) = engine().await else { return };
+    let names = [
+        "QuantumMechanics.state_uncertainty_of_raw_commutator",
+        "QuantumMechanics.state_uncertainty_of_raw_comutator",
+    ];
+    let r = t.engine.resolve(&names.map(String::from)).await.unwrap();
+    assert_eq!(r[0].imports.as_deref(), Some(UNCERTAINTY_IMPORTS));
+    assert_eq!(
+        r[1].suggestions[0].imports.as_deref(),
+        Some(UNCERTAINTY_IMPORTS)
+    );
     t.done().await;
 }
 

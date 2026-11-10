@@ -86,24 +86,20 @@ RUN apt-get update \
 ENTRYPOINT ["tini", "--", "pisa-worker"]
 
 # Exports every declaration of the project (about 30 minutes) and ingests it.
-# QuantumInfo (which couldn't be imported alongside Mathlib up to Physlib
-# v4.35.0) and PhyslibAlpha come from environments of their own, and their
-# declarations record the header that loads them. A declaration keeps its
-# first export's copy, so PhyslibAlpha's goes last.
+# Mathlib, Physlib, QuantumInfo and PhyslibAlpha import together, so they are
+# exported from one environment; the declarations of the last two record the
+# header that loads them besides the default imports.
 FROM lean AS search-export
 COPY search/exporter /opt/exporter
 COPY --from=build-server /usr/local/bin/pisa-search /usr/local/bin/
-RUN lake env lean --run /opt/exporter/PisaExport.lean --env mathlib-physlib Mathlib Physlib \
-        > /tmp/decls.ndjson \
-    && lake env lean --run /opt/exporter/PisaExport.lean --env physlib-quantuminfo Physlib QuantumInfo \
-        > /tmp/quantuminfo.ndjson \
-    && lake env lean --run /opt/exporter/PisaExport.lean --env physlib-alpha PhyslibAlpha \
-        > /tmp/alpha.ndjson \
-    && lake env lean --run /opt/exporter/ToAdditive.lean Mathlib Physlib > /tmp/additive.ndjson \
-    && pisa-search ingest --export /tmp/decls.ndjson --export /tmp/quantuminfo.ndjson \
-        --export /tmp/alpha.ndjson --export /tmp/additive.ndjson --project /opt/project --out /corpus \
-        --env-imports "physlib-quantuminfo=import Physlib; import QuantumInfo" \
-        --env-imports "physlib-alpha=import PhyslibAlpha"
+RUN lake env lean --run /opt/exporter/PisaExport.lean --env all \
+        Mathlib Physlib QuantumInfo PhyslibAlpha > /tmp/decls.ndjson \
+    && lake env lean --run /opt/exporter/ToAdditive.lean Mathlib Physlib QuantumInfo PhyslibAlpha \
+        > /tmp/additive.ndjson \
+    && pisa-search ingest --export /tmp/decls.ndjson --export /tmp/additive.ndjson \
+        --project /opt/project --out /corpus \
+        --library-imports "QuantumInfo=Mathlib,Physlib,QuantumInfo" \
+        --library-imports "PhyslibAlpha=Mathlib,Physlib,PhyslibAlpha"
 
 FROM scratch AS corpus
 COPY --from=search-export /corpus /
