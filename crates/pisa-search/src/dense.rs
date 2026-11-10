@@ -22,21 +22,30 @@ pub const DIMS: usize = 512;
 /// Qwen3-Embedding's query instruction; documents get none.
 pub const QUERY_INSTRUCTION: &str = "Instruct: Given a description of a mathematical or physical statement, retrieve the Lean declaration that states it\nQuery: ";
 
+/// The most characters a declaration is embedded as.
+pub const VIEW_CHARS: usize = 2000;
+
 /// The text a declaration is embedded as, in LeanSearch v2's style: header,
-/// informal block, formal block. Short, for CPU embedding.
+/// informal block, formal block, in at most [`VIEW_CHARS`] characters. The
+/// description is cut so that the signature fits; only a signature too long
+/// on its own is cut.
 pub fn document_view(d: &Decl, informal: Option<&pisa_protocol::search::Informal>) -> String {
-    let mut s = format!("{} {}\n", d.kind, d.name);
+    let head = format!("{} {}\n", d.kind, d.name);
+    let mut description = String::new();
     if let Some(i) = informal {
-        s.push_str(&i.informal_name);
-        s.push('\n');
-        s.push_str(&i.statement_nl);
-        s.push('\n');
+        description.push_str(&i.informal_name);
+        description.push('\n');
+        description.push_str(&i.statement_nl);
+        description.push('\n');
     } else if let Some(doc) = &d.docstring {
-        s.push_str(doc);
-        s.push('\n');
+        description.push_str(doc);
+        description.push('\n');
     }
+    let room = VIEW_CHARS.saturating_sub(head.chars().count() + d.signature.chars().count());
+    let mut s = head;
+    s.extend(description.chars().take(room));
     s.push_str(&d.signature);
-    s.chars().take(600).collect()
+    s.chars().take(VIEW_CHARS).collect()
 }
 
 pub fn text_hash(model: &str, text: &str) -> [u8; 16] {
@@ -580,6 +589,40 @@ pub async fn embed_missing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decl(signature: &str) -> Decl {
+        Decl {
+            name: "t".into(),
+            kind: "theorem".into(),
+            signature: signature.into(),
+            ..Default::default()
+        }
+    }
+
+    fn described(statement: &str) -> pisa_protocol::search::Informal {
+        pisa_protocol::search::Informal {
+            informal_name: "A name".into(),
+            statement_nl: statement.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_view_keeps_its_signature_and_cuts_the_description() {
+        // One that fits is as it was, so its vector is kept.
+        let short = document_view(&decl("t : 1 = 1"), Some(&described("One is one.")));
+        assert_eq!(short, "theorem t\nA name\nOne is one.\nt : 1 = 1");
+        // A long description is cut so that the whole signature fits.
+        let signature = format!("t : {} = 1", "x".repeat(900));
+        let view = document_view(&decl(&signature), Some(&described(&"y".repeat(3000))));
+        assert_eq!(view.chars().count(), 2000);
+        assert!(view.ends_with(&signature), "{view}");
+        // A signature too long on its own is cut last.
+        let signature = "z".repeat(5000);
+        let view = document_view(&decl(&signature), Some(&described("short")));
+        assert_eq!(view.chars().count(), 2000);
+        assert!(view.starts_with("theorem t\nz"), "{view}");
+    }
 
     fn unit(xs: &[f32]) -> Vec<f32> {
         let mut v = vec![0.0; DIMS];
