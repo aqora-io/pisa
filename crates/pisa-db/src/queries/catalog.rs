@@ -1138,6 +1138,22 @@ pub(crate) async fn orphans_after(
     Ok((orphans, next))
 }
 
+pub(crate) async fn own_builds(
+    db: &Handle,
+    v: &str,
+    ids: &[String],
+) -> Result<HashMap<String, String>, Error> {
+    let mut c = conn(db).await?;
+    let rows: Vec<(String, String)> = modules::table
+        .filter(modules::version.eq(v))
+        .filter(modules::id.eq_any(ids))
+        .select((modules::id, modules::build))
+        .load(&mut *c)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows.into_iter().collect())
+}
+
 pub(crate) async fn modules_with_decls_after(
     db: &Handle,
     v: &str,

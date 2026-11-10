@@ -787,6 +787,12 @@ impl Catalog {
         dispatch!(&self.db, orphans_after(&self.version, after, limit.into()))
     }
 
+    /// The own build of each of `ids` that has a record, read without the
+    /// rest of the record.
+    pub async fn own_builds(&self, ids: &[String]) -> Result<HashMap<String, String>, Error> {
+        dispatch!(&self.db, own_builds(&self.version, ids))
+    }
+
     /// Up to `limit` ids, in order, of the modules with declarations for
     /// search, after the module `after`.
     pub async fn modules_with_decls_after(
@@ -2163,6 +2169,25 @@ mod tests {
             assert_eq!(
                 catalog.orphans_after(Some("p"), 10).await.unwrap().0,
                 Vec::<String>::new()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn own_builds_are_read_for_many_modules_at_once() {
+        for catalog in catalogs().await {
+            let parent = meta("p");
+            let kid = child("c", &parent);
+            catalog
+                .commit("p", &parent, None, no_labels())
+                .await
+                .unwrap();
+            catalog.commit("c", &kid, None, no_labels()).await.unwrap();
+            let own = |m: &ModuleMeta| m.modules.last().unwrap().build.clone();
+            let ids = ["p", "c", "gone"].map(String::from);
+            assert_eq!(
+                catalog.own_builds(&ids).await.unwrap(),
+                HashMap::from([("p".into(), own(&parent)), ("c".into(), own(&kid))])
             );
         }
     }

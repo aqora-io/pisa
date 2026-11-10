@@ -89,37 +89,38 @@ impl Snapshots {
             .as_secs() as i64;
         let prefix = ObjectPath::from(format!("snapshots/{}", self.version));
         let listed: Vec<_> = futures::StreamExt::collect(self.store.list(Some(&prefix))).await;
-        // Each module's own build, if it has a record.
-        let mut builds: HashMap<String, Option<String>> = HashMap::new();
-        let mut deleted = 0;
+        // `<id>.<build>.<ext>.zst`.
+        let mut old = Vec::new();
         for meta in listed {
             let meta = meta.map_err(internal)?;
             if now - meta.last_modified.timestamp() < grace.as_secs() as i64 {
                 continue;
             }
-            // `<id>.<build>.<ext>.zst`.
             let Some(name) = meta.location.filename() else {
                 continue;
             };
             let mut parts = name.split('.');
-            let (Some(id), Some(build)) = (parts.next(), parts.next()) else {
-                continue;
-            };
-            if !builds.contains_key(id) {
-                let own = match self.catalog.module(id).await {
-                    Ok(m) => m.modules.last().map(|own| own.build.clone()),
-                    Err(e) if e.kind == ErrorKind::NotFound => None,
-                    Err(e) => return Err(e),
-                };
-                builds.insert(id.to_string(), own);
+            if let (Some(id), Some(build)) = (parts.next(), parts.next()) {
+                let (id, build) = (id.to_string(), build.to_string());
+                old.push((meta.location, id, build));
             }
-            if builds[id].as_deref() == Some(build) {
+        }
+        // Each module's own build, if it has a record.
+        let ids: BTreeSet<&String> = old.iter().map(|(_, id, _)| id).collect();
+        let ids: Vec<String> = ids.into_iter().cloned().collect();
+        let mut builds = HashMap::new();
+        for page in ids.chunks(SWEEP_PAGE as usize) {
+            builds.extend(self.catalog.own_builds(page).await?);
+        }
+        let mut deleted = 0;
+        for (location, id, build) in old {
+            if builds.get(&id) == Some(&build) {
                 continue;
             }
-            match self.store.delete(&meta.location).await {
+            match self.store.delete(&location).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => deleted += 1,
                 Err(e) => {
-                    tracing::warn!(path = %meta.location, "sweeping a snapshot file failed: {e}")
+                    tracing::warn!(path = %location, "sweeping a snapshot file failed: {e}")
                 }
             }
         }
