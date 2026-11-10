@@ -1901,6 +1901,13 @@ impl Snapshots {
         let mut renamed = BTreeMap::from([(old.clone(), new.clone())]);
         // Each new module's original, whose declarations it is taken to have.
         let mut originals: HashMap<String, String> = HashMap::new();
+        // What a copy builds on through each module it imports, as its create
+        // will find it, the import itself last: through `from`, `to` and what
+        // it builds on; through a module the plan rebuilds, that module's copy
+        // and what the copy builds on; through any other, the module and what
+        // it builds on.
+        let mut through: HashMap<String, Vec<String>> =
+            HashMap::from([(old.clone(), needs.clone())]);
         let mut planned: Vec<Planned> = Vec::new();
         for m in order {
             let meta = self.catalog.module(&m).await?;
@@ -1909,6 +1916,23 @@ impl Snapshots {
             let header = snapshot::next_header(&split_header(&code).header, &id);
             renamed.insert(m.clone(), id.clone());
             originals.insert(id.clone(), m.clone());
+            // What the copy builds on, from its imports, its own module last.
+            // The plan rebuilds what is below first, so an import not seen yet
+            // is one it leaves.
+            let mut needs_now: Vec<String> = Vec::new();
+            for i in &meta.imports {
+                if !through.contains_key(i) {
+                    let kept = self.catalog.module(i).await?;
+                    through.insert(i.clone(), ids(&kept.modules).cloned().collect());
+                }
+                for n in &through[i] {
+                    if !needs_now.contains(n) {
+                        needs_now.push(n.clone());
+                    }
+                }
+            }
+            needs_now.push(id.clone());
+            through.insert(m.clone(), needs_now.clone());
             let affected = if changed_definitions.is_empty() {
                 Vec::new()
             } else {
@@ -1937,24 +1961,8 @@ impl Snapshots {
                 });
                 continue;
             };
-            // What the copy builds on, as its create will find it: `to`'s
-            // modules for `from`'s, and the new modules for those the plan
-            // rebuilds.
             let needs_before: Vec<String> =
                 ids(&meta.modules).filter(|n| **n != m).cloned().collect();
-            let mut needs_now: Vec<String> = Vec::new();
-            for n in &needs_before {
-                let now = if *n == old {
-                    needs.clone()
-                } else {
-                    vec![renamed.get(n).unwrap_or(n).clone()]
-                };
-                for n in now {
-                    if !needs_now.contains(&n) {
-                        needs_now.push(n);
-                    }
-                }
-            }
             for (e, entry_meta) in entries {
                 // The comparison the copy's create will run, the copy taken to
                 // declare what its original does, under an `allow` of every

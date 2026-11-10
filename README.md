@@ -559,9 +559,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   several versions are a 400 that names them, and so is a `version` that
   isn't theirs. `label` doesn't combine with `against` (400), and a spec
   snapshot that doesn't exist is a 404. A [rebuild](#rebuilding) copies
-  only a run's heads, so audit against the same ids after it; a spec
-  snapshot that was itself a head is copied too, and `created` maps it to
-  its copy.
+  only a run's heads, so audit against the same ids after it. A spec
+  snapshot that was still a head, with nothing replacing it yet, is copied
+  like any head, and with `retire` its old id is deleted: find its copy in
+  `created` and audit against that.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports

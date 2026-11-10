@@ -745,6 +745,30 @@ async fn a_proof_whose_helper_uses_a_changed_type_is_unlinked() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_copy_is_compared_through_what_to_no_longer_builds_on() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let a = create(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
+    let a2 = create(&c, json!({"code": "import Foo\n\ndef a : Int := 1"})).await;
+    let b = create(&c, json!({"code": on(&a, "theorem b : 1 = 1 := rfl")})).await;
+    let b2 = create(&c, json!({"code": on(&a2, "theorem b : 1 = 1 := rfl")})).await;
+    // P builds on A only through B, and states something about A's `a`.
+    let p = create(
+        &c,
+        json!({"code": on(&b, "theorem p : a = a := rfl"), "labels": {"p": "1"}}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["changes"], json!([]), "{r}");
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p))], "{r}");
+    // B′ builds on A2 instead, so P′'s `a` is another one: no link.
+    assert_eq!(items(&r, "replaces"), [&Value::Null], "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    let made = r["created"][0]["new_snapshot_id"].as_str().unwrap();
+    let (_, info) = get(&c, &format!("/snapshots/{made}")).await;
+    assert!(info.get("replaces").is_none(), "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_resent_rebuild_replays_the_copy_that_replaced_its_original() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let lib = library(&c).await;
