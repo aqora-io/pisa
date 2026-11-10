@@ -89,13 +89,4 @@ def exportDecl (n : Name) (chars : Nat) : MetaM (Option Json) := do
 def exportDecls (names : Array Name) (chars : Nat) : MetaM (Array Json) :=
   names.filterMapM (exportDecl · chars)
 
-/-- Logs `PISA_EXPORT <exports>` for the declarations of `m`, an imported
-module, which the worker reads. -/
-def exportModule (m : Name) (chars : Nat) : Elab.Command.CommandElabM Unit := do
-  let env ← getEnv
-  let some idx := env.getModuleIdx? m | throwError "{m} is not imported"
-  let names := env.header.moduleData[idx.toNat]!.constNames
-  let out ← Elab.Command.liftTermElabM (exportDecls names chars)
-  logInfo (MessageData.ofFormat (.text ("PISA_EXPORT " ++ (Json.arr out).compress)))
-
 end Pisa

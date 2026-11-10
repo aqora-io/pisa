@@ -44,7 +44,7 @@ use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{
     MAX_LABELS, MAX_LIMIT, check_key, check_labels, is_cursor, snapshot_id_error,
 };
-use pisa_protocol::repl::{CommandResponse, ReplCommand, ReplResponse, Severity};
+use pisa_protocol::repl::CommandResponse;
 use pisa_protocol::search::{Description, Informal};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{
@@ -55,16 +55,13 @@ use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{
-    Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls,
-    record_fits, unknown_module,
+    Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, SnapshotDecls, record_fits,
+    unknown_module,
 };
-use crate::check::{header_error, policy_error, run, unexpected};
+use crate::check::{header_error, policy_error};
 use crate::db::Db;
 use crate::launcher::Verdict;
-use crate::policy::{
-    Policy, module_export, module_report, parse_declarations, parse_export, parse_report,
-    uses_macros,
-};
+use crate::policy::{Policy, parse_declarations, parse_export, uses_macros};
 use crate::pool::{Lease, Pool};
 
 /// Time allowed for the report on a snapshot's declarations.
@@ -557,7 +554,7 @@ fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// The files `lean -o` wrote for module `s<id>` in `dir`, by extension, the
+/// The files the build wrote for module `s<id>` in `dir`, by extension, the
 /// `.olean` last.
 fn outputs(dir: &Path, id: &str) -> std::io::Result<Vec<(String, PathBuf)>> {
     let prefix = format!("s{id}.");
@@ -575,28 +572,16 @@ fn outputs(dir: &Path, id: &str) -> std::io::Result<Vec<(String, PathBuf)>> {
     Ok(files)
 }
 
-/// The snapshots among the `.olean` files `lean --deps` printed, by id.
-fn snapshot_imports(paths: &[PathBuf]) -> Result<BTreeSet<String>, Error> {
+/// The snapshots among the modules the build says the module imports, by id.
+fn snapshot_imports(modules: &[String]) -> Result<BTreeSet<String>, Error> {
     let mut ids = BTreeSet::new();
-    for path in paths {
-        let parent = path.parent().and_then(Path::file_name);
-        if parent != Some(std::ffi::OsStr::new(snapshot::ROOT)) {
-            continue;
-        }
-        let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-        match snapshot::parse_module(&format!("{}.{stem}", snapshot::ROOT)) {
+    for module in modules {
+        match snapshot::parse_module(module) {
             Ok(Some(id)) => {
                 ids.insert(id);
             }
-            _ => {
-                return Err(Error::new(
-                    ErrorKind::BadRequest,
-                    format!(
-                        "Lean reads an import that isn't a snapshot: {}",
-                        path.display()
-                    ),
-                ));
-            }
+            Ok(None) => {}
+            Err(e) => return Err(Error::new(ErrorKind::BadRequest, e)),
         }
     }
     Ok(ids)
@@ -738,49 +723,6 @@ fn verified_declarations(verdict: Verdict) -> Result<Vec<ReportedDeclaration>, S
     }
     parse_declarations(verdict.declarations)
         .ok_or_else(|| "unreadable verifier declarations".to_string())
-}
-
-/// Runs one of the worker's own reports in environment `env` and parses it;
-/// `what` names it in the error.
-async fn run_report<T>(
-    slot: &mut Lease,
-    text: String,
-    env: u64,
-    what: &str,
-    parse: impl Fn(&CommandResponse) -> Option<T>,
-) -> Result<T, Error> {
-    let cmd = ReplCommand::cmd(text, Some(env));
-    let report = match run(slot, &cmd, REPORT_TIMEOUT).await? {
-        ReplResponse::Command(r) => r,
-        ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
-        other => return Err(unexpected(other)),
-    };
-    parse(&report).ok_or_else(|| {
-        let why = report
-            .messages
-            .iter()
-            .find(|m| m.severity == Severity::Error)
-            .map_or("no output".to_string(), |m| m.data.clone());
-        internal(format!("the {what} failed: {why}"))
-    })
-}
-
-/// The declarations of a module in a process that has it imported, with their
-/// axioms as that process reports them.
-async fn report_module(
-    slot: &mut Lease,
-    id: &str,
-    env: u64,
-) -> Result<Vec<ReportedDeclaration>, Error> {
-    let text = module_report(&snapshot::module(id));
-    run_report(slot, text, env, "axiom report", parse_report).await
-}
-
-/// What the search service indexes of a module's declarations, from a
-/// process that has it imported.
-async fn export_module(slot: &mut Lease, id: &str, env: u64) -> Result<Vec<SnapshotDecl>, Error> {
-    let text = module_export(&snapshot::module(id));
-    run_report(slot, text, env, "declaration export", parse_export).await
 }
 
 impl Snapshots {
@@ -1472,9 +1414,9 @@ impl Snapshots {
             Err(e) => return fail(outcome, e),
         };
         let macros = uses_macros(&split.body) || parents.iter().any(|p| p.macros);
-        // The builder imports module-system code as the code on top of it
-        // does, seeing only what it exports, so only the verifier, which
-        // reads all of it, can describe it.
+        // Module-system code exports its theorems as axioms to what it
+        // imports, so only the verifier, which loads those whole, can
+        // describe it.
         let module_system = split.header.lines().next() == Some("module");
         let recheck = module_system || job.verify.unwrap_or(macros);
         // The snapshots a replacement swaps follow from its imports, so a
@@ -1499,7 +1441,7 @@ impl Snapshots {
             }
             None => None,
         };
-        // `lean -o` imports everything again, so free the slot's memory first.
+        // The build imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
 
         let root = slot.scratch_dir().join("build");
@@ -1516,7 +1458,7 @@ impl Snapshots {
         let start = Instant::now();
         let compiled = slot.compile(&root, &file, &olean, limit).await;
         outcome.time = (start.elapsed().as_secs_f64() * 1e6).round() / 1e6;
-        let compiled = match compiled {
+        let mut compiled = match compiled {
             Ok(c) => c,
             Err(e) => {
                 remove_module(&dir, id);
@@ -1526,7 +1468,7 @@ impl Snapshots {
         // The file is the submitted code, so positions need no shifting.
         let response = CommandResponse {
             env: 0,
-            messages: compiled.messages,
+            messages: std::mem::take(&mut compiled.messages),
             sorries: Vec::new(),
             tactics: Vec::new(),
             at: Vec::new(),
@@ -1563,9 +1505,9 @@ impl Snapshots {
         }
         // What the module imports is what Lean's own header parser read,
         // which can differ from the line-by-line split the record holds.
-        let read = match slot.deps(&file, limit).await {
-            Ok(paths) => snapshot_imports(&paths),
-            Err(e) => Err(internal(format!("reading the imports failed: {e}"))),
+        let read = match &compiled.imports {
+            Some(modules) => snapshot_imports(modules),
+            None => Err(internal("the build didn't say what the module imports")),
         };
         let listed = snapshot::imports(&split.header).unwrap_or_default();
         if let Err(e) = read.and_then(|read| {
@@ -1606,34 +1548,31 @@ impl Snapshots {
         };
 
         // Keep the builder warm on the snapshot so the next checks are hits.
-        let env = match slot
+        if let Err(f) = slot
             .warm_up_with(header, &header_key(header), Some(id))
             .await
         {
-            Ok((env, _)) => env,
-            Err(f) => {
-                self.unbuild(slot, id);
-                return fail(outcome, header_error(f, slot.import_timeout()));
-            }
-        };
+            self.unbuild(slot, id);
+            return fail(outcome, header_error(f, slot.import_timeout()));
+        }
         // The verifier's declarations, which don't depend on what ran in the
         // build, or else the build's report.
         let decls = match rechecked {
             Some(decls) => decls,
-            None => match report_module(slot, id, env).await {
-                Ok(decls) => decls,
-                Err(e) => {
+            None => match compiled.report.take().and_then(parse_declarations) {
+                Some(decls) => decls,
+                None => {
                     self.unbuild(slot, id);
-                    return fail(outcome, e);
+                    return fail(outcome, internal("the build's axiom report is missing"));
                 }
             },
         };
         let mut verification = slot.policy().judge_decls(false, Some(decls));
         // For search only, so a failure just leaves the module out of it.
-        let exported = export_module(slot, id, env)
-            .await
-            .inspect_err(|e| tracing::warn!(module = %id, "exporting declarations failed: {e}"))
-            .ok();
+        let exported = compiled.export.take().and_then(parse_export);
+        if exported.is_none() {
+            tracing::warn!(module = %id, "the build's declaration export is missing");
+        }
         let status = worst_status(&verification.declarations);
         let replacement = match replacing.zip(swapped.as_ref()) {
             Some((r, swapped)) => match compare(r, &verification.declarations, swapped) {

@@ -126,39 +126,14 @@ const MARKER: &str = "PISA_DECLS ";
 /// it.
 pub const AXIOM_REPORT: &str = "run_cmd _root_.Pisa.reportNew";
 
-/// [`AXIOM_REPORT`] for the declarations of one imported module, e.g. a
-/// snapshot (whose own declarations are not "after the imports").
-pub fn module_report(module: &str) -> String {
-    format!("run_cmd _root_.Pisa.reportModule `{module}")
-}
-
-const EXPORT_MARKER: &str = "PISA_EXPORT ";
-
-/// The export of the declarations of `module`, which the process imports:
-/// what the search service indexes of each and the audit's review list shows,
-/// as [`SnapshotDecl`]s in JSON without `uses_sorry` and `status`, which come
-/// from the check result (see `docker/pisa-lean/Pisa/Export.lean`). A
-/// definition's `value` is cut at [`VALUE_CHARS`](crate::catalog::VALUE_CHARS)
-/// characters. Docstrings of a module-system snapshot aren't loaded in a
-/// module-system header, so they are missing there.
-pub fn module_export(module: &str) -> String {
-    format!(
-        "run_cmd _root_.Pisa.exportModule `{module} {}",
-        crate::catalog::VALUE_CHARS
-    )
-}
-
-pub fn parse_export(report: &CommandResponse) -> Option<Vec<SnapshotDecl>> {
-    report
-        .messages
-        .iter()
-        .filter(|m| m.severity == Severity::Info)
-        .find_map(|m| m.data.strip_prefix(EXPORT_MARKER))
-        .and_then(|json| serde_json::from_str::<Vec<SnapshotDecl>>(json).ok())
-        .map(|mut decls| {
-            decls.sort_by(|a, b| a.name.cmp(&b.name));
-            decls
-        })
+/// What the search service indexes of each declaration of a snapshot module,
+/// and the audit's review list shows: the export `pisa build` prints
+/// (`docker/pisa-lean/Pisa/Export.lean`), as [`SnapshotDecl`]s without
+/// `uses_sorry` and `status`, which come from the check result, sorted by name.
+pub fn parse_export(export: serde_json::Value) -> Option<Vec<SnapshotDecl>> {
+    let mut decls: Vec<SnapshotDecl> = serde_json::from_value(export).ok()?;
+    decls.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(decls)
 }
 
 /// Whether `body` uses macros, or other code that runs at elaboration time
@@ -806,27 +781,19 @@ mod tests {
     }
 
     #[test]
-    fn reports_are_rooted_calls_of_the_library() {
+    fn the_report_is_a_rooted_call_of_the_library() {
         assert_eq!(AXIOM_REPORT, "run_cmd _root_.Pisa.reportNew");
-        assert_eq!(
-            module_report("PisaSnap.s0f"),
-            "run_cmd _root_.Pisa.reportModule `PisaSnap.s0f"
-        );
     }
 
     #[test]
-    fn module_export_names_the_module_and_parses() {
-        assert_eq!(
-            module_export("PisaSnap.s0f"),
-            "run_cmd _root_.Pisa.exportModule `PisaSnap.s0f 4000"
-        );
-        let report: CommandResponse = serde_json::from_value(json!({
-            "env": 1,
-            "messages": [{"severity": "info", "pos": {"line": 1, "column": 0},
-                "data": "PISA_EXPORT [{\"name\":\"b\",\"kind\":\"def\",\"signature\":\"b : Nat\",\"type_pp_full\":\"Nat\",\"type_refs\":[\"Nat\"],\"value_refs\":[],\"docstring\":\"B.\",\"deprecated_to\":null},{\"name\":\"a\",\"kind\":\"theorem\",\"signature\":\"a : True\",\"type_pp_full\":\"True\",\"type_refs\":[],\"value_refs\":[],\"docstring\":null,\"deprecated_to\":null}]"}]
-        }))
-        .unwrap();
-        let decls = parse_export(&report).unwrap();
+    fn an_export_parses_sorted_by_name() {
+        let export = json!([
+            {"name": "b", "kind": "def", "signature": "b : Nat", "type_pp_full": "Nat",
+             "type_refs": ["Nat"], "value_refs": [], "docstring": "B.", "deprecated_to": null},
+            {"name": "a", "kind": "theorem", "signature": "a : True", "type_pp_full": "True",
+             "type_refs": [], "value_refs": [], "docstring": null, "deprecated_to": null}
+        ]);
+        let decls = parse_export(export).unwrap();
         let names: Vec<&str> = decls.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
         assert_eq!(decls[1].docstring.as_deref(), Some("B."));

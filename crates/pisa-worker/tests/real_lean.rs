@@ -1,7 +1,6 @@
 //! The axiom report and the kernel verifier on real Lean: code is compiled to
-//! snapshot modules as a worker builds them, reported as the builder reports
-//! them, and re-checked by `pisa verify` (`docker/pisa-lean`); `pisa build`
-//! is checked against them. Each test needs
+//! snapshot modules, and described, by `pisa build` (`docker/pisa-lean`) as
+//! a worker builds them, and re-checked by `pisa verify`. Each test needs
 //! elan on `PATH` and `docker/pisa-lean` built, and runs on the library's
 //! toolchain, so they are ignored by default:
 //!
@@ -14,13 +13,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pisa_protocol::header::split_header;
-use pisa_protocol::repl::{CommandResponse, Message};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
-use pisa_worker::launcher::compile_args;
+use pisa_worker::catalog::SnapshotDecl;
 use pisa_worker::policy::{
-    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_export, module_report,
-    parse_declarations, parse_export, parse_report,
+    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, parse_declarations, parse_export,
 };
 
 fn docker() -> PathBuf {
@@ -40,13 +37,15 @@ struct Snapshots {
     root: tempfile::TempDir,
 }
 
-/// A built module: its id, whether it is module-system code, and its
-/// declarations as the builder's report and the verifier give them.
+/// A built module: its id, whether it is module-system code, its
+/// declarations as the build's report and the verifier give them, and its
+/// export.
 struct Built {
     id: String,
     module_system: bool,
     reported: Vec<Declaration>,
     verified: Vec<Declaration>,
+    export: Vec<SnapshotDecl>,
 }
 
 impl Snapshots {
@@ -56,115 +55,62 @@ impl Snapshots {
         Snapshots { root }
     }
 
-    /// Runs `lean` on the snapshot modules, and with `pisa` on the `Pisa`
-    /// library, as the worker's REPL and verifier run. It runs on the
-    /// library's toolchain, whatever elan's default, as the image builds both
-    /// with one.
-    fn lean(&self, args: &[&str], pisa: bool) -> std::process::Output {
-        let mut path = vec![self.root.path().to_path_buf()];
-        if pisa {
-            path.push(docker().join("pisa-lean/.lake/build/lib/lean"));
-        }
+    /// Runs `lean` on the snapshot modules, on the library's toolchain,
+    /// whatever elan's default, as the image builds both with one.
+    fn lean(&self, args: &[&str]) -> std::process::Output {
         let toolchain = std::fs::read_to_string(docker().join("pisa-lean/lean-toolchain")).unwrap();
         Command::new("lean")
             .args(args)
             .current_dir(self.root.path())
             .env("ELAN_TOOLCHAIN", toolchain.trim())
-            .env("LEAN_PATH", std::env::join_paths(path).unwrap())
+            .env("LEAN_PATH", self.root.path())
             .output()
             .expect("running lean (is elan on PATH?)")
     }
 
-    /// Compiles `code` to its snapshot module, then reports and re-checks it.
-    fn build(&self, code: &str) -> Built {
-        let id = snapshot::id(code);
-        let file = self
-            .root
-            .path()
-            .join(snapshot::ROOT)
-            .join(format!("s{id}.lean"));
-        std::fs::write(&file, code).unwrap();
-        let args = compile_args(self.root.path(), &file, &file.with_extension("olean"));
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = self.lean(&args, false);
+    /// Compiles `code` to its snapshot module with `lean -o`, as the worker
+    /// once did.
+    fn lean_build(&self, code: &str) -> String {
+        let (file, olean) = self.file(code);
+        let root = self.root.path().to_string_lossy().into_owned();
+        let (file, olean) = (file.to_string_lossy(), olean.to_string_lossy());
+        let out = self.lean(&[
+            "-R",
+            &root,
+            "-o",
+            &olean,
+            "-DautoImplicit=false",
+            "--json",
+            &file,
+        ]);
         assert!(
             out.status.success(),
             "lean -o failed:\n{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+        snapshot::id(code)
+    }
+
+    /// Compiles and describes `code` with `pisa build`, then re-checks it.
+    fn build(&self, code: &str) -> Built {
+        let id = snapshot::id(code);
+        let module_system = split_header(code).header.lines().next() == Some("module");
+        let built = self.tool_build(code);
+        let reported = match module_system {
+            true => Vec::new(),
+            false => {
+                let decls = parse_declarations(built.one("PISA_DECLS").clone()).unwrap();
+                policy().judge_decls(false, Some(decls)).declarations
+            }
+        };
         Built {
-            module_system: split_header(code).header.lines().next() == Some("module"),
-            reported: self.report(code, &id),
+            module_system,
+            reported,
             verified: self.verify(&id),
+            export: parse_export(built.one("PISA_EXPORT").clone()).unwrap(),
             id,
         }
-    }
-
-    /// The per-module report, in a file headed as the builder's warm process
-    /// is: the code's header with its snapshots replaced by the module.
-    fn report(&self, code: &str, id: &str) -> Vec<Declaration> {
-        let header = snapshot::next_header(&split_header(code).header, id);
-        let text = format!(
-            "{}\n{}\n",
-            header_command(&header),
-            module_report(&snapshot::module(id))
-        );
-        let file = self.root.path().join(format!("report_{id}.lean"));
-        std::fs::write(&file, text).unwrap();
-        let out = self.lean(&["--json", &file.to_string_lossy()], true);
-        let messages: Vec<Message> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let response = CommandResponse {
-            env: 0,
-            messages,
-            sorries: Vec::new(),
-            tactics: Vec::new(),
-            at: Vec::new(),
-            infotree: None,
-        };
-        let decls = parse_report(&response).unwrap_or_else(|| {
-            panic!(
-                "no axiom report for s{id}: {:?}\n{}",
-                response.messages,
-                String::from_utf8_lossy(&out.stderr)
-            )
-        });
-        policy().judge_decls(false, Some(decls)).declarations
-    }
-
-    /// The search export of module `id`, run as the builder runs it.
-    fn export(&self, code: &str, id: &str) -> Vec<pisa_worker::catalog::SnapshotDecl> {
-        let header = snapshot::next_header(&split_header(code).header, id);
-        let text = format!(
-            "{}\n{}\n",
-            header_command(&header),
-            module_export(&snapshot::module(id))
-        );
-        let file = self.root.path().join(format!("export_{id}.lean"));
-        std::fs::write(&file, text).unwrap();
-        let out = self.lean(&["--json", &file.to_string_lossy()], true);
-        let messages: Vec<Message> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect();
-        let response = CommandResponse {
-            env: 0,
-            messages,
-            sorries: Vec::new(),
-            tactics: Vec::new(),
-            at: Vec::new(),
-            infotree: None,
-        };
-        parse_export(&response).unwrap_or_else(|| {
-            panic!(
-                "no export for s{id}: {:?}\n{}",
-                response.messages,
-                String::from_utf8_lossy(&out.stderr)
-            )
-        })
     }
 
     /// The kernel verifier's declarations.
@@ -175,9 +121,8 @@ impl Snapshots {
 
 impl Built {
     /// The declarations the worker records: the verifier's for module-system
-    /// code, which the builder sees only as importers do (it is always
-    /// re-checked), and otherwise the report's, which must agree with the
-    /// verifier's.
+    /// code, which only the verifier describes (it is always re-checked), and
+    /// otherwise the report's, which must agree with the verifier's.
     fn agreed(&self) -> &[Declaration] {
         if self.module_system {
             return &self.verified;
@@ -594,8 +539,7 @@ fn the_export_prints_a_definitions_value_without_notation() {
     let s = Snapshots::new();
     let code = "def double (n : Nat) : Nat := 2 * n\n\nnotation \"twice\" => double\n\n\
                 def four : Nat := twice 2\n\ntheorem t : four = 4 := rfl\n";
-    let built = s.build(code);
-    let decls = s.export(code, &built.id);
+    let decls = s.build(code).export;
     let value = |name: &str| {
         let d = decls.iter().find(|d| d.name == name);
         d.unwrap_or_else(|| panic!("no {name} in {decls:?}"))
@@ -754,7 +698,7 @@ fn the_tool_writes_what_lean_writes() {
     };
     let module_id = snapshot::id(MODULE);
     for code in [PLAIN, MODULE, &on(&module_id)] {
-        let id = by_lean.build(code).id;
+        let id = by_lean.lean_build(code);
         by_tool.tool_build(code);
         let (lean, tool) = (by_lean.files(&id), by_tool.files(&id));
         assert!(lean.contains_key("olean"), "{:?}", lean.keys());
@@ -770,20 +714,9 @@ fn the_tool_writes_what_lean_writes() {
 
 #[test]
 #[ignore = "needs elan Lean 4.36.0-rc2"]
-fn the_builds_report_is_the_verifiers_and_the_old_reports() {
-    let s = Snapshots::new();
-    let built = s.build(PLAIN);
-    let tooled = Snapshots::new().tool_build(PLAIN);
-    let decls = parse_declarations(tooled.one("PISA_DECLS").clone()).unwrap();
-    let sorted = |decls: &[Declaration]| -> Vec<Declaration> {
-        let mut decls = decls.to_vec();
-        decls.sort_by(|a, b| a.name.cmp(&b.name));
-        decls
-    };
-    let reported = sorted(&policy().judge_decls(false, Some(decls)).declarations);
-    assert_eq!(reported, sorted(built.agreed()));
-    let verified = s.tool_verify(&[&built.id]);
-    assert_eq!(sorted(&verdict_declarations(&verified[0])), reported);
+fn the_builds_report_is_the_verifiers() {
+    // `agreed` compares the two.
+    assert!(!Snapshots::new().build(PLAIN).agreed().is_empty());
     // Module-system code is described by the verifier alone.
     assert!(
         Snapshots::new()

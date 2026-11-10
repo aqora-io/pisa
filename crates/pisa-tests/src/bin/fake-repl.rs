@@ -17,18 +17,15 @@
 //! when two imported modules declare the same name: every `#check` in it fails.
 //! Snapshot modules (`import PisaSnap.s…`) are read from `LEAN_PATH`, with
 //! the snapshots they import.
-//! The worker's axiom report (`run_cmd _root_.Pisa.reportNew`, or
-//! `reportModule` for a module) lists each `theorem`,
-//! `def` and `axiom` seen since the imports, or, for a module report, those
-//! of that module (see `pisa_tests::declarations`). Its declaration export
-//! (`run_cmd _root_.Pisa.exportModule`) is the same declarations, with their
-//! statements and docstrings (see `pisa_tests::exports`). Both read the code
-//! as `pisa_tests::as_reported` gives it, so `-- reported-as: LINE` makes them
-//! show `LINE` in place of the next line, where the verifier sees the code.
+//! The worker's axiom report (`run_cmd _root_.Pisa.reportNew`) lists each
+//! `theorem`, `def` and `axiom` seen since the imports (see
+//! `pisa_tests::declarations`). It reads the code as `pisa_tests::as_reported`
+//! gives it, so `-- reported-as: LINE` makes it show `LINE` in place of the
+//! next line, where the verifier sees the code.
 
 use std::io::{BufRead, Write};
 
-use pisa_tests::{as_reported, declarations, declares, exports, find_module, imported_code, needs};
+use pisa_tests::{as_reported, declarations, declares, imported_code, needs};
 use serde_json::{Value, json};
 
 struct State {
@@ -118,34 +115,11 @@ fn import(s: &mut State, header: &str) -> Value {
 
 fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
     let full = infotree == Some("full");
-    // The axiom report and the export are calls into the `Pisa` library; each
-    // names a module, or reports what the code since the imports declares.
-    for (marker, report, call, module_at) in [
-        (
-            "PISA_DECLS",
-            declarations as fn(&str) -> String,
-            "run_cmd _root_.Pisa.report",
-            "reportModule `",
-        ),
-        (
-            "PISA_EXPORT",
-            exports,
-            "run_cmd _root_.Pisa.export",
-            "exportModule `",
-        ),
-    ] {
-        if !cmd.starts_with(call) {
-            continue;
-        }
-        let code = match cmd.split_once(module_at) {
-            None => prev.local.clone(),
-            Some((_, rest)) => {
-                let module = rest.split_whitespace().next().unwrap();
-                std::fs::read_to_string(find_module(module).unwrap()).unwrap()
-            }
-        };
+    // The axiom report is a call into the `Pisa` library, on what the code
+    // since the imports declares.
+    if cmd.starts_with("run_cmd _root_.Pisa.reportNew") {
         s.envs.push(prev.clone());
-        let report = format!("{marker} {}", report(&as_reported(&code)));
+        let report = format!("PISA_DECLS {}", declarations(&as_reported(&prev.local)));
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
     }
     if prev.local.contains("import Clash") && cmd.starts_with("#check") {

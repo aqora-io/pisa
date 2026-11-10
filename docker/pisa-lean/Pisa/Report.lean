@@ -7,9 +7,8 @@ public import Pisa.Canon
 
 /-!
 How the worker describes a declaration, for its axiom report (`run_cmd
-_root_.Pisa.reportNew` after code, `_root_.Pisa.reportModule` for an imported
-snapshot) and for the kernel verifier (`pisa verify`, `Pisa.Verify`), which
-call the same `describe`.
+_root_.Pisa.reportNew` after code, and `pisa build` for a snapshot module) and
+for the kernel verifier (`pisa verify`), which call the same `describe`.
 
 A description is `{name, kind, axioms, assumes, type, value, type_refs,
 value_refs, generated, parent}`:
@@ -387,11 +386,5 @@ def log (mod : Name) (names : Array Name) : Elab.Command.CommandElabM Unit := do
 def reportNew : Elab.Command.CommandElabM Unit := do
   let env ← getEnv
   log env.mainModule (env.constants.map₂.toList.map (·.1)).toArray
-
-/-- The report on the declarations of `m`, an imported module. -/
-def reportModule (m : Name) : Elab.Command.CommandElabM Unit := do
-  let env ← getEnv
-  let some idx := env.getModuleIdx? m | throwError "{m} is not imported"
-  log m env.header.moduleData[idx.toNat]!.constNames
 
 end Pisa

@@ -18,16 +18,15 @@ pub struct WorkerConfig {
     /// The REPL executable.
     #[arg(long, env = "PISA_REPL", default_value = "repl")]
     pub repl: PathBuf,
-    /// The `lean` executable, used to explain imports the REPL fails to load,
-    /// and to compile snapshots.
+    /// The `lean` executable, used to explain imports the REPL fails to load.
     #[arg(long, env = "PISA_LEAN", default_value = "lean")]
     pub lean: PathBuf,
     /// `lake`, which runs `lake comparator` on a run's export. Elan's picks
     /// the toolchain the export names, which is the project's.
     #[arg(long, env = "PISA_LAKE", default_value = "lake")]
     pub lake: PathBuf,
-    /// The `pisa` tool (`docker/pisa-lean`), which re-verifies snapshot
-    /// modules through the kernel.
+    /// The `pisa` tool (`docker/pisa-lean`), which builds snapshot modules and
+    /// re-verifies them through the kernel.
     #[arg(
         long,
         env = "PISA_TOOL",

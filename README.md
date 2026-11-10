@@ -1011,8 +1011,10 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
 - **Limits.** At most 1000 items, as the plan carries code.
 
 **How it works.**
-- **Building.** A module is its code compiled with `lean -o` to the module
-  `PisaSnap.s<hash>`, where `hash` is a hash of the code.
+- **Building.** A module is its code compiled to the module
+  `PisaSnap.s<hash>`, where `hash` is a hash of the code, by `pisa build`
+  (`docker/pisa-lean`): it writes what `lean -o` writes, and in the same
+  process reports the module's declarations and their exports.
 - **Using.** Later code imports it like any module, in `/check`, `/sessions`
   or another snapshot. A chunk can import several snapshots, which merges
   parallel branches.

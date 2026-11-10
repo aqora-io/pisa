@@ -362,16 +362,6 @@ impl Lease {
             .await
     }
 
-    /// The `.olean` files of the modules `file` imports, as Lean reads its
-    /// header; see [`Launcher::deps`].
-    pub async fn deps(
-        &self,
-        file: &std::path::Path,
-        timeout: Duration,
-    ) -> Result<Vec<std::path::PathBuf>, String> {
-        self.pool.launcher.deps(self.id, file, timeout).await
-    }
-
     /// Starts re-checking snapshot modules through the kernel, imports
     /// first; see [`Launcher::verify`].
     pub fn verify(

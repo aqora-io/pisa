@@ -97,6 +97,18 @@ pub fn imported_code(code: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Prints a Lean message as `lean --json` does, on `line` of the input.
+pub fn print_message(line: usize, severity: &str, data: &str) {
+    let message = json!({
+        "severity": severity,
+        "pos": {"line": line, "column": 0},
+        "endPos": null,
+        "fileName": "<stdin>",
+        "data": data,
+    });
+    println!("{message}");
+}
+
 /// The name a line declares, and whether it is private.
 fn declared(line: &str) -> Option<(&str, bool)> {
     let mut words = line.split_whitespace();

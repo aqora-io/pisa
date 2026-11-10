@@ -37,15 +37,46 @@ pub struct Launcher {
     cgroups: Option<Cgroups>,
 }
 
-/// What `lean -o` reported for one module.
+/// What `pisa build` reported for one module.
 #[derive(Debug)]
 pub struct Compiled {
+    /// Lean's messages.
     pub messages: Vec<Message>,
     /// `None` when the time limit killed it.
     pub status: Option<std::process::ExitStatus>,
     pub stderr: String,
     /// OOM kills in the slot's cgroup while it ran.
     pub oom_kills: u64,
+    /// The modules the written module imports (`PISA_IMPORTS`).
+    pub imports: Option<Vec<String>>,
+    /// Its declarations as the build describes them (`PISA_DECLS`), for code
+    /// outside the module system: the JSON array the policy parses.
+    pub report: Option<serde_json::Value>,
+    /// Its declaration export (`PISA_EXPORT`).
+    pub export: Option<serde_json::Value>,
+}
+
+impl Compiled {
+    /// Parses `pisa build`'s output: Lean's messages as JSON lines, and its
+    /// `PISA_*` lines, of which the last of each kind counts, as nothing the
+    /// code prints comes after them.
+    fn parse(stdout: &str) -> (Vec<Message>, [Option<serde_json::Value>; 3]) {
+        let mut messages = Vec::new();
+        let mut found: [Option<serde_json::Value>; 3] = [None, None, None];
+        for line in stdout.lines() {
+            let marked = ["PISA_IMPORTS ", "PISA_DECLS ", "PISA_EXPORT "]
+                .iter()
+                .position(|m| line.starts_with(m));
+            match marked {
+                Some(i) => {
+                    let json = line.split_once(' ').map_or("", |(_, j)| j);
+                    found[i] = serde_json::from_str(json).ok();
+                }
+                None => messages.extend(serde_json::from_str::<Message>(line).ok()),
+            }
+        }
+        (messages, found)
+    }
 }
 
 /// What a process run to its end printed, and how it exited.
@@ -326,7 +357,8 @@ impl Launcher {
     }
 
     /// Compiles `file` to the module `olean`, named by its path below `root`,
-    /// set up like the slot's REPL (same environment, sandbox and cgroup).
+    /// with `pisa build`, set up like the slot's REPL (same environment,
+    /// sandbox and cgroup), and has it describe the module.
     pub async fn compile(
         &self,
         slot: usize,
@@ -338,7 +370,7 @@ impl Launcher {
         let before = self.oom_kills(slot);
         let args = compile_args(root, file, olean);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let mut cmd = self.command_on(slot, &self.lean, &args, &self.build_path)?;
+        let mut cmd = self.command_on(slot, &self.tool, &args, &self.build_path)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -352,56 +384,23 @@ impl Launcher {
                 status: None,
                 stderr: String::new(),
                 oom_kills,
+                imports: None,
+                report: None,
+                export: None,
             });
         };
         let output = output?;
+        let (messages, [imports, report, export]) =
+            Compiled::parse(&String::from_utf8_lossy(&output.stdout));
         Ok(Compiled {
-            messages: String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| serde_json::from_str(line).ok())
-                .collect(),
+            messages,
             status: Some(output.status),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             oom_kills,
+            imports: imports.and_then(|i| serde_json::from_value(i).ok()),
+            report,
+            export,
         })
-    }
-
-    /// The `.olean` files of the modules `file` imports, as Lean's own header
-    /// parser reads them (`lean --deps`), set up like
-    /// [`compile`](Self::compile). The error is Lean's, or why it didn't run.
-    pub async fn deps(
-        &self,
-        slot: usize,
-        file: &Path,
-        timeout: Duration,
-    ) -> Result<Vec<PathBuf>, String> {
-        let file = file.to_string_lossy().into_owned();
-        let args = ["--deps", file.as_str()];
-        let run = async {
-            let mut cmd = self.command_on(slot, &self.lean, &args, &self.build_path)?;
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            cmd.spawn()?.wait_with_output().await
-        };
-        let output = match tokio::time::timeout(timeout, run).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return Err(format!("running Lean failed: {e}")),
-            Err(_) => return Err("Lean took too long to read the imports".into()),
-        };
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("{} {}", stdout.trim(), stderr.trim())
-                .trim()
-                .to_string());
-        }
-        Ok(stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(PathBuf::from)
-            .collect())
     }
 
     /// Starts `pisa verify` on `modules`, imports first, in the slot's
@@ -512,18 +511,23 @@ impl Launcher {
     }
 }
 
-/// The `lean` arguments that compile `file` to `olean`, a module named by its
+/// The `pisa` arguments that compile `file` to `olean`, a module named by its
 /// path below `root`. `-D` sets `autoImplicit` off for the whole file, as the
-/// header command does in the REPL; code can turn it back on with `set_option`.
+/// header command does in the REPL; code can turn it back on with
+/// `set_option`. Definitions' values are exported up to
+/// [`VALUE_CHARS`](crate::catalog::VALUE_CHARS) characters.
 pub fn compile_args(root: &Path, file: &Path, olean: &Path) -> Vec<String> {
     let path = |p: &Path| p.to_string_lossy().into_owned();
     vec![
+        "build".into(),
         "-R".into(),
         path(root),
         "-o".into(),
         path(olean),
-        "-DautoImplicit=false".into(),
-        "--json".into(),
+        "-D".into(),
+        "autoImplicit=false".into(),
+        "--value-chars".into(),
+        crate::catalog::VALUE_CHARS.to_string(),
         path(file),
     ]
 }
@@ -602,15 +606,29 @@ mod tests {
         assert_eq!(
             args,
             [
+                "build",
                 "-R",
                 "/root",
                 "-o",
                 "/root/s.olean",
-                "-DautoImplicit=false",
-                "--json",
+                "-D",
+                "autoImplicit=false",
+                "--value-chars",
+                "4000",
                 "/root/s.lean"
             ]
         );
+    }
+
+    #[test]
+    fn a_builds_last_marker_lines_count() {
+        let stdout = "{\"severity\":\"warning\",\"pos\":{\"line\":1,\"column\":0},\"data\":\"w\"}\n\
+                      PISA_DECLS [1]\nPISA_IMPORTS [\"Init\"]\nPISA_DECLS [2]\nPISA_EXPORT oops\n";
+        let (messages, [imports, report, export]) = super::Compiled::parse(stdout);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(imports, Some(serde_json::json!(["Init"])));
+        assert_eq!(report, Some(serde_json::json!([2])));
+        assert_eq!(export, None);
     }
 
     #[test]
