@@ -267,14 +267,17 @@ fn lean_made(name: &str) -> bool {
 }
 
 /// The assumptions `decls` declare: their `axiom`s other than Lean's, by
-/// name across modules, with their type hash.
+/// name across modules, with their type hash and their name as declared.
 fn declared_assumptions<'a>(
     decls: impl IntoIterator<Item = &'a Declaration>,
-) -> HashMap<String, &'a str> {
+) -> HashMap<String, (&'a str, &'a str)> {
     decls
         .into_iter()
         .filter(|d| d.kind == "axiom" && !lean_made(&d.name))
-        .map(|d| (normalised(&d.name).into_owned(), d.type_hash.as_str()))
+        .map(|d| {
+            let key = normalised(&d.name).into_owned();
+            (key, (d.type_hash.as_str(), d.name.as_str()))
+        })
         .collect()
 }
 
@@ -283,26 +286,46 @@ fn declared_assumptions<'a>(
 /// doesn't, declares must be declared by the replaced module or a snapshot
 /// it no longer builds on, with the same statement. The snapshots both build
 /// on are the same. Otherwise a `sorry` could be "filled" by assuming it.
+///
+/// Names are matched across modules (see [`normalised`]), but a private name
+/// is a module's own: one of a snapshot the code newly builds on is matched
+/// only with those of the snapshots it no longer builds on, never with the
+/// replaced module's own, which a private axiom of the same name and another
+/// statement could otherwise pass for.
 fn added_assumptions(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
 ) -> Vec<DeclarationChange> {
-    let lost = swapped.lost.iter().flat_map(|(_, d)| d);
-    let before = declared_assumptions(replacing.declarations.iter().chain(lost));
-    // The replaced module's own are compared as its statements.
-    let own = declared_assumptions(&replacing.declarations);
-    let gained = swapped.gained.iter().flat_map(|(_, d)| d);
-    let mut changes: Vec<DeclarationChange> = declared_assumptions(now.iter().chain(gained))
+    let own_before = declared_assumptions(&replacing.declarations);
+    let lost_before = declared_assumptions(swapped.lost.iter().flat_map(|(_, d)| d));
+    let gained_now = declared_assumptions(swapped.gained.iter().flat_map(|(_, d)| d));
+    let own_now = declared_assumptions(now);
+    let private = |name: &str| name.starts_with("_private.");
+    let mut changes: Vec<DeclarationChange> = Vec::new();
+    for (own, (key, (statement, name))) in own_now
         .into_iter()
-        .filter_map(|(name, statement)| match before.get(&name) {
-            Some(was) if *was == statement => None,
-            Some(_) if own.contains_key(&name) => None,
-            Some(_) => Some(DeclarationChange::new(name, Change::Assumption)),
-            None => Some(DeclarationChange::new(name, Change::AddedAssumption)),
-        })
-        .collect();
+        .map(|a| (true, a))
+        .chain(gained_now.into_iter().map(|a| (false, a)))
+    {
+        let mine = (own || !private(&key))
+            .then(|| own_before.get(&key))
+            .flatten();
+        let change = match (mine, lost_before.get(&key)) {
+            // The replaced module's own are compared as its statements.
+            (Some(_), _) => None,
+            (None, Some((was, _))) if *was == statement => None,
+            (None, Some(_)) => Some(Change::Assumption),
+            (None, None) => Some(Change::AddedAssumption),
+        };
+        if let Some(change) = change {
+            // As the code names it; a private one with its module.
+            let name = if own { key } else { name.to_string() };
+            changes.push(DeclarationChange::new(name, change));
+        }
+    }
     changes.sort_by_key(ToString::to_string);
+    changes.dedup();
     changes
 }
 
@@ -398,6 +421,36 @@ fn walk(
     } else {
         ambiguous.dedup();
         Err(ambiguous)
+    }
+}
+
+/// The assumptions a spec permits (see [`AuditSnapshotsResponse::clean`]):
+/// those declared in a spec snapshot's module or in a module it builds on.
+#[derive(Debug, Default)]
+struct Permitted {
+    /// Their names.
+    names: HashSet<String>,
+    /// The spec modules' own private ones, without their module: a head's
+    /// module declares them as its own.
+    own_private: HashSet<String>,
+}
+
+impl Permitted {
+    /// Adds the assumption `name`, declared in a spec module if `of_spec`.
+    fn add(&mut self, name: &str, of_spec: bool) {
+        if of_spec && name.starts_with("_private.") {
+            self.own_private.insert(normalised(name).into_owned());
+        }
+        self.names.insert(name.to_string());
+    }
+
+    /// Whether it permits `assumption` on a head whose module is `head`: by
+    /// name, or as a private one of the head's own module that is a spec
+    /// module's own. Another module's private name isn't the spec's.
+    fn permits(&self, assumption: &str, head: &str) -> bool {
+        let own = format!("_private.{}.", snapshot::module(head));
+        self.names.contains(assumption)
+            || (assumption.starts_with(&own) && self.own_private.contains(&*normalised(assumption)))
     }
 }
 
@@ -2348,7 +2401,7 @@ impl Snapshots {
         }
         // What the spec permits: the axioms its modules, and what they build
         // on, declare.
-        let mut permitted: HashSet<String> = HashSet::new();
+        let mut permitted = Permitted::default();
         for (_, spec_meta) in &specs {
             let Some(meta) = metas.get(&spec_meta.module) else {
                 continue;
@@ -2363,7 +2416,9 @@ impl Snapshots {
                     .declarations
                     .iter()
                     .filter(|d| d.kind == "axiom");
-                permitted.extend(axioms.map(|d| normalised(&d.name).into_owned()));
+                for d in axioms {
+                    permitted.add(&d.name, *m == spec_meta.module);
+                }
             }
         }
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
@@ -2404,7 +2459,8 @@ impl Snapshots {
         }
         let mut audit = self.count(&entries, &mut metas).await?;
         for a in &mut audit.assumptions {
-            a.in_spec = Some(permitted.contains(&*normalised(&a.name)));
+            let on_a_head = heads.iter().any(|(_, m)| permitted.permits(&a.name, m));
+            a.in_spec = Some(on_a_head);
         }
         audit.clean = Some(clean);
         audit.heads = heads.iter().map(|(e, _)| self.id(e)).collect();
@@ -2483,7 +2539,7 @@ impl Snapshots {
         reached: &[Vec<(String, Vec<String>)>],
         heads: &[(String, String)],
         metas: &HashMap<String, ModuleMeta>,
-        permitted: &HashSet<String>,
+        permitted: &Permitted,
         comparisons: &[AuditComparison],
     ) -> (Vec<AuditTarget>, bool) {
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
@@ -2526,7 +2582,7 @@ impl Snapshots {
                             ProofStatus::Conditional => h
                                 .assumes
                                 .iter()
-                                .all(|a| permitted.contains(&*normalised(a))),
+                                .all(|a| permitted.permits(a, module_of[head])),
                             ProofStatus::Sorry | ProofStatus::Rejected => false,
                         };
                     all_accepted &= accepted;
@@ -3071,6 +3127,55 @@ mod tests {
     }
 
     #[test]
+    fn another_modules_private_assumption_isnt_the_specs_own() {
+        let axiom = |name: &str, ty: &str| Declaration {
+            kind: "axiom".into(),
+            ..using(decl(name, ty, None, &[]), &[], &[])
+        };
+        // The spec assumes its own private `a : True`; the head keeps it, but
+        // proves `t` from a snapshot it newly builds on whose private `a` is
+        // `False`: a private name of another module isn't the spec's.
+        let spec = vec![
+            axiom("_private.PisaSnap.sS.0.a", "true"),
+            using(decl("t", "1", None, &["sorryAx"]), &[], &[]),
+        ];
+        let now = [
+            axiom("_private.PisaSnap.sH.0.a", "true"),
+            using(
+                decl("t", "1", None, &["_private.PisaSnap.sG.0.a"]),
+                &[],
+                &[],
+            ),
+        ];
+        let gained = Swapped {
+            lost: Vec::new(),
+            gained: vec![("G".into(), vec![axiom("_private.PisaSnap.sG.0.a", "false")])],
+        };
+        assert_eq!(
+            compare(&replacing(spec.clone(), None), &now, &gained).unwrap_err(),
+            ["statement: the code adds the assumption _private.PisaSnap.sG.0.a"]
+        );
+        // Its own private `a` is the spec's.
+        assert!(compare(&replacing(spec, None), &now, &Swapped::default()).is_ok());
+    }
+
+    #[test]
+    fn a_spec_permits_its_own_private_assumptions_on_a_heads_own_module() {
+        let mut permitted = Permitted::default();
+        // The spec module's own, and one of a module it builds on.
+        permitted.add("_private.PisaSnap.sS.0.a", true);
+        permitted.add("kun", true);
+        permitted.add("_private.PisaSnap.sB.0.b", false);
+        assert!(permitted.permits("_private.PisaSnap.sH.0.a", "H"));
+        assert!(permitted.permits("kun", "H"));
+        assert!(permitted.permits("_private.PisaSnap.sB.0.b", "H"));
+        // Another module's private `a` isn't the spec's own.
+        assert!(!permitted.permits("_private.PisaSnap.sG.0.a", "H"));
+        // Nor is the private `b` of what the spec builds on a head's own.
+        assert!(!permitted.permits("_private.PisaSnap.sH.0.b", "H"));
+    }
+
+    #[test]
     fn a_swap_that_cant_be_followed_is_refused() {
         // A private name the new side has twice.
         let private = |m: &str| {
@@ -3608,7 +3713,14 @@ mod tests {
         }];
         let judged = |modules: &[&str]| {
             let metas = modules.iter().map(|m| (m.to_string(), module(m))).collect();
-            s.targets(&specs, &reached, &heads, &metas, &HashSet::new(), &compared)
+            s.targets(
+                &specs,
+                &reached,
+                &heads,
+                &metas,
+                &Permitted::default(),
+                &compared,
+            )
         };
         let (targets, accepted) = judged(&["s", "h"]);
         assert_eq!((targets.len(), accepted), (1, true));
