@@ -18,8 +18,8 @@ use pisa_protocol::snapshot;
 use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
 use pisa_worker::launcher::{Verified, compile_args};
 use pisa_worker::policy::{
-    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_report, parse_declarations,
-    parse_report,
+    AXIOM_REPORT, DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_report,
+    parse_declarations, parse_report,
 };
 
 fn docker() -> PathBuf {
@@ -182,6 +182,41 @@ impl Built {
     }
 }
 
+/// The verdict on `body`, checked as `/check` checks it: under the header the
+/// worker gives it, then the axiom report on what it declares.
+fn checked(body: &str) -> pisa_protocol::verify::Verification {
+    let snapshots = Snapshots::new();
+    let file = snapshots.root.path().join("checked.lean");
+    std::fs::write(
+        &file,
+        format!(
+            "{}
+{body}
+{AXIOM_REPORT}
+",
+            header_command("")
+        ),
+    )
+    .unwrap();
+    let out = snapshots.lean(&["--json", &file.to_string_lossy()], true);
+    let messages: Vec<Message> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let (report, body): (Vec<Message>, Vec<Message>) = messages
+        .into_iter()
+        .partition(|m| m.data.starts_with("PISA_"));
+    let response = |messages| CommandResponse {
+        env: 0,
+        messages,
+        sorries: Vec::new(),
+        tactics: Vec::new(),
+        at: Vec::new(),
+        infotree: None,
+    };
+    policy().judge(&response(body), Some(&response(report)))
+}
+
 /// The reasons a replacement of `old` by `new` is refused for.
 fn changes(old: &str, new: &str) -> Vec<String> {
     let snapshots = Snapshots::new();
@@ -337,6 +372,28 @@ theorem t : two + Nat.succ 1 = 4 := rfl
 theorem u : 1 ⊕⊕ 3 = 4 := rfl
 ";
     assert_eq!(changes(NOTATION, proved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_broken_lemma_leaves_the_others_their_status() {
+    let v = checked("theorem good : 1 = 1 := rfl\ntheorem bad : 1 = 2 := rfl\n");
+    let status = |name: &str| {
+        v.declarations
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.status)
+    };
+    use pisa_protocol::verify::ProofStatus;
+    assert_eq!(
+        (status("good"), status("bad")),
+        (Some(ProofStatus::Proved), Some(ProofStatus::Sorry)),
+        "{v:?}"
+    );
+    assert_eq!(
+        v.reasons,
+        ["error: Lean reported errors", "axiom: bad uses sorryAx"]
+    );
 }
 
 #[test]

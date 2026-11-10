@@ -14,7 +14,7 @@ use pisa_protocol::wire::{
 
 use crate::check::{axiom_report, header_error, policy_error, run, run_check, unexpected};
 use crate::db::DbError;
-use crate::policy::parse_report;
+use crate::policy::read_report;
 use crate::pool::{Lease, Pool, Resident};
 use crate::store::{SessionMeta, StateMeta, Store, now_secs};
 
@@ -258,7 +258,8 @@ impl Sessions {
             ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
             other => return Err(unexpected(other)),
         };
-        let reported = axiom_report(slot, &r).await.as_ref().and_then(parse_report);
+        let report = axiom_report(slot, &r).await;
+        let reported = report.and_then(|r| read_report(&r).ok().map(|r| r.declarations));
         let declarations = reported
             .map(|decls| slot.policy().judge_decls(false, Some(decls)).declarations)
             .unwrap_or_default();

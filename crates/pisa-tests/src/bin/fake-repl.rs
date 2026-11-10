@@ -187,6 +187,27 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
             }
         };
         s.envs.push(prev.clone());
+        // `-- report-fails: NAME` has the report fail to describe NAME.
+        let fails: Vec<&str> = code
+            .lines()
+            .filter_map(|l| l.split_once("-- report-fails: ").map(|(_, n)| n.trim()))
+            .collect();
+        if marker == "PISA_DECLS" && !fails.is_empty() {
+            let decls: Vec<Value> = serde_json::from_str(&report(&as_reported(&code))).unwrap();
+            let kept: Vec<&Value> = decls
+                .iter()
+                .filter(|d| !fails.contains(&d["name"].as_str().unwrap()))
+                .collect();
+            let failed: Vec<Value> = fails
+                .iter()
+                .map(|n| json!({"name": n, "error": format!("describing {n}: a metavariable")}))
+                .collect();
+            let messages = [
+                message(1, "info", &format!("PISA_DECLS {}", json!(kept))),
+                message(1, "info", &format!("PISA_REPORT_FAILED {}", json!(failed))),
+            ];
+            return json!({"env": s.envs.len() - 1, "messages": messages});
+        }
         let report = format!("{marker} {}", report(&as_reported(&code)));
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
     }
