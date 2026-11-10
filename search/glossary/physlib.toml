@@ -153,3 +153,122 @@ meaning = "like `InnerProductSpace` but only requiring the norm to be equivalent
 [[term]]
 lean = "InformalLemma, InformalDefinition"
 meaning = "placeholders for results and definitions stated in words in their docstring but not yet formalized"
+
+# QuantumInfo (Physlib's quantum information library), paraphrasing its
+# docstrings in the v4.35.0-da683984 index.
+
+[[term]]
+lean = "MState d"
+meaning = "a mixed quantum state (density matrix) on the system with basis d: a positive semidefinite complex d×d matrix with trace 1; `ρ.M` is it as a `HermitianMat`"
+
+[[term]]
+lean = "MState.pure ψ"
+meaning = "the mixed state of the pure state given by the ket ψ"
+
+[[term]]
+lean = "ρ₁ ⊗ᴹ ρ₂"
+meaning = "`MState.prod`, the product state of two mixed states, on the system d₁ × d₂"
+
+[[term]]
+lean = "Ket d"
+meaning = "a pure state as a unit-norm vector over the basis d; kets are normalized, so they don't form a vector space"
+
+[[term]]
+lean = "Bra d"
+meaning = "a bra, the same data as a `Ket`, kept apart to avoid confusing complex conjugation; `Ket.to_bra` and `Bra.to_ket` convert"
+
+[[term]]
+lean = "Braket.dot ξ ψ"
+meaning = "the inner product ⟨ξ|ψ⟩ of a bra and a ket, a complex number"
+
+[[term]]
+lean = "ψ₁ ⊗ᵠ ψ₂"
+meaning = "`Ket.prod`, the product of two kets, an unentangled state on d₁ × d₂"
+
+[[term]]
+lean = "MatrixMap A B R"
+meaning = "a linear map from A×A matrices to B×B matrices over R"
+
+[[term]]
+lean = "MatrixMap.IsCompletelyPositive"
+meaning = "complete positivity: the map tensored with the identity on n×n matrices is positive, for every n"
+
+[[term]]
+lean = "MatrixMap.IsTracePreserving"
+meaning = "trace preservation: the trace of the output equals the trace of the input"
+
+[[term]]
+lean = "CPTPMap dIn dOut"
+meaning = "a quantum channel: a completely positive, trace-preserving linear map from the system dIn to dOut, the most general physically realizable operation; `CPMap` drops trace preservation and `PTPMap` complete positivity"
+
+[[term]]
+lean = "CPTPMap.choi Λ"
+meaning = "the Choi matrix of the channel Λ"
+
+[[term]]
+lean = "POVM X d"
+meaning = "a measurement with outcomes X on the system d: positive semidefinite matrices, one per outcome, summing to the identity"
+
+[[term]]
+lean = "HermitianMat n α"
+meaning = "the Hermitian n×n matrices over α, as a subtype of matrices; `A.mat` is the matrix"
+
+[[term]]
+lean = "𝐔[d]"
+meaning = "`Matrix.unitaryGroup d ℂ`, the unitary d×d complex matrices"
+
+[[term]]
+lean = "MState.uConj ρ U"
+meaning = "the state ρ evolved by the unitary U, U ρ U†"
+
+[[term]]
+lean = "Matrix.traceLeft"
+meaning = "the partial trace over the left factor of a matrix on d × d₁; `Matrix.traceRight` over the right one, and `MState.traceLeft` and `traceRight` for states"
+
+[[term]]
+lean = "Sᵥₙ ρ"
+meaning = "the von Neumann entropy of the mixed state ρ"
+
+[[term]]
+lean = "𝐃(ρ‖σ)"
+meaning = "`qRelativeEnt ρ σ`, the (Umegaki) quantum relative entropy Tr[ρ (log ρ − log σ)], an extended non-negative real"
+
+[[term]]
+lean = "SandwichedRelRentropy α ρ σ"
+meaning = "the sandwiched Rényi relative entropy of order α, with natural logarithms; at α = 1 the quantum relative entropy"
+
+[[term]]
+lean = "qConditionalEnt ρ"
+meaning = "the quantum conditional entropy S(A|B) = S(ρᴬᴮ) − S(ρᴮ) of a state on dA × dB"
+
+[[term]]
+lean = "qMutualInfo ρ"
+meaning = "the quantum mutual information I(A:B) = S(ρᴬ) + S(ρᴮ) − S(ρᴬᴮ) of a state on dA × dB"
+
+[[term]]
+lean = "coherentInfo ρ Λ"
+meaning = "the coherent information of the state ρ through the channel Λ"
+
+[[term]]
+lean = "Prob"
+meaning = "a real number in [0, 1], a probability"
+
+[[term]]
+lean = "ProbDistribution α"
+meaning = "a discrete probability distribution on the finite type α; `Hₛ` is its Shannon entropy"
+
+[[term]]
+lean = "p [x₁ ↔ x₂]"
+meaning = "the convex combination of x₁ and x₂ with weight p on x₁ (`Mixable`)"
+
+[[term]]
+lean = "MEnsemble d α"
+meaning = "an ensemble of mixed states on d, indexed by α, each with a probability weight"
+
+[[term]]
+lean = "Matrix.traceNorm A"
+meaning = "the trace norm of A, Tr √(A† A)"
+
+[[term]]
+lean = "Qubit"
+meaning = "the index type of a qubit's two basis states; `𝐔[Qubit]` are its gates"
