@@ -799,7 +799,11 @@ export interface components {
              */
             snapshot?: components["schemas"]["Snapshot"];
         };
-        /** @description A new declaration and the axioms it depends on. */
+        /**
+         * @description A new declaration and the axioms it depends on. Unless a request asks for
+         *     declarations in full, a response summarises each, leaving out `assumes`,
+         *     `type_hash`, `type_refs` and `value_refs`.
+         */
         Declaration: {
             /**
              * @description Its axioms that are assumptions: declared as `axiom` in this code or

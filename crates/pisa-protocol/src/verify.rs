@@ -23,22 +23,24 @@ pub struct Verification {
     pub changes: Vec<DeclarationChange>,
 }
 
-/// A new declaration and the axioms it depends on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+/// A new declaration and the axioms it depends on. Unless a request asks for
+/// declarations in full, a response summarises each, leaving out `assumes`,
+/// `type_hash`, `type_refs` and `value_refs`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 pub struct Declaration {
     pub name: String,
     pub kind: String,
     pub axioms: Vec<String>,
     /// Its axioms that are assumptions: declared as `axiom` in this code or
     /// in a snapshot it builds on.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub assumes: Vec<String>,
     /// What its axioms make it, by [`ProofStatus`].
     pub status: ProofStatus,
     /// The SHA-256 of its type's canonical text, with private names taken
     /// without their module, and with the internal auxiliaries it uses
     /// following it.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(default)]
     pub type_hash: String,
     /// For definitions, the same for the value, so a proof can't change what
     /// a statement means by redefining something it mentions.
@@ -46,11 +48,11 @@ pub struct Declaration {
     pub value_hash: Option<String>,
     /// The constants of this code and of the snapshots it builds on that its
     /// type uses, through internal auxiliaries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub type_refs: Vec<String>,
     /// The same for a definition's value, or an inductive's constructors and
     /// recursor.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub value_refs: Vec<String>,
     /// Made by Lean on demand, such as an equation lemma: code with the same
     /// statements needn't have it.
@@ -62,6 +64,41 @@ pub struct Declaration {
     /// the like. A change to it is a change to that type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+}
+
+impl Serialize for Declaration {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        // Only a summary has no type hash. In full, every field is written,
+        // empty or not, as stored records were before summaries: workers of
+        // earlier releases read them.
+        let full = !self.type_hash.is_empty();
+        let mut m = s.serialize_map(None)?;
+        m.serialize_entry("name", &self.name)?;
+        m.serialize_entry("kind", &self.kind)?;
+        m.serialize_entry("axioms", &self.axioms)?;
+        if full {
+            m.serialize_entry("assumes", &self.assumes)?;
+        }
+        m.serialize_entry("status", &self.status)?;
+        if full {
+            m.serialize_entry("type_hash", &self.type_hash)?;
+        }
+        if let Some(value_hash) = &self.value_hash {
+            m.serialize_entry("value_hash", value_hash)?;
+        }
+        if full {
+            m.serialize_entry("type_refs", &self.type_refs)?;
+            m.serialize_entry("value_refs", &self.value_refs)?;
+        }
+        if self.generated {
+            m.serialize_entry("generated", &true)?;
+        }
+        if let Some(parent) = &self.parent {
+            m.serialize_entry("parent", parent)?;
+        }
+        m.end()
+    }
 }
 
 impl Declaration {
@@ -413,6 +450,16 @@ mod tests {
         let back: Declaration =
             serde_json::from_value(serde_json::to_value(&summary).unwrap()).unwrap();
         assert_eq!(back, summary);
+    }
+
+    #[test]
+    fn a_full_declaration_writes_every_field_even_empty() {
+        // As stored records are read by workers that came before summaries.
+        let d = decl("t", "T", None);
+        let json = serde_json::to_value(&d).unwrap();
+        for key in ["assumes", "type_hash", "type_refs", "value_refs"] {
+            assert!(json.get(key).is_some(), "{key}: {json}");
+        }
     }
 
     #[test]
