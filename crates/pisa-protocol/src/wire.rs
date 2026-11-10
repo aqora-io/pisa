@@ -80,6 +80,9 @@ pub struct SnapshotCreateJob {
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<api::Replaces>,
+    /// Whether `replaces` may name a snapshot that another replaces.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,14 +237,17 @@ mod tests {
                 snapshot_id: "e".into(),
                 allow: None,
             }),
+            fork: true,
         };
         let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();
         assert_eq!(job["kind"], "snapshot_replace");
         assert_eq!(job["replaces"], serde_json::json!({"snapshot_id": "e"}));
+        assert_eq!(job["fork"], true);
         let Ok(Job::SnapshotReplace(back)) = serde_json::from_value(job) else {
             panic!("not a replace")
         };
         assert_eq!(back.replaces.unwrap().snapshot_id, "e");
+        assert!(back.fork);
     }
 
     #[test]

@@ -364,6 +364,7 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
         key: None,
         replaces: None,
         replacement: None,
+        fork: false,
     }
 }
 

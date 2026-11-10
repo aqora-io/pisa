@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::Cluster;
 use pisa_client::{Client, CreateSnapshotOptions};
 use pisa_protocol::snapshot;
@@ -890,6 +892,72 @@ async fn retire_keeps_from() {
     assert_eq!(now, expected);
     // The other project keeps its snapshot, and with it B's module.
     assert_eq!(listed(&c, "p:2").await, [entry(&lib.other)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_item_that_loses_to_an_agent_fails_and_a_resend_heals() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    // Two levels: L, which is slow to build, and the skeleton X on it.
+    let l = create(
+        &c,
+        json!({"code": on(&b, "theorem l : 2 = 2 := rfl\nSLEEP 800"), "labels": p1}),
+    )
+    .await;
+    let x = create(
+        &c,
+        json!({"code": on(&l, "theorem x : 3 = 3 := sorry"), "labels": p1}),
+    )
+    .await;
+    let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
+    let b2 = create(
+        &c,
+        json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+
+    let rebuilding = tokio::spawn({
+        let (client, url) = (c.client.clone(), c.url("/snapshots/rebuild"));
+        let body = json!({"from": entry(&b), "to": entry(&b2), "labels": p1});
+        async move {
+            let r = client.post(url).json(&body).send().await.unwrap();
+            r.json::<Value>().await.unwrap()
+        }
+    });
+    // While L's copy builds, an agent proves X on L.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let a = create(
+        &c,
+        json!({"code": on(&l, "theorem x : 3 = 3 := rfl"), "labels": p1,
+               "replaces": {"snapshot_id": entry(&x)}}),
+    )
+    .await;
+
+    let r = rebuilding.await.unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(new_entries(&r).len(), 1, "{r}");
+    let failed = r["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1, "{r}");
+    assert_eq!(failed[0]["snapshot_id"], entry(&x), "{r}");
+    assert_eq!(failed[0]["check"]["error"]["kind"], "conflict", "{r}");
+    // The agent's proof is X's only replacer: no fork.
+    assert_eq!(replacers(&c, entry(&x)).await, [entry(&a)]);
+
+    // Sent again, the rebuild plans A, which replaced X, and not X.
+    let again = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(again["ok"], true, "{again}");
+    assert_eq!(
+        items(&again, "snapshot_id"),
+        [&json!(entry(&l)), &json!(entry(&a))]
+    );
+    assert_eq!(new_entries(&again)[0], new_entries(&r)[0]);
+    assert_eq!(replacers(&c, entry(&x)).await, [entry(&a)]);
+    assert_eq!(replacers(&c, entry(&a)).await.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

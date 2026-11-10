@@ -161,12 +161,14 @@ fn create_snapshot_options(
     labels: Option<BTreeMap<String, String>>,
     key: Option<String>,
     replaces: Option<Bound<'_, PyAny>>,
+    fork: bool,
 ) -> PyResult<pisa_client::CreateSnapshotOptions> {
     Ok(pisa_client::CreateSnapshotOptions {
         verify,
         labels: labels.unwrap_or_default(),
         key,
         replaces: replaces.as_ref().map(replaces_of).transpose()?,
+        fork,
     })
 }
 
@@ -265,7 +267,7 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false))]
     fn create_snapshot<'py>(
         &self,
         py: Python<'py>,
@@ -274,14 +276,15 @@ impl Client {
         labels: Option<BTreeMap<String, String>>,
         key: Option<String>,
         replaces: Option<Bound<'py, PyAny>>,
+        fork: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces)?;
+        let opts = create_snapshot_options(verify, labels, key, replaces, fork)?;
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false))]
     fn submit_create_snapshot<'py>(
         &self,
         py: Python<'py>,
@@ -290,8 +293,9 @@ impl Client {
         labels: Option<BTreeMap<String, String>>,
         key: Option<String>,
         replaces: Option<Bound<'py, PyAny>>,
+        fork: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces)?;
+        let opts = create_snapshot_options(verify, labels, key, replaces, fork)?;
         call(py, async move {
             let job = self.inner.submit_create_snapshot_with(&code, &opts).await?;
             Ok(queued(job))

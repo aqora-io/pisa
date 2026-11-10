@@ -158,6 +158,7 @@ async fn create(
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
         replaces: item.replaces.clone(),
+        fork: false,
     };
     let p = prepare_create(app, create).map_err(|e| e.0)?;
     let mut tries = 0;

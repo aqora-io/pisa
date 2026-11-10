@@ -282,7 +282,7 @@ def test_replaces(url):
     assert proof["snapshot"]["replaces"] == link
     assert client.get_snapshot(proof["snapshot"]["id"])["replaces"] == link
 
-    weakened = client.create_snapshot("import Foo\ntheorem replaced : True := trivial", replaces=link)
+    weakened = client.create_snapshot("import Foo\ntheorem replaced : True := trivial", replaces=link, fork=True)
     assert "snapshot" not in weakened and not weakened["check"]["ok"]
     assert weakened["check"]["reasons"] == ["statement: replaced has a different type"]
 
@@ -296,10 +296,26 @@ def test_replaces(url):
     assert done["replacement"]["affected"] == ["uses_g"]
     with pytest.raises(ValueError):
         client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": "definitions"})
-    unknown = client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": {"definitions": ["nope"]}})
+    allow = {"definitions": ["nope"]}
+    unknown = client.create_snapshot(fixed, replaces={"snapshot_id": old, "allow": allow}, fork=True)
     assert "snapshot" not in unknown and unknown["check"]["error"]["kind"] == "bad_request"
     with pytest.raises(ValueError):
         client.create_snapshot(fixed, replaces=old)
+
+
+def test_replacing_only_a_head(url):
+    client = Client(url, timeout=5)
+    old = client.create_snapshot("import Foo\ntheorem head_t : 1 = 1 := sorry")["snapshot"]["id"]
+    link = {"snapshot_id": old}
+    first = client.create_snapshot("import Foo\ntheorem head_t : 1 = 1 := rfl", replaces=link)["snapshot"]
+    other = "import Foo\ntheorem head_t : 1 = 1 := rfl\ntheorem head_u : 2 = 2 := rfl"
+    refused = client.create_snapshot(other, replaces=link)
+    assert "snapshot" not in refused and refused["check"]["error"]["kind"] == "conflict"
+    assert refused["heads"] == [first["id"]]
+    forked = client.create_snapshot(other, replaces=link, fork=True)
+    assert forked["snapshot"]["replaces"] == link and "heads" not in forked
+    job = client.submit_create_snapshot(other + "\ntheorem head_v : 3 = 3 := rfl", replaces=link, fork=True)
+    assert client.wait_job(job)["snapshot"]["replaces"] == link
 
 
 def test_rebuild_snapshots(url):

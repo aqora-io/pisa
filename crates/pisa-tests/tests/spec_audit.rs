@@ -151,7 +151,7 @@ async fn two_proofs_fork_the_run() {
     let q = create(
         &c,
         json!({"code": "import Foo\n\ntheorem h : 1 = 1 := rfl\ntheorem t : 2 = 2 := rfl",
-               "replaces": replacing(&s), "verify": true}),
+               "replaces": replacing(&s), "verify": true, "fork": true}),
     )
     .await;
 
@@ -306,6 +306,7 @@ async fn assumptions_permitted_by_the_spec() {
             changed_definitions: Vec::new(),
             affected: Vec::new(),
         }),
+        fork: false,
     };
     let (linked, _) = catalog
         .add_entry(module.strip_prefix("PisaSnap.s").unwrap(), entry)

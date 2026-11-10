@@ -138,8 +138,13 @@ pub struct CreateSnapshotOptions {
     pub key: Option<String>,
     /// The snapshot this code replaces. It is kept only if it keeps that
     /// snapshot's statements; otherwise the check is not `ok`, its `reasons`
-    /// say what changed, and there is no snapshot.
+    /// say what changed, and there is no snapshot. It must be a head, one
+    /// that no snapshot replaces, unless `fork` is set.
     pub replaces: Option<Replaces>,
+    /// Lets `replaces` name a snapshot that another replaces already, which
+    /// forks the run. Otherwise the check's error is a `conflict`, and the
+    /// response's `heads` are the snapshots to replace instead.
+    pub fork: bool,
 }
 
 /// Options for [`Client::rebuild_snapshots`].
@@ -541,6 +546,7 @@ impl Client {
             labels: opts.labels.clone(),
             key: opts.key.clone(),
             replaces: opts.replaces.clone(),
+            fork: opts.fork,
         }
     }
 

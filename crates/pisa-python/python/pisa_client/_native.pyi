@@ -2,7 +2,7 @@ from typing import Literal, NotRequired, TypedDict
 
 ErrorKind = Literal[
     "timeout", "out_of_memory", "crash", "policy", "lean",
-    "capacity", "unavailable", "bad_request", "not_found", "internal",
+    "capacity", "unavailable", "bad_request", "not_found", "conflict", "internal",
 ]
 
 class Error(TypedDict):
@@ -114,6 +114,7 @@ class CreateSnapshotResponse(TypedDict):
     snapshot: NotRequired[Snapshot]
     check: CheckResult
     replacement: NotRequired[Replacement]
+    heads: NotRequired[list[str]]
 
 class Description(TypedDict):
     title: str
@@ -339,6 +340,7 @@ class Client:
         labels: dict[str, str] | None = None,
         key: str | None = None,
         replaces: Replaces | None = None,
+        fork: bool = False,
     ) -> CreateSnapshotResponse:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module that later code can import, with a new `snapshot` carrying
@@ -375,7 +377,14 @@ class Client:
         a snapshot the code no longer builds on, else the result's
         `check["error"]` is a `bad_request`; a private one is named without
         its module, `_private.h`. An empty list raises a `PisaError` of kind
-        `bad_request`."""
+        `bad_request`.
+
+        The replaced snapshot must be a head, one that no snapshot replaces.
+        Otherwise nothing is built or kept, `check["error"]["kind"]` is
+        `conflict`, and `heads` lists the snapshots to replace instead, oldest
+        first. Another create can replace it while this one builds, which is
+        refused the same way. `fork=True` replaces it anyway, which forks the
+        run. A `key` replay comes before this check."""
     def submit_create_snapshot(
         self,
         code: str,
@@ -384,6 +393,7 @@ class Client:
         labels: dict[str, str] | None = None,
         key: str | None = None,
         replaces: Replaces | None = None,
+        fork: bool = False,
     ) -> Job:
         """Like `create_snapshot`, as a job."""
     def get_snapshot(self, id: str) -> SnapshotDetail:

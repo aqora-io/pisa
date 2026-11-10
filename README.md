@@ -223,7 +223,7 @@ pnpm -C web generate
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}` |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?}` → `{snapshot?, check, replacement?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
@@ -324,6 +324,7 @@ limit in seconds (default 60).
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
 | `bad_request`, `not_found` | 400, 404 | Malformed request; unknown or expired job, state or session; unknown snapshot or declaration |
+| `conflict` | 409 | A create replaces a snapshot that another already replaces; in-band, in `check.error` (see [Replacing](#replacing)) |
 | `internal` | 500 | A bug |
 
 ## Snapshots
@@ -424,6 +425,15 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   `snapshot`: `check.ok` is false and `check.reasons` says what changed, e.g.
   `statement: t has a different type`. To change a statement on purpose,
   create the code without `replaces`.
+- **Only a head.** A create may replace only a head, a snapshot that nothing
+  replaces. Otherwise nothing is built or kept: `check.error` is a `conflict`
+  that names what replaces it, and `heads` lists the snapshots to replace
+  instead, those nothing replaces that are reached from the replaced one
+  through what replaces it, oldest first. A create that loses a race to
+  another during its build is refused the same way. `"fork": true` skips the
+  check, for parallel attempts at one target, and a fork is reported by the
+  [spec audit](#spec-audit). A key replay comes first and returns its
+  snapshot, whatever replaced it since.
 - **Imports.** The code may import more, and may build on other snapshots
   than the replaced snapshot's module does. A type names the constants it uses,
   such as a definition from an imported snapshot, without saying what they
@@ -621,7 +631,10 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   skeleton a proof replaced. Delete it yourself if nothing needs it.
 - **Sending it again.** The keys come from the plan, so sending the same
   rebuild again, after a failure, a timeout or a lost server, replays the
-  creates that are done and runs the rest.
+  creates that are done and runs the rest. An item is a create without
+  `fork`: if an agent replaced its snapshot after the plan was made, the item
+  fails with a `conflict`, and sending the rebuild again plans the agent's
+  head instead.
 - **Async.** A run can take minutes, so it takes `Prefer: respond-async` (see
   [Async requests](#async-requests)): the 202's job, of kind
   `rebuild_snapshots`, is run by the server that answered, and

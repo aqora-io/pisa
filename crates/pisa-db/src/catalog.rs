@@ -209,6 +209,9 @@ pub struct NewEntry {
     pub replaces: Option<Replaces>,
     /// What the comparison with it found; set exactly when `replaces` is.
     pub replacement: Option<Replacement>,
+    /// Whether it may replace an entry that another entry replaces already,
+    /// making a fork. It isn't stored.
+    pub fork: bool,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -458,7 +461,8 @@ impl Catalog {
     /// record, which is another worker's if it stored the module first. A
     /// missing parent is `not_found`, and so is one deleted and built again
     /// since `meta` was made from it, whose files `meta` would name, and so
-    /// is the entry `entry` replaces, if it is gone.
+    /// is the entry `entry` replaces, if it is gone. If another entry
+    /// replaces that one, it is a `conflict`, unless `entry` forks.
     ///
     /// If `entry`'s key is already on an entry, nothing is written and that
     /// entry comes back, unchanged. On the same module, with its stored
@@ -484,7 +488,8 @@ impl Catalog {
     /// A new entry on an existing module; `None` if the module is gone. If
     /// `entry`'s key is already on an entry, that one comes back instead,
     /// unchanged, and it may be on another module. The entry `entry`
-    /// replaces being gone is `not_found`.
+    /// replaces being gone is `not_found`, and being replaced already is a
+    /// `conflict`, unless `entry` forks.
     pub async fn add_entry(
         &self,
         m: &str,
@@ -722,6 +727,7 @@ mod tests {
             key: None,
             replaces: None,
             replacement: None,
+            fork: false,
         }
     }
 
@@ -734,6 +740,7 @@ mod tests {
             key: None,
             replaces: None,
             replacement: None,
+            fork: false,
         }
     }
 
@@ -743,6 +750,7 @@ mod tests {
             key: Some(k.into()),
             replaces: None,
             replacement: None,
+            fork: false,
         }
     }
 
@@ -893,6 +901,7 @@ mod tests {
                 });
                 let entry = NewEntry {
                     replaces: replaces.clone(),
+                    fork: true,
                     ..no_labels()
                 };
                 let (e, added) = catalog.add_entry("x", entry).await.unwrap().unwrap();
@@ -923,6 +932,7 @@ mod tests {
                     changed_definitions: Vec::new(),
                     affected: Vec::new(),
                 }),
+                fork: true,
                 ..no_labels()
             };
             let mut replacers = Vec::new();
@@ -1079,7 +1089,11 @@ mod tests {
                 .unwrap();
             let p1 = added(&catalog, step(&s0, &["t"], &[], &[])).await;
             let a = added(&catalog, step(&p1, &["u"], &[], &[])).await;
-            let b = added(&catalog, step(&p1, &["v"], &[], &[])).await;
+            let forking = NewEntry {
+                fork: true,
+                ..step(&p1, &["v"], &[], &[])
+            };
+            let b = added(&catalog, forking).await;
 
             catalog.remove_entry(&p1).await.unwrap();
 
@@ -1158,6 +1172,77 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(e, kept);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_create_replacing_a_replaced_snapshot_is_a_conflict_unless_it_forks() {
+        for catalog in catalogs().await {
+            let (old, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let first = added(&catalog, step(&old, &[], &[], &[])).await;
+            let replacing = |key: Option<&str>, fork: bool| NewEntry {
+                key: key.map(String::from),
+                fork,
+                ..step(&old, &[], &[], &[])
+            };
+
+            let err = catalog
+                .commit("y", &meta("y"), None, replacing(None, false))
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Conflict);
+            assert!(catalog.module("y").await.is_err());
+            let err = catalog
+                .add_entry("x", replacing(None, false))
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Conflict);
+            assert_eq!(
+                replacer_ids(&catalog, &old).await,
+                std::slice::from_ref(&first)
+            );
+
+            // A fork goes through, and is not stored.
+            let (second, ..) = catalog
+                .commit("y", &meta("y"), None, replacing(Some("k"), true))
+                .await
+                .unwrap();
+            let (third, _) = catalog
+                .add_entry("x", replacing(None, true))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut found = replacer_ids(&catalog, &old).await;
+            found.sort();
+            let mut all = [first, second.clone(), third];
+            all.sort();
+            assert_eq!(found, all);
+
+            // A key replay comes first.
+            let (e, ..) = catalog
+                .commit("y", &meta("y"), None, replacing(Some("k"), false))
+                .await
+                .unwrap();
+            assert_eq!(e, second);
+            let (e, _) = catalog
+                .add_entry("x", replacing(Some("k"), false))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(e, second);
+
+            // Deleting the replacers makes it a head again.
+            for e in all {
+                catalog.remove_entry(&e).await.unwrap();
+            }
+            catalog
+                .add_entry("x", replacing(None, false))
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 
@@ -1452,6 +1537,27 @@ mod tests {
             ids.dedup();
             assert_eq!(ids.len(), 8);
             assert_eq!(catalog.list(&[], 100, None).await.unwrap().0.len(), 9);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn creates_racing_to_replace_one_head_make_one_replacer() {
+        for catalog in catalogs().await {
+            let (old, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let made = racing(8, |_| {
+                let (catalog, old) = (catalog.clone(), old.clone());
+                async move { catalog.add_entry("x", step(&old, &[], &[], &[])).await }
+            })
+            .await;
+            let refused: Vec<ErrorKind> = made
+                .iter()
+                .filter_map(|r| r.as_ref().err().map(|e| e.kind))
+                .collect();
+            assert_eq!(refused, [ErrorKind::Conflict; 7]);
+            assert_eq!(replacer_ids(&catalog, &old).await.len(), 1);
         }
     }
 

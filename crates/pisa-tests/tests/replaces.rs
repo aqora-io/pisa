@@ -69,7 +69,8 @@ async fn a_proof_replaces_its_skeleton_and_the_link_is_kept() {
 
     // A replacement may add declarations, and still leave a `sorry`.
     let code = "import Foo\n\ntheorem helper : 2 = 2 := sorry\ntheorem t : 1 = 1 := sorry";
-    let partial = create(&c, json!({"code": code, "replaces": replacing(old)})).await;
+    let body = json!({"code": code, "replaces": replacing(old), "fork": true});
+    let partial = create(&c, body).await;
     assert_eq!(partial["replacement"], json!({"filled": []}));
     assert_eq!(partial["snapshot"]["status"], "sorry");
 }
@@ -122,7 +123,11 @@ async fn a_definition_changes_only_when_allowed_and_its_users_are_listed() {
     // A definition's type stays the same.
     let retyped =
         "import Foo\n\ndef f : Int := 2\ntheorem t : f = f := rfl\ntheorem u : 1 = 1 := rfl";
-    let r = create(&c, json!({"code": retyped, "replaces": replaces})).await;
+    let r = create(
+        &c,
+        json!({"code": retyped, "replaces": replaces, "fork": true}),
+    )
+    .await;
     refused(&r, "statement: f has a different type");
 }
 
@@ -139,7 +144,7 @@ async fn only_the_named_definitions_may_change() {
     assert_eq!(r["snapshot"]["replaces"], replaces);
 
     let g = "import Foo\n\ndef f : Nat := 1\ndef g : Nat := 2\ntheorem t : f = g := sorry";
-    let r = create(&c, json!({"code": g, "replaces": replaces})).await;
+    let r = create(&c, json!({"code": g, "replaces": replaces, "fork": true})).await;
     refused(&r, "statement: g has a different value");
 }
 
@@ -228,7 +233,8 @@ async fn the_comparison_is_stored_with_the_link_for_new_code_and_kept_code() {
     assert_eq!(found.len(), 1);
 
     // The code is kept now, so another create only adds an entry.
-    let kept = create(&c, json!({"code": fixed, "replaces": replaces})).await;
+    let body = json!({"code": fixed, "replaces": replaces, "fork": true});
+    let kept = create(&c, body).await;
     assert_ne!(entry(&kept), entry(&built));
     let stored = catalog.entry(&bare(&kept)).await.unwrap();
     assert_eq!(stored.replacement, Some(comparison));
@@ -323,7 +329,8 @@ async fn a_replacement_on_other_snapshots_keeps_what_its_statements_use() {
     .await;
     let r = create(
         &c,
-        json!({"code": on(&more, "theorem thm3 : foo = 1 := rfl"), "replaces": replacing(&old)}),
+        json!({"code": on(&more, "theorem thm3 : foo = 1 := rfl"), "replaces": replacing(&old),
+               "fork": true}),
     )
     .await;
     assert_eq!(r["replacement"], json!({"filled": ["thm3"]}), "{r}");
@@ -338,7 +345,8 @@ async fn a_replacement_on_other_snapshots_keeps_what_its_statements_use() {
         "import Foo\nimport {lost}\nimport {}\n\ntheorem thm3 : foo = 1 := rfl",
         module(&helper)
     );
-    let r = create(&c, json!({"code": both, "replaces": replacing(&old)})).await;
+    let body = json!({"code": both, "replaces": replacing(&old), "fork": true});
+    let r = create(&c, body).await;
     assert_eq!(r["replacement"]["filled"], json!(["thm3"]), "{r}");
 }
 
@@ -441,6 +449,159 @@ async fn a_replacement_cant_assume_what_it_should_prove() {
     assert_eq!(r["replacement"]["filled"], json!(["t"]), "{r}");
     assert_eq!(r["snapshot"]["status"], "conditional");
     let stronger = "import Foo\n\naxiom kun : 2 = 2\ntheorem t : 1 = 1 := kun";
-    let r = create(&c, json!({"code": stronger, "replaces": replacing(&old)})).await;
+    let body = json!({"code": stronger, "replaces": replacing(&old), "fork": true});
+    let r = create(&c, body).await;
     refused(&r, "statement: kun has a different type");
+}
+
+/// The entry id in a snapshot id.
+fn bare(id: &str) -> &str {
+    id.split_once('~').unwrap().1
+}
+
+async fn delete(c: &Cluster, id: &str) {
+    let r = c.client.delete(c.url(&format!("/snapshots/{id}"))).send();
+    assert_eq!(r.await.unwrap().status(), 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replacing_a_replaced_snapshot_is_a_conflict() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let p = entry(&create(&c, json!({"code": PROOF, "replaces": replacing(&s)})).await).to_string();
+    let blobs = c.stored_blobs().await;
+
+    // CRASH would kill fake-lean: a build would answer `crash`.
+    let code = format!("{PROOF}\nCRASH");
+    let r = create(&c, json!({"code": code, "replaces": replacing(&s)})).await;
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "conflict", "{r}");
+    assert_eq!(r["heads"], json!([p]), "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap();
+    assert_eq!(
+        message,
+        format!(
+            "{s} is replaced by {p}; the run's heads from there are {p}. Replace a head, or set fork"
+        )
+    );
+    assert_eq!(c.stored_blobs().await, blobs);
+    let listed = get(&c, "/snapshots").await;
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 2, "{listed}");
+
+    // The head can be replaced.
+    let code = "import Foo\n\ntheorem t : 1 = 1 := rfl\ntheorem u : 2 = 2 := rfl";
+    let r = create(&c, json!({"code": code, "replaces": replacing(&p)})).await;
+    assert_eq!(r["snapshot"]["replaces"], replacing(&p), "{r}");
+    assert!(r.get("heads").is_none(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_heads_are_the_ends_of_the_run_from_the_replaced_snapshot() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let p = create(&c, json!({"code": PROOF, "replaces": replacing(&s)})).await;
+    let p = entry(&p).to_string();
+    // A fork at S, and a step above its older branch.
+    let q = format!("{PROOF}\n-- q");
+    let body = json!({"code": q, "replaces": replacing(&s), "fork": true});
+    let q = entry(&create(&c, body).await).to_string();
+    let p2 = format!("{PROOF}\n-- p2");
+    let p2 = entry(&create(&c, json!({"code": p2, "replaces": replacing(&p)})).await).to_string();
+
+    let r = create(&c, json!({"code": PROOF, "replaces": replacing(&s)})).await;
+    assert_eq!(r["check"]["error"]["kind"], "conflict", "{r}");
+    // Oldest first, each once.
+    assert_eq!(r["heads"], json!([q, p2]), "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!("{s} is replaced by {p}, {q}; ")),
+        "{r}"
+    );
+    let r = create(&c, json!({"code": PROOF, "replaces": replacing(&p)})).await;
+    assert_eq!(r["heads"], json!([p2]), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_replaces_a_replaced_snapshot() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let s = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let p = entry(&create(&c, json!({"code": PROOF, "replaces": replacing(&s)})).await).to_string();
+
+    let code = format!("{PROOF}\n-- another proof");
+    let body = json!({"code": code, "replaces": replacing(&s), "fork": true});
+    let q = create(&c, body).await;
+    assert_eq!(q["snapshot"]["replaces"], replacing(&s), "{q}");
+    assert!(q.get("heads").is_none(), "{q}");
+    let found = catalog.replacers(bare(&s)).await.unwrap();
+    let found: Vec<&str> = found.iter().map(|(e, _)| e.as_str()).collect();
+    assert_eq!(found, [bare(&p), bare(entry(&q))]);
+
+    // `fork` is a request to skip the check, not a link: it is never stored.
+    let info = get(&c, &format!("/snapshots/{}", entry(&q))).await;
+    assert!(info.get("fork").is_none(), "{info}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_whose_replacer_was_deleted_can_be_replaced() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let p = entry(&create(&c, json!({"code": PROOF, "replaces": replacing(&s)})).await).to_string();
+    delete(&c, &p).await;
+
+    let code = format!("{PROOF}\n-- another proof");
+    let r = create(&c, json!({"code": code, "replaces": replacing(&s)})).await;
+    assert_eq!(r["snapshot"]["replaces"], replacing(&s), "{r}");
+    assert!(r.get("heads").is_none(), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_replay_comes_before_the_head_check() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let body = json!({"code": PROOF, "key": "k", "replaces": replacing(&s)});
+    let p = create(&c, body.clone()).await;
+    let code = format!("{PROOF}\n-- next");
+    let next = json!({"code": code, "replaces": replacing(entry(&p))});
+    create(&c, next).await;
+
+    // S and P are both replaced now, and the key still returns P.
+    let replay = create(&c, body).await;
+    assert_eq!(replay["snapshot"], p["snapshot"], "{replay}");
+    assert!(replay.get("heads").is_none(), "{replay}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replacement_landing_during_a_build_wins() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let s = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+
+    let slow = format!("{PROOF}\n-- SLEEP 800");
+    let building = tokio::spawn({
+        let (client, url) = (c.client.clone(), c.url("/snapshots"));
+        let body = json!({"code": slow, "replaces": replacing(&s)});
+        async move {
+            let r = client.post(url).json(&body).send().await.unwrap();
+            r.json::<Value>().await.unwrap()
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let p = create(&c, json!({"code": PROOF, "replaces": replacing(&s)})).await;
+    let p = entry(&p).to_string();
+    // The slow build is still running, and has stored nothing.
+    let blobs = c.stored_blobs().await;
+
+    let r = building.await.unwrap();
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "conflict", "{r}");
+    assert_eq!(r["heads"], json!([p]), "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(&format!("{s} is replaced by {p}; ")),
+        "{r}"
+    );
+    // The build's files went with the refused commit.
+    let listed = get(&c, "/snapshots").await;
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 2, "{listed}");
+    assert_eq!(c.stored_blobs().await, blobs);
 }

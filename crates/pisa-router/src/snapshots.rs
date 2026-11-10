@@ -104,6 +104,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         labels: req.labels,
         key: req.key,
         replaces: req.replaces,
+        fork: req.fork,
     };
     let job = if replace {
         Job::SnapshotReplace(create)

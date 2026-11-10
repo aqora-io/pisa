@@ -67,6 +67,9 @@ pub enum ErrorKind {
     Unavailable,
     BadRequest,
     NotFound,
+    /// The snapshot a create replaces is already replaced; see
+    /// [`fork`](CreateSnapshotRequest::fork).
+    Conflict,
     Internal,
 }
 
@@ -83,6 +86,7 @@ impl ErrorKind {
             ErrorKind::Unavailable => 503,
             ErrorKind::BadRequest => 400,
             ErrorKind::NotFound => 404,
+            ErrorKind::Conflict => 409,
             ErrorKind::Internal => 500,
         }
     }
@@ -558,9 +562,19 @@ pub struct CreateSnapshotRequest {
     /// longer builds on a snapshot that module does, what the module's
     /// declarations use from there must be unchanged in what the code builds
     /// on now. Otherwise nothing is kept and `check.reasons` lists the
-    /// changes. The new snapshot records the link.
+    /// changes. The new snapshot records the link. The replaced snapshot
+    /// must be a head, one that no snapshot replaces, unless `fork` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replaces>,
+    /// Lets `replaces` name a snapshot that another snapshot replaces
+    /// already, which forks the run. Otherwise such a create keeps nothing
+    /// and builds nothing: `check.error` is a `conflict`, and the response's
+    /// `heads` are the snapshots to replace instead. Another create can
+    /// replace the snapshot while this one builds, and then it is refused
+    /// the same way, with its build discarded. A `key` replay comes before
+    /// this check. It does nothing without `replaces`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fork: bool,
 }
 
 /// A snapshot that a create replaces, and what the replacement may change:
@@ -655,8 +669,9 @@ pub struct CreateSnapshotResponse {
     /// Absent when nothing new was kept: Lean reported errors, the check
     /// could not complete, the code changed what the snapshot it
     /// [`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`
-    /// says how), or `verify: true` found it kept but failing the re-check
-    /// (`check.error` says why).
+    /// says how), the snapshot it replaces is replaced already (a
+    /// `conflict`, see `heads`), or `verify: true` found it kept but failing
+    /// the re-check (`check.error` says why).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<Snapshot>,
     /// The check, as for `/check`. It has no `sorries`, and `time` includes
@@ -667,6 +682,11 @@ pub struct CreateSnapshotResponse {
     /// compare again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<Replacement>,
+    /// On a `conflict` (`check.error`), the snapshots to replace instead:
+    /// those that nothing replaces, reached from the replaced snapshot by
+    /// following what replaces it, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heads: Vec<String>,
 }
 
 /// `GET /snapshots/{id}`: a snapshot with its module's code, check and

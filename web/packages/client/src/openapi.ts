@@ -628,6 +628,16 @@ export interface components {
         CreateSnapshotRequest: {
             code: string;
             /**
+             * @description Lets `replaces` name a snapshot that another snapshot replaces
+             *     already, which forks the run. Otherwise such a create keeps nothing
+             *     and builds nothing: `check.error` is a `conflict`, and the response's
+             *     `heads` are the snapshots to replace instead. Another create can
+             *     replace the snapshot while this one builds, and then it is refused
+             *     the same way, with its build discarded. A `key` replay comes before
+             *     this check. It does nothing without `replaces`.
+             */
+            fork?: boolean;
+            /**
              * @description Makes the create safe to retry: while a snapshot made with this key
              *     exists, a create with it on the same code returns that snapshot as it
              *     is, instead of adding another; on other code it is a `bad_request`.
@@ -655,7 +665,8 @@ export interface components {
              *     longer builds on a snapshot that module does, what the module's
              *     declarations use from there must be unchanged in what the code builds
              *     on now. Otherwise nothing is kept and `check.reasons` lists the
-             *     changes. The new snapshot records the link.
+             *     changes. The new snapshot records the link. The replaced snapshot
+             *     must be a head, one that no snapshot replaces, unless `fork` is set.
              */
             replaces?: components["schemas"]["Replaces"];
             /**
@@ -686,6 +697,12 @@ export interface components {
              */
             check: components["schemas"]["CheckResult"];
             /**
+             * @description On a `conflict` (`check.error`), the snapshots to replace instead:
+             *     those that nothing replaces, reached from the replaced snapshot by
+             *     following what replaces it, oldest first.
+             */
+            heads?: string[];
+            /**
              * @description What the replacement changed, if the request named a snapshot it
              *     replaces and the code was kept. Absent on a key replay, which doesn't
              *     compare again.
@@ -697,8 +714,9 @@ export interface components {
              *     Absent when nothing new was kept: Lean reported errors, the check
              *     could not complete, the code changed what the snapshot it
              *     [`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`
-             *     says how), or `verify: true` found it kept but failing the re-check
-             *     (`check.error` says why).
+             *     says how), the snapshot it replaces is replaced already (a
+             *     `conflict`, see `heads`), or `verify: true` found it kept but failing
+             *     the re-check (`check.error` says why).
              */
             snapshot?: components["schemas"]["Snapshot"];
         };
@@ -796,7 +814,7 @@ export interface components {
             message: string;
         };
         /** @enum {string} */
-        ErrorKind: "timeout" | "out_of_memory" | "crash" | "policy" | "lean" | "capacity" | "unavailable" | "bad_request" | "not_found" | "internal";
+        ErrorKind: "timeout" | "out_of_memory" | "crash" | "policy" | "lean" | "capacity" | "unavailable" | "bad_request" | "not_found" | "conflict" | "internal";
         /** @description The body of every non-2xx response. */
         ErrorResponse: {
             error: components["schemas"]["Error"];

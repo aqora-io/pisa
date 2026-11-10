@@ -883,6 +883,7 @@ impl Snapshots {
             snapshot: Some(self.snapshot(entry, entry_meta, &meta)),
             check: meta.result,
             replacement: None,
+            heads: Vec::new(),
         }
     }
 
@@ -896,18 +897,22 @@ impl Snapshots {
             snapshot: None,
             check,
             replacement: None,
+            heads: Vec::new(),
         }
     }
 
     /// Checks `job.code` by compiling it to a module and keeps the module
     /// unless Lean reported errors, with a new entry on it. Code that is
     /// already kept gets the new entry without being built again. Failures
-    /// are reported in `check`.
+    /// are reported in `check`. So is a replaced snapshot that another
+    /// replaces already, which is refused as a `conflict` before anything is
+    /// built, with the run's `heads`, unless the job forks.
     pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> CreateSnapshotResponse {
         let mut response = CreateSnapshotResponse {
             snapshot: None,
             check: CheckResult::default(),
             replacement: None,
+            heads: Vec::new(),
         };
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
@@ -948,13 +953,39 @@ impl Snapshots {
             },
             None => None,
         };
+        if let Some(r) = replacing.as_ref().filter(|_| !job.fork) {
+            match self.replaced_by(&r.entry).await {
+                Ok(Some((error, heads))) => {
+                    response.check.error = Some(error);
+                    response.heads = heads;
+                    return response;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    response.check.error = Some(e);
+                    return response;
+                }
+            }
+        }
         // A kept module removed before its new entry was added is built
         // again, once.
         for _ in 0..2 {
             let done = self
                 .create_once(pool, &job, &split, replacing.as_ref(), response.clone())
                 .await;
-            if let Some(done) = done {
+            if let Some(mut done) = done {
+                // Another create replaced it while this one was building.
+                if let Some(r) = &replacing
+                    && done
+                        .check
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.kind == ErrorKind::Conflict)
+                    && let Ok(Some((error, heads))) = self.replaced_by(&r.entry).await
+                {
+                    done.check.error = Some(error);
+                    done.heads = heads;
+                }
                 return done;
             }
         }
@@ -978,6 +1009,43 @@ impl Snapshots {
                 .cloned()
                 .collect(),
         })
+    }
+
+    /// The refusal of a create that replaces `entry` when another entry
+    /// replaces it already: the error, which names the replacers and the
+    /// run's heads from there, and the heads. `None` if `entry` is a head.
+    async fn replaced_by(&self, entry: &str) -> Result<Option<(Error, Vec<String>)>, Error> {
+        let replacers = self.catalog.replacers(entry).await?;
+        if replacers.is_empty() {
+            return Ok(None);
+        }
+        let heads = self.heads_from(entry).await?;
+        let replacers: Vec<String> = replacers.iter().map(|(r, _)| self.id(r)).collect();
+        let message = format!(
+            "{} is replaced by {}; the run's heads from there are {}. Replace a head, or set fork",
+            self.id(entry),
+            replacers.join(", "),
+            heads.join(", ")
+        );
+        Ok(Some((Error::new(ErrorKind::Conflict, message), heads)))
+    }
+
+    /// The snapshot ids of the heads of the run from `entry`: the entries
+    /// that nothing replaces, reached from `entry` through what replaces it,
+    /// oldest first.
+    async fn heads_from(&self, entry: &str) -> Result<Vec<String>, Error> {
+        let created = self.catalog.entry(entry).await?.created_micros;
+        let mut todo = vec![(entry.to_string(), created)];
+        let mut heads = Vec::new();
+        while let Some((e, created)) = todo.pop() {
+            let replacers = self.catalog.replacers(&e).await?;
+            if replacers.is_empty() {
+                heads.push((created, e));
+            }
+            todo.extend(replacers.into_iter().map(|(r, m)| (r, m.created_micros)));
+        }
+        heads.sort();
+        Ok(heads.into_iter().map(|(_, e)| self.id(&e)).collect())
     }
 
     /// The snapshot modules a replacement of `replacing` that builds on
@@ -1168,6 +1236,7 @@ impl Snapshots {
             key: job.key.clone(),
             replaces: replacing.map(Replacing::link),
             replacement: replacement.clone(),
+            fork: job.fork,
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -1406,6 +1475,7 @@ impl Snapshots {
             key: job.key.clone(),
             replaces: replacing.map(Replacing::link),
             replacement: replacement.clone(),
+            fork: job.fork,
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)
@@ -2914,6 +2984,7 @@ mod tests {
             key: None,
             replaces: None,
             replacement: None,
+            fork: false,
         }
     }
 

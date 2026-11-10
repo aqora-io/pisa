@@ -217,8 +217,15 @@ async fn client_replaces_snapshots() {
     let detail = client.get_snapshot(&proof.id).await.unwrap();
     assert_eq!(detail.snapshot.replaces, Some(replaces));
 
+    // The skeleton is replaced now: replacing it again needs `fork`.
+    let weakened = "import Foo\ntheorem t : True := trivial";
+    let refused = client.create_snapshot_with(weakened, &opts).await.unwrap();
+    assert!(refused.snapshot.is_none());
+    assert_eq!(refused.check.error.unwrap().kind, ErrorKind::Conflict);
+    assert_eq!(refused.heads, std::slice::from_ref(&proof.id));
+    let forking = CreateSnapshotOptions { fork: true, ..opts };
     let weakened = client
-        .create_snapshot_with("import Foo\ntheorem t : True := trivial", &opts)
+        .create_snapshot_with(weakened, &forking)
         .await
         .unwrap();
     assert!(weakened.snapshot.is_none() && !weakened.check.ok);

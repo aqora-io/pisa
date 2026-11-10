@@ -90,7 +90,9 @@ async fn replacers_in(conn: &mut Conn, v: &str, e: &str) -> Result<Vec<(String, 
     rows.into_iter().map(entry_from_row).collect()
 }
 
-/// Fails with `not_found` if `entry` replaces an entry that is gone.
+/// Fails with `not_found` if `entry` replaces an entry that is gone, and
+/// with `conflict` if another entry replaces it already and `entry` doesn't
+/// fork.
 async fn check_replaced(conn: &mut Conn, v: &str, entry: &NewEntry) -> Result<(), Fail> {
     let Some(replaces) = &entry.replaces else {
         return Ok(());
@@ -98,13 +100,29 @@ async fn check_replaced(conn: &mut Conn, v: &str, entry: &NewEntry) -> Result<()
     let kept: bool = diesel::select(exists(entries::table.find((v, &replaces.snapshot_id))))
         .get_result(conn)
         .await?;
-    if kept {
+    if !kept {
+        return Err(Fail::Api(Error::new(
+            ErrorKind::NotFound,
+            "the replaced snapshot was deleted while this one was being built".to_string(),
+        )));
+    }
+    if entry.fork {
         return Ok(());
     }
-    Err(Fail::Api(Error::new(
-        ErrorKind::NotFound,
-        "the replaced snapshot was deleted while this one was being built".to_string(),
-    )))
+    let replaced: bool = diesel::select(exists(
+        entries::table
+            .filter(entries::version.eq(v))
+            .filter(entries::replaces.eq(&replaces.snapshot_id)),
+    ))
+    .get_result(conn)
+    .await?;
+    if replaced {
+        return Err(Fail::Api(Error::new(
+            ErrorKind::Conflict,
+            "the replaced snapshot was replaced while this one was being built".to_string(),
+        )));
+    }
+    Ok(())
 }
 
 /// Records that the transaction changes entry `entry` and/or module `module`.

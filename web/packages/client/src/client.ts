@@ -99,7 +99,7 @@ export interface GetDeclarationOptions extends VersionOptions {
 }
 
 export type CreateSnapshotOptions = RunOptions &
-  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces">;
+  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces" | "fork">;
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -130,6 +130,7 @@ const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
   "unavailable",
   "bad_request",
   "not_found",
+  "conflict",
   "internal",
 ]);
 
@@ -419,6 +420,7 @@ export class PisaClient {
     if (options.labels !== undefined) body.labels = options.labels;
     if (options.key !== undefined) body.key = options.key;
     if (options.replaces !== undefined) body.replaces = options.replaces;
+    if (options.fork !== undefined) body.fork = options.fork;
     return body;
   }
 

@@ -508,6 +508,10 @@
           "code": {
             "type": "string"
           },
+          "fork": {
+            "description": "Lets `replaces` name a snapshot that another snapshot replaces\nalready, which forks the run. Otherwise such a create keeps nothing\nand builds nothing: `check.error` is a `conflict`, and the response's\n`heads` are the snapshots to replace instead. Another create can\nreplace the snapshot while this one builds, and then it is refused\nthe same way, with its build discarded. A `key` replay comes before\nthis check. It does nothing without `replaces`.",
+            "type": "boolean"
+          },
           "key": {
             "description": "Makes the create safe to retry: while a snapshot made with this key\nexists, a create with it on the same code returns that snapshot as it\nis, instead of adding another; on other code it is a `bad_request`.\nSuch a replay ignores the request's other fields, `labels` and\n`verify` included, so it can be `verified: false` with no error after\n`verify: true`. Creates that keep nothing don't use the key up, and\ndeleting the snapshot frees it. See\n[`check_key`](crate::labels::check_key) for the rules.",
             "type": "string"
@@ -524,7 +528,7 @@
           },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
-            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` names them, and\nadds no assumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link."
+            "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` names them, and\nadds no assumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link. The replaced snapshot\nmust be a head, one that no snapshot replaces, unless `fork` is set."
           },
           "timeout": {
             "description": "Lean's time limit in seconds, for building the module including its\nimports.",
@@ -552,13 +556,20 @@
             "$ref": "#/components/schemas/CheckResult",
             "description": "The check, as for `/check`. It has no `sorries`, and `time` includes\nimporting the module's imports."
           },
+          "heads": {
+            "description": "On a `conflict` (`check.error`), the snapshots to replace instead:\nthose that nothing replaces, reached from the replaced snapshot by\nfollowing what replaces it, oldest first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "replacement": {
             "$ref": "#/components/schemas/Replacement",
             "description": "What the replacement changed, if the request named a snapshot it\nreplaces and the code was kept. Absent on a key replay, which doesn't\ncompare again."
           },
           "snapshot": {
             "$ref": "#/components/schemas/Snapshot",
-            "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept: Lean reported errors, the check\ncould not complete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), or `verify: true` found it kept but failing the re-check\n(`check.error` says why)."
+            "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept: Lean reported errors, the check\ncould not complete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), the snapshot it replaces is replaced already (a\n`conflict`, see `heads`), or `verify: true` found it kept but failing\nthe re-check (`check.error` says why)."
           }
         },
         "required": [
@@ -778,6 +789,7 @@
           "unavailable",
           "bad_request",
           "not_found",
+          "conflict",
           "internal"
         ],
         "type": "string"

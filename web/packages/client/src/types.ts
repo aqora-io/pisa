@@ -118,6 +118,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorKind, number>> = {
   unavailable: 503,
   bad_request: 400,
   not_found: 404,
+  conflict: 409,
   internal: 500,
 };
 
