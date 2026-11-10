@@ -1056,19 +1056,20 @@ impl Snapshots {
         needs: &[String],
         own: &str,
     ) -> Result<Swapped, Error> {
-        self.predicted_swap(replacing, needs, own, &HashMap::new())
+        self.predicted_swap(replacing, needs, own, &HashMap::new(), &mut HashMap::new())
             .await
     }
 
     /// [`swapped`](Self::swapped) for a replacement that builds on modules
     /// not made yet: each module `originals` maps is taken to declare what
-    /// the module it maps to does.
+    /// the module it maps to does. The records it reads are kept in `metas`.
     async fn predicted_swap(
         &self,
         replacing: &Replacing,
         needs: &[String],
         own: &str,
         originals: &HashMap<String, String>,
+        metas: &mut HashMap<String, ModuleMeta>,
     ) -> Result<Swapped, Error> {
         let lost: Vec<&String> = replacing
             .needs
@@ -1085,7 +1086,12 @@ impl Snapshots {
         ] {
             for m in modules {
                 let read = originals.get(m).unwrap_or(m);
-                let decls = self.catalog.module(read).await?.result.declarations;
+                let decls = self
+                    .module_cached(read, metas)
+                    .await?
+                    .result
+                    .declarations
+                    .clone();
                 side.push((m.clone(), decls));
             }
         }
@@ -1922,12 +1928,15 @@ impl Snapshots {
         let has_labels = |e: &EntryMeta| job.labels.iter().all(|(k, v)| e.labels.get(k) == Some(v));
         let mut matching: HashMap<String, Vec<(String, EntryMeta)>> = HashMap::new();
         let mut replaced: Vec<RebuildReplaced> = Vec::new();
-        for (e, entry_meta) in self.catalog.entries_on(&modules, &filter).await? {
+        let on = self.catalog.entries_on(&modules, &filter).await?;
+        let on_ids: Vec<String> = on.iter().map(|(e, _)| e.clone()).collect();
+        let mut replacers_of = self.catalog.replacers_among(&on_ids).await?;
+        for (e, entry_meta) in on {
             // Only heads are copied, and entries that only their copies from
             // this same rebuild replace, so that it replays them when sent
             // again.
             let key = format!("rebuild:{old}:{new}:{e}");
-            let replacers = self.catalog.replacers(&e).await?;
+            let replacers = replacers_of.remove(&e).unwrap_or_default();
             if replacers.iter().all(|(_, r)| r.key.as_ref() == Some(&key)) {
                 matching
                     .entry(entry_meta.module.clone())
@@ -1981,8 +1990,10 @@ impl Snapshots {
         let mut through: HashMap<String, Vec<String>> =
             HashMap::from([(old.clone(), needs.clone())]);
         let mut planned: Vec<Planned> = Vec::new();
+        // The records the plan reads, each once.
+        let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
         for m in order {
-            let meta = self.catalog.module(&m).await?;
+            let meta = self.module_cached(&m, &mut metas).await?.clone();
             let code = snapshot::rewrite_imports(&meta.code, &renamed);
             let id = snapshot::id(&code);
             let header = snapshot::next_header(&split_header(&code).header, &id);
@@ -1994,7 +2005,7 @@ impl Snapshots {
             let mut needs_now: Vec<String> = Vec::new();
             for i in &meta.imports {
                 if !through.contains_key(i) {
-                    let kept = self.catalog.module(i).await?;
+                    let kept = self.module_cached(i, &mut metas).await?;
                     through.insert(i.clone(), ids(&kept.modules).cloned().collect());
                 }
                 for n in &through[i] {
@@ -2050,7 +2061,7 @@ impl Snapshots {
                     needs: needs_before.clone(),
                 };
                 let swapped = self
-                    .predicted_swap(&copied, &needs_now, &id, &originals)
+                    .predicted_swap(&copied, &needs_now, &id, &originals, &mut metas)
                     .await?;
                 let definitions: Vec<String> = allowable(&copied, &swapped)
                     .map(|d| d.name.clone())
@@ -2435,6 +2446,18 @@ impl Snapshots {
             };
         }
         Ok(metas.get(m))
+    }
+
+    /// [`cached`](Self::cached) for a module that must be kept: `not_found`
+    /// if it is gone, as [`Catalog::module`] has it.
+    async fn module_cached<'a>(
+        &self,
+        m: &str,
+        metas: &'a mut HashMap<String, ModuleMeta>,
+    ) -> Result<&'a ModuleMeta, Error> {
+        self.cached(m, metas)
+            .await?
+            .ok_or_else(|| unknown_module(m))
     }
 
     /// The module among `modules` that declares the axiom `name`, loading

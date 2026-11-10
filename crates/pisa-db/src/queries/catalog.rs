@@ -1,7 +1,7 @@
 // The snapshot catalog's queries, for `Catalog` (see `crate::catalog`).
 // Included by `backend.rs` once per backend.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use diesel::dsl::{exists, not};
@@ -41,6 +41,10 @@ const ENTRY: (
     entries::replaces_allow,
     entries::replacement,
 );
+
+/// The entry ids a query of [`replacers_among`] takes, so that SQLite's limit
+/// on bound values is never reached.
+const REPLACED_CHUNK: usize = 1000;
 
 async fn module_in(conn: &mut Conn, v: &str, m: &str) -> Result<Option<ModuleMeta>, Fail> {
     let record = modules::table
@@ -592,6 +596,35 @@ pub(crate) async fn replacers(
     e: &str,
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
     Ok(replacers_in(&mut *conn(db).await?, v, e).await?)
+}
+
+pub(crate) async fn replacers_among(
+    db: &Handle,
+    v: &str,
+    es: &[String],
+) -> Result<HashMap<String, Vec<(String, EntryMeta)>>, Error> {
+    let mut found: HashMap<String, Vec<(String, EntryMeta)>> = HashMap::new();
+    let mut c = conn(db).await?;
+    for chunk in es.chunks(REPLACED_CHUNK) {
+        let rows = entries::table
+            .filter(entries::version.eq(v))
+            .filter(entries::replaces.eq_any(chunk))
+            .order((entries::created_micros, entries::id))
+            .select(ENTRY)
+            .load::<EntryRow>(&mut *c)
+            .await
+            .map_err(DbError::from)?;
+        for row in rows {
+            let (e, meta) = entry_from_row(row)?;
+            if let Some(replaced) = &meta.replaces {
+                found
+                    .entry(replaced.snapshot_id.clone())
+                    .or_default()
+                    .push((e, meta));
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// The entries on `modules` with every label in `labels`, oldest first.

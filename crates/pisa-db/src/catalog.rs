@@ -20,7 +20,7 @@
 //! removes a module conflicts with one that adds an entry on it, and two
 //! creates with the same key conflict instead of both succeeding.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use pisa_protocol::api::{
@@ -567,6 +567,16 @@ impl Catalog {
         dispatch!(&self.db, replacers(&self.version, entry))
     }
 
+    /// The entries of this version that replace each of `entries`, oldest
+    /// first, keyed by the replaced entry; entries nothing replaces are
+    /// absent. A few queries at most, whatever the number of entries.
+    pub async fn replacers_among(
+        &self,
+        entries: &[String],
+    ) -> Result<HashMap<String, Vec<(String, EntryMeta)>>, Error> {
+        dispatch!(&self.db, replacers_among(&self.version, entries))
+    }
+
     /// The entries on `modules` that have every `(key, value)` in `labels`,
     /// oldest first.
     pub async fn entries_on(
@@ -978,6 +988,68 @@ mod tests {
             let found: Vec<&str> = found.iter().map(|(e, _)| e.as_str()).collect();
             assert_eq!(found, [replacers[0].as_str(), replacers[1].as_str()]);
             assert!(catalog.replacers(&c).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn replacers_among_groups_by_what_they_replace() {
+        for catalog in catalogs().await {
+            catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let a = added(&catalog, no_labels()).await;
+            let b = added(&catalog, no_labels()).await;
+            let c = added(&catalog, no_labels()).await;
+            let fork = |old: &str| NewEntry {
+                fork: true,
+                ..step(old, &[], &[], &[])
+            };
+            let a1 = added(&catalog, fork(&a)).await;
+            let a2 = added(&catalog, fork(&a)).await;
+            let b1 = added(&catalog, fork(&b)).await;
+
+            let found = catalog
+                .replacers_among(&[a.clone(), b.clone(), c.clone()])
+                .await
+                .unwrap();
+            let replacers =
+                |e: &str| -> Vec<&str> { found[e].iter().map(|(r, _)| r.as_str()).collect() };
+            assert_eq!(found.len(), 2);
+            assert_eq!(replacers(&a), [a1.as_str(), a2.as_str()]);
+            assert_eq!(replacers(&b), [b1.as_str()]);
+            assert!(!found.contains_key(&c));
+            for (_, meta) in &found[&a] {
+                assert_eq!(meta.replaces.as_ref().unwrap().snapshot_id, a);
+            }
+            assert!(catalog.replacers_among(&[]).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn replacers_among_reads_past_one_chunk() {
+        // One more than the 1000 ids a query takes.
+        const ENTRIES: usize = 1001;
+        for catalog in catalogs().await {
+            catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            // Each entry replaces the one before it, so that all but the last
+            // are replaced once.
+            let mut chain = vec![added(&catalog, no_labels()).await];
+            for _ in 0..ENTRIES {
+                let next = step(chain.last().unwrap(), &[], &[], &[]);
+                chain.push(added(&catalog, next).await);
+            }
+
+            let replaced = &chain[..ENTRIES];
+            let found = catalog.replacers_among(replaced).await.unwrap();
+            assert_eq!(found.len(), ENTRIES);
+            for (old, new) in replaced.iter().zip(&chain[1..]) {
+                let ids: Vec<&str> = found[old].iter().map(|(r, _)| r.as_str()).collect();
+                assert_eq!(ids, [new.as_str()]);
+            }
         }
     }
 
