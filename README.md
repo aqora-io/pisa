@@ -1140,6 +1140,11 @@ OpenAI models are a flag away):
 - It caches by content hash, so after a library update only changed
   declarations cost anything.
 - It checks LaTeX against KaTeX and checks that cited Lean names exist.
+- Its prompt has a glossary of how to read names many declarations use
+  (`search/glossary/`): Mathlib's for every declaration, and Physlib's,
+  QuantumInfo's terms included, for Physlib, PhyslibAlpha, QuantumInfo and
+  snapshot declarations. A changed glossary doesn't change the content hash:
+  `informalize --force --libraries …` describes those again.
 
 **Prebuilt indexes.** Each index is a GitHub release tagged `index-<env_id>`,
 on the commit that built it. Its assets are archives of the gitignored `search/`

@@ -637,13 +637,20 @@ impl Prompts {
     }
 
     fn system(&self, d: &Decl) -> &[String] {
-        if matches!(d.library.as_str(), "Physlib" | "PhyslibAlpha") {
+        if PHYSICS.contains(&d.library.as_str()) {
             &self.physlib
         } else {
             &self.mathlib
         }
     }
 }
+
+/// The libraries whose declarations are described with the physics glossary
+/// as well as Mathlib's: Physlib's, and snapshots, which a run here builds on
+/// them as often as not.
+const PHYSICS: &[&str] = &["Physlib", "PhyslibAlpha", "QuantumInfo", "PisaSnap"];
+
+impl Prompts {}
 
 /// Sends each `(i, declaration, prompt)` to the model, at most
 /// `cfg.concurrency` at once and at most as many as `limit` lets through,
@@ -1136,6 +1143,31 @@ pub fn report(input: &ReportInput, outcomes: &[Outcome], corpus: &Corpus) -> Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn physics_libraries_and_snapshots_get_the_physics_glossary() {
+        let prompts = Prompts::new().unwrap();
+        let glossary = |library: &str| {
+            let d = Decl {
+                library: library.into(),
+                ..Default::default()
+            };
+            prompts.system(&d).join("\n")
+        };
+        let mathlib = prompts.mathlib[1]
+            .trim_start_matches("Glossary:\n")
+            .to_string();
+        for library in ["Physlib", "PhyslibAlpha", "QuantumInfo", "PisaSnap"] {
+            let text = glossary(library);
+            assert!(
+                text.contains("`MState d`") && text.contains("`Space d`"),
+                "{library}"
+            );
+            // On top of Mathlib's.
+            assert!(text.contains(&mathlib), "{library}");
+        }
+        assert!(!glossary("Mathlib").contains("`MState d`"));
+    }
+
     use super::*;
     use crate::corpus::tests::decl;
 
