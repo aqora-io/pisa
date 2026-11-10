@@ -764,7 +764,11 @@ pub fn auto_implicit_hint(body: &str, messages: &[Message]) -> Option<Message> {
         .split('`')
         .nth(1)
         .filter(|n| !n.is_empty() && *n != "autoImplicit");
+    let universe = cause.data.starts_with("unknown universe level");
     let bind = match name {
+        Some(n) if universe => {
+            format!("declare `{n}` with `universe {n}`, or after the name, as in `t.{{{n}}}`")
+        }
         Some(n) => format!("bind `{n}` as an argument, as in `{{{n}}}`"),
         None => "bind it as an argument".to_string(),
     };
@@ -958,8 +962,10 @@ mod tests {
             "{}",
             hint.data
         );
-        // Universe levels too.
-        assert!(auto_implicit_hint(code, &[error("unknown universe level `u`")]).is_some());
+        // Universe levels too, which `{u}` can't bind.
+        let universe = auto_implicit_hint(code, &[error("unknown universe level `u`")]).unwrap();
+        assert!(universe.data.contains("`universe u`"), "{}", universe.data);
+        assert!(!universe.data.contains("`{u}`"), "{}", universe.data);
         // Not if the code sets the option itself, nor for other errors.
         let set = format!("set_option autoImplicit false\n{code}");
         assert!(auto_implicit_hint(&set, &[error("Unknown identifier `d`")]).is_none());
