@@ -353,8 +353,9 @@ def statements_under_replaces():
     step("replaces: statements compare on their canonical form, from verified records")
 
 
-def audit_against(spec, allow=()):
-    query = urllib.parse.urlencode([("against", spec["snapshot"]["id"])] + [("allow", n) for n in allow])
+def audit_against(spec, allow=(), review=False):
+    query = [("against", spec["snapshot"]["id"])] + [("allow", n) for n in allow]
+    query = urllib.parse.urlencode(query + ([("review", "true")] if review else []))
     status, out = call("GET", f"/snapshots/audit?{query}")
     assert status == 200, out
     return out
@@ -440,6 +441,76 @@ def comparator():
     assert "does not match" in pair["output"] and "good" in pair["output"], pair
     delete_snapshots([cheat, skeleton])
     step("comparator: a head that changes what a statement means is refused")
+
+
+def circuit(program, budget="3", promise="n < 4", accepts="n < c.length + 2", gates="",
+            fits="by decide", solves="fun n h => by unfold accepts program; unfold promise at h; simp; omega",
+            witness="⟨0, by unfold promise; decide⟩", budget_last=False):
+    """A small circuit problem: a program of gates, within a budget, that
+    accepts every input the promise allows."""
+    budget = f"def budget : Nat := {budget}\n\n"
+    program = f"def program : List Gate := {program}\n\n"
+    return (f"inductive Gate where\n  | h\n  | cnot{gates}\n\n"
+            "def cost (c : List Gate) : Nat := c.length\n\n"
+            f"def promise (n : Nat) : Prop := {promise}\n\n"
+            f"def accepts (c : List Gate) (n : Nat) : Prop := {accepts}\n\n"
+            + (program + budget if budget_last else budget + program)
+            + f"theorem fits : cost program ≤ budget := {fits}\n\n"
+            f"theorem solves : ∀ n, promise n → accepts program n := {solves}\n\n"
+            f"theorem nonvacuous : ∃ n, promise n := {witness}\n")
+
+
+def review():
+    skeleton = circuit("sorry", fits="sorry", solves="sorry", witness="sorry")
+    spec = create_snapshot(skeleton, holes=["program"], verify=True)
+    spec_id = spec["snapshot"]["id"]
+    honest = create_snapshot(circuit("[Gate.h, Gate.cnot]"), replaces={"snapshot_id": spec_id}, verify=True)
+    out = audit_against(spec, review=True)
+    assert out["clean"] is True, out
+    review_list = out["review"][0]
+    listed = {d["name"]: d for d in review_list["declarations"]}
+    wanted = {"Gate", "Gate.h", "Gate.cnot", "cost", "promise", "accepts", "budget", "program",
+              "fits", "solves", "nonvacuous"}
+    assert wanted <= listed.keys() and all(d["origin"] == "spec" for d in listed.values()), listed
+    program = listed["program"]
+    assert program["hole"] and "Gate.cnot" in program["value"] and "[" not in program["value"], program
+    assert not listed["budget"].get("hole") and "value" not in listed["budget"], listed["budget"]
+    assert {"List", "Nat"} <= set(review_list["library"]), review_list
+    assert post("/snapshots/comparator", {"against": [spec_id], "paranoid": False})["accepted"]
+    delete_snapshots([honest])
+    step("review: a head lists what the spec's statements use, its hole by value, and is accepted")
+
+    # Each of these misses the claim with a valid proof; made outside the
+    # holes, the audit and comparator refuse it.
+    moves = [
+        ("budget", circuit("[Gate.h, Gate.cnot]", budget="cost program", fits="Nat.le_refl _", budget_last=True)),
+        ("accepts", circuit("[]", accepts="True", solves="fun _ _ => trivial")),
+        ("promise", circuit("[]", promise="n < 1")),
+        ("Gate", circuit("[Gate.magic, Gate.magic]", gates="\n  | magic")),
+    ]
+    for name, code in moves:
+        replaces = {"snapshot_id": spec_id, "allow": {"definitions": [name]}}
+        head = create_snapshot(code, replaces=replaces, verify=True)
+        out = audit_against(spec)
+        reasons = out["comparisons"][0].get("reasons", [])
+        assert out["clean"] is False and any(name in r for r in reasons), (name, out)
+        verdict = post("/snapshots/comparator", {"against": [spec_id], "paranoid": False})
+        assert not verdict["accepted"], (name, verdict)
+        delete_snapshots([head])
+    delete_snapshots([spec])
+    step("review: a budget, an acceptance condition, a promise or a gate changed outside the holes is refused")
+
+    # A spec that leaves the budget as a hole allows the first move: only the
+    # review list's value shows it.
+    loose = create_snapshot(skeleton, holes=["program", "budget"], verify=True)
+    gamed = create_snapshot(moves[0][1], replaces={"snapshot_id": loose["snapshot"]["id"]}, verify=True)
+    out = audit_against(loose, review=True)
+    assert out["clean"] is True, out
+    budget = {d["name"]: d for d in out["review"][0]["declarations"]}["budget"]
+    assert budget["hole"] and "cost" in budget["value"] and "program" in budget["value"], budget
+    assert post("/snapshots/comparator", {"against": [loose["snapshot"]["id"]], "paranoid": False})["accepted"]
+    delete_snapshots([gamed, loose])
+    step("review: a budget left as a hole and set to the candidate's own cost is clean, and the review shows its value")
 
 
 def allow_through_a_lost_snapshot():
@@ -689,6 +760,7 @@ if __name__ == "__main__":
     allow_by_name()
     holes()
     comparator()
+    review()
     allow_through_a_lost_snapshot()
     labels()
     module_snapshots()
