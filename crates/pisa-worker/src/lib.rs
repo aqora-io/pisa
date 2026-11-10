@@ -108,9 +108,9 @@ pub async fn run_with_stores(
         let (pool, owner) = (pool.clone(), worker_id.clone());
         let catalog = catalog::Catalog::new(db.clone(), version.clone());
         tokio::spawn(async move {
+            // From the start, so that workers that live less than an
+            // interval sweep too; the lease keeps it to one an interval.
             let mut tick = tokio::time::interval(SWEEP_EVERY);
-            // Not as the worker starts, only once it has run an interval.
-            tick.tick().await;
             loop {
                 tick.tick().await;
                 match catalog.take_lease(SWEEP_LEASE, &owner, SWEEP_EVERY).await {

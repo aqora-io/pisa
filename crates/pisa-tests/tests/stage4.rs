@@ -1285,3 +1285,39 @@ async fn verify_rejects_unknown_snapshots_and_other_modules() {
     let (status, _) = request(&c, reqwest::Method::POST, "/snapshots/Mathlib/verify").await;
     assert_eq!(status, 400);
 }
+
+/// A worker that lives less than the sweep's interval still sweeps.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_sweeps_what_a_stopped_delete_left_as_it_starts() {
+    let mut c = Cluster::start(&[]).await;
+    let stop = c.add_drainable_worker(common::worker_config("w0", "v", 1));
+    c.wait_for_workers(1).await;
+    let parent = kept(&c, ROOT).await;
+    let kid = kept(&c, &on(&parent, "theorem c : 2 = 2 := rfl")).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let parent_id = &module(&parent)["PisaSnap.s".len()..];
+    // The parent's delete keeps its module for the child; the child's
+    // stops once its entry and record are gone.
+    let (status, r) = request(
+        &c,
+        reqwest::Method::DELETE,
+        &format!("/snapshots/{}", entry(&parent)),
+    )
+    .await;
+    assert_eq!(status, 200, "{r}");
+    let kid_entry = pisa_protocol::api::SnapshotId::parse(entry(&kid))
+        .unwrap()
+        .entry;
+    catalog.remove_entry(&kid_entry).await.unwrap();
+    assert!(catalog.module(parent_id).await.is_ok());
+
+    stop.send(()).unwrap();
+    c.wait_for_workers(0).await;
+    c.add_worker(common::worker_config("w0", "v", 1));
+    let swept = tokio::time::timeout(Duration::from_secs(10), async {
+        while catalog.module(parent_id).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+    assert!(swept.await.is_ok(), "the parent's module is still there");
+}
