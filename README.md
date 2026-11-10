@@ -1354,7 +1354,10 @@ with weighted reciprocal rank fusion:
 - **dense:** Qwen3-Embedding-8B vectors for every declaration, from Scaleway's
   serverless API, which also embeds each query. Qwen3-Embedding-0.6B is a
   free, local alternative (TEI on CPU, or llama.cpp on a GPU) that retrieves
-  somewhat worse; see `search/bench/2026-10-22/report.md`.
+  somewhat worse; see `search/bench/2026-10-22/report.md`. A declaration is
+  embedded as its kind and name, its description (or docstring) and its
+  signature, in at most 2,000 characters: the description is cut so that the
+  signature fits.
 
 Qdrant's weights scale a lane's ranks rather than its scores: a weight below 1
 makes a lane count only for its first few hits. The tuned defaults (`Weights`
