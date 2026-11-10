@@ -251,7 +251,11 @@ def snapshots():
     assert status == 200 and info["imports"] == [root["snapshot"]["module"]], info
     assert info["id"] == child["snapshot"]["id"] and info["module"] == child["snapshot"]["module"], info
     delete_snapshots(created)
-    r = on(merged, "example : True := trivial")
+    # A worker that didn't run the delete imports the module until it looks
+    # it up again, within PISA_SNAPSHOT_CONFIRM_SECS (60 by default).
+    deadline = time.monotonic() + 75
+    while "error" not in (r := on(merged, "example : True := trivial")) and time.monotonic() < deadline:
+        time.sleep(2)
     assert r["error"]["kind"] == "not_found", r
     step("snapshot: errors aren't kept; read, and modules go with their last snapshot")
 
