@@ -243,7 +243,7 @@ export interface paths {
         put?: never;
         /**
          * Start a proof session
-         * @description Checks code with `sorry`s and returns a state for each, to apply tactics to. Each state starts from the imports alone: a tactic can't use what the code declares before its `sorry`, which a warning in `messages` points out. Declarations to use go in a snapshot that the code imports.
+         * @description Opens code with `sorry`s on Lean Beam and returns a state for each, to apply tactics to. A tactic runs in the code's own context, so it can use what the code declares before its `sorry`. The session's id is also its document's, for `/documents/{id}/goals` and `/probes`. A 503 means no worker serves documents.
          */
         post: operations["startSession"];
         delete?: never;
@@ -452,7 +452,7 @@ export interface paths {
         put?: never;
         /**
          * Apply a tactic to a state
-         * @description Returns the new state. Earlier states stay valid, so a session is a tree. A tactic that doesn't parse is a 422 `lean`; an error Lean recovers from, like an unknown identifier, is in `messages`.
+         * @description Returns the new state. Earlier states stay valid, so a session is a tree, and the same tactic on the same state gives the same state. A tactic that fails is a 422 `lean`, with Lean's errors in its message. A worker that doesn't hold the session's document replays the steps from the `sorry`, in milliseconds each.
          */
         post: operations["applyTactic"];
         delete?: never;
@@ -485,7 +485,10 @@ export interface components {
              */
             definitions: string[];
         };
-        /** @description `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`. */
+        /**
+         * @description `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`,
+         *     with Lean's errors in its message, and leaves no state.
+         */
         ApplyTacticRequest: {
             tactic: string;
             /** Format: int64 */
@@ -493,8 +496,9 @@ export interface components {
         };
         ApplyTacticResponse: {
             /**
-             * @description No goals remain for this state's `sorry`. This says nothing about the
-             *     rest of the proof; check the assembled proof with the session check.
+             * @description No goals remain for this state's `sorry`, and the tactic doesn't say
+             *     `sorry` or `admit`. This says nothing about the rest of the proof;
+             *     check the assembled proof with the session check.
              */
             complete: boolean;
             messages: components["schemas"]["Message"][];
@@ -1817,13 +1821,13 @@ export interface components {
         };
         /** @description A proof session: the states that its code's `sorry`s start from. */
         Session: {
-            /** @description Its id, for checking the finished proof at `/sessions/{id}/check`. */
-            id: string;
             /**
-             * @description What Lean said about the code, and a warning, at its first line, if
-             *     the code declares something before a `sorry`: each state starts from
-             *     the imports alone, so its tactics can't use what the code declares.
+             * @description Its id, `<version>~<32 hex>`, for checking the finished proof at
+             *     `/sessions/{id}/check`. It is also its open document's, for
+             *     `/documents/{id}/goals` and `/probes`.
              */
+            id: string;
+            /** @description Lean's errors and warnings about the code. */
             messages: components["schemas"]["Message"][];
             /** @description One per `sorry`, in source order. */
             states: components["schemas"]["State"][];
@@ -1914,8 +1918,9 @@ export interface components {
             pos?: components["schemas"]["Pos"];
         };
         /**
-         * @description `POST /sessions`: runs code containing `sorry`; each `sorry` becomes a
-         *     proof state that tactics can be applied to.
+         * @description `POST /sessions`: opens code containing `sorry` on Lean Beam; each
+         *     `sorry` becomes a proof state that tactics can be applied to, in the
+         *     code's own context.
          */
         StartSessionRequest: {
             /** @description Code with `sorry`s, each of which becomes a state. */
@@ -1935,7 +1940,11 @@ export interface components {
              *     their `sorry`'s goal; a tactic can leave more, or none.
              */
             goals: string[];
-            /** @description Its id, for applying a tactic at `/states/{id}/tactic`. */
+            /**
+             * @description Its id, `<version>~<session hex>~<32 hex>`, for applying a tactic at
+             *     `/states/{id}/tactic`. The same tactic on the same state gives the
+             *     same state, and so the same id.
+             */
             id: string;
             /**
              * @description Where the `sorry` is in the code. Only a session's first states have

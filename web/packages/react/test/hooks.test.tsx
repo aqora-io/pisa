@@ -47,11 +47,6 @@ describe("useProofSession", () => {
     if (tactic === "fail") {
       return new Response(JSON.stringify({ error: { kind: "lean", message: "failed" } }), { status: 422 });
     }
-    // Lean recovers from an elaboration error: the step succeeds, with the error.
-    if (tactic === "exact nope") {
-      const error = { severity: "error", pos: { line: 0, column: 0 }, text: "Unknown identifier `nope`" };
-      return { state: { id: "k-nope", goals: [] }, complete: false, messages: [error] };
-    }
     // `skip` leaves the state as it was, with the same key.
     if (tactic === "skip") return { state: { id: "k1", goals: ["⊢ g"] }, complete: false, messages: [] };
     return { state: { id: `k-${String(tactic)}`, goals: [] }, complete: true, messages: [] };
@@ -67,17 +62,14 @@ describe("useProofSession", () => {
 
     let skip: number | undefined;
     let fail: number | undefined;
-    let nope: number | undefined;
     act(() => {
       skip = result.current.apply(root?.id ?? -1, "skip");
       fail = result.current.apply(root?.id ?? -1, "fail");
-      nope = result.current.apply(root?.id ?? -1, "exact nope");
     });
     await waitFor(() => expect(result.current.nodes.every((n) => n.status !== "pending")).toBe(true));
     expect(result.current.node(skip ?? -1)).toMatchObject({ status: "ok", state: "k1", parent: root?.id });
     expect(result.current.node(fail ?? -1)).toMatchObject({ status: "failed", error: { kind: "lean" } });
-    expect(result.current.node(nope ?? -1)).toMatchObject({ status: "failed", messages: [{ severity: "error" }] });
-    expect(result.current.apply(nope ?? -1, "rfl")).toBeUndefined();
+    expect(result.current.apply(fail ?? -1, "rfl")).toBeUndefined();
 
     // Branching from a node with the root's key goes on from that node.
     let trivial: number | undefined;
@@ -86,7 +78,7 @@ describe("useProofSession", () => {
     });
     await waitFor(() => expect(result.current.node(trivial ?? -1)?.status).toBe("ok"));
     expect(result.current.path(trivial ?? -1)).toEqual(["skip", "trivial"]);
-    expect(result.current.children(root?.id ?? -1)).toHaveLength(3);
+    expect(result.current.children(root?.id ?? -1)).toHaveLength(2);
     expect(result.current.proofText([trivial ?? -1])).toBe(`theorem t : True := by skip\n${" ".repeat(23)}trivial`);
   });
 

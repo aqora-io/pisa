@@ -261,7 +261,7 @@ fn prepare_check(
         version,
         header_key: Some(split.header_key),
         header: prewarm_header(split.header),
-        state: None,
+        document: None,
     };
     let job = Job::Check(CheckJob {
         code,

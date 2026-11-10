@@ -62,12 +62,14 @@ diesel::table! {
 }
 
 diesel::table! {
-    states (version, hash) {
+    states (version, id) {
         version -> Text,
-        hash -> Text,
-        meta -> Jsonb,
+        id -> Text,
+        session -> Text,
+        sorry -> Nullable<Integer>,
+        parent -> Nullable<Text>,
+        tactic -> Nullable<Text>,
         created -> BigInt,
-        holder -> Nullable<Text>,
     }
 }
 

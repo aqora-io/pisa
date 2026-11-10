@@ -68,7 +68,7 @@ fn comparable(v: &Value) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn each_long_endpoint_answers_later_as_it_would_have_at_once() {
-    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let c = Cluster::start_beam(&[("w0", "v", 2)]).await;
     let (_, session) = c.post("/sessions", json!({"code": CODE})).await;
     let state = session["states"][0]["id"].as_str().unwrap();
     let session_id = session["id"].as_str().unwrap();
@@ -159,7 +159,7 @@ async fn a_wait_returns_as_soon_as_the_job_is_done() {
 async fn failures_are_kept_and_requests_checked_first() {
     let mut cfg = router_config();
     cfg.max_wait_secs = 1;
-    let c = Cluster::start_with(cfg, &[("w0", "v", 1)], |w| w).await;
+    let c = Cluster::start_with(cfg, &[("w0", "v", 1)], common::with_beam).await;
 
     // A malformed key is the request's own fault, at once.
     let (status, _, r) = submit(&c, &c.url("/states/nope/tactic"), json!({"tactic": "rfl"})).await;

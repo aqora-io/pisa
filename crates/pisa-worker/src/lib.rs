@@ -21,7 +21,6 @@ pub mod review;
 pub mod runs;
 pub mod sessions;
 pub mod snapshots;
-pub mod store;
 
 pub use config::WorkerConfig;
 use documents::Documents;
@@ -48,10 +47,10 @@ async fn shutdown_signal() {
     }
 }
 
-/// Runs the worker on the job queue in `db`, with pickled proof states and
-/// snapshot modules kept in `store`, and the records that describe them, the
-/// sessions and the snapshot entries in `db`. Every worker of the same
-/// version must share both. When `shutdown` completes, the worker drains: it
+/// Runs the worker on the job queue in `db`, with snapshot modules kept in
+/// `store`, and the records that describe them, the sessions, their states,
+/// the open documents and the snapshot entries in `db`. Every worker of the
+/// same version must share both. When `shutdown` completes, the worker drains: it
 /// claims no more jobs, finishes the ones it has (for at most
 /// `drain_timeout_secs`), and returns.
 pub async fn run_with_stores(
@@ -110,23 +109,25 @@ pub async fn run_with_stores(
         }
     });
     let sessions = Arc::new(Sessions {
-        store: store::Store::new(store, db.clone(), version.clone(), worker_id.clone()),
+        records: records::Records::new(db.clone(), version.clone()),
         version: version.clone(),
     });
     if cfg.state_ttl_secs > 0 {
         let ttl = Duration::from_secs(cfg.state_ttl_secs);
-        let store = sessions.store.clone();
+        let records = records::Records::new(db.clone(), version.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval((ttl / 4).max(Duration::from_secs(60)));
             loop {
                 tick.tick().await;
-                match store.sweep(ttl).await {
-                    Ok(n) => tracing::info!(deleted = n, "swept expired proof states"),
-                    Err(e) => tracing::warn!("sweeping proof states failed: {e}"),
+                let cutoff = documents::now_secs().saturating_sub(ttl.as_secs());
+                match records.sweep(cutoff).await {
+                    Ok(n) => tracing::info!(deleted = n, "swept expired sessions and documents"),
+                    Err(e) => tracing::warn!("sweeping sessions and documents failed: {e}"),
                 }
             }
         });
     }
+    tokio::spawn(remove_pickles(store, version.clone()));
 
     let (drain_tx, drain_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -157,8 +158,9 @@ pub(crate) async fn run_job(
 ) -> JobResult {
     match job {
         Job::Check(c) => JobResult::Check(check::run_check(pool, c).await),
-        Job::SessionStart(j) => JobResult::SessionStarted(sessions.start(pool, j).await),
-        Job::SessionTactic(j) => JobResult::TacticApplied(sessions.tactic(pool, j).await),
+        job @ (Job::SessionStart(_) | Job::SessionTactic(_)) => {
+            documents::run(documents, job).await
+        }
         Job::SessionCheck(j) => JobResult::SessionChecked(sessions.check(pool, j).await),
         Job::SnapshotCreate(j) | Job::SnapshotReplace(j) => {
             JobResult::SnapshotCreated(Box::new(pool.snapshots().create(pool, j).await))
@@ -219,6 +221,35 @@ pub(crate) async fn run_job(
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the server".into(),
         },
+    }
+}
+
+/// Deletes the pickled proof states an earlier release stored under
+/// `states/<version>/`: states are replayed on Lean Beam now.
+async fn remove_pickles(store: Arc<dyn ObjectStore>, version: String) {
+    use futures::StreamExt;
+    use object_store::ObjectStoreExt;
+    let prefix = object_store::path::Path::from(format!("states/{version}"));
+    let mut objects = store.list(Some(&prefix));
+    let mut removed = 0;
+    while let Some(meta) = objects.next().await {
+        let removing = match meta {
+            Ok(meta) => store.delete(&meta.location).await,
+            Err(e) => Err(e),
+        };
+        match removing {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!("removing the pickled proof states failed: {e}");
+                return;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(
+            removed,
+            "removed the pickled proof states of an earlier release"
+        );
     }
 }
 

@@ -94,10 +94,16 @@ pub fn worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
 
 /// [`worker_config`] with one Beam slot, on the fake Beam.
 pub fn beam_worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
+    with_beam(worker_config(name, version, slots))
+}
+
+/// `cfg` with one Beam slot, on the fake Beam, which tactic sessions and
+/// documents need.
+pub fn with_beam(cfg: WorkerConfig) -> WorkerConfig {
     WorkerConfig {
         beam_slots: 1,
         beam_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_fake-beam"))),
-        ..worker_config(name, version, slots)
+        ..cfg
     }
 }
 
@@ -121,6 +127,11 @@ async fn db_store() -> (Db, String) {
 impl Cluster {
     pub async fn start(workers: &[(&str, &str, usize)]) -> Cluster {
         Self::start_with(router_config(), workers, |c| c).await
+    }
+
+    /// [`Cluster::start`] with a Beam slot on each worker, for sessions.
+    pub async fn start_beam(workers: &[(&str, &str, usize)]) -> Cluster {
+        Self::start_with(router_config(), workers, with_beam).await
     }
 
     /// Starts the router and `(name, version, slots)` workers. Requests can

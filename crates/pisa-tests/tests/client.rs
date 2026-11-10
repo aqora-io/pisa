@@ -14,7 +14,7 @@ use pisa_client::{
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_covers_checks_and_sessions() {
-    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let c = Cluster::start_beam(&[("w0", "v", 2)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_timeout(5);
     assert_eq!(client.health().await.unwrap().status, HealthStatus::Ok);
 
@@ -39,7 +39,7 @@ async fn client_covers_checks_and_sessions() {
         .unwrap();
     let step = client.apply_tactic(&s.states[0].id, "simp").await.unwrap();
     assert!(!step.complete);
-    assert_eq!(step.state.goals, ["⊢ goal 1 after simp"]);
+    assert_eq!(step.state.goals, ["⊢ True after simp"]);
     let done = client.apply_tactic(&step.state.id, "rfl").await.unwrap();
     assert!(done.complete);
     let err = client
@@ -665,7 +665,7 @@ async fn missing_version_is_out_of_capacity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_submits_and_waits_for_jobs() {
-    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_timeout(5);
 
     let job = client.submit_check("#check Nat").await.unwrap();

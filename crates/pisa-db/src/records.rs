@@ -18,6 +18,19 @@ pub struct DocumentRow {
     pub holder: Option<String>,
 }
 
+/// A tactic session's state: one of its `sorry`s, or a tactic applied to
+/// another state. A worker replays the chain from the `sorry` on Lean Beam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateRow {
+    /// The session's document.
+    pub session: String,
+    /// For a session's first states, the index of their `sorry`.
+    pub sorry: Option<u32>,
+    /// For the others, the state the tactic was applied to.
+    pub parent: Option<String>,
+    pub tactic: Option<String>,
+}
+
 pub struct Records {
     db: Db,
     version: String,
@@ -28,24 +41,15 @@ impl Records {
         Records { db, version }
     }
 
-    /// Stores state `hash`'s record, created at `created` (seconds since the
-    /// Unix epoch) by worker `holder`, in place of any it had. Jobs that
-    /// continue the state prefer the holder, which may still have it loaded.
-    pub async fn put_state(
-        &self,
-        hash: &str,
-        created: u64,
-        meta: &Value,
-        holder: &str,
-    ) -> Result<(), DbError> {
-        dispatch!(
-            &self.db,
-            put_state(&self.version, hash, created, meta, holder)
-        )
+    /// Stores state `id`, a step of a tactic session, at `created` (seconds
+    /// since the Unix epoch). A state's id comes from what it is, so storing
+    /// it again only renews it.
+    pub async fn put_state(&self, id: &str, state: &StateRow, created: u64) -> Result<(), DbError> {
+        dispatch!(&self.db, put_state(&self.version, id, state, created))
     }
 
-    pub async fn state(&self, hash: &str) -> Result<Option<Value>, DbError> {
-        dispatch!(&self.db, state(&self.version, hash))
+    pub async fn state(&self, id: &str) -> Result<Option<StateRow>, DbError> {
+        dispatch!(&self.db, state(&self.version, id))
     }
 
     /// Stores session `id`'s record, created at `created` (seconds since the
@@ -153,6 +157,33 @@ mod tests {
             assert_eq!(r.document("d").await.unwrap(), None);
             assert!(!r.hold_document("d", "w3", 14).await.unwrap());
             assert_eq!(r.edit_document("d", "c", 2, "w3", 14).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_state_is_a_sorry_or_a_tactic_on_another_state() {
+        for (db, r, version) in records().await {
+            let root = StateRow {
+                session: "s".into(),
+                sorry: Some(0),
+                parent: None,
+                tactic: None,
+            };
+            let step = StateRow {
+                session: "s".into(),
+                sorry: None,
+                parent: Some("a".into()),
+                tactic: Some("simp".into()),
+            };
+            r.put_state("a", &root, 10).await.unwrap();
+            r.put_state("b", &step, 10).await.unwrap();
+            // Storing it again only renews it.
+            r.put_state("b", &step, 20).await.unwrap();
+            assert_eq!(r.state("a").await.unwrap(), Some(root));
+            assert_eq!(r.state("b").await.unwrap(), Some(step));
+            assert_eq!(r.state("c").await.unwrap(), None);
+            assert_eq!(r.sweep(15).await.unwrap(), 1);
+            assert_eq!(db.rows(&version).await.unwrap(), [["states", "b"]]);
         }
     }
 

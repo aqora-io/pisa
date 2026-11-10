@@ -90,12 +90,12 @@ export type { Error as ApiError } from "./openapi.ts";
 
 // ===================== Identifiers =====================
 
-/** A proof state: `<version>~<header_key>~<hash>`. Opaque to clients. The hash
- *  is of the state's contents, so two tactics that reach the same state give
- *  the same id. A state stays valid after tactics are applied to it, so a
- *  session is a tree. */
+/** A proof state: `<version>~<session>~<32 hex>`. Opaque to clients. The same
+ *  tactic on the same state gives the same state, and the same id. A state
+ *  stays valid after tactics are applied to it, so a session is a tree. */
 export type StateId = string;
-/** A tactic session, `<version>~<header_key>~<id>`. */
+/** A tactic session, `<version>~<32 hex>`: also its open document's id, for
+ *  the `/documents` endpoints. */
 export type SessionId = string;
 /** A snapshot's id, `<version>~<32 lowercase hex>`. */
 export type SnapshotId = string;

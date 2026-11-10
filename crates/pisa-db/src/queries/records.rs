@@ -6,7 +6,7 @@ use diesel_async::RunQueryDsl;
 use serde_json::Value;
 
 use crate::db::{DbError, retry};
-use crate::records::DocumentRow;
+use crate::records::{DocumentRow, StateRow};
 use crate::schema::{
     described, documents, entries, leases, module_imports, modules, sessions, states,
 };
@@ -14,27 +14,24 @@ use crate::schema::{
 pub(crate) async fn put_state(
     db: &Handle,
     v: &str,
-    hash: &str,
+    id: &str,
+    state: &StateRow,
     created: u64,
-    meta: &Value,
-    holder: &str,
 ) -> Result<(), DbError> {
     retry(|| async {
         diesel::insert_into(states::table)
             .values((
                 states::version.eq(v),
-                states::hash.eq(hash),
-                states::meta.eq(meta),
+                states::id.eq(id),
+                states::session.eq(&state.session),
+                states::sorry.eq(state.sorry.map(|n| n as i32)),
+                states::parent.eq(&state.parent),
+                states::tactic.eq(&state.tactic),
                 states::created.eq(created as i64),
-                states::holder.eq(holder),
             ))
-            .on_conflict((states::version, states::hash))
+            .on_conflict((states::version, states::id))
             .do_update()
-            .set((
-                states::meta.eq(meta),
-                states::created.eq(created as i64),
-                states::holder.eq(holder),
-            ))
+            .set(states::created.eq(created as i64))
             .execute(&mut *conn(db).await?)
             .await?;
         Ok(())
@@ -42,13 +39,24 @@ pub(crate) async fn put_state(
     .await
 }
 
-pub(crate) async fn state(db: &Handle, v: &str, hash: &str) -> Result<Option<Value>, DbError> {
-    Ok(states::table
-        .find((v, hash))
-        .select(states::meta)
-        .first(&mut *conn(db).await?)
+pub(crate) async fn state(db: &Handle, v: &str, id: &str) -> Result<Option<StateRow>, DbError> {
+    let row = states::table
+        .find((v, id))
+        .select((
+            states::session,
+            states::sorry,
+            states::parent,
+            states::tactic,
+        ))
+        .first::<(String, Option<i32>, Option<String>, Option<String>)>(&mut *conn(db).await?)
         .await
-        .optional()?)
+        .optional()?;
+    Ok(row.map(|(session, sorry, parent, tactic)| StateRow {
+        session,
+        sorry: sorry.map(|n| n as u32),
+        parent,
+        tactic,
+    }))
 }
 
 pub(crate) async fn put_session(
@@ -276,7 +284,7 @@ pub(crate) async fn rows(db: &Handle, v: &str) -> Result<Vec<Vec<String>>, DbErr
     }
     for hash in states::table
         .filter(states::version.eq(v))
-        .select(states::hash)
+        .select(states::id)
         .load::<String>(c)
         .await?
     {

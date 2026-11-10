@@ -55,9 +55,6 @@ pub struct NewJob {
     pub header_key: Option<String>,
     /// The header's text, which new workers may prewarm.
     pub header: Option<String>,
-    /// The proof state the job continues, by version and hash. The worker
-    /// that stored it is preferred.
-    pub state: Option<(String, String)>,
     /// The open document it works on, by id within `version`. Only workers
     /// with Beam slots claim it, and the worker holding the document open is
     /// preferred.
@@ -110,8 +107,7 @@ pub struct Candidate {
     pub id: i64,
     pub priority: i16,
     pub header_key: Option<String>,
-    /// The worker that stored the proof state the job continues, or that
-    /// holds open the document it works on.
+    /// The worker that holds open the document it works on.
     pub affinity: Option<String>,
     pub enqueued_micros: i64,
     /// The open document it works on.
@@ -346,7 +342,6 @@ mod tests {
             priority,
             header_key: Some("k".into()),
             header: Some("import Mathlib".into()),
-            state: None,
             document: None,
             job: json!({"kind": "check"}),
             max_wait: Duration::from_secs(60),
@@ -595,29 +590,6 @@ mod tests {
             q.claim("w", &[id], LEASE).await.unwrap();
             assert_eq!(q.give_up(id).await.unwrap(), None);
             assert!(q.complete("w", id, &json!(1)).await.unwrap());
-        }
-    }
-
-    #[tokio::test]
-    async fn the_worker_that_stored_a_state_is_its_jobs_affinity() {
-        for q in queues().await {
-            let records = Records::new(q.db().clone(), "v".into());
-            let hash = uuid::Uuid::new_v4().simple().to_string();
-            records.put_state(&hash, 0, &json!({}), "w1").await.unwrap();
-            let mut new = job(Some("v"), 0);
-            new.state = Some(("v".into(), hash));
-            q.enqueue(&new).await.unwrap();
-            let mut unknown = job(Some("v"), 0);
-            unknown.state = Some(("v".into(), "nope".into()));
-            q.enqueue(&unknown).await.unwrap();
-            let affinity: Vec<_> = q
-                .candidates("v", 10)
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|c| c.affinity)
-                .collect();
-            assert_eq!(affinity, [Some("w1".to_string()), None]);
         }
     }
 

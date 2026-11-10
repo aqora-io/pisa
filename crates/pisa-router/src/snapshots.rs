@@ -114,7 +114,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         version,
         header_key: Some(header_key(&next)),
         header: None,
-        state: None,
+        document: None,
     };
     let replace = req.replaces.is_some();
     let create = SnapshotCreateJob {

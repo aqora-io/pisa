@@ -42,9 +42,7 @@ function Editor({ code }: { code: string }) {
   - Each `sorry` is a root, and every tactic adds a node. Nodes have ids of
     their own, as two tactics can reach the same state.
   - Branches run in parallel, and a tactic Lean rejects marks its node
-    `failed`: with `error` when the server refused it, or with an error in
-    `messages` when Lean recovered (an unknown identifier, say). A failed node
-    can't be built on.
+    `failed`, with the server's `error`. A failed node can't be built on.
   - Requests are aborted on reset and unmount. Call `start` from an event,
     not an effect.
 - **Snapshots.**

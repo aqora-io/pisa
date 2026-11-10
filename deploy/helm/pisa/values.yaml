@@ -65,9 +65,9 @@ worker:
   maxRssMb: 6000
   # Headers to import at startup, separated by ';', e.g. "import Mathlib".
   prewarm: ""
-  # Lean Beam processes per pod for /documents, beside the slots (0 serves
-  # none), and the documents each keeps open.
-  beamSlots: 0
+  # Lean Beam processes per pod for /documents and tactic sessions, beside
+  # the slots (0 serves neither), and the documents each keeps open.
+  beamSlots: 1
   beamDocuments: 4
   # memory.max per Beam process (MiB); also sizes the pod's memory limit.
   beamMemoryMaxMb: 8000
@@ -82,8 +82,8 @@ worker:
   resources: {}
   extraEnv: []
 
-# S3-compatible storage for tactic-session proof states. All workers of a
-# release share it.
+# S3-compatible storage for snapshot modules. All workers of a release share
+# it.
 store:
   s3:
     # Required.
@@ -98,12 +98,13 @@ store:
       name: ""
       accessKeyIdKey: AWS_ACCESS_KEY_ID
       secretAccessKeyKey: AWS_SECRET_ACCESS_KEY
-  # Delete stored states and sessions older than this (0 keeps them).
+  # Delete documents, sessions and their states older than this (0 keeps
+  # them).
   stateTtlSecs: 86400
 
 # PostgreSQL holds the job queue between the servers and the workers, and
-# the metadata that all workers of a release share: the session and
-# proof-state records, and the snapshot entries and module records. It has
+# the metadata that all workers of a release share: the documents, the
+# sessions and their states, and the snapshot entries and module records. It has
 # the only copy of the snapshot records, which never expire, so it must be
 # durable and backed up. The chart doesn't deploy PostgreSQL; run it with
 # CloudNativePG (https://cloudnative-pg.io), as a managed service or by any

@@ -11,18 +11,19 @@ Lean 4 Server in Rust*:
 
 1. **Servers and workers.** A server puts each request's job on a queue in
    the database, with two priority classes.
-   Workers claim jobs, preferring those whose proof state they hold or whose
-   header they have warm, and a job whose worker dies runs on another. Servers
-   hold no state, so they run in replicas.
+   Workers claim jobs, preferring those whose document they hold open or
+   whose header they have warm, and a job whose worker dies runs on another.
+   Servers hold no state, so they run in replicas.
 2. **Hardened workers.**
    - Each REPL runs in a bubblewrap sandbox and its own cgroup v2 limits.
    - Proofs are judged by the axioms they depend on, not by string matching.
    - Metaprogramming and unsafe options are rejected before the code runs.
    - Worker pools are labelled by version.
 3. **Tactic sessions.**
-   - Proof states are pickled into object storage (S3, or Garage in Compose),
-     and their records and the sessions are kept in PostgreSQL, so any worker
-     can continue a session.
+   - A session is a document open on Lean Beam, and a state is a tactic run
+     from a `sorry` or from another state, so tactics see what the session's
+     own code declares. The states' records are kept in PostgreSQL, so any
+     worker can continue a session by replaying them.
    - A final check re-runs the whole proof from scratch and confirms it proves
      the original statements, with the original imports.
 
@@ -36,7 +37,7 @@ imports it instead of re-checking it.
 | --- | --- |
 | `pisa-protocol` | The HTTP API types, REPL protocol types, header splitting, the jobs and results that go through the queue |
 | `pisa-repl` | Async driver for one REPL process: blank-line framing, timeouts, crash reporting |
-| `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, sessions, state store, claiming jobs |
+| `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, documents and tactic sessions on Lean Beam, claiming jobs |
 | `pisa-db` | The database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, the job queue and the workers' registry, and the snapshot catalog, shared by the servers and the workers |
 | `pisa-server` | The server: `pisa-router`'s API and `pisa-search`'s in one process, with a combined `/health` and graceful shutdown |
 | `pisa-router` | The check, session and snapshot API: queueing jobs and waiting for their results |
@@ -71,11 +72,11 @@ next to Garage for S3.
 `--scale server=N` or `--scale worker=N` runs more of either. The servers and
 the workers keep their data in two places, chosen by environment variables
 that Compose and the chart set:
-- **The job queue and the metadata**, the sessions, the records that make
-  proof states loadable, and the snapshots and module records, are in a
-  database, which every server and worker share. `PISA_DATABASE_URL` is
-  a PostgreSQL URL (`postgres://user:password@host/db`) or the path of a
-  SQLite file, which only one host can use. It is required.
+- **The job queue and the metadata**, the documents, the sessions and their
+  states, and the snapshots and module records, are in a database, which
+  every server and worker share. `PISA_DATABASE_URL` is a PostgreSQL URL
+  (`postgres://user:password@host/db`) or the path of a SQLite file, which
+  only one host can use. It is required.
   - Each process creates or updates the tables when it starts, one process
     at a time.
   - Jobs and workers are kept apart by `PISA_QUEUE` (default `pisa`), which
@@ -96,7 +97,7 @@ that Compose and the chart set:
   - The tests use in-memory SQLite, and also the PostgreSQL that
     `PISA_TEST_DATABASE_URL` names when it is set. Each test has versions of
     its own there, so tests can share one database.
-- **Blobs**, the pickled proof states and snapshot modules, are in S3.
+- **Blobs**, the snapshot modules, are in S3.
   `PISA_STORE` is `s3`, which reads the `AWS_*` variables, or `memory`.
 
 The pinned versions live in `docker/lean-project`: `lean-toolchain`,
@@ -114,9 +115,9 @@ on the same Lean version.
 **Cluster prerequisites.** Like most application charts, it uses the cluster's
 own KEDA, which reads the job queue from the database (see Scaling below).
 
-**Storage.** The job queue and the metadata (sessions, proof-state records,
-snapshots and module records) live in PostgreSQL, and blobs (pickled
-proof states, snapshot modules) in an S3-compatible bucket.
+**Storage.** The job queue and the metadata (documents, sessions and their
+states, snapshots and module records) live in PostgreSQL, and blobs (snapshot
+modules) in an S3-compatible bucket.
 - The chart doesn't deploy PostgreSQL. Put the URL of one you run, for
   example with [CloudNativePG](https://cloudnative-pg.io) or a managed
   service, in a Secret, and name it in `metadata.database.urlSecret.name`
@@ -199,6 +200,14 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release that runs tactic sessions on Lean Beam:
+- Earlier sessions and their states are gone, and their ids answer 404. The
+  database's migration drops their records, and each worker deletes the
+  pickled states under the object store's `states/<version>/` when it starts.
+- Sessions need workers with a Beam slot. `PISA_BEAM_SLOTS` is 1 by default,
+  in Compose and in the chart, whose worker pods request one more CPU and
+  `beamMemoryMaxMb` more memory.
+
 To the release that names each thing in the API once:
 - Reset the database, and the object store's `snapshots/` and `states/`.
   Nothing reads what earlier releases stored, so snapshots, sessions and
@@ -227,8 +236,8 @@ pnpm -C web generate
 | --- | --- |
 | `POST /check` | `{code, version?, timeout?, detail?, at?}` → check result |
 | `POST /check/batch` | `{items: [{code}], version?, timeout?, detail?, at?}` → `{results: [...]}`, in order |
-| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}` |
-| `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid |
+| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}`; see [Tactic sessions](#sessions) |
+| `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid, and a failing tactic is a 422 |
 | `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
 | `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
@@ -350,21 +359,51 @@ tactics at a `sorry`:
 - `PATCH` replaces the code. It names the `revision` it replaces, and is a
   409 `conflict` if the document is at another. Goals and probes may name a
   `revision` too.
-- `DELETE` closes the document. An unused one expires with the proof states,
-  after `PISA_STATE_TTL_SECS`.
+- `DELETE` closes the document. An unused one expires after
+  `PISA_STATE_TTL_SECS` (a day in Compose and the chart).
 - A document's jobs run one at a time, on the worker that holds it open,
   while that worker is live. If it goes, another reopens the stored code,
   which takes as long as elaborating it.
 - Only workers with Beam slots serve documents. Without one, the endpoints
   answer 503 `unavailable`; a 429 means no Beam worker took the job in time.
   The worker settings:
-  - `PISA_BEAM_SLOTS` (default 0): `lean-beam-mcp` processes beside the REPL
-    slots, each in a sandbox and cgroup of its own.
+  - `PISA_BEAM_SLOTS` (default 1): `lean-beam-mcp` processes beside the REPL
+    slots, each in a sandbox and cgroup of its own. They serve documents and
+    tactic sessions.
   - `PISA_BEAM_DOCUMENTS` (default 4): the documents each keeps open. To
     open another, it closes the least recently used one that no job holds.
   - `PISA_BEAM_MEMORY_MAX_MB` (default 0, none): each one's memory limit.
   - `PISA_BEAM_BIN`: `lean-beam-mcp`, by default the one in Lean's
     toolchain.
+
+<a id="sessions"></a>
+**Tactic sessions.** A session is a [document](#documents) for building
+proofs one tactic at a time, as a tree of states:
+- `POST /sessions` opens the code, and answers a state for each `sorry`,
+  with its goals, and Lean's errors and warnings (`messages`). The session's
+  `id` is its document's, so `/documents/{id}/goals` and `/probes` work on
+  it, but its code stays: a `PATCH` is a 400 `bad_request`.
+- `POST /states/{id}/tactic` runs a tactic on a state, in the context of the
+  session's code, so it sees what the code declares before the `sorry`.
+  - It answers the new state, which can be continued; a tactic that fails is
+    a 422 `lean`, with Lean's errors in its message.
+  - A state stays valid after others are made from it, so a client can try
+    alternatives from one state.
+  - `complete` means no goals are left and the tactic doesn't say `sorry` or
+    `admit`. As with probes, it is no verdict.
+- A state's id is `<version>~<session>~<state>`, where `<state>` names what
+  the state is: the same tactic on the same state gives the same id.
+- `POST /sessions/{id}/check` checks the assembled proof from scratch, as
+  `/check` does, and also requires the session's original statements and
+  imports.
+- The worker that holds the session's document keeps the latest 256 states
+  it made or used. Another worker, or this one for an older state, replays
+  the state's tactics from the nearest state it keeps, or from the `sorry`,
+  reopening the document first if it isn't open there.
+- `DELETE /documents/{id}` closes a session, and its states then answer 404.
+  A session expires `PISA_STATE_TTL_SECS` after it starts.
+- Only workers with Beam slots serve sessions. Without one, `/sessions` and
+  `/states/{id}/tactic` answer 503 `unavailable`.
 
 `version` selects a worker pool, by label (such as `v4.35.0-1a2b3c4d`) or by
 an alias set with `PISA_ALIASES`. Session, state, snapshot and document ids
@@ -1182,8 +1221,7 @@ import { PisaClient } from "@aqora/pisa-client";
 const client = new PisaClient({ url: "http://localhost:8000", timeout: 60 });
 const result = await client.check("theorem t : 2 + 2 = 4 := by decide");
 const session = await client.startSession("theorem t (n : Nat) : n + 0 = n := by sorry");
-// Throws a PisaError (kind "lean") if the tactic doesn't parse; an error Lean
-// recovers from, like an unknown identifier, is in step.messages instead.
+// Throws a PisaError (kind "lean") if the tactic fails, with Lean's errors.
 const step = await client.applyTactic(session.states[0]!.id, "simp");
 ```
 
@@ -1562,15 +1600,9 @@ code on top of it does, seeing only what it exports. `/check` and
 
 - The REPL never frees environments, so workers replace each process after
   `PISA_MAX_USES` jobs or at a memory high-water mark.
-- REPL tactic mode can't write a finished tactic script back into the `sorry`.
+- A session doesn't write a finished tactic script back into the `sorry`.
   Clients submit the assembled proof to `/sessions/{id}/check`.
-- Scoped extensions, such as scoped notation, don't survive pickling.
-- A session's states start from its imports alone: the REPL makes each on
-  the environment the code started from. So a tactic can't use what the
-  session's own code declares before the `sorry`, and answers that it
-  doesn't know the name; the session's `messages` warn at the first such
-  declaration. Put those declarations in a [snapshot](#snapshots) and start
-  the session on its header: what a snapshot declares is in the environment
-  of the code that imports it.
+- A state that another worker continues is replayed from its `sorry`, so
+  that step takes as long as the tactics before it, and the reopening.
 - Not built yet: auth and per-tenant fairness, `/jobs` async batches, and
   human workspaces (stage 4).

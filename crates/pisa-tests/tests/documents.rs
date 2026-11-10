@@ -29,7 +29,6 @@ fn document_job(c: &Cluster, document: &str, job: Job, max_wait: Duration) -> Ne
         priority: 0,
         header_key: None,
         header: None,
-        state: None,
         document: Some(document.into()),
         job: serde_json::to_value(job).unwrap(),
         max_wait,

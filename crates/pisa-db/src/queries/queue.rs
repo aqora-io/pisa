@@ -17,7 +17,7 @@ use crate::queue::{
     ASYNC_RETENTION, Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION,
     STALE_RETENTION, Stage, Status,
 };
-use crate::schema::{documents, jobs, states, workers};
+use crate::schema::{documents, jobs, workers};
 
 /// How long a server's own giving up gets before a sweep deletes a job
 /// nobody can claim any more.
@@ -92,15 +92,8 @@ async fn insert(
 ) -> Result<(i64, Option<String>), DbError> {
     retry(|| async {
         let mut c = conn(db).await?;
-        let affinity = match (&job.state, &job.version, &job.document) {
-            (Some((v, hash)), _, _) => states::table
-                .find((v, hash))
-                .select(states::holder)
-                .first::<Option<String>>(&mut *c)
-                .await
-                .optional()?
-                .flatten(),
-            (None, Some(v), Some(id)) => documents::table
+        let affinity = match (&job.version, &job.document) {
+            (Some(v), Some(id)) => documents::table
                 .find((v, id))
                 .select(documents::holder)
                 .first::<Option<String>>(&mut *c)

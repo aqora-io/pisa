@@ -432,7 +432,7 @@ async fn other_workers_load_snapshots_from_the_store() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_snapshots_are_not_found() {
-    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
     let unknown = format!(
         "import PisaSnap.s{}\n\ntheorem t : True := trivial",
         "0".repeat(32)
@@ -449,7 +449,7 @@ async fn unknown_snapshots_are_not_found() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sessions_run_on_snapshots_and_keep_their_imports() {
-    let mut c = Cluster::start(&[("w0", "v", 1)]).await;
+    let mut c = Cluster::start_beam(&[("w0", "v", 1)]).await;
     let root = kept(&c, ROOT).await;
     let other = kept(&c, "import Foo\n\ntheorem base : 1 = 1 := rfl\n-- other").await;
     let code = on(&root, "needs base\ntheorem t : 1 = 1 := by sorry");
@@ -457,7 +457,7 @@ async fn sessions_run_on_snapshots_and_keep_their_imports() {
     assert_eq!(status, 200, "{s}");
     assert_eq!(s["states"][0]["pos"]["line"], 5);
 
-    c.add_worker(common::worker_config("w1", "v", 1));
+    c.add_worker(common::beam_worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
     c.kill_worker(0).await;
 

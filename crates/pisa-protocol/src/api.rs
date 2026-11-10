@@ -458,8 +458,9 @@ pub struct TacticInfo {
     pub end_pos: Pos,
 }
 
-/// `POST /sessions`: runs code containing `sorry`; each `sorry` becomes a
-/// proof state that tactics can be applied to.
+/// `POST /sessions`: opens code containing `sorry` on Lean Beam; each
+/// `sorry` becomes a proof state that tactics can be applied to, in the
+/// code's own context.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct StartSessionRequest {
     /// Code with `sorry`s, each of which becomes a state.
@@ -473,13 +474,13 @@ pub struct StartSessionRequest {
 /// A proof session: the states that its code's `sorry`s start from.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Session {
-    /// Its id, for checking the finished proof at `/sessions/{id}/check`.
+    /// Its id, `<version>~<32 hex>`, for checking the finished proof at
+    /// `/sessions/{id}/check`. It is also its open document's, for
+    /// `/documents/{id}/goals` and `/probes`.
     pub id: String,
     /// One per `sorry`, in source order.
     pub states: Vec<State>,
-    /// What Lean said about the code, and a warning, at its first line, if
-    /// the code declares something before a `sorry`: each state starts from
-    /// the imports alone, so its tactics can't use what the code declares.
+    /// Lean's errors and warnings about the code.
     #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
@@ -489,7 +490,9 @@ pub struct Session {
 /// tactics are applied to it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct State {
-    /// Its id, for applying a tactic at `/states/{id}/tactic`.
+    /// Its id, `<version>~<session hex>~<32 hex>`, for applying a tactic at
+    /// `/states/{id}/tactic`. The same tactic on the same state gives the
+    /// same state, and so the same id.
     pub id: String,
     /// The goals left, as Lean prints them. A session's first states have
     /// their `sorry`'s goal; a tactic can leave more, or none.
@@ -502,7 +505,8 @@ pub struct State {
     pub end_pos: Option<Pos>,
 }
 
-/// `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`.
+/// `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`,
+/// with Lean's errors in its message, and leaves no state.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ApplyTacticRequest {
     pub tactic: String,
@@ -514,8 +518,9 @@ pub struct ApplyTacticRequest {
 pub struct ApplyTacticResponse {
     /// The new state. Earlier states stay valid, so a session is a tree.
     pub state: State,
-    /// No goals remain for this state's `sorry`. This says nothing about the
-    /// rest of the proof; check the assembled proof with the session check.
+    /// No goals remain for this state's `sorry`, and the tactic doesn't say
+    /// `sorry` or `admit`. This says nothing about the rest of the proof;
+    /// check the assembled proof with the session check.
     pub complete: bool,
     #[schema(required = true)]
     #[serde(default)]
@@ -1501,25 +1506,27 @@ fn is_id_part(p: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
 }
 
-/// A state key or session ID: `<version>~<header key>~<id>`. Carrying the
-/// version and header lets the router route it without a lookup.
+/// A state's id: `<version>~<session>~<id>`, where the session is its open
+/// document's id within the version. Carrying the version and the document
+/// lets the router route it without a lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Key {
     pub version: String,
-    pub header_key: String,
+    /// The session's document.
+    pub session: String,
     pub id: String,
 }
 
 impl Key {
     pub fn parse(s: &str) -> Option<Key> {
         let mut parts = s.split('~');
-        let (version, header_key, id) = (parts.next()?, parts.next()?, parts.next()?);
-        if parts.next().is_some() || ![version, header_key, id].into_iter().all(is_id_part) {
+        let (version, session, id) = (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() || ![version, session, id].into_iter().all(is_id_part) {
             return None;
         }
         Some(Key {
             version: version.into(),
-            header_key: header_key.into(),
+            session: session.into(),
             id: id.into(),
         })
     }
@@ -1527,7 +1534,7 @@ impl Key {
 
 impl std::fmt::Display for Key {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}~{}~{}", self.version, self.header_key, self.id)
+        write!(f, "{}~{}~{}", self.version, self.session, self.id)
     }
 }
 
@@ -1705,7 +1712,7 @@ mod tests {
     fn keys_round_trip_and_reject_path_tricks() {
         let k = Key {
             version: "v4.35.0-1a2b3c4d".into(),
-            header_key: "abc".into(),
+            session: "abc".into(),
             id: "0f".into(),
         };
         assert_eq!(Key::parse(&k.to_string()), Some(k));

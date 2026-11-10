@@ -14,7 +14,8 @@ import { usePisaClient } from "../provider.tsx";
 
 /** A state of a proof session. Each `sorry` is a root, and each tactic applied
  *  is a node under the node it was applied to. Nodes have ids of their own:
- *  two tactics can reach the same state, with the same id. */
+ *  the same tactic applied twice to a state gives the same state, with the
+ *  same id. */
 export interface ProofNode {
   id: number;
   /** The node the tactic was applied to; `null` for a root. */
@@ -29,8 +30,7 @@ export interface ProofNode {
   complete: boolean;
   messages: Message[];
   /** Why the tactic failed: `lean` or `policy` when Lean rejected it,
-   *  `not_found` when the state it was applied to has expired. Absent when
-   *  Lean recovered from an error, which is then in `messages`. */
+   *  `not_found` when the state it was applied to has expired. */
   error?: PisaError;
   /** For a root, the `sorry` it stands for. */
   sorry?: State;
@@ -133,9 +133,7 @@ export function proofReducer(s: ProofState, a: ProofAction): ProofState {
     case "applied":
       return update(s, a.id, (n) => ({
         ...n,
-        // Lean recovers from an elaboration error, closing the goal: the
-        // state it leaves can't be built on.
-        status: a.messages.some((m) => m.severity === "error") ? "failed" : "ok",
+        status: "ok",
         state: a.state,
         goals: a.goals,
         complete: a.complete,

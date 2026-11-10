@@ -43,6 +43,11 @@ export default async function setup(project: TestProject): Promise<() => void> {
     join(BIN, "fake-repl"),
     "--lean",
     join(BIN, "fake-lean"),
+    // Sessions run on Lean Beam, here its stand-in.
+    "--beam-slots",
+    "1",
+    "--beam-bin",
+    join(BIN, "fake-beam"),
   ]);
   await until("the worker", async () => (await health(url)).workers === 1);
   project.provide("pisaUrl", url);

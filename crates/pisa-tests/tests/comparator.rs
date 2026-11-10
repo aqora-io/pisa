@@ -42,7 +42,6 @@ async fn run(c: &Cluster, job: Job) -> JobResult {
         priority: 0,
         header_key: None,
         header: None,
-        state: None,
         document: None,
         job: serde_json::to_value(job).unwrap(),
         max_wait: Duration::from_secs(10),

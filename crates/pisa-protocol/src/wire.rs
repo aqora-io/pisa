@@ -55,6 +55,10 @@ pub struct CheckJob {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStartJob {
+    /// The session's document: 32 lowercase hex, its id within the job's
+    /// version.
+    #[serde(default)]
+    pub document: String,
     pub code: String,
     pub timeout_secs: u64,
 }

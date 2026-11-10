@@ -54,7 +54,7 @@ describe("sessions", () => {
   it("branches from any state, and checks the proof against the session", async () => {
     const session = await client.startSession("theorem t : 1 = 1 := by sorry");
     const root = session.states[0];
-    expect(root?.goals).toEqual(["⊢ goal 1"]);
+    expect(root?.goals).toEqual(["⊢ True"]);
     expect(root?.pos).toEqual({ line: 1, column: 24 });
 
     const step = await client.applyTactic(root?.id ?? "", "simp");

@@ -45,7 +45,9 @@ def url(db):
     wait_for(lambda: client.health()["status"] == "ok")
     worker = subprocess.Popen(
         [BIN / "pisa-worker", "--database-url", db, "--version", "v",
-         "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean"],
+         "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean",
+         # Sessions run on Lean Beam, here its stand-in.
+         "--beam-slots", "1", "--beam-bin", BIN / "fake-beam"],
         env=env,
     )
     wait_for(lambda: health(url)["workers"] == 1)
@@ -140,7 +142,7 @@ def test_session(url):
     client = Client(url, timeout=5)
     session = client.start_session("theorem t : 1 = 1 := by sorry")
     root = session["states"][0]
-    assert root["goals"] == ["⊢ goal 1"] and root["pos"]["line"] == 1
+    assert root["goals"] == ["⊢ True"] and root["pos"]["line"] == 1
 
     step = client.apply_tactic(root["id"], "simp")
     assert not step["complete"] and "pos" not in step["state"]

@@ -34,7 +34,7 @@ fn bad_request(message: impl Into<String>) -> ApiError {
 
 /// Fails unless a live worker of `version` (of any, for `None`) serves
 /// documents: otherwise a job on one would only wait for its time limit.
-async fn serving(app: &App, version: Option<&str>) -> Result<(), ApiError> {
+pub(crate) async fn serving(app: &App, version: Option<&str>) -> Result<(), ApiError> {
     let n = app
         .dispatcher
         .queue()
@@ -63,11 +63,12 @@ async fn submit(
         job,
         route: Route {
             version,
+            document: Some(document),
             ..Route::default()
         },
         priority: Priority::Interactive,
     };
-    Ok(app.dispatcher.submit_document(p, document).await?)
+    Ok(app.dispatcher.submit(p).await?)
 }
 
 fn positions(at: &[LinePos]) -> Result<(), ApiError> {

@@ -6,9 +6,6 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Cluster, url_of};
-use futures::StreamExt;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
 use pisa_client::{Client, HealthStatus};
 use pisa_worker::queue::LIVE;
 use serde_json::{Value, json};
@@ -27,7 +24,7 @@ async fn until(what: &str, mut done: impl AsyncFnMut() -> bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn any_server_serves_any_request() {
-    let c = Cluster::start(&[("w0", "v", 1), ("w1", "v", 1)]).await;
+    let c = Cluster::start_beam(&[("w0", "v", 1), ("w1", "v", 1)]).await;
     let b = c.start_server().await;
     for server in [&c.router, &b] {
         let (status, r) = c
@@ -69,32 +66,20 @@ async fn servers_share_the_workers_slots() {
     );
 }
 
-/// Without the stored pickles, only the worker holding a state can continue
-/// it, so every tactic must find it, whichever server it comes through. Both
-/// workers have the header warm, so only the state tells them apart.
+/// A session's tactics go to the worker holding its document open,
+/// whichever server they come through, while that worker is live.
 #[tokio::test(flavor = "multi_thread")]
-async fn tactics_go_to_the_worker_holding_their_state() {
-    let c = Cluster::start(&[("w0", "v", 1), ("w1", "v", 1)]).await;
+async fn tactics_go_to_the_worker_holding_their_session() {
+    let c = Cluster::start_beam(&[("w0", "v", 1), ("w1", "v", 1)]).await;
     let b = c.start_server().await;
-    let warm = json!({"code": "import Foo\nSLEEP 300\n#check Nat", "timeout": 10});
-    let (r0, r1) = tokio::join!(
-        c.post("/check", warm.clone()),
-        c.post_to(&b, "/check", warm)
-    );
-    assert_eq!((r0.0, r1.0), (200, 200));
     let (status, s) = c.post("/sessions", json!({"code": CODE})).await;
     assert_eq!(status, 200, "{s}");
     let state = s["states"][0]["id"].as_str().unwrap().to_string();
-    let pickles: Vec<Path> = c
-        .store
-        .list(Some(&Path::from("states")))
-        .map(|meta| meta.unwrap().location)
-        .collect()
-        .await;
-    assert!(!pickles.is_empty());
-    for path in pickles {
-        c.store.delete(&path).await.unwrap();
-    }
+    let (_, session) = s["id"].as_str().unwrap().split_once('~').unwrap();
+    let records = pisa_worker::records::Records::new(c.db.clone(), c.version("v"));
+    let holder = async || records.document(session).await.unwrap().unwrap().holder;
+    let first = holder().await;
+    assert!(first.is_some());
     for server in [&b, &c.router, &b, &c.router, &b, &c.router] {
         let (status, step) = c
             .post_to(
@@ -104,6 +89,7 @@ async fn tactics_go_to_the_worker_holding_their_state() {
             )
             .await;
         assert_eq!(status, 200, "{step}");
+        assert_eq!(holder().await, first);
     }
 }
 

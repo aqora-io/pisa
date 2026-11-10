@@ -15,7 +15,7 @@
 //! reopens it there. Jobs on a document wait for the worker holding it while
 //! that one is live ([`crate::claims`]), and run one at a time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,7 +23,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use pisa_beam::pos::BodyMap;
-use pisa_beam::{Beam, BeamError, Doc, Goal, LspPos, Mode, Packages, Range, RunResult, Workspace};
+use pisa_beam::{
+    Beam, BeamError, Doc, Goal, Handle, LspPos, Mode, Packages, Range, RunResult, Workspace,
+};
 use pisa_protocol::api::{self, Error, ErrorKind, GoalsMode, LinePos, Pos, ProbeAt, ProbeResult};
 use pisa_protocol::header::{Split, split_header};
 use pisa_protocol::wire::{
@@ -39,6 +41,8 @@ use crate::launcher::Launcher;
 use crate::policy::header_command;
 use crate::pool::Pool;
 use crate::records::{DocumentRow, Records};
+
+mod sessions;
 
 /// The library the documents' files belong to.
 const LIB: &str = "PisaDocs";
@@ -96,6 +100,10 @@ struct Open {
     /// Each `sorry`, with where probes at it run.
     sorries: Vec<(api::Sorry, LspPos)>,
     used: Instant,
+    /// Tactic sessions' states this process has a handle on, with their
+    /// `sorry`'s position, oldest first ([`sessions`]).
+    handles: HashMap<String, (Handle, LspPos)>,
+    kept: VecDeque<String>,
 }
 
 /// A job's time limit.
@@ -346,6 +354,8 @@ impl Documents {
                     messages,
                     sorries,
                     used: Instant::now(),
+                    handles: HashMap::new(),
+                    kept: VecDeque::new(),
                 });
                 self.placed.lock().unwrap().insert(id.to_string(), slot);
                 Ok(())
@@ -454,6 +464,12 @@ impl Documents {
     /// Opens the new code, then stores it if the document is still at the
     /// revision the edit replaces.
     async fn edit(&self, j: DocumentEditJob) -> Result<api::Document, Error> {
+        if self.records.session(&j.document).await?.is_some() {
+            return Err(bad_request(
+                "a session's code doesn't change, as its states are tied to it: start another \
+                 session",
+            ));
+        }
         self.scan(&split_header(&j.code).body)?;
         let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
@@ -616,6 +632,8 @@ pub async fn run(documents: Option<&Documents>, job: Job) -> JobResult {
             Job::DocumentOpen(_) | Job::DocumentEdit(_) => JobResult::Document(Err(none())),
             Job::DocumentGoals(_) => JobResult::DocumentGoals(Err(none())),
             Job::DocumentProbe(_) => JobResult::DocumentProbes(Err(none())),
+            Job::SessionStart(_) => JobResult::SessionStarted(Err(none())),
+            Job::SessionTactic(_) => JobResult::TacticApplied(Err(none())),
             _ => JobResult::DocumentClosed(Err(none())),
         };
     };
@@ -625,6 +643,8 @@ pub async fn run(documents: Option<&Documents>, job: Job) -> JobResult {
         Job::DocumentGoals(j) => JobResult::DocumentGoals(d.goals(j).await),
         Job::DocumentProbe(j) => JobResult::DocumentProbes(d.probe(j).await),
         Job::DocumentClose(j) => JobResult::DocumentClosed(d.close(j).await),
+        Job::SessionStart(j) => JobResult::SessionStarted(d.start_session(j).await),
+        Job::SessionTactic(j) => JobResult::TacticApplied(d.tactic(j).await),
         _ => JobResult::Failed {
             error: "not a job on a document".into(),
         },
@@ -744,7 +764,7 @@ fn bad_request(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::BadRequest, message)
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

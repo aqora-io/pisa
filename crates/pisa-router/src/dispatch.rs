@@ -27,9 +27,9 @@ pub struct Route {
     pub header_key: Option<String>,
     /// Header text, which new workers may pre-warm.
     pub header: Option<String>,
-    /// The hash of the proof state the job continues: the worker that stored
-    /// it, which may still hold it, gets first refusal. Needs `version`.
-    pub state: Option<String>,
+    /// The open document the job works on, by its id within `version`: only
+    /// workers with Beam slots run it, and the one holding it open first.
+    pub document: Option<String>,
 }
 
 /// A job, where it may run, and how soon, as an endpoint makes it.
@@ -250,7 +250,6 @@ impl Dispatcher {
             priority: Priority::Batch as i16,
             header_key: None,
             header: None,
-            state: None,
             document: None,
             job: serde_json::to_value(job)
                 .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?,
@@ -298,18 +297,6 @@ impl Dispatcher {
     /// within `max_wait` after.
     pub async fn submit(&self, p: Prepared) -> Result<JobResult, DispatchError> {
         self.submit_new(self.new_job(p)?).await
-    }
-
-    /// [`submit`](Self::submit) for a job on open document `document`, which
-    /// only workers with Beam slots run, the one holding it first.
-    pub async fn submit_document(
-        &self,
-        p: Prepared,
-        document: String,
-    ) -> Result<JobResult, DispatchError> {
-        let mut new = self.new_job(p)?;
-        new.document = Some(document);
-        self.submit_new(new).await
     }
 
     async fn submit_new(&self, new: NewJob) -> Result<JobResult, DispatchError> {
@@ -425,12 +412,11 @@ impl Dispatcher {
             .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?;
         let route = p.route;
         Ok(NewJob {
-            state: route.state.zip(route.version.clone()).map(|(h, v)| (v, h)),
             version: route.version,
             priority: p.priority as i16,
             header_key: route.header_key,
             header: route.header,
-            document: None,
+            document: route.document,
             job,
             max_wait: self.cfg.max_wait,
             max_attempts: self.cfg.max_retries + 1,

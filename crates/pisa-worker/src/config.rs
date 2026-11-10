@@ -112,9 +112,9 @@ pub struct WorkerConfig {
     /// On shutdown, how long to wait for in-flight jobs before exiting anyway.
     #[arg(long, env = "PISA_DRAIN_TIMEOUT_SECS", default_value_t = 600)]
     pub drain_timeout_secs: u64,
-    /// Lean Beam processes for open documents (`/documents`), besides the
-    /// REPL slots. 0 serves no documents.
-    #[arg(long, env = "PISA_BEAM_SLOTS", default_value_t = 0)]
+    /// Lean Beam processes for open documents (`/documents`) and tactic
+    /// sessions, besides the REPL slots. 0 serves neither.
+    #[arg(long, env = "PISA_BEAM_SLOTS", default_value_t = 1)]
     pub beam_slots: usize,
     /// Documents each Beam process keeps open. To open another, it closes the
     /// least recently used one that no job is using.
