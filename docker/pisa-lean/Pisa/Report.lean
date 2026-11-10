@@ -278,15 +278,17 @@ type's name, and from a constructor, after the constructor's. -/
 def typeDerived : List String :=
   ["casesOn", "recOn", "below", "brecOn", "binductionOn", "ibelow", "noConfusion",
     "noConfusionType", "ctorIdx", "toCtorIdx", "ctorElim", "ctorElimType"]
-def constructorDerived : List String := ["injEq", "inj", "sizeOf_spec", "hinj", "noConfusion"]
+def constructorDerived : List String :=
+  ["injEq", "inj", "sizeOf_spec", "hinj", "noConfusion", "elim"]
 
 /-- The inductive type of `own`, the declarations described with `n`, that
 `n` is one of Lean's declarations for, by name and by shape, as the verifier
 finds the same, and so that what code declares isn't taken for it:
 - a constructor or the recursor;
 - named after the type (`casesOn`, `noConfusion`, `below`, …), a definition
-  built from the type's recursor, `casesOn` or `noConfusionType`, or its
-  `ctorIdx`;
+  built from the type's recursor, `casesOn`, `noConfusionType` or `ctorIdx`,
+  which Lean 4.36 builds an enumeration's `noConfusion` from; its `ctorIdx`;
+  and its `ctorElimType`, which Lean builds from the constructors alone;
 - named after a constructor (`injEq`, `inj`, `sizeOf_spec`, …), a lemma
   about the constructor;
 - a projection: a definition `fun … self => self.i` named after the
@@ -327,7 +329,8 @@ def parentOf (env : Environment) (own : NameSet) (n : Name) (ci : ConstantInfo) 
       -- Lean makes `ctorIdx` for every inductive type, so code can't name
       -- one so; for a single constructor it is a constant.
       guard (s == "ctorIdx" ||
-        [mkRecName p, p ++ `casesOn, p ++ `noConfusionType].any used.contains)
+        [mkRecName p, p ++ `casesOn, p ++ `noConfusionType, p ++ `ctorIdx].any used.contains ||
+        (s == "ctorElimType" && v.ctors.any used.contains))
       return v.name
     let afterConstructor : Option Name := do
       guard (constructorDerived.contains s && own.contains p)

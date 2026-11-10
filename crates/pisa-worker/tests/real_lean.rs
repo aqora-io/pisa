@@ -575,6 +575,38 @@ fn a_structure_with_another_field_is_one_change() {
 
 #[test]
 #[ignore = "needs elan Lean 4.36.0-rc2"]
+fn an_enumeration_with_another_constructor_is_one_change() {
+    // Lean 4.36 builds an enumeration's `ctorElimType` from its
+    // constructors, its `noConfusion` from `ctorIdx`, and an `elim` for each
+    // constructor: all of them are the type's.
+    let two = "inductive Gate\n  | h\n  | cnot\ntheorem t : Gate.h ≠ Gate.cnot := sorry\n";
+    let three =
+        "inductive Gate\n  | h\n  | cnot\n  | magic\ntheorem t : Gate.h ≠ Gate.cnot := sorry\n";
+    let snapshots = Snapshots::new();
+    let (two, three) = (snapshots.build(two), snapshots.build(three));
+    for built in [&two, &three] {
+        for d in built
+            .agreed()
+            .iter()
+            .filter(|d| d.name.starts_with("Gate."))
+        {
+            assert!(
+                d.parent.as_deref() == Some("Gate") || d.generated,
+                "{} has no parent: {:?}",
+                d.name,
+                built.agreed()
+            );
+        }
+    }
+    let changes = grouped(statement_changes(two.agreed(), three.agreed()), |c| {
+        parent_in(two.agreed(), &c.name)
+    });
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].name, "Gate");
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn the_export_prints_a_definitions_value_without_notation() {
     let s = Snapshots::new();
     let code = "def double (n : Nat) : Nat := 2 * n\n\nnotation \"twice\" => double\n\n\
