@@ -1197,3 +1197,34 @@ async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
         .unwrap();
     assert_eq!(r.status(), 200);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_onto_a_structure_with_another_field_allows_the_structure() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\nstructure S where x : Nat"}),
+    )
+    .await;
+    let s = create(
+        &c,
+        json!({"code": on(&b, "theorem t (s : S) : s = s := rfl"), "labels": {"p": "1"}}),
+    )
+    .await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\nstructure S where x : Nat y : Nat",
+               "replaces": {"snapshot_id": entry(&b), "allow": {"definitions": ["S"]}}}),
+    )
+    .await;
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    // The copy replaces the original under an allow of the structure: its
+    // constructor isn't something `allow` can name.
+    let allow = json!({"definitions": ["S"]});
+    assert_eq!(
+        items(&r, "replaces"),
+        [&json!({"snapshot_id": entry(&s), "allow": allow})],
+        "{r}"
+    );
+}

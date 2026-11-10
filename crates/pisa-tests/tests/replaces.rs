@@ -118,6 +118,32 @@ async fn a_refusal_says_what_changed_and_how() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn allow_may_name_a_structure_whose_fields_change() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let skeleton = "import Foo\n\nstructure S where x : Nat\ntheorem t (s : S) : s = s := sorry";
+    let old = entry(&create(&c, json!({"code": skeleton})).await).to_string();
+    let wider = "import Foo\n\nstructure S where x : Nat y : Nat\ntheorem t (s : S) : s = s := rfl";
+    let r = create(&c, json!({"code": wider, "replaces": replacing(&old)})).await;
+    refused(
+        &r,
+        "statement: S has different constructors or what Lean makes from them (S.mk)",
+    );
+    assert_eq!(
+        r["check"]["changes"],
+        json!([{"name": "S", "change": "derived", "includes": ["S.mk"]}]),
+        "{r}"
+    );
+    let replaces = json!({"snapshot_id": old, "allow": {"definitions": ["S"]}});
+    let r = create(&c, json!({"code": wider, "replaces": replaces})).await;
+    assert_eq!(
+        r["replacement"],
+        // What changed under it is listed after it, for review.
+        json!({"filled": ["t"], "changed_definitions": ["S", "S.mk"], "affected": ["t"]}),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_changed_statement_is_not_kept() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
@@ -214,7 +240,7 @@ async fn allow_must_name_a_definition() {
         assert!(r.get("snapshot").is_none(), "{r}");
         assert_eq!(r["check"]["error"]["kind"], "bad_request", "{r}");
         let message = format!(
-            "allow names {name}, which isn't a definition of the replaced snapshot or of a \
+            "allow names {name}, which isn't a definition or inductive type of the replaced snapshot or of a \
              snapshot the code no longer builds on"
         );
         assert_eq!(r["check"]["error"]["message"], message, "{r}");

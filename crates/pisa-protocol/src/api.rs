@@ -624,7 +624,8 @@ pub struct Replacement {
     #[serde(default)]
     pub filled: Vec<String>,
     /// The definitions whose value changed, each of them one that `allow`
-    /// names.
+    /// names, and the inductive types `allow` names whose constructors, or
+    /// what Lean makes from them, changed, each followed by those that did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changed_definitions: Vec<String>,
     /// The theorems whose type uses a changed definition, directly or

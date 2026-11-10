@@ -477,20 +477,27 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   {"definitions": ["helper", "bound"]}}` lets the named definitions change
   their value but not their type, e.g. to add a missing hypothesis; any other
   definition that changes is refused (`statement: g has a different value`).
+  It may also name an inductive type, structure or class: its constructors and
+  what Lean makes from them may then change, e.g. to add a field, but not its
+  own type. What Lean makes from it is told by name and shape (a constructor,
+  `casesOn`, `injEq`, a projection named after its field), so a declaration
+  the code names `S.below` isn't one, and `changed_definitions` lists, after
+  the type, each of them that changed.
   A theorem's type only names a definition, so its meaning can change while
   its type matches: `replacement` in the response lists the
   `changed_definitions` and the theorems of the new module whose type uses
   one, directly or through another definition (`affected`).
-  - **What may be named.** A definition (a declaration with a value) of the
-    replaced snapshot's module, or of a snapshot the code no longer builds on
-    (see *Imports*). A name is compared without a private one's module, so
+  - **What may be named.** A definition (a declaration with a value) or an
+    inductive type of the replaced snapshot's module, or of a snapshot the
+    code no longer builds on (see *Imports*). A name is compared without a private one's module, so
     `private def h` is `_private.h`, or the full name a refusal gives,
     `_private.PisaSnap.s….0.h`, but not `h`.
   - **Errors.** An empty list is a 400 `bad_request`: to change no
-    definition, leave `allow` out. A name that isn't such a definition is a
+    definition, leave `allow` out. A name that isn't such a declaration is a
     `bad_request` in `check.error` (`allow names nope, which isn't a
-    definition of the replaced snapshot or of a snapshot the code no longer
-    builds on`), found before the code is built, and nothing is kept. For
+    definition or inductive type of the replaced snapshot or of a snapshot
+    the code no longer builds on`), found before the code is built, and
+    nothing is kept. For
     `h` where a `private def h` would match, it adds `(for a private
     definition, write _private.h)`.
 - **The link.** `replacement.filled` lists the declarations that used `sorry`

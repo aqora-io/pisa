@@ -147,20 +147,35 @@ fn compare(
     swapped: &Swapped,
 ) -> Result<Replacement, Vec<DeclarationChange>> {
     let allowed = |name: &str| allows(replacing.replaced.allow.as_ref(), name);
-    let (values, mut refused): (Vec<_>, Vec<_>) = statement_changes(&replacing.declarations, now)
+    let reached = walk(replacing, now, swapped)?;
+    let mut refused = Vec::new();
+    let mut changed_definitions: Vec<String> = Vec::new();
+    // What Lean made from an inductive type that `allow` names.
+    let mut derived: Vec<String> = Vec::new();
+    for c in statement_changes(&replacing.declarations, now)
         .into_iter()
-        .partition(|c| c.change == Change::Value && allowed(&c.name));
-    let mut changed_definitions: Vec<String> = values.into_iter().map(|c| c.name).collect();
-    for reached in walk(replacing, now, swapped)? {
-        if reached.change == Change::Value && allowed(&reached.name) {
-            changed_definitions.push(reached.name);
+        .chain(reached)
+    {
+        if c.change == Change::Value && allowed(&c.name) {
+            changed_definitions.push(c.name);
+        } else if let Some(p) = parent(replacing, swapped, &c).filter(|p| allowed(p)) {
+            if !changed_definitions.contains(&p) {
+                changed_definitions.push(p);
+            }
+            derived.push(c.name);
         } else {
-            refused.push(reached);
+            refused.push(c);
         }
     }
     refused.extend(added_assumptions(replacing, now, swapped));
     if !refused.is_empty() {
         return Err(grouped(refused, |c| parent(replacing, swapped, c)));
+    }
+    // What changed under an allowed type is listed after it, for review.
+    for d in &derived {
+        if !changed_definitions.contains(d) {
+            changed_definitions.push(d.clone());
+        }
     }
     let affected = if changed_definitions.is_empty() {
         Vec::new()
@@ -194,16 +209,17 @@ fn compare(
     })
 }
 
-/// Whether `allow` lets the definition `name` change its value: it names it,
-/// both as [`normalised`].
+/// Whether `allow` names `name`, both as [`normalised`]: a definition, which
+/// may then change its value, or an inductive type, whose constructors and
+/// what Lean makes from them may then change.
 fn allows(allow: Option<&Allow>, name: &str) -> bool {
     let name = normalised(name);
     allow.is_some_and(|a| a.definitions.iter().any(|n| normalised(n) == name))
 }
 
-/// The definitions, declarations with a value, that a replacement's `allow`
-/// may name: the replaced module's, and those of the snapshots it no longer
-/// builds on.
+/// What a replacement's `allow` may name, the definitions (declarations with
+/// a value) and inductive types of the replaced module and of the snapshots
+/// it no longer builds on.
 fn allowable<'a>(
     replacing: &'a Replacing,
     swapped: &'a Swapped,
@@ -213,7 +229,7 @@ fn allowable<'a>(
         .declarations
         .iter()
         .chain(lost)
-        .filter(|d| d.value_hash.is_some())
+        .filter(|d| d.value_hash.is_some() || d.kind == "inductive")
 }
 
 /// The error for a replacement whose `allow` names something other than a
@@ -236,8 +252,8 @@ fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Error> {
     Some(Error::new(
         ErrorKind::BadRequest,
         format!(
-            "allow names {name}, which isn't a definition of the replaced snapshot or of a \
-             snapshot the code no longer builds on{hint}"
+            "allow names {name}, which isn't a definition or inductive type of the replaced \
+             snapshot or of a snapshot the code no longer builds on{hint}"
         ),
     ))
 }
@@ -2155,14 +2171,23 @@ impl Snapshots {
                 let definitions: Vec<String> = allowable(&copied, &swapped)
                     .map(|d| d.name.clone())
                     .collect();
-                copied.replaced.allow = (!definitions.is_empty()).then_some(Allow { definitions });
+                copied.replaced.allow = (!definitions.is_empty()).then(|| Allow {
+                    definitions: definitions.clone(),
+                });
+                // What `allow` can name of what changed: the types, not what
+                // Lean made from them.
                 let replaces = compare(&copied, &copied.declarations, &swapped)
                     .ok()
-                    .map(|r| Replaces {
-                        snapshot_id: copied.replaced.snapshot_id.clone(),
-                        allow: (!r.changed_definitions.is_empty()).then_some(Allow {
-                            definitions: r.changed_definitions,
-                        }),
+                    .map(|r| {
+                        let named: Vec<String> = r
+                            .changed_definitions
+                            .into_iter()
+                            .filter(|n| definitions.contains(n))
+                            .collect();
+                        Replaces {
+                            snapshot_id: copied.replaced.snapshot_id.clone(),
+                            allow: (!named.is_empty()).then_some(Allow { definitions: named }),
+                        }
                     });
                 planned.push(Planned {
                     created: entry_meta.created_micros,
@@ -2901,7 +2926,7 @@ mod tests {
             let error = allow_error(&allowed, &swapped).unwrap();
             assert_eq!(error.kind, ErrorKind::BadRequest);
             let message = format!(
-                "allow names {name}, which isn't a definition of the replaced snapshot or of a \
+                "allow names {name}, which isn't a definition or inductive type of the replaced snapshot or of a \
                  snapshot the code no longer builds on{hint}"
             );
             assert_eq!(error.message, message);

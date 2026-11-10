@@ -1617,7 +1617,7 @@
             "type": "array"
           },
           "changed_definitions": {
-            "description": "The definitions whose value changed, each of them one that `allow`\nnames.",
+            "description": "The definitions whose value changed, each of them one that `allow`\nnames, and the inductive types `allow` names whose constructors, or\nwhat Lean makes from them, changed, each followed by those that did.",
             "items": {
               "type": "string"
             },

@@ -1338,7 +1338,8 @@ export interface components {
             affected?: string[];
             /**
              * @description The definitions whose value changed, each of them one that `allow`
-             *     names.
+             *     names, and the inductive types `allow` names whose constructors, or
+             *     what Lean makes from them, changed, each followed by those that did.
              */
             changed_definitions?: string[];
             /**

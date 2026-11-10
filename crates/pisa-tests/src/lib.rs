@@ -105,7 +105,8 @@ fn declared(line: &str) -> Option<(&str, bool)> {
     if private || keyword == "public" {
         keyword = words.next()?;
     }
-    matches!(keyword, "theorem" | "def" | "axiom").then(|| words.next().map(|n| (n, private)))?
+    matches!(keyword, "theorem" | "def" | "axiom" | "structure")
+        .then(|| words.next().map(|n| (n, private)))?
 }
 
 /// Whether `name` is declared in `local`, or non-privately in `imported`.
@@ -126,7 +127,8 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 /// The worker's axiom report for `code`: one declaration per line starting
-/// with `theorem`, `def` or `axiom`. Theorems depend on `sorryAx` if the code
+/// with `theorem`, `def` or `axiom`, and for `structure S where FIELDS`, the
+/// inductive `S` and its constructor `S.mk`, whose parent it is. Theorems depend on `sorryAx` if the code
 /// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, on any
 /// axiom it declares, and on the axioms of imported snapshots its line names;
 /// those it declares or imports are its `assumes`. Its "type" is the statement text between the name
@@ -225,6 +227,29 @@ pub fn declarations(code: &str) -> String {
         let (Some(keyword), Some(name)) = (words.next(), words.next()) else {
             continue;
         };
+        // `structure S where FIELDS`: the type, and its constructor, whose
+        // "type" is the fields.
+        if keyword == "structure" {
+            let fields = line.split_once(" where ").map_or("", |(_, f)| f.trim());
+            decls.push((
+                "inductive",
+                name.to_string(),
+                vec![],
+                "Type".into(),
+                String::new(),
+                None,
+            ));
+            let mk = format!("{name}.mk");
+            decls.push((
+                "constructor",
+                mk,
+                vec![],
+                fields.into(),
+                String::new(),
+                Some(name),
+            ));
+            continue;
+        }
         let (statement, value) = statement_and_value(line, name);
         let (kind, axioms) = match keyword {
             "axiom" => {
@@ -235,11 +260,11 @@ pub fn declarations(code: &str) -> String {
             "theorem" => ("theorem", Vec::new()),
             _ => continue,
         };
-        decls.push((kind, name.to_string(), axioms, statement, value));
+        decls.push((kind, name.to_string(), axioms, statement, value, None));
     }
     let decls: Vec<Value> = decls
         .into_iter()
-        .map(|(kind, name, axioms, statement, value)| {
+        .map(|(kind, name, axioms, statement, value, parent)| {
             let axioms = if kind == "theorem" {
                 // And the imported axioms it names.
                 let mut axioms = used.clone();
@@ -267,9 +292,14 @@ pub fn declarations(code: &str) -> String {
                 refs.dedup();
                 refs
             };
-            let value_refs = if kind == "def" { refs(&value) } else { Vec::new() };
+            let value_refs = match kind {
+                "def" => refs(&value),
+                "inductive" => vec![format!("{name}.mk")],
+                _ => Vec::new(),
+            };
             json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes, "type": statement,
-                   "value": value_text, "type_refs": refs(&statement), "value_refs": value_refs})
+                   "value": value_text, "type_refs": refs(&statement), "value_refs": value_refs,
+                   "parent": parent})
         })
         .collect();
     Value::Array(decls).to_string()
