@@ -62,9 +62,11 @@ pub struct Query {
     /// Hits to return (default 5, at most 50).
     #[serde(default = "default_limit")]
     pub limit: usize,
-    /// Also return declarations that depend on `sorry`, flagged.
-    #[serde(default)]
-    pub include_sorried: bool,
+    /// Also return declarations that depend on `sorry`, flagged. By default
+    /// only when searching snapshots, so that agents find the skeleton's
+    /// lemmas they build on before those are proved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_sorried: Option<bool>,
     /// Snapshots to search as well as the base libraries (default: none):
     /// heads only, those that no other snapshot replaces.
     #[serde(default, skip_serializing_if = "SnapshotScope::is_none")]
@@ -101,7 +103,7 @@ impl Default for Query {
             libraries: Vec::new(),
             kinds: Vec::new(),
             limit: default_limit(),
-            include_sorried: false,
+            include_sorried: None,
             snapshots: SnapshotScope::None,
         }
     }
@@ -324,7 +326,7 @@ mod tests {
         let q: Query =
             serde_json::from_value(json!({"description": "trace of a density matrix"})).unwrap();
         assert_eq!(q.limit, 5);
-        assert!(!q.include_sorried);
+        assert_eq!(q.include_sorried, None);
         let f = Flags::default();
         assert_eq!(serde_json::to_value(&f).unwrap(), json!({}));
         assert_eq!(q.snapshots, SnapshotScope::None);

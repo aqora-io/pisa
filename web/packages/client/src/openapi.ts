@@ -1124,7 +1124,11 @@ export interface components {
             description?: string;
             /** @description A pretty-printed goal state (hypotheses and `⊢ target`). */
             goal?: string;
-            /** @description Also return declarations that depend on `sorry`, flagged. */
+            /**
+             * @description Also return declarations that depend on `sorry`, flagged. By default
+             *     only when searching snapshots, so that agents find the skeleton's
+             *     lemmas they build on before those are proved.
+             */
             include_sorried?: boolean;
             /** @description Restrict to these kinds, e.g. `["theorem"]`. */
             kinds?: string[];

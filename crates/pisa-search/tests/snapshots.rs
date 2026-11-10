@@ -615,9 +615,9 @@ async fn a_hit_has_its_own_status() {
     let e = s.engine().await;
     s.index(&e, false);
 
+    // A sorried snapshot declaration is shown when searching snapshots.
     let by_name = |name: &str| Query {
         name: Some(name.into()),
-        include_sorried: true,
         snapshots: SnapshotScope::All,
         ..Default::default()
     };

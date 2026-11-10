@@ -605,7 +605,7 @@ class Client:
         libraries: list[str] | None = None,
         kinds: list[str] | None = None,
         limit: int = 5,
-        include_sorried: bool = False,
+        include_sorried: bool | None = None,
         snapshots: SnapshotScope | None = None,
     ) -> QueryResult:
         """Search declarations by free `text` or by the fields that apply: a
@@ -636,7 +636,7 @@ class Query(TypedDict, total=False):
     libraries: list[str]
     kinds: list[str]
     limit: int
-    include_sorried: bool
+    include_sorried: NotRequired[bool]
     snapshots: SnapshotScope
 
 class SnapshotLabels(TypedDict):

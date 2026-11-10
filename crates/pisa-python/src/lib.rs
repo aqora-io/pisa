@@ -570,7 +570,7 @@ impl Client {
 
     #[pyo3(signature = (
         text = None, *, description = None, latex = None, pattern = None, goal = None,
-        name = None, libraries = None, kinds = None, limit = 5, include_sorried = false,
+        name = None, libraries = None, kinds = None, limit = 5, include_sorried = None,
         snapshots = None
     ))]
     #[allow(clippy::too_many_arguments)]
@@ -586,7 +586,7 @@ impl Client {
         libraries: Option<Vec<String>>,
         kinds: Option<Vec<String>>,
         limit: usize,
-        include_sorried: bool,
+        include_sorried: Option<bool>,
         snapshots: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let snapshots = match snapshots {
