@@ -26,8 +26,15 @@ same compose stack:
                and the memory of each REPL process
   determinism  the largest chunks rebuilt in each worker container, compared
                with the module the store served
+  verify       the kernel re-check of the api phase's modules in the first
+               worker container: each module alone, and with `pisa verify`
+               all of them in one process, imports first
 
-usage: python3 scripts/bench_snapshots.py [--out DIR] [--limit N] [--phases ...]
+The api phase sends `verify` as `--verify` says, or none with `omit`. Run the
+stack with one worker (`--scale worker=1`) for the verify phase, so that one
+container holds every module.
+
+usage: python3 scripts/bench_snapshots.py [--out DIR] [--limit N] [--phases ...] [--verify ...]
 """
 
 import argparse
@@ -365,9 +372,10 @@ def suffix(as_modules):
     return "-modules" if as_modules else ""
 
 
-def phase_api(src, order, url, checks, out, as_modules=False):
+def phase_api(src, order, url, checks, out, as_modules=False, verify="omit"):
     """Each chunk as a snapshot through pisa's API, importing the snapshots of
-    the modules it imports, followed by `checks` checks on its header."""
+    the modules it imports, followed by `checks` checks on its header. The
+    creates send `verify` unless it is `omit`."""
     chunked = set(order)
     hit = MODULE_HIT if as_modules else HIT
     raw_file = out / f"raw-api{suffix(as_modules)}.json"
@@ -375,13 +383,18 @@ def phase_api(src, order, url, checks, out, as_modules=False):
     for i, m in enumerate(order):
         deps = [d for d in IMPORT.findall(src[m]) if d in chunked]
         code = chunk_code(m, src, snaps, chunked, as_modules)
+        body = {"code": code, "timeout": 1200}
+        if verify != "omit":
+            body["verify"] = verify == "true"
         t = time.time()
-        status, r = api(url, "POST", "/snapshots", {"code": code, "timeout": 1200})
+        status, r = api(url, "POST", "/snapshots", body)
         dt = time.time() - t
         assert status == 200, r
         result = r["check"]
+        snapshot = r.get("snapshot", {})
         row = {"module": m, "seconds": dt, "build_seconds": result["time"], "imports": len(deps),
-               "kept": "snapshot" in r, "status": r.get("snapshot", {}).get("status"), "lines": lines_of(code)}
+               "kept": "snapshot" in r, "status": snapshot.get("status"), "lines": lines_of(code),
+               "snapshot_module": snapshot.get("module"), "verified": snapshot.get("verified")}
         if "snapshot" not in r:
             row["error"] = result.get("error") or [x["text"][:300] for x in result["messages"] if x["severity"] == "error"][:3]
             res["api"]["creates"].append(row)
@@ -459,6 +472,41 @@ def phase_restart(url, out, as_modules=False):
             fields = {parts[i].rstrip(":"): int(parts[i + 1]) // 1024 for i in range(1, len(parts) - 1, 3)}
             res["memory_mb"].append({"worker": w, "pid": parts[0], **fields})
     print(f"restart: cold {res['cold'][0]:.1f}s, hits {statistics.median(res['hits']):.3f}s", flush=True)
+    return res
+
+
+def phase_verify(out, as_modules=False):
+    """Times the kernel re-check of the api phase's modules, imports first, in
+    the first worker container, on the modules its snapshot cache holds: each
+    module alone with the old verifier script if the image has it, each alone
+    with `pisa verify`, and all of them in one `pisa verify`."""
+    raw = json.loads((out / f"raw-api{suffix(as_modules)}.json").read_text())
+    modules = [c["snapshot_module"] for c in raw["api"]["creates"] if c.get("snapshot_module")]
+    worker = workers()[0]
+    root = sh("docker", "exec", worker, "bash", "-c", "ls -d /tmp/pisa-*/snapshots/* | head -1").decode().strip()
+    missing = [m for m in modules
+               if subprocess.run(["docker", "exec", worker, "test", "-f",
+                                  f"{root}/{m.replace('.', '/')}.olean"]).returncode != 0]
+    env = f"cd /opt/project && lake env bash -c 'export LEAN_PATH=$LEAN_PATH:{root}; "
+
+    def run(cmd):
+        t = time.time()
+        r = subprocess.run(["docker", "exec", worker, "bash", "-c", env + cmd + "'"], capture_output=True)
+        return time.time() - t, r.stdout.decode()
+
+    res = {"modules": len(modules), "missing": missing}
+    tool = "/opt/pisa/.lake/build/bin/pisa"
+    has_tool = subprocess.run(["docker", "exec", worker, "test", "-x", tool]).returncode == 0
+    if subprocess.run(["docker", "exec", worker, "test", "-f", "/opt/verifier/PisaVerify.lean"]).returncode == 0:
+        res["script_each"] = [run(f"lean --run /opt/verifier/PisaVerify.lean {m}")[0] for m in modules]
+        print(f"verify: script each {sum(res['script_each']):.1f}s in all", flush=True)
+    if has_tool:
+        res["tool_each"] = [run(f"{tool} verify {m}")[0] for m in modules]
+        dt, output = run(f"{tool} verify {' '.join(modules)}")
+        res["tool_chain"] = dt
+        res["tool_chain_ok"] = output.count('"ok":true')
+        print(f"verify: tool each {sum(res['tool_each']):.1f}s in all, chain {dt:.1f}s "
+              f"({res['tool_chain_ok']} of {len(modules)} passed)", flush=True)
     return res
 
 
@@ -551,6 +599,8 @@ def main():
     ap.add_argument("--skip-replay-failures", action="store_true",
                     help="api phase: leave out modules that failed in the chain phase (raw.json), and their dependents")
     ap.add_argument("--keep", action="store_true", help="leave the container running")
+    ap.add_argument("--verify", choices=["omit", "true", "false"], default="omit",
+                    help="what the api phase's creates send as `verify`")
     ap.add_argument("--report-only", action="store_true", help="render tables from an existing raw.json")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -591,12 +641,16 @@ def main():
                         bad.add(m)
                 order = [m for m in order if m not in bad]
             api_raw = {"target": args.target, "modules": len(order), "as_modules": args.as_modules,
-                       "header": None if args.as_modules else HEADER}
-            api_raw.update(phase_api(src, order, args.url, args.checks, args.out, args.as_modules))
+                       "header": None if args.as_modules else HEADER, "verify": args.verify}
+            api_raw.update(phase_api(src, order, args.url, args.checks, args.out, args.as_modules,
+                                     args.verify))
             (args.out / f"raw-api{suffix(args.as_modules)}.json").write_text(json.dumps(api_raw, indent=1))
         if "restart" in phases:
             cold = phase_restart(args.url, args.out, args.as_modules)
             (args.out / f"cold{suffix(args.as_modules)}.json").write_text(json.dumps(cold, indent=1))
+        if "verify" in phases:
+            verified = phase_verify(args.out, args.as_modules)
+            (args.out / f"verify{suffix(args.as_modules)}.json").write_text(json.dumps(verified, indent=1))
         if "determinism" in phases:
             det = phase_determinism(src, args.out, args.as_modules)
             (args.out / f"determinism{suffix(args.as_modules)}.json").write_text(json.dumps(det, indent=1))
