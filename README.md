@@ -230,7 +230,7 @@ pnpm -C web generate
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
-| `DELETE /snapshots/{id}` | → `{removed: [...]}`, the modules that went with the snapshot; see [Retention](#retention) |
+| `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
@@ -544,7 +544,11 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   snapshot replaced more than once is a fork, listed in `forks` with what
   replaced it: there is no merge, so delete all but one branch. A deleted
   snapshot on the way doesn't cut the run, as what replaced it now replaces
-  what it replaced; deleting a head makes what it replaced a head again.
+  what it replaced; deleting a head makes what it replaced a head again. To
+  drop a losing branch, `DELETE /snapshots/{id}?with_replacers=true` on the
+  snapshot `forks` names for it: it takes the branch with it, and `deleted`
+  lists what went. A plain delete of that snapshot moves the rest of the
+  branch down, and the fork stays.
 - **Targets.** Each declaration of a spec snapshot's module, other than its
   assumptions and what Lean generated, is a target. `targets` has a row for
   each target and each head reached from its spec snapshot, with its `status`
@@ -757,8 +761,12 @@ working. Deleting a snapshot that [replaced](#replacing) another re-points
 what replaced it at that one, with the two links composed: `allow` and the
 `replacement` hold the changes of both steps, so a run isn't cut. A snapshot
 with no link, such as a spec snapshot, leaves its replacers' links as they
-are. A create that replaces a snapshot deleted while it was being built is a
-404. Each worker checks a module it has cached against the store at most
+are. With `?with_replacers=true` a delete takes the snapshot and every
+snapshot that replaces it, directly or through others, in one step and
+splices nothing; what the snapshot replaced is a head again if nothing else
+replaces it, and `deleted` lists every snapshot that went, the asked one
+first (a plain delete lists one). A create that replaces a snapshot deleted
+while it was being built is a 404. Each worker checks a module it has cached against the store at most
 every `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere
 within that time.
 
@@ -818,6 +826,8 @@ let opts = pisa_client::RebuildOptions::default(); // `retire: true` deletes the
 let job = client.submit_rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?;
 let done = client.wait_job(&job).await?; // the server ran the plan: done.created, done.failed
 let removed = client.delete_snapshot(&base.id).await?.removed; // the modules that went with it
+let opts = pisa_client::DeleteSnapshotOptions { with_replacers: true };
+let dropped = client.delete_snapshot_with(&extended.id, &opts).await?.deleted; // it and what replaces it
 // A long request as a job (see Async requests), answered however long it takes.
 let job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num").await?;
 let result = client.wait_job(&job).await?; // what check would have returned
@@ -847,6 +857,7 @@ client.audit_snapshots(against=[base["id"]])["clean"]   # the run from base, to 
 plan = client.rebuild_snapshots(base["id"], extended["id"], {"run": "7"}, dry_run=True)["plan"]   # create each item, a level at a time, with its replaces
 done = client.wait_job(client.submit_rebuild_snapshots(base["id"], extended["id"], {"run": "7"}))   # retire=True deletes the originals the copies replace, not base
 client.delete_snapshot(base["id"])["removed"]   # the modules that went with it
+client.delete_snapshot(extended["id"], with_replacers=True)["deleted"]   # it and what replaces it
 job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num")
 client.wait_job(job)["ok"]   # what check would have returned, or raised
 ```

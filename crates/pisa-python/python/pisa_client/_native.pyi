@@ -144,6 +144,7 @@ class ListDependentsResponse(TypedDict):
 
 class DeleteSnapshotResponse(TypedDict):
     removed: list[str]
+    deleted: list[str]
 
 class AuditSummary(TypedDict):
     proved: int
@@ -421,10 +422,15 @@ class Client:
         Returns the snapshot. Labels that break the rules raise a
         `bad_request` PisaError, and NotFoundError means an unknown
         snapshot."""
-    def delete_snapshot(self, id: str) -> DeleteSnapshotResponse:
+    def delete_snapshot(self, id: str, *, with_replacers: bool = False) -> DeleteSnapshotResponse:
         """Delete a snapshot; `removed` lists the modules that went with it:
         its module, if no other snapshot or kept module needs it, and so on
-        up its imports."""
+        up its imports. The snapshots that replace it replace what it
+        replaced instead. With `with_replacers`, they go too, and the ones
+        that replace them, and nothing is spliced: a whole branch of a run is
+        dropped, and what the snapshot replaced is a head again if nothing
+        else replaces it. `deleted` lists every snapshot that went, the asked
+        one first."""
     def verify_snapshot(self, id: str) -> VerifySnapshotResponse:
         """Re-check a snapshot's module and everything it imports through the
         kernel, imports first, skipping what already passed. A module the

@@ -143,7 +143,7 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
             JobResult::Snapshot(pool.snapshots().get(&j.entry).await.map(Box::new))
         }
         Job::SnapshotDelete(j) => {
-            JobResult::SnapshotDeleted(pool.snapshots().delete(&j.entry).await)
+            JobResult::SnapshotDeleted(pool.snapshots().delete(&j.entry, j.with_replacers).await)
         }
         Job::SnapshotVerify(j) => {
             JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.entry).await)

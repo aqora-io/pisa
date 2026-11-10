@@ -22,7 +22,7 @@ pub enum Job {
     /// it as [`Job::Unsupported`], rather than keeping the code unchecked.
     SnapshotReplace(SnapshotCreateJob),
     SnapshotGet(SnapshotJob),
-    SnapshotDelete(SnapshotJob),
+    SnapshotDelete(SnapshotDeleteJob),
     SnapshotVerify(SnapshotJob),
     SnapshotList(SnapshotListJob),
     SnapshotLabels(SnapshotLabelsJob),
@@ -89,6 +89,17 @@ pub struct SnapshotCreateJob {
 pub struct SnapshotJob {
     /// The snapshot id, `<version>~<entry id>`.
     pub entry: String,
+}
+
+/// `DELETE /snapshots/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotDeleteJob {
+    /// The snapshot id, `<version>~<entry id>`.
+    pub entry: String,
+    /// Whether to delete the snapshots that replace it too, directly or
+    /// through others, rather than splice them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub with_replacers: bool,
 }
 
 /// `GET /snapshots`, its query parsed and checked by the router.

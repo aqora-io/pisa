@@ -105,6 +105,19 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("asks a delete to take the snapshots that replace the snapshot", async () => {
+    const { client, sent } = recording(() => json({ removed: [], deleted: ["v1~e1", "v1~e2"] }));
+    await client.deleteSnapshot("v1~e1");
+    await client.deleteSnapshot("v1~e1", { withReplacers: false });
+    const dropped = await client.deleteSnapshot("v1~e1", { withReplacers: true });
+    expect(sent.map((s) => [s.method, s.url])).toEqual([
+      ["DELETE", "/api/snapshots/v1~e1"],
+      ["DELETE", "/api/snapshots/v1~e1"],
+      ["DELETE", "/api/snapshots/v1~e1?with_replacers=true"],
+    ]);
+    expect(dropped.deleted).toEqual(["v1~e1", "v1~e2"]);
+  });
+
   it("updates labels with a merge patch", async () => {
     const { client, sent } = recording(() => json({ id: "v1~e1", labels: { stage: "done" } }));
     await client.updateSnapshot("v1~e1", { labels: { stage: "done", draft: null } });

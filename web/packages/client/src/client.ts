@@ -93,6 +93,13 @@ export interface RebuildOptions extends RequestOptions {
   verify?: boolean;
 }
 
+export interface DeleteSnapshotOptions extends RequestOptions {
+  /** Delete the snapshots that replace this one too, directly or through
+   *  others, and splice nothing: a whole branch of a run goes. What the
+   *  snapshot replaced is a head again if nothing else replaces it. */
+  withReplacers?: boolean;
+}
+
 export interface GetDeclarationOptions extends VersionOptions {
   /** A snapshot module to look in first, as a snapshot hit's `module`. */
   module?: ModuleName;
@@ -335,9 +342,14 @@ export class PisaClient {
     return this.call("PATCH", ["snapshots", id], update, options);
   }
 
-  /** Deletes a snapshot, and the modules nothing else needs. */
-  deleteSnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<DeleteSnapshotResponse> {
-    return this.call("DELETE", ["snapshots", id], undefined, options);
+  /** Deletes a snapshot, and the modules nothing else needs. The snapshots
+   *  that replace it replace what it replaced instead. With `withReplacers`
+   *  it deletes those too, and the ones that replace them; `deleted` lists
+   *  every snapshot that went, the asked one first. */
+  deleteSnapshot(id: SnapshotId, options: DeleteSnapshotOptions = {}): Promise<DeleteSnapshotResponse> {
+    const query = new URLSearchParams();
+    if (options.withReplacers) query.set("with_replacers", "true");
+    return this.call("DELETE", ["snapshots", id], undefined, options, query);
   }
 
   /** Re-checks the snapshot's module and its imports through the kernel. A

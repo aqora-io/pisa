@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    Allow, CheckOptions, Client, CreateSnapshotOptions, Detail, Error, ErrorKind, HealthStatus,
-    Job, JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos, ProofStatus, RebuildOptions,
-    Replaces,
+    Allow, CheckOptions, Client, CreateSnapshotOptions, DeleteSnapshotOptions, Detail, Error,
+    ErrorKind, HealthStatus, Job, JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos,
+    ProofStatus, RebuildOptions, Replaces,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -167,8 +167,66 @@ async fn client_covers_snapshots() {
 
     let deleted = client.delete_snapshot(&id).await.unwrap();
     assert_eq!(deleted.removed, std::slice::from_ref(&name));
+    assert_eq!(deleted.deleted, std::slice::from_ref(&id));
     let err = client.get_snapshot(&id).await.unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_drops_a_branch() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let skeleton = client
+        .create_snapshot("import Foo\ntheorem t : 1 = 1 := sorry")
+        .await
+        .unwrap();
+    let skeleton = skeleton.snapshot.unwrap().id;
+    let replacing = |fork| CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: skeleton.clone(),
+            allow: None,
+        }),
+        fork,
+        ..Default::default()
+    };
+    let a1 = client
+        .create_snapshot_with("import Foo\ntheorem t : 1 = 1 := rfl", &replacing(false))
+        .await
+        .unwrap();
+    let a1 = a1.snapshot.unwrap().id;
+    let b1 = client
+        .create_snapshot_with("import Foo\ntheorem t : 1 = 1 := by simp", &replacing(true))
+        .await
+        .unwrap();
+    let b1 = b1.snapshot.unwrap().id;
+    let a2 = CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: a1.clone(),
+            allow: None,
+        }),
+        ..Default::default()
+    };
+    let a2 = client
+        .create_snapshot_with(
+            "import Foo\ntheorem t : 1 = 1 := rfl\ntheorem u : 1 = 1 := rfl",
+            &a2,
+        )
+        .await
+        .unwrap();
+    let a2 = a2.snapshot.unwrap().id;
+
+    let opts = DeleteSnapshotOptions {
+        with_replacers: true,
+    };
+    let dropped = client.delete_snapshot_with(&a1, &opts).await.unwrap();
+    assert_eq!(dropped.deleted, [a1.clone(), a2.clone()]);
+    for gone in [&a1, &a2] {
+        let err = client.get_snapshot(gone).await.unwrap_err();
+        assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+    }
+    let audit = client.audit_snapshots_against([&skeleton]).await.unwrap();
+    assert_eq!(audit.heads, [b1]);
+    assert!(audit.forks.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]

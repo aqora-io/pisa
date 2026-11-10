@@ -147,6 +147,15 @@ pub struct CreateSnapshotOptions {
     pub fork: bool,
 }
 
+/// Options for [`Client::delete_snapshot_with`].
+#[derive(Debug, Clone, Default)]
+pub struct DeleteSnapshotOptions {
+    /// Delete the snapshots that replace the snapshot too, directly or
+    /// through others, and splice nothing: a whole branch of a run goes. What
+    /// the snapshot replaced is a head again if nothing else replaces it.
+    pub with_replacers: bool,
+}
+
 /// Options for [`Client::rebuild_snapshots`].
 #[derive(Debug, Clone, Default)]
 pub struct RebuildOptions {
@@ -788,9 +797,26 @@ impl Client {
 
     /// Deletes a snapshot. `removed` names the modules that went with it:
     /// its module, if no other snapshot or kept module needs it, and so on up
-    /// its imports.
+    /// its imports. The snapshots that replace it replace what it replaced
+    /// instead; `deleted` lists the snapshot alone.
     pub async fn delete_snapshot(&self, id: &str) -> Result<DeleteSnapshotResponse, Error> {
-        self.endpoint.delete(self.snapshot_url(id)?).await
+        self.delete_snapshot_with(id, &DeleteSnapshotOptions::default())
+            .await
+    }
+
+    /// Like [`delete_snapshot`](Self::delete_snapshot), with options. With
+    /// [`with_replacers`](DeleteSnapshotOptions::with_replacers), `deleted`
+    /// lists every snapshot that went, the asked one first.
+    pub async fn delete_snapshot_with(
+        &self,
+        id: &str,
+        opts: &DeleteSnapshotOptions,
+    ) -> Result<DeleteSnapshotResponse, Error> {
+        let mut url = self.snapshot_url(id)?;
+        if opts.with_replacers {
+            url.query_pairs_mut().append_pair("with_replacers", "true");
+        }
+        self.endpoint.delete(url).await
     }
 
     fn snapshot_url(&self, id: &str) -> Result<Url, Error> {

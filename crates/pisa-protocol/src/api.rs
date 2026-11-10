@@ -1104,12 +1104,24 @@ pub struct VerifyFailure {
 /// replaced instead, with the two links composed: their `allow` and
 /// `replacement` hold the changes of both steps. If it replaced nothing, they
 /// keep their links to it.
+///
+/// With `with_replacers=true`, it deletes the snapshot and every snapshot
+/// that replaces it, directly or through others, in one step, and splices
+/// nothing: a whole branch of a run goes. If the snapshot replaced another,
+/// the branch no longer counts among that one's replacers, which is a head
+/// again if none are left.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DeleteSnapshotResponse {
-    /// The modules removed, the snapshot's own first.
+    /// The modules removed, each before the modules it imports: the
+    /// snapshot's own first, unless a snapshot deleted with it imports it.
     #[schema(required = true)]
     #[serde(default)]
     pub removed: Vec<String>,
+    /// The ids of the snapshots deleted, the one asked for first. It is the
+    /// one alone unless `with_replacers` was set.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub deleted: Vec<String>,
 }
 
 /// Whether `p` can be a part of a [`Key`] or a [`SnapshotId`]: non-empty

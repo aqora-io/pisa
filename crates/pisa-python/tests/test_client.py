@@ -268,7 +268,7 @@ def test_snapshots(url):
         client.get_snapshot(name)
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
-    assert client.delete_snapshot(snapshot_id) == {"removed": [name]}
+    assert client.delete_snapshot(snapshot_id) == {"removed": [name], "deleted": [snapshot_id]}
     with pytest.raises(NotFoundError):
         client.get_snapshot(snapshot_id)
 
@@ -316,6 +316,24 @@ def test_replacing_only_a_head(url):
     assert forked["snapshot"]["replaces"] == link and "heads" not in forked
     job = client.submit_create_snapshot(other + "\ntheorem head_v : 3 = 3 := rfl", replaces=link, fork=True)
     assert client.wait_job(job)["snapshot"]["replaces"] == link
+
+
+def test_dropping_a_branch(url):
+    client = Client(url, timeout=5)
+    spec = client.create_snapshot("import Foo\ntheorem branch_t : 1 = 1 := sorry")["snapshot"]["id"]
+    link = {"snapshot_id": spec}
+    first = client.create_snapshot("import Foo\ntheorem branch_t : 1 = 1 := rfl", replaces=link)["snapshot"]["id"]
+    other = client.create_snapshot("import Foo\ntheorem branch_t : 1 = 1 := by decide", replaces=link, fork=True)
+    deeper = "import Foo\ntheorem branch_t : 1 = 1 := rfl\ntheorem branch_u : 2 = 2 := rfl"
+    last = client.create_snapshot(deeper, replaces={"snapshot_id": first})["snapshot"]["id"]
+    assert len(client.audit_snapshots(against=[spec])["forks"]) == 1
+
+    dropped = client.delete_snapshot(first, with_replacers=True)
+    assert dropped["deleted"] == [first, last]
+    audit = client.audit_snapshots(against=[spec])
+    assert audit["heads"] == [other["snapshot"]["id"]] and "forks" not in audit
+    with pytest.raises(NotFoundError):
+        client.get_snapshot(last)
 
 
 def test_rebuild_snapshots(url):

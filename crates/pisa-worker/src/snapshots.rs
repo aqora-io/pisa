@@ -2468,14 +2468,26 @@ impl Snapshots {
         Ok(self.snapshot(entry, entry_meta, &meta))
     }
 
-    /// Deletes an entry, then each module that nothing needs any more: the
-    /// entry's own, then up the chain of imports. Once the entry is gone,
-    /// the rest is best effort: what fails is logged, and a module whose
-    /// record went is listed even if its files couldn't be deleted.
-    pub async fn delete(&self, entry: &str) -> Result<DeleteSnapshotResponse, Error> {
+    /// Deletes an entry, or with `with_replacers` it and every entry that
+    /// replaces it, directly or through others, then each module that
+    /// nothing needs any more: the entries' own, then up the chain of
+    /// imports. Once the entries are gone, the rest is best effort: what
+    /// fails is logged, and a module whose record went is listed even if its
+    /// files couldn't be deleted.
+    pub async fn delete(
+        &self,
+        entry: &str,
+        with_replacers: bool,
+    ) -> Result<DeleteSnapshotResponse, Error> {
         let entry = self.parse(entry)?;
-        let (entry_meta, cleaned) = self.catalog.remove_entry(&entry).await?;
-        let mut queue = VecDeque::from_iter(cleaned.map(|m| (entry_meta.module, m)));
+        let (deleted, cleaned) = if with_replacers {
+            self.catalog.remove_branch(&entry).await?
+        } else {
+            let (entry_meta, cleaned) = self.catalog.remove_entry(&entry).await?;
+            let cleaned = cleaned.map(|m| (entry_meta.module, m));
+            (vec![entry], cleaned.into_iter().collect())
+        };
+        let mut queue = VecDeque::from(cleaned);
         let mut removed = Vec::new();
         while let Some((id, meta)) = queue.pop_front() {
             // The record is gone, so the files of its build can go.
@@ -2494,7 +2506,8 @@ impl Snapshots {
                 }
             }
         }
-        Ok(DeleteSnapshotResponse { removed })
+        let deleted = deleted.iter().map(|entry| self.id(entry)).collect();
+        Ok(DeleteSnapshotResponse { removed, deleted })
     }
 }
 
@@ -3050,7 +3063,7 @@ mod tests {
         let building = lock.lock().await;
         let deleting = tokio::spawn({
             let s = s.clone();
-            async move { s.delete(&s.id(&entry)).await }
+            async move { s.delete(&s.id(&entry), false).await }
         });
         tokio::time::timeout(Duration::from_secs(5), async {
             while has_files(&s, &old).await {

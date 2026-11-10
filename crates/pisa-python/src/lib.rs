@@ -334,8 +334,17 @@ impl Client {
         )
     }
 
-    fn delete_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.delete_snapshot(&id).await })
+    #[pyo3(signature = (id, *, with_replacers = false))]
+    fn delete_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        with_replacers: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::DeleteSnapshotOptions { with_replacers };
+        call(py, async move {
+            self.inner.delete_snapshot_with(&id, &opts).await
+        })
     }
 
     fn verify_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {

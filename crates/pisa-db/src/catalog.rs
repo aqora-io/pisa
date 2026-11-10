@@ -512,6 +512,18 @@ impl Catalog {
         dispatch!(&self.db, remove_entry(&self.version, e))
     }
 
+    /// Removes the entry and every entry that replaces it, directly or
+    /// through others, in one transaction, and splices nothing. Returns their
+    /// ids, the entry's first, and each module that went with them, with its
+    /// record, importers first. What the entry replaced keeps its other
+    /// replacers, and is a head again if it has none.
+    pub async fn remove_branch(
+        &self,
+        e: &str,
+    ) -> Result<(Vec<String>, Vec<(String, ModuleMeta)>), Error> {
+        dispatch!(&self.db, remove_branch(&self.version, e))
+    }
+
     /// The entries, newest first, that have every `(key, value)` in `labels`
     /// (every entry if there are none), at most `limit` of them, starting
     /// after the cursor `after` (see [`is_cursor`]). Also returns the cursor
@@ -878,6 +890,8 @@ mod tests {
             assert_eq!(catalog.entry(&e).await.unwrap_err().message, unknown);
             let removed = catalog.remove_entry(&e).await;
             assert_eq!(removed.unwrap_err().message, unknown);
+            let dropped = catalog.remove_branch(&e).await;
+            assert_eq!(dropped.unwrap_err().message, unknown);
             let labelled = catalog.set_labels(&e, &BTreeMap::new()).await;
             assert_eq!(labelled.unwrap_err().message, unknown);
         }
@@ -1104,6 +1118,102 @@ mod tests {
             );
             assert_eq!(a.replacement, Some(replacement(&["t", "u"], &[], &[])));
             assert_eq!(b.replacement, Some(replacement(&["t", "v"], &[], &[])));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_delete_takes_what_replaces_it() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let forking = |old: &str| NewEntry {
+                fork: true,
+                ..step(old, &["v"], &[], &[])
+            };
+            let a1 = added(&catalog, step(&s0, &["t"], &[], &[])).await;
+            let a2 = added(&catalog, step(&a1, &["u"], &[], &[])).await;
+            let a3 = added(&catalog, forking(&a1)).await;
+            let b1 = added(&catalog, forking(&s0)).await;
+
+            let (deleted, removed) = catalog.remove_branch(&a1).await.unwrap();
+
+            assert_eq!(deleted[0], a1);
+            let mut rest = deleted[1..].to_vec();
+            rest.sort();
+            let mut both = [a2.clone(), a3.clone()];
+            both.sort();
+            assert_eq!(rest, both);
+            // `x` still holds the spec and B1.
+            assert!(removed.is_empty());
+            assert_eq!(replacer_ids(&catalog, &s0).await, std::slice::from_ref(&b1));
+            for gone in &deleted {
+                assert!(catalog.entry(gone).await.is_err());
+            }
+            // Nothing was spliced: B1 keeps its link.
+            let kept = catalog.entry(&b1).await.unwrap();
+            assert_eq!(kept.replaces, link(&s0, &[]));
+            assert_eq!(kept.replacement, Some(replacement(&["v"], &[], &[])));
+            // A create racing it that commits later finds what it replaces gone.
+            let late = catalog.add_entry("x", step(&a2, &[], &[], &[])).await;
+            assert_eq!(late.unwrap_err().kind, ErrorKind::NotFound);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_that_was_the_only_replacer_leaves_a_head() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let a1 = added(&catalog, step(&s0, &["t"], &[], &[])).await;
+
+            let (deleted, _) = catalog.remove_branch(&a1).await.unwrap();
+
+            assert_eq!(deleted, [a1]);
+            assert!(replacer_ids(&catalog, &s0).await.is_empty());
+            // S0 is a head again, so a create may replace it without forking.
+            added(&catalog, step(&s0, &["t"], &[], &[])).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_branch_delete_cleans_the_modules_it_frees() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            // Each module imports the one before, so `a` can go only after
+            // `b`, and `b` after `c`.
+            let a = meta("a");
+            let b = child("b", &a);
+            let c = child("c", &b);
+            let mut deleted = Vec::new();
+            let mut replaced = s0.clone();
+            for (m, module) in [("a", &a), ("b", &b), ("c", &c)] {
+                let step = step(&replaced, &[], &[], &[]);
+                replaced = catalog.commit(m, module, None, step).await.unwrap().0;
+                deleted.push(replaced.clone());
+            }
+            let (kept, ..) = catalog
+                .commit("z", &meta("z"), None, no_labels())
+                .await
+                .unwrap();
+
+            let (found, removed) = catalog.remove_branch(&deleted[0]).await.unwrap();
+
+            assert_eq!(found, deleted);
+            let modules: Vec<&str> = removed.iter().map(|(m, _)| m.as_str()).collect();
+            assert_eq!(modules, ["c", "b", "a"]);
+            assert_eq!(removed[0].1.imports, ["b"]);
+            for m in ["a", "b", "c"] {
+                assert!(catalog.module(m).await.is_err(), "{m}");
+            }
+            assert!(catalog.module("x").await.is_ok());
+            assert!(catalog.entry(&kept).await.is_ok());
         }
     }
 

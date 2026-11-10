@@ -3,6 +3,7 @@ export {
   type CheckOptions,
   type ClientOptions,
   type CreateSnapshotOptions,
+  type DeleteSnapshotOptions,
   type GetDeclarationOptions,
   type Job,
   type JobOptions,

@@ -13,7 +13,7 @@ use pisa_protocol::api::{
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
-use pisa_protocol::wire::{Job, JobResult, SnapshotJob, SnapshotRebuildJob};
+use pisa_protocol::wire::{Job, JobResult, SnapshotDeleteJob, SnapshotRebuildJob};
 
 use crate::dispatch::{DispatchError, Priority};
 use crate::http::{ApiError, App};
@@ -207,7 +207,10 @@ async fn retire(
 
 /// Deletes snapshot `entry` on `version`; one already gone counts.
 async fn delete(app: &App, entry: String, version: Option<String>) -> Result<(), ApiError> {
-    let job = Job::SnapshotDelete(SnapshotJob { entry });
+    let job = Job::SnapshotDelete(SnapshotDeleteJob {
+        entry,
+        with_replacers: false,
+    });
     match submit(app, job, version, Priority::Interactive).await? {
         JobResult::SnapshotDeleted(Ok(_)) => Ok(()),
         JobResult::SnapshotDeleted(Err(e)) if e.kind == ErrorKind::NotFound => Ok(()),

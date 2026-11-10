@@ -421,6 +421,166 @@ async fn deleting_a_middle_snapshot_keeps_the_run() {
     assert_eq!(r["heads"], json!([id(&p2)]), "{r}");
 }
 
+/// `DELETE /snapshots/{id}{query}`: the status and body.
+async fn delete(c: &Cluster, id: &str, query: &str) -> (u16, Value) {
+    let r = c
+        .client
+        .delete(c.url(&format!("/snapshots/{id}{query}")))
+        .send()
+        .await
+        .unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+/// Two attempts at a target fork the run; dropping one with its branch
+/// leaves the other as the run's only head.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_branch_resolves_a_fork() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s0 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let a1 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": replacing(&s0)}),
+    )
+    .await;
+    let b1 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := by decide", "replaces": replacing(&s0),
+               "fork": true}),
+    )
+    .await;
+    let a2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl\ntheorem h : 1 = 1 := rfl",
+               "replaces": replacing(&a1)}),
+    )
+    .await;
+    let r = audit(&c, &[id(&s0)]).await;
+    assert_eq!(r["forks"].as_array().unwrap().len(), 1, "{r}");
+
+    let (status, r) = delete(&c, id(&a1), "?with_replacers=true").await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["deleted"], json!([id(&a1), id(&a2)]), "{r}");
+    assert_eq!(r["removed"].as_array().unwrap().len(), 2, "{r}");
+
+    let r = audit(&c, &[id(&s0)]).await;
+    assert!(r.get("forks").is_none(), "{r}");
+    assert_eq!(r["heads"], json!([id(&b1)]), "{r}");
+    assert_eq!(link(&c, id(&b1)).await, replacing(&s0));
+    for gone in [&a1, &a2] {
+        let (status, _) = get(&c, &format!("/snapshots/{}", id(gone))).await;
+        assert_eq!(status, 404);
+    }
+}
+
+/// A module that only a dropped branch kept goes with it, along with the
+/// modules it imported that nothing else keeps.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_branch_cleans_up_what_it_imported() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let base = create(&c, json!({"code": "import Foo\n\ndef base_n : Nat := 1"})).await;
+    let s0 = create(&c, json!({"code": on(&base, "theorem t : 2 = 2 := sorry")})).await;
+    let p1 = create(
+        &c,
+        json!({"code": on(&base, "theorem t : 2 = 2 := rfl"), "replaces": replacing(&s0)}),
+    )
+    .await;
+    // The base keeps no snapshot of its own: only what imports it keeps it.
+    let (status, r) = delete(&c, id(&base), "").await;
+    assert_eq!(
+        (status, r["removed"].as_array().unwrap().len()),
+        (200, 0),
+        "{r}"
+    );
+
+    let (status, r) = delete(&c, id(&s0), "?with_replacers=true").await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["deleted"], json!([id(&s0), id(&p1)]), "{r}");
+    let mut removed: Vec<&str> = r["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap())
+        .collect();
+    removed.sort();
+    let mut modules = [&base, &s0, &p1].map(|r| r["snapshot"]["module"].as_str().unwrap());
+    modules.sort();
+    assert_eq!(removed, modules, "{r}");
+}
+
+/// Without the option, a delete splices and lists the one snapshot it took.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_delete_lists_one_snapshot() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s0 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let p1 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": replacing(&s0)}),
+    )
+    .await;
+    let p2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl\ntheorem h : 1 = 1 := rfl",
+               "replaces": replacing(&p1)}),
+    )
+    .await;
+    let p3 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl\ntheorem h : 1 = 1 := rfl\ntheorem g : 1 = 1 := rfl",
+               "replaces": replacing(&p2)}),
+    )
+    .await;
+
+    let (status, r) = delete(&c, id(&p1), "").await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["deleted"], json!([id(&p1)]), "{r}");
+    let (status, r) = delete(&c, id(&p2), "?with_replacers=false").await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["deleted"], json!([id(&p2)]), "{r}");
+    assert_eq!(link(&c, id(&p3)).await, replacing(&s0));
+    // A head has nothing replacing it, so the option takes it alone.
+    let (status, r) = delete(&c, id(&p3), "?with_replacers=true").await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["deleted"], json!([id(&p3)]), "{r}");
+    let r = audit(&c, &[id(&s0)]).await;
+    assert_eq!(r["heads"], json!([id(&s0)]), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_replacers_must_be_a_boolean() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s0 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    for query in [
+        "?with_replacers=maybe",
+        "?with_replacers=",
+        "?with_replacers=1",
+    ] {
+        let (status, r) = delete(&c, id(&s0), query).await;
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{query}: {r}"
+        );
+        let message = r["error"]["message"].as_str().unwrap();
+        assert!(message.contains("true or false"), "{query}: {message}");
+    }
+    // Nothing was deleted.
+    let (status, _) = get(&c, &format!("/snapshots/{}", id(&s0))).await;
+    assert_eq!(status, 200);
+}
+
 /// The acceptance flow: a skeleton on a base, a proof that changes one of
 /// its definitions, then a base that changes one of its own, and a rebuild
 /// that retires the old head. A rebuild copies only the run's head, the old

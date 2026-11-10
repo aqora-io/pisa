@@ -422,6 +422,67 @@ pub(crate) async fn remove_entry(
     Ok(removed)
 }
 
+pub(crate) async fn remove_branch(
+    db: &Handle,
+    v: &str,
+    e: &str,
+) -> Result<(Vec<String>, Vec<(String, ModuleMeta)>), Error> {
+    let removed = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let Some(first) = entry_in(conn, v, e).await? else {
+                return Err(Fail::Api(unknown_entry(v, e)));
+            };
+            // The branch: `e`, then what replaces each entry found, with the
+            // module of each.
+            let mut ids = vec![e.to_string()];
+            let mut owners = vec![first.module];
+            let mut next = 0;
+            while next < ids.len() {
+                for (r, meta) in replacers_in(conn, v, &ids[next]).await? {
+                    ids.push(r);
+                    owners.push(meta.module);
+                }
+                next += 1;
+            }
+            diesel::delete(
+                entries::table
+                    .filter(entries::version.eq(v))
+                    .filter(entries::id.eq_any(&ids)),
+            )
+            .execute(conn)
+            .await?;
+            let mut modules: Vec<String> = Vec::new();
+            for (entry, module) in ids.iter().zip(owners) {
+                log(conn, v, Some(entry), Some(&module)).await?;
+                if !modules.contains(&module) {
+                    modules.push(module);
+                }
+            }
+            // A module goes once the modules that import it have, so go round
+            // until a round cleans none.
+            let mut cleaned = Vec::new();
+            while !modules.is_empty() {
+                let mut kept = Vec::new();
+                for module in &modules {
+                    match clean(conn, v, module).await? {
+                        Some(meta) => cleaned.push((module.clone(), meta)),
+                        None => kept.push(module.clone()),
+                    }
+                }
+                if kept.len() == modules.len() {
+                    break;
+                }
+                modules = kept;
+            }
+            Ok((ids, cleaned))
+        })
+    })
+    .await?;
+    Ok(removed)
+}
+
 /// Up to `limit` entries, newest first, with every label in `labels`, from
 /// before the entry created at `after`'s time with `after`'s id.
 pub(crate) async fn list(

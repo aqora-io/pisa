@@ -499,7 +499,7 @@ async fn entries_hold_their_modules_until_the_last_reference_goes() {
     );
 
     let gone = delete(&c, &root).await;
-    assert_eq!(gone, json!({"removed": []}));
+    assert_eq!(gone, json!({"removed": [], "deleted": [entry(&root)]}));
     let root_path = format!("/snapshots/{}", entry(&root));
     let (status, r) = request(&c, reqwest::Method::GET, &root_path).await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));

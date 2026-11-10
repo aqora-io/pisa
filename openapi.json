@@ -705,10 +705,17 @@
         "type": "object"
       },
       "DeleteSnapshotResponse": {
-        "description": "`DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once\nno snapshot and no kept module needs it, and then so do the modules it\nimports, on the same terms. The snapshots that replace it replace what it\nreplaced instead, with the two links composed: their `allow` and\n`replacement` hold the changes of both steps. If it replaced nothing, they\nkeep their links to it.",
+        "description": "`DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once\nno snapshot and no kept module needs it, and then so do the modules it\nimports, on the same terms. The snapshots that replace it replace what it\nreplaced instead, with the two links composed: their `allow` and\n`replacement` hold the changes of both steps. If it replaced nothing, they\nkeep their links to it.\n\nWith `with_replacers=true`, it deletes the snapshot and every snapshot\nthat replaces it, directly or through others, in one step, and splices\nnothing: a whole branch of a run goes. If the snapshot replaced another,\nthe branch no longer counts among that one's replacers, which is a head\nagain if none are left.",
         "properties": {
+          "deleted": {
+            "description": "The ids of the snapshots deleted, the one asked for first. It is the\none alone unless `with_replacers` was set.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "removed": {
-            "description": "The modules removed, the snapshot's own first.",
+            "description": "The modules removed, each before the modules it imports: the\nsnapshot's own first, unless a snapshot deleted with it imports it.",
             "items": {
               "type": "string"
             },
@@ -716,7 +723,8 @@
           }
         },
         "required": [
-          "removed"
+          "removed",
+          "deleted"
         ],
         "type": "object"
       },
@@ -3579,7 +3587,7 @@
     },
     "/snapshots/{id}": {
       "delete": {
-        "description": "Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed.",
+        "description": "Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed. With `with_replacers=true` it deletes those snapshots as well, and the ones that replace them, and splices nothing: a whole branch of a run goes, and what the snapshot replaced is a head again if nothing else replaces it. `deleted` lists the snapshots that went, the asked one first.",
         "operationId": "deleteSnapshot",
         "parameters": [
           {
@@ -3589,6 +3597,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "`true` to delete the snapshots that replace it too, directly or through others; `false` by default",
+            "in": "query",
+            "name": "with_replacers",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],

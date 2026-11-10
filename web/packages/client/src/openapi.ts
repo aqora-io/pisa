@@ -265,7 +265,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a snapshot
-         * @description Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed.
+         * @description Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed. With `with_replacers=true` it deletes those snapshots as well, and the ones that replace them, and splices nothing: a whole branch of a run goes, and what the snapshot replaced is a head again if nothing else replaces it. `deleted` lists the snapshots that went, the asked one first.
          */
         delete: operations["deleteSnapshot"];
         options?: never;
@@ -783,9 +783,23 @@ export interface components {
          *     replaced instead, with the two links composed: their `allow` and
          *     `replacement` hold the changes of both steps. If it replaced nothing, they
          *     keep their links to it.
+         *
+         *     With `with_replacers=true`, it deletes the snapshot and every snapshot
+         *     that replaces it, directly or through others, in one step, and splices
+         *     nothing: a whole branch of a run goes. If the snapshot replaced another,
+         *     the branch no longer counts among that one's replacers, which is a head
+         *     again if none are left.
          */
         DeleteSnapshotResponse: {
-            /** @description The modules removed, the snapshot's own first. */
+            /**
+             * @description The ids of the snapshots deleted, the one asked for first. It is the
+             *     one alone unless `with_replacers` was set.
+             */
+            deleted: string[];
+            /**
+             * @description The modules removed, each before the modules it imports: the
+             *     snapshot's own first, unless a snapshot deleted with it imports it.
+             */
             removed: string[];
         };
         /** @description A natural-language description of a declaration. */
@@ -2899,7 +2913,10 @@ export interface operations {
     };
     deleteSnapshot: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `true` to delete the snapshots that replace it too, directly or through others; `false` by default */
+                with_replacers?: boolean;
+            };
             header?: never;
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */
