@@ -314,6 +314,10 @@ pub enum Detail {
     /// it to have: [`AtPosition::term`]. Lean then prints every term of the
     /// code, which can take several times as long as the check.
     Terms,
+    /// Every field of each of [`CheckResult::declarations`]. Without it a
+    /// declaration has its `name`, `kind` and `status`, and only the axioms
+    /// it uses outside the worker's allowed ones.
+    Declarations,
 }
 
 /// The most positions a check can ask about in `at`.
@@ -521,6 +525,9 @@ pub struct CheckSessionRequest {
     pub code: String,
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Only `declarations` applies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<Detail>,
 }
 
 /// `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
@@ -594,6 +601,9 @@ pub struct CreateSnapshotRequest {
     /// `bad_request`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holes: Option<Vec<String>>,
+    /// Only `declarations` applies, to `check`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<Detail>,
 }
 
 /// A snapshot that a create replaces, and what the replacement may change:

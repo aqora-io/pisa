@@ -64,6 +64,8 @@ pub struct SessionCheckJob {
     pub session: String,
     pub code: String,
     pub timeout_secs: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<api::Detail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,12 +88,17 @@ pub struct SnapshotCreateJob {
     /// A spec's holes; empty with `replaces`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<api::Detail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotJob {
     /// The snapshot id, `<version>~<entry id>`.
     pub entry: String,
+    /// For `GET /snapshots/{id}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<api::Detail>,
 }
 
 /// `DELETE /snapshots/{id}`.
@@ -265,6 +272,7 @@ mod tests {
             }),
             fork: true,
             holes: Vec::new(),
+            detail: Vec::new(),
         };
         let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();
         assert_eq!(job["kind"], "snapshot_replace");

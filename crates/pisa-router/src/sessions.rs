@@ -148,6 +148,7 @@ pub async fn check(
         session: id,
         code: req.code,
         timeout_secs: req.timeout,
+        detail: req.detail,
     });
     let p = Prepared {
         job,

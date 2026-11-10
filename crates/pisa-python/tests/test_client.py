@@ -101,6 +101,14 @@ def test_check(url):
     assert ok["ok"]
     assert ok["declarations"][0]["name"] == "t"
     assert isinstance(ok["time"], float) and isinstance(ok["ok"], bool)
+    # A summary, unless asked for in full.
+    assert ok["declarations"][0] == {"name": "t", "kind": "theorem", "axioms": [], "status": "proved"}
+    full = client.check("import Foo\ntheorem t : 1 = 1 := rfl", detail=["declarations"])
+    assert full["declarations"][0]["axioms"] == ["propext"] and "type_hash" in full["declarations"][0]
+    created = client.create_snapshot("import Foo\n\ntheorem py_slim : 1 = 1 := rfl")
+    assert "type_hash" not in created["check"]["declarations"][0]
+    detail = client.get_snapshot(created["snapshot"]["id"], detail=["declarations"])
+    assert "type_hash" in detail["check"]["declarations"][0]
 
     results = client.check_batch(["#check Nat", "theorem t : False := sorry"])
     assert len(results) == 2 and all("id" not in r for r in results)

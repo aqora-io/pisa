@@ -150,6 +150,8 @@ pub struct CreateSnapshotOptions {
     /// replace it to change, which those inherit and may change without
     /// `allow`. Not with `replaces`; empty sends none.
     pub holes: Vec<String>,
+    /// [`Detail::Declarations`] for every field of the check's declarations.
+    pub detail: Vec<Detail>,
 }
 
 /// Options for [`Client::delete_snapshot_with`].
@@ -481,7 +483,18 @@ impl Client {
     /// Re-checks a completed proof from scratch and confirms it proves the
     /// statements the session started from.
     pub async fn check_session(&self, session_id: &str, code: &str) -> Result<CheckResult, Error> {
-        let req = self.check_session_request(code);
+        self.check_session_with(session_id, code, &[]).await
+    }
+
+    /// Like [`Client::check_session`], with [`Detail::Declarations`] for
+    /// every field of the declarations.
+    pub async fn check_session_with(
+        &self,
+        session_id: &str,
+        code: &str,
+        detail: &[Detail],
+    ) -> Result<CheckResult, Error> {
+        let req = self.check_session_request(code, detail);
         self.post(&format!("sessions/{session_id}/check"), &req)
             .await
     }
@@ -493,14 +506,15 @@ impl Client {
         code: &str,
     ) -> Result<Job<CheckResult>, Error> {
         let url = self.endpoint.url(&format!("sessions/{session_id}/check"))?;
-        let req = self.check_session_request(code);
+        let req = self.check_session_request(code, &[]);
         self.endpoint.submit(url, Some(&req)).await
     }
 
-    fn check_session_request(&self, code: &str) -> CheckSessionRequest {
+    fn check_session_request(&self, code: &str, detail: &[Detail]) -> CheckSessionRequest {
         CheckSessionRequest {
             code: code.to_string(),
             timeout: self.timeout,
+            detail: detail.to_vec(),
         }
     }
 
@@ -562,6 +576,7 @@ impl Client {
             replaces: opts.replaces.clone(),
             fork: opts.fork,
             holes: (!opts.holes.is_empty()).then(|| opts.holes.clone()),
+            detail: opts.detail.clone(),
         }
     }
 
@@ -642,7 +657,21 @@ impl Client {
 
     /// A snapshot with its module's code, check result and exports.
     pub async fn get_snapshot(&self, id: &str) -> Result<SnapshotDetail, Error> {
-        self.endpoint.get(self.snapshot_url(id)?).await
+        self.get_snapshot_with(id, &[]).await
+    }
+
+    /// Like [`Client::get_snapshot`], with [`Detail::Declarations`] for every
+    /// field of the check's declarations.
+    pub async fn get_snapshot_with(
+        &self,
+        id: &str,
+        detail: &[Detail],
+    ) -> Result<SnapshotDetail, Error> {
+        let mut url = self.snapshot_url(id)?;
+        if detail.contains(&Detail::Declarations) {
+            url.query_pairs_mut().append_pair("detail", "declarations");
+        }
+        self.endpoint.get(url).await
     }
 
     /// Snapshots newest first: those with every label in `labels` (up to

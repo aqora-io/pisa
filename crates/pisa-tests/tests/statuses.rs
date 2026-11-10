@@ -59,9 +59,10 @@ async fn statuses_tell_assumptions_from_sorry_and_the_rest() {
     .await;
 
     assert_eq!(a["snapshot"]["status"], "conditional", "{a}");
+    // A summary's axioms are those outside the allowed ones: the assumption.
     let thm3 = decl(&b["check"], "thm3");
     assert_eq!(
-        (&thm3["status"], &thm3["assumes"]),
+        (&thm3["status"], &thm3["axioms"]),
         (&json!("conditional"), &json!(["kunneth"]))
     );
     assert_eq!(b["snapshot"]["status"], "conditional", "{b}");
@@ -88,7 +89,7 @@ async fn statuses_tell_assumptions_from_sorry_and_the_rest() {
         .await;
     let t = decl(&checked, "t");
     assert_eq!(
-        (&t["status"], &t["assumes"], &checked["ok"]),
+        (&t["status"], &t["axioms"], &checked["ok"]),
         (&json!("conditional"), &json!(["kunneth"]), &json!(false))
     );
 

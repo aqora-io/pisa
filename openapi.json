@@ -560,6 +560,13 @@
           "code": {
             "type": "string"
           },
+          "detail": {
+            "description": "Only `declarations` applies.",
+            "items": {
+              "$ref": "#/components/schemas/Detail"
+            },
+            "type": "array"
+          },
           "timeout": {
             "format": "int64",
             "minimum": 0,
@@ -576,6 +583,13 @@
         "properties": {
           "code": {
             "type": "string"
+          },
+          "detail": {
+            "description": "Only `declarations` applies, to `check`.",
+            "items": {
+              "$ref": "#/components/schemas/Detail"
+            },
+            "type": "array"
           },
           "fork": {
             "description": "Lets `replaces` name a snapshot that another snapshot replaces\nalready, which forks the run. Otherwise such a create keeps nothing\nand builds nothing: `check.error` is a `conflict`, and the response's\n`heads` are the snapshots to replace instead. Another create can\nreplace the snapshot while this one builds, and then it is refused\nthe same way, with its build discarded. A `key` replay comes before\nthis check. It does nothing without `replaces`.",
@@ -714,11 +728,7 @@
           "name",
           "kind",
           "axioms",
-          "assumes",
-          "status",
-          "type_hash",
-          "type_refs",
-          "value_refs"
+          "status"
         ],
         "type": "object"
       },
@@ -882,7 +892,8 @@
         "description": "Extra detail a check can return, requested in `detail`.",
         "enum": [
           "tactics",
-          "terms"
+          "terms",
+          "declarations"
         ],
         "type": "string"
       },
@@ -3840,6 +3851,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "`declarations` for every field of the check's declarations",
+            "in": "query",
+            "name": "detail",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Detail"
             }
           }
         ],

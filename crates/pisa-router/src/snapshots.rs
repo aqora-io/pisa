@@ -10,7 +10,7 @@ use axum::extract::{Path, RawQuery, State};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     Accepted, ApiErrors, AuditSnapshotsResponse, CreateSnapshotRequest, CreateSnapshotResponse,
-    DeleteSnapshotResponse, ErrorKind, JobKind, JobStatus, ListDependentsResponse,
+    DeleteSnapshotResponse, Detail, ErrorKind, JobKind, JobStatus, ListDependentsResponse,
     ListSnapshotsResponse, PreferAsync, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
     Snapshot, SnapshotDetail, SnapshotId, UpdateSnapshotRequest, VerifySnapshotResponse,
 };
@@ -123,6 +123,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         replaces: req.replaces,
         fork: req.fork,
         holes: req.holes.unwrap_or_default(),
+        detail: req.detail,
     };
     let job = if replace {
         Job::SnapshotReplace(create)
@@ -146,15 +147,22 @@ pub(crate) fn created(done: JobResult) -> Result<CreateSnapshotResponse, ApiErro
 #[utoipa::path(
     get, path = "/snapshots/{id}", operation_id = "getSnapshot", tag = "snapshots",
     summary = "A snapshot, with its module's code, check and exports",
-    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`")),
+    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), GetParams),
     responses((status = 200, description = "The snapshot", body = SnapshotDetail), ApiErrors),
 )]
+/// `GET /snapshots/{id}`. The query is taken as a `Result` so that the id is
+/// checked first.
 pub async fn get(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    q: Result<Params<GetParams>, ApiError>,
 ) -> Result<Json<SnapshotDetail>, ApiError> {
     let version = parse_id(&id)?.version;
-    let job = Job::SnapshotGet(SnapshotJob { entry: id });
+    let Params(GetParams { detail }) = q?;
+    let job = Job::SnapshotGet(SnapshotJob {
+        entry: id,
+        detail: detail.into_iter().collect(),
+    });
     match submit(&app, job, Some(version), Priority::Interactive).await? {
         JobResult::Snapshot(r) => Ok(Json(*r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
@@ -532,6 +540,15 @@ pub async fn delete(
     }
 }
 
+/// `GET /snapshots/{id}`'s query. Other parameters are ignored.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct GetParams {
+    /// `declarations` for every field of the check's declarations
+    #[serde(default)]
+    detail: Option<Detail>,
+}
+
 /// `DELETE /snapshots/{id}`'s query. Other parameters are ignored.
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -558,7 +575,10 @@ pub async fn verify(
         Ok(id) => id.version,
         Err(e) => return e.into_response(),
     };
-    let job = Job::SnapshotVerify(SnapshotJob { entry: id });
+    let job = Job::SnapshotVerify(SnapshotJob {
+        entry: id,
+        detail: Vec::new(),
+    });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::VerifySnapshot, p).await
 }

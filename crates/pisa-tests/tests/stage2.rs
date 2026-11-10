@@ -18,7 +18,71 @@ async fn clean_proof_passes_with_declarations() {
     let r = check(&c, "import Mathlib\ntheorem t : 1 = 1 := rfl").await;
     assert_eq!(r["ok"], true, "{r}");
     assert_eq!(r["declarations"][0]["name"], "t");
-    assert_eq!(r["declarations"][0]["axioms"], json!(["propext"]));
+    // Only the axioms outside the allowed ones, unless asked for in full.
+    assert_eq!(r["declarations"][0]["axioms"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn declarations_are_summarised_unless_asked_for_in_full() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let get = |path: String| {
+        let c = &c;
+        async move {
+            let r = c.client.get(c.url(&path)).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            r.json::<Value>().await.unwrap()
+        }
+    };
+    // Its name, kind and status, and the axioms outside the allowed ones:
+    // the fake's `propext` is allowed.
+    let summary =
+        |name: &str| json!({"name": name, "kind": "theorem", "axioms": [], "status": "proved"});
+    let full = |d: &Value| d["type_hash"].is_string() && d["axioms"] == json!(["propext"]);
+    let code = "import Foo\ntheorem t : 1 = 1 := rfl";
+    let detail = json!(["declarations"]);
+
+    let r = check(&c, code).await;
+    assert_eq!(r["declarations"], json!([summary("t")]), "{r}");
+    let (_, r) = c
+        .post("/check", json!({"code": code, "detail": detail}))
+        .await;
+    assert!(full(&r["declarations"][0]), "{r}");
+    let (_, r) = c
+        .post("/check/batch", json!({"items": [{"code": code}]}))
+        .await;
+    assert_eq!(
+        r["results"][0]["declarations"],
+        json!([summary("t")]),
+        "{r}"
+    );
+
+    let snapshot = "import Foo\n\ntheorem u : 2 = 2 := rfl";
+    let (_, r) = c.post("/snapshots", json!({"code": snapshot})).await;
+    assert_eq!(r["check"]["declarations"], json!([summary("u")]), "{r}");
+    let id = r["snapshot"]["id"].as_str().unwrap().to_string();
+    let (_, r) = c
+        .post("/snapshots", json!({"code": snapshot, "detail": detail}))
+        .await;
+    assert!(full(&r["check"]["declarations"][0]), "{r}");
+    let r = get(format!("/snapshots/{id}")).await;
+    assert_eq!(r["check"]["declarations"], json!([summary("u")]), "{r}");
+    let r = get(format!("/snapshots/{id}?detail=declarations")).await;
+    assert!(full(&r["check"]["declarations"][0]), "{r}");
+
+    let (_, s) = c
+        .post(
+            "/sessions",
+            json!({"code": "import Foo\ntheorem v : 3 = 3 := by sorry"}),
+        )
+        .await;
+    let checked = format!("/sessions/{}/check", s["id"].as_str().unwrap());
+    let done = "import Foo\ntheorem v : 3 = 3 := rfl";
+    let (_, r) = c.post(&checked, json!({"code": done})).await;
+    assert_eq!(r["declarations"], json!([summary("v")]), "{r}");
+    let (_, r) = c
+        .post(&checked, json!({"code": done, "detail": detail}))
+        .await;
+    assert!(full(&r["declarations"][0]), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

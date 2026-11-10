@@ -31,12 +31,14 @@ pub struct Declaration {
     pub axioms: Vec<String>,
     /// Its axioms that are assumptions: declared as `axiom` in this code or
     /// in a snapshot it builds on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assumes: Vec<String>,
     /// What its axioms make it, by [`ProofStatus`].
     pub status: ProofStatus,
     /// The SHA-256 of its type's canonical text, with private names taken
     /// without their module, and with the internal auxiliaries it uses
     /// following it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub type_hash: String,
     /// For definitions, the same for the value, so a proof can't change what
     /// a statement means by redefining something it mentions.
@@ -44,9 +46,11 @@ pub struct Declaration {
     pub value_hash: Option<String>,
     /// The constants of this code and of the snapshots it builds on that its
     /// type uses, through internal auxiliaries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub type_refs: Vec<String>,
     /// The same for a definition's value, or an inductive's constructors and
     /// recursor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub value_refs: Vec<String>,
     /// Made by Lean on demand, such as an equation lemma: code with the same
     /// statements needn't have it.
@@ -58,6 +62,30 @@ pub struct Declaration {
     /// the like. A change to it is a change to that type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+}
+
+impl Declaration {
+    /// The declaration as a response gives it unless asked for in full: its
+    /// name, kind and status, and the axioms it uses outside `allowed`.
+    pub fn summarised(self, allowed: &[String]) -> Declaration {
+        Declaration {
+            name: self.name,
+            kind: self.kind,
+            axioms: self
+                .axioms
+                .into_iter()
+                .filter(|a| !allowed.contains(a))
+                .collect(),
+            assumes: Vec::new(),
+            status: self.status,
+            type_hash: String::new(),
+            value_hash: None,
+            type_refs: Vec::new(),
+            value_refs: Vec::new(),
+            generated: false,
+            parent: None,
+        }
+    }
 }
 
 /// A declaration as Lean's report prints it (`Pisa.describe`): a
@@ -364,6 +392,27 @@ mod tests {
             ..Default::default()
         };
         reported.with_status(ProofStatus::Proved)
+    }
+
+    #[test]
+    fn a_summary_keeps_the_name_kind_status_and_the_axioms_not_allowed() {
+        let mut d = decl("t", "T", Some("V"));
+        d.axioms = vec!["propext".into(), "sorryAx".into(), "oops".into()];
+        d.assumes = vec!["oops".into()];
+        d.type_refs = vec!["f".into()];
+        d.value_refs = vec!["g".into()];
+        d.generated = true;
+        d.parent = Some("S".into());
+        let summary = d.summarised(&["propext".to_string()]);
+        assert_eq!(
+            serde_json::to_value(&summary).unwrap(),
+            serde_json::json!({"name": "t", "kind": "def", "axioms": ["sorryAx", "oops"],
+                               "status": "proved"})
+        );
+        // It reads back, with what it left out empty.
+        let back: Declaration =
+            serde_json::from_value(serde_json::to_value(&summary).unwrap()).unwrap();
+        assert_eq!(back, summary);
     }
 
     #[test]

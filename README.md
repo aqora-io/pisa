@@ -228,10 +228,10 @@ pnpm -C web generate
 | `POST /check/batch` | `{items: [{code}], version?, timeout?, detail?, at?}` → `{results: [...]}`, in order |
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}` |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid |
-| `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
+| `POST /sessions/{id}/check` | `{code, timeout?, detail?}` → check result, also requiring the session's original statements and imports |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, detail?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
-| `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
+| `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
@@ -276,7 +276,14 @@ A check result is `{ok, time, error?, messages, sorries, reasons, changes?, decl
   check, the declarations that don't keep the statements they must, each also
   one of `reasons`: `{name, module?, change, was?, now?, includes?}`, see
   *Refused* under [Replacing](#replacing).
-- `declarations` lists each new declaration with the axioms it uses.
+- `declarations` lists each new declaration as `{name, kind, status,
+  axioms}`, its axioms being those it uses besides the allowed ones (see
+  [Statuses](#statuses)). With `detail: ["declarations"]` each has every
+  field: all its `axioms`, the assumptions it uses (`assumes`), and the hashes
+  and references the comparisons run on (`type_hash`, `value_hash?`,
+  `type_refs`, `value_refs`, `generated?`, `parent?`). `/sessions/{id}/check`
+  and `POST /snapshots` take the same `detail`, and `GET /snapshots/{id}`
+  takes `?detail=declarations`.
 
 With `detail: ["tactics"]`, a check result also has `tactics`, the goals at
 every step of the proof. Each entry is one run of a tactic, in the order Lean
@@ -476,7 +483,7 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   stops at Lean's and Mathlib's constants, which the version fixes.
 - **What declarations use.** Each declaration in a check result records the
   constants of the code and of its snapshots that its type and value use
-  (`type_refs`, `value_refs`). Private names are compared without the module
+  (`type_refs`, `value_refs`, with `detail: ["declarations"]`). Private names are compared without the module
   they were declared in, and what Lean makes on demand, such as equation
   lemmas (`generated`), needn't stay.
 - **Definitions.** `"replaces": {"snapshot_id": "…~9c0e…", "allow":
@@ -547,7 +554,8 @@ proved: the audit shows it unproved, and the run isn't `clean`.
 **Statuses and assumptions.** An `axiom` declared in snapshot code, or in the
 code being checked, is an assumption: a statement taken as given, such as a
 lemma from the literature. Each declaration in a check result has a `status`,
-and `assumes` lists the assumptions it uses:
+and `assumes` lists the assumptions it uses (with `detail: ["declarations"]`;
+the summary's `axioms` show them too):
 
 | `status` | Axioms it uses besides the allowed ones (`propext`, `Classical.choice`, `Quot.sound`) |
 | --- | --- |

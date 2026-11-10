@@ -471,7 +471,10 @@ mod tests {
             ..Default::default()
         };
         let d = Dispatcher::start(queue.clone(), cfg).await;
-        let job = Job::SnapshotGet(SnapshotJob { entry: "e".into() });
+        let job = Job::SnapshotGet(SnapshotJob {
+            entry: "e".into(),
+            detail: Vec::new(),
+        });
         let looked = |token: String| {
             let d = &d;
             async move { d.look(&token, Duration::ZERO).await.unwrap().unwrap().state }

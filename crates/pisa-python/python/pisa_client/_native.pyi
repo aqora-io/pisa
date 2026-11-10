@@ -27,15 +27,17 @@ class Sorry(TypedDict):
 ProofStatus = Literal["proved", "conditional", "sorry", "rejected"]
 
 class Declaration(TypedDict):
+    """Without `detail=["declarations"]`, only `name`, `kind`, `status`, and
+    the `axioms` outside the worker's allowed ones."""
     name: str
     kind: str
     axioms: list[str]
-    assumes: list[str]
+    assumes: NotRequired[list[str]]
     status: ProofStatus
-    type_hash: str
+    type_hash: NotRequired[str]
     value_hash: NotRequired[str]
-    type_refs: list[str]
-    value_refs: list[str]
+    type_refs: NotRequired[list[str]]
+    value_refs: NotRequired[list[str]]
     generated: NotRequired[bool]
     parent: NotRequired[str]
 
@@ -337,13 +339,15 @@ class Client:
         self,
         code: str,
         *,
-        detail: list[Literal["tactics", "terms"]] = [],
+        detail: list[Literal["tactics", "terms", "declarations"]] = [],
         at: list[tuple[int, int]] = [],
     ) -> CheckResult:
         """Check one piece of code. `ok` is the verdict; a check that could not
         complete (timeout, policy, ...) has `error` set instead of raising.
         `detail=["tactics"]` adds `tactics`: each tactic Lean ran, with the
-        goals before and after it.
+        goals before and after it. `detail=["declarations"]` gives every field
+        of each declaration, which otherwise has its name, kind and status and
+        the axioms outside the allowed ones.
 
         `at` takes up to 64 `(line, column)` positions in the code, lines from
         1 and columns from 0, and adds `at`: the tactic at each, with its
@@ -355,7 +359,7 @@ class Client:
         self,
         codes: list[str],
         *,
-        detail: list[Literal["tactics", "terms"]] = [],
+        detail: list[Literal["tactics", "terms", "declarations"]] = [],
         at: list[tuple[int, int]] = [],
     ) -> list[CheckResult]:
         """Check several pieces of code in one request; results keep the order
@@ -365,9 +369,12 @@ class Client:
     def apply_tactic(self, state_id: str, tactic: str) -> ApplyTacticResponse:
         """Apply one tactic. Raises LeanError if Lean rejects it and LimitError
         if it times out. Earlier states stay valid."""
-    def check_session(self, session_id: str, code: str) -> CheckResult:
+    def check_session(
+        self, session_id: str, code: str, *, detail: list[Literal["declarations"]] = []
+    ) -> CheckResult:
         """Re-check a completed proof from scratch; `ok` also requires that it
-        proves the session's original statements, with its imports."""
+        proves the session's original statements, with its imports.
+        `detail=["declarations"]` as for `check`."""
     def create_snapshot(
         self,
         code: str,
@@ -378,6 +385,7 @@ class Client:
         replaces: Replaces | None = None,
         fork: bool = False,
         holes: list[str] | None = None,
+        detail: list[Literal["declarations"]] = [],
     ) -> CreateSnapshotResponse:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module that later code can import, with a new `snapshot` carrying
@@ -439,11 +447,15 @@ class Client:
         replaces: Replaces | None = None,
         fork: bool = False,
         holes: list[str] | None = None,
+        detail: list[Literal["declarations"]] = [],
     ) -> Job:
         """Like `create_snapshot`, as a job."""
-    def get_snapshot(self, id: str) -> SnapshotDetail:
+    def get_snapshot(
+        self, id: str, *, detail: list[Literal["declarations"]] = []
+    ) -> SnapshotDetail:
         """A snapshot, with its module's code, check result and exports.
-        Raises NotFoundError for an unknown or deleted snapshot."""
+        `detail=["declarations"]` as for `check`. Raises NotFoundError for an
+        unknown or deleted snapshot."""
     def list_snapshots(
         self,
         labels: dict[str, str] | None = None,
@@ -551,7 +563,7 @@ class Client:
         self,
         code: str,
         *,
-        detail: list[Literal["tactics", "terms"]] = [],
+        detail: list[Literal["tactics", "terms", "declarations"]] = [],
         at: list[tuple[int, int]] = [],
     ) -> Job:
         """Like `check`, as a job the server runs without the request waiting
