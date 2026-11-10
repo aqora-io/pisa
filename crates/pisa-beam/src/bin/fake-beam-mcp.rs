@@ -7,7 +7,12 @@
 //! - `STALE`: a document-version mismatch;
 //! - `FAIL`: a tool error;
 //! - `CRASH`: exit with a message on stderr;
-//! - `rfl` or `trivial`: the tactic closes the goal; anything else fails.
+//! - `rfl` or `trivial`: the tactic closes the goal; `fail` or `omega`: it
+//!   fails; anything else leaves the goal `<goal> after <text>`.
+//!
+//! A probe starts from the goal `True`, and one from a handle from that
+//! handle's goal, so a chain of tactics replayed in another process reaches
+//! the same goals.
 //!
 //! When the document exists on disk it is read, as Beam reads it: `update`
 //! and `sync` give it a new version when its text changed, each `sorry` is a
@@ -27,6 +32,8 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 static HANDLES: AtomicU64 = AtomicU64::new(0);
+/// The goal each handle holds, by its raw value; none once it is closed.
+static GOALS: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(Mutex::default);
 /// Each document's text and version, by path.
 static DOCS: LazyLock<Mutex<HashMap<PathBuf, (String, u64)>>> = LazyLock::new(Mutex::default);
 
@@ -165,7 +172,7 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
             "proof_state": {"goals": [goal("True")]}}]})),
         "lean_goals" => tool_ok(json!({"goals": [goal("True")]})),
         "lean_run_at" | "lean_run_at_handle" | "lean_run_with" | "lean_run_with_linear" => {
-            tool_ok(probe(name, text))
+            tool_ok(probe(name, text, &args))
         }
         "lean_release" | "lean_close" => tool_ok(json!({})),
         "lean_save" => tool_ok(json!({"module": "Docs.A", "olean": "/fake/Docs/A.olean"})),
@@ -175,18 +182,43 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
     }
 }
 
-/// A probe's result: `rfl` or `trivial` closes the goal, anything else fails.
-fn probe(name: &str, text: &str) -> Value {
-    let closes = text.contains("rfl") || text.contains("trivial");
-    let mut result = if closes {
-        json!({"success": true, "messages": [], "proof_state": {"goals": []}, "traces": []})
-    } else {
-        json!({"success": false, "traces": [], "proof_state": {"goals": [goal("True")]},
-               "messages": [{"severity": "error", "text": "fake: tactic failed"}]})
+/// A probe's result, from the goal `True` or the handle's in `args`: `rfl`
+/// or `trivial` closes it, `fail` or `omega` fails, and anything else leaves
+/// `<goal> after <text>`. A run that keeps its result, and succeeds, has a
+/// new handle on it; `lean_run_with_linear` uses its handle up.
+fn probe(name: &str, text: &str, args: &Map<String, Value>) -> Value {
+    let raw = |handle: &Value| {
+        handle["raw"]["value"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
     };
-    if closes && name != "lean_run_at" {
+    let mut goals = GOALS.lock().unwrap();
+    let from = match args.get("handle") {
+        Some(handle) if name == "lean_run_with_linear" => goals.remove(&raw(handle)).flatten(),
+        Some(handle) => goals.get(&raw(handle)).cloned().flatten(),
+        None => None,
+    }
+    .unwrap_or_else(|| "True".to_string());
+    let (success, left) = if text.contains("rfl") || text.contains("trivial") {
+        (true, None)
+    } else if text.contains("fail") || text.contains("omega") {
+        (false, Some(from.clone()))
+    } else {
+        (true, Some(format!("{from} after {}", text.trim())))
+    };
+    let state: Vec<Value> = left.iter().map(|g| goal(g)).collect();
+    let messages = match success {
+        true => json!([]),
+        false => json!([{"severity": "error", "text": "fake: tactic failed"}]),
+    };
+    let mut result = json!({"success": success, "messages": messages,
+                            "proof_state": {"goals": state}, "traces": []});
+    if success && name != "lean_run_at" {
         let n = HANDLES.fetch_add(1, Ordering::SeqCst);
-        result["next_handle"] = json!({"epoch": 1, "raw": {"value": format!("runAt:fake:{n}")},
+        let value = format!("runAt:fake:{n}");
+        goals.insert(value.clone(), left.filter(|_| success));
+        result["next_handle"] = json!({"epoch": 1, "raw": {"value": value},
                                        "session": "fake", "workspaceId": "local:fake"});
     }
     result
@@ -275,7 +307,7 @@ fn document_call(
             tool_ok(json!({"goals": [goal(rest)]}))
         }
         "lean_run_at" | "lean_run_at_handle" | "lean_run_with" | "lean_run_with_linear" => {
-            tool_ok(probe(name, text))
+            tool_ok(probe(name, text, args))
         }
         "lean_save" => tool_ok(json!({"module": "Docs.A", "olean": "/fake/Docs/A.olean"})),
         "lean_release" => tool_ok(json!({})),

@@ -205,3 +205,26 @@ async fn documents_on_disk_are_read_where_positions_land() {
     );
     beam.close(doc, T).await.unwrap();
 }
+
+#[tokio::test]
+async fn tactics_chain_through_handles_and_replay_alike_in_another_process() {
+    async fn chain(beam: &Beam) -> String {
+        let first = beam
+            .run_at_handle(doc(), 1, AT, "constructor", T)
+            .await
+            .unwrap();
+        let handle = first.next_handle.unwrap();
+        let second = beam.run_with(doc(), &handle, "simp", T).await.unwrap();
+        let goal = second.proof_state.unwrap().goals[0].target.clone();
+        // A failure leaves nothing to continue, and the handle stays.
+        let failed = beam.run_with(doc(), &handle, "fail", T).await.unwrap();
+        assert!(!failed.success && failed.next_handle.is_none());
+        let next = second.next_handle.unwrap();
+        let done = beam.run_with(doc(), &next, "rfl", T).await.unwrap();
+        assert!(done.success && done.proof_state.unwrap().goals.is_empty());
+        goal
+    }
+    let goal = chain(&beam().await).await;
+    assert_eq!(goal, "True after constructor after simp");
+    assert_eq!(chain(&beam().await).await, goal);
+}
