@@ -807,8 +807,9 @@ let base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n
 let base = base.snapshot.expect("kept"); // none if nothing was kept: `check` says why
 let next = client.check(&format!("{}\nexample : double 2 = 4 := rfl", base.header)).await?;
 let run = std::collections::BTreeMap::from([("run".to_string(), "7".to_string())]);
-let page = client.list_snapshots(&run, Some(50), None).await?; // newest first
-let more = client.list_snapshots(&run, Some(50), page.next.as_deref()).await?;
+let page = client.list_snapshots(&run, Some(50), None, false).await?; // newest first
+let more = client.list_snapshots(&run, Some(50), page.next.as_deref(), false).await?;
+let heads = client.list_snapshots(&run, None, None, true).await?; // only what nothing replaces
 // A merge patch: `Some` sets a label, `None` removes it, and the rest stay.
 let done = std::collections::BTreeMap::from([("stage".to_string(), Some("done".to_string()))]);
 let snapshot = client.update_snapshot(&base.id, &done).await?;
@@ -849,6 +850,7 @@ client.check_session(session["id"], "theorem t (n : Nat) : n + 0 = n := by simp"
 base = client.create_snapshot("import Mathlib\ndef double (n : ℕ) := 2 * n", labels={"run": "7"})["snapshot"]
 client.check(base["header"] + "\nexample : double 2 = 4 := rfl")["ok"]
 page = client.list_snapshots({"run": "7"}, limit=50)   # newest first; pass page["next"] as after=
+heads = client.list_snapshots({"run": "7"}, heads=True)   # only what nothing replaces
 client.update_snapshot(base["id"], {"stage": "done", "run": None})   # a merge patch: None removes a label
 client.verify_snapshot(base["id"])["snapshot"]["verified"]
 more = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two : double 2 = 4 := rfl"
