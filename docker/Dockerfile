@@ -62,6 +62,8 @@ RUN cp /opt/project/lean-toolchain /opt/pisa/lean-toolchain \
 COPY docker/verifier /opt/verifier
 
 FROM lean AS worker
+# lake comparator's sandbox covers /run/user, which has to exist for that.
+RUN mkdir -p /run/user
 COPY --from=build /usr/local/bin/pisa-worker /usr/local/bin/
 ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl
 ENTRYPOINT ["pisa-worker"]

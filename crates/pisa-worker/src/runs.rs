@@ -1,5 +1,6 @@
 //! A run as a Lake project, for `lake comparator` to judge apart from pisa's
-//! own audit (`/snapshots/export`).
+//! own audit (`/snapshots/export`), and comparator's verdict on it
+//! (`/snapshots/comparator`).
 //!
 //! The project holds every module the run's spec snapshots and heads need,
 //! as their code was stored, and a comparator configuration for each spec
@@ -7,18 +8,27 @@
 //! module is the challenge and the head's the solution. Its Lake
 //! configuration is the worker's project's, so the modules build on what they
 //! were built on.
+//!
+//! Comparator runs on a slot of the worker, in its cgroup, and sandboxes the
+//! code it judges itself.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use pisa_protocol::api::{Error, ErrorKind};
+use pisa_protocol::api::{ComparatorPair, ComparatorResponse, Error, ErrorKind};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
-use pisa_protocol::wire::{ExportedFile, ExportedPair, ExportedRun};
+use pisa_protocol::wire::{ExportedFile, ExportedPair, ExportedRun, SnapshotComparatorJob};
 use serde_json::{Value, json};
 
 use crate::catalog::ModuleMeta;
+use crate::pool::Pool;
 use crate::snapshots::Snapshots;
+
+/// How many of comparator's last lines of output a pair keeps.
+const OUTPUT_LINES: usize = 40;
 
 /// The project's Lake package.
 const NAME: &str = "pisa_run";
@@ -96,6 +106,82 @@ pub async fn export(
         pairs,
         forks: audit.forks,
     })
+}
+
+/// Judges the run `job` names with `lake comparator`, each pair of a spec
+/// snapshot and a head in turn, in one export, so that Lake builds each
+/// module once.
+pub async fn comparator(
+    pool: &Arc<Pool>,
+    job: SnapshotComparatorJob,
+) -> Result<ComparatorResponse, Error> {
+    let project = pool.launcher().project();
+    let run = export(pool.snapshots(), project, &job.against, &job.allow).await?;
+    let mut slot = pool.acquire("", None).await;
+    // Comparator builds the modules, so free the slot's memory first.
+    slot.retire_and_wait("evict").await;
+    let dir = slot.scratch_dir().join("run");
+    write(&dir, &run, project).map_err(|e| {
+        Error::new(
+            ErrorKind::Internal,
+            format!("writing the run's project: {e}"),
+        )
+    })?;
+    let timeout = Duration::from_secs(job.timeout_secs);
+    let mut pairs = Vec::new();
+    for pair in &run.pairs {
+        let mut args = vec!["comparator", "--config", &pair.config];
+        if job.paranoid {
+            args.push("--paranoid");
+        }
+        let ran = pool
+            .launcher()
+            .lake(slot.id, &args, &dir, timeout)
+            .await
+            .map_err(|e| {
+                Error::new(ErrorKind::Internal, format!("running lake comparator: {e}"))
+            })?;
+        pairs.push(ComparatorPair {
+            spec: pair.spec.clone(),
+            head: pair.head.clone(),
+            config: pair.config.clone(),
+            accepted: ran.code == Some(0),
+            exit_code: ran.code,
+            output: tail(&ran.output, OUTPUT_LINES),
+            skipped: pair.skipped.clone(),
+        });
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(ComparatorResponse {
+        accepted: run.forks.is_empty() && pairs.iter().all(|p| p.accepted),
+        forks: run.forks,
+        pairs,
+    })
+}
+
+/// Writes `run` into `dir`, afresh, with the project's packages, which are
+/// built already, as its own.
+fn write(dir: &Path, run: &ExportedRun, project: Option<&Path>) -> std::io::Result<()> {
+    let _ = std::fs::remove_dir_all(dir);
+    for f in &run.files {
+        let path = dir.join(&f.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, &f.text)?;
+    }
+    let packages = project.map(|p| p.join(".lake").join("packages"));
+    if let Some(packages) = packages.filter(|p| p.is_dir()) {
+        std::fs::create_dir_all(dir.join(".lake"))?;
+        std::os::unix::fs::symlink(std::path::absolute(packages)?, dir.join(".lake/packages"))?;
+    }
+    Ok(())
+}
+
+/// The last `n` lines of `text`.
+fn tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.trim_end().lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 fn file(path: &str, text: String) -> ExportedFile {
@@ -352,6 +438,13 @@ mod tests {
                 "_private.PisaSnap.sa.0.a"
             ]
         );
+    }
+
+    #[test]
+    fn a_pair_keeps_the_end_of_the_output() {
+        let text = "a\nb\nc\n";
+        assert_eq!(tail(text, 2), "b\nc");
+        assert_eq!(tail(text, 9), "a\nb\nc");
     }
 
     #[test]

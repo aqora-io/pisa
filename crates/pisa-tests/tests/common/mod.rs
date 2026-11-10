@@ -62,6 +62,7 @@ pub fn worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
         slots: Some(slots),
         repl: PathBuf::from(env!("CARGO_BIN_EXE_fake-repl")),
         lean: PathBuf::from(env!("CARGO_BIN_EXE_fake-lean")),
+        lake: PathBuf::from(env!("CARGO_BIN_EXE_fake-lake")),
         verifier: PathBuf::from("PisaVerify.lean"),
         lean_lib: PathBuf::from("pisa-lean"),
         project: None,

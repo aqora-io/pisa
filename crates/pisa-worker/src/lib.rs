@@ -191,6 +191,9 @@ pub(crate) async fn run_job(
         Job::SnapshotAudit(j) => {
             JobResult::SnapshotAudit(pool.snapshots().audit_against(&j.against, &j.allow).await)
         }
+        Job::SnapshotComparator(j) => {
+            JobResult::SnapshotComparator(runs::comparator(pool, j).await)
+        }
         Job::SnapshotExport(j) => {
             let project = pool.launcher().project();
             JobResult::SnapshotExport(

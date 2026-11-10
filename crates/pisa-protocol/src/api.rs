@@ -1202,6 +1202,68 @@ pub struct AuditComparison {
     pub replacement: Option<Replacement>,
 }
 
+/// `POST /snapshots/comparator`: judges a run with `lake comparator`,
+/// which shares no code with the audit, on the Lake project
+/// `GET /snapshots/export` gives: each spec snapshot against each head it
+/// reaches.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ComparatorRequest {
+    /// The spec's snapshot ids, as for the audit.
+    pub against: Vec<String>,
+    /// The definitions the heads may change besides the spec's holes, as for
+    /// the audit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Also run the external kernels Lean bundles: `leanchecker-paranoid`,
+    /// `lean4lean`, `nanoda`, `con-leche` and `con-ron`.
+    #[serde(default = "paranoid_default")]
+    pub paranoid: bool,
+    /// The time limit in seconds for each spec snapshot and head, in which
+    /// comparator builds and exports both and checks the head.
+    #[serde(default = "comparator_timeout")]
+    pub timeout: u64,
+}
+
+fn paranoid_default() -> bool {
+    true
+}
+
+fn comparator_timeout() -> u64 {
+    600
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ComparatorResponse {
+    /// There is no fork, and comparator accepted every pair.
+    pub accepted: bool,
+    /// As in the audit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forks: Vec<AuditFork>,
+    /// Each spec snapshot with each head it reaches.
+    pub pairs: Vec<ComparatorPair>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ComparatorPair {
+    /// The spec snapshot.
+    pub spec: String,
+    /// The head.
+    pub head: String,
+    /// Its comparator configuration in the export.
+    pub config: String,
+    pub accepted: bool,
+    /// Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it
+    /// ran past `timeout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// The end of what it printed.
+    pub output: String,
+    /// Targets, holes and assumptions the configuration leaves out because
+    /// they are private, which comparator can't name across two modules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+}
+
 /// A snapshot that more than one snapshot replaces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditFork {

@@ -7,7 +7,8 @@ mod common;
 use std::time::Duration;
 
 use common::Cluster;
-use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotExportJob};
+use pisa_protocol::api::ComparatorResponse;
+use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotComparatorJob, SnapshotExportJob};
 use pisa_worker::queue::{NewJob, Poll};
 use serde_json::{Value, json};
 
@@ -138,4 +139,95 @@ async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
     assert!(text(&run, "lake-manifest.json").contains("\"pisa_run\""));
     assert!(text(&run, "README.md").contains(&format!("| `comparator/1.json` | `{}` |", id(&s))));
     assert!(run.forks.is_empty());
+}
+
+async fn comparator(
+    c: &Cluster,
+    against: &[&str],
+    paranoid: bool,
+    timeout_secs: u64,
+) -> ComparatorResponse {
+    let job = Job::SnapshotComparator(SnapshotComparatorJob {
+        against: against.iter().map(|s| s.to_string()).collect(),
+        allow: Vec::new(),
+        paranoid,
+        timeout_secs,
+    });
+    match run(c, job).await {
+        JobResult::SnapshotComparator(Ok(r)) => r,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn comparator_judges_each_spec_snapshot_against_its_head() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    // Nothing replaces it yet: it is its own head, and its sorry is refused.
+    let r = comparator(&c, &[&id(&s)], true, 60).await;
+    assert!(!r.accepted, "{r:?}");
+    let pair = &r.pairs[0];
+    assert_eq!(
+        (&pair.spec, &pair.head, pair.exit_code),
+        (&id(&s), &id(&s), Some(1))
+    );
+    assert!(pair.output.contains("sorryAx"), "{}", pair.output);
+    assert!(
+        pair.output
+            .contains("comparator --config comparator/1.json --paranoid"),
+        "{}",
+        pair.output
+    );
+
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let r = comparator(&c, &[&id(&s)], false, 60).await;
+    assert!(r.accepted, "{r:?}");
+    let pair = &r.pairs[0];
+    assert_eq!((&pair.head, pair.exit_code), (&id(&p), Some(0)));
+    assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    for proof in ["rfl", "by rfl"] {
+        let code = format!("import Foo\n\ntheorem t : 2 = 2 := {proof}");
+        create(
+            &c,
+            json!({"code": code, "replaces": {"snapshot_id": id(&s)}, "fork": true}),
+        )
+        .await;
+    }
+    let r = comparator(&c, &[&id(&s)], false, 60).await;
+    assert_eq!(r.pairs.len(), 2, "{r:?}");
+    assert!(r.pairs.iter().all(|p| p.accepted), "{r:?}");
+    assert_eq!(r.forks[0].snapshot_id, id(&s));
+    assert!(!r.accepted, "a fork isn't accepted");
+
+    let slow = create(
+        &c,
+        json!({"code": "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl"}),
+    )
+    .await;
+    let r = comparator(&c, &[&id(&slow)], false, 1).await;
+    assert!(!r.accepted, "{r:?}");
+    assert_eq!(r.pairs[0].exit_code, None);
+    assert!(
+        r.pairs[0].output.contains("more than 1s"),
+        "{}",
+        r.pairs[0].output
+    );
 }

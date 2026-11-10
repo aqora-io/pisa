@@ -19,6 +19,7 @@ use crate::config::{Sandbox, WorkerConfig};
 pub struct Launcher {
     repl: PathBuf,
     lean: PathBuf,
+    lake: PathBuf,
     verifier: PathBuf,
     project: Option<PathBuf>,
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
@@ -46,6 +47,20 @@ pub struct Compiled {
     /// OOM kills in the slot's cgroup while it ran.
     pub oom_kills: u64,
 }
+
+/// What a process run to its end printed, and how it exited.
+#[derive(Debug)]
+pub struct Ran {
+    /// None when its time limit killed it.
+    pub code: Option<i32>,
+    /// Its standard output, then its standard error.
+    pub output: String,
+}
+
+/// The variables of the worker's environment that `lake` keeps when it runs
+/// outside the sandbox. Credentials, such as the database's URL, aren't
+/// among them.
+const LAKE_ENV: [&str; 5] = ["PATH", "HOME", "ELAN_HOME", "LANG", "TMPDIR"];
 
 /// The snapshot verifier's `PISA_VERIFY` verdict. `ok` is false when the
 /// kernel rejected a declaration; `report` carries its axiom report (the
@@ -112,6 +127,7 @@ impl Launcher {
             repl: std::path::absolute(&cfg.repl).unwrap_or_else(|_| cfg.repl.clone()),
             // Usually a bare `lean`, found on the project environment's PATH.
             lean: cfg.lean.clone(),
+            lake: cfg.lake.clone(),
             verifier: cfg.verifier.clone(),
             project: cfg.project.clone(),
             env,
@@ -332,6 +348,52 @@ impl Launcher {
             Ok(v) => v,
             Err(e) => not_ok(format!("unreadable verifier verdict: {e}")),
         }
+    }
+
+    /// Runs `lake` with `args` in `dir`, in `slot`'s cgroup but outside the
+    /// sandbox, for at most `timeout`: `lake comparator` sandboxes the code it
+    /// judges itself.
+    pub async fn lake(
+        &self,
+        slot: usize,
+        args: &[&str],
+        dir: &Path,
+        timeout: Duration,
+    ) -> std::io::Result<Ran> {
+        let mut cmd = Command::new(&self.lake);
+        cmd.args(args)
+            .current_dir(dir)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        for key in LAKE_ENV {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        if let Some(cg) = &self.cgroups {
+            cg.apply(slot, &mut cmd)?;
+        }
+        let child = cmd.spawn()?;
+        let ran = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(out) => {
+                let out = out?;
+                let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+                output.push_str(&String::from_utf8_lossy(&out.stderr));
+                Ran {
+                    code: out.status.code(),
+                    output,
+                }
+            }
+            Err(_) => Ran {
+                code: None,
+                output: format!("lake ran for more than {}s", timeout.as_secs()),
+            },
+        };
+        self.wait_idle(slot).await;
+        Ok(ran)
     }
 
     /// Waits (up to two seconds) until no process is left in the slot's

@@ -22,6 +22,10 @@ pub struct WorkerConfig {
     /// to compile snapshots, and to re-verify them.
     #[arg(long, env = "PISA_LEAN", default_value = "lean")]
     pub lean: PathBuf,
+    /// `lake`, which runs `lake comparator` on a run's export. Elan's picks
+    /// the toolchain the export names, which is the project's.
+    #[arg(long, env = "PISA_LAKE", default_value = "lake")]
+    pub lake: PathBuf,
     /// The script `lean --run` executes to re-verify a snapshot module through
     /// the kernel.
     #[arg(

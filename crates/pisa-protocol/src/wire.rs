@@ -30,6 +30,7 @@ pub enum Job {
     SnapshotRebuild(SnapshotRebuildJob),
     SnapshotAudit(SnapshotAuditJob),
     SnapshotExport(SnapshotExportJob),
+    SnapshotComparator(SnapshotComparatorJob),
     DocumentOpen(DocumentOpenJob),
     DocumentEdit(DocumentEditJob),
     DocumentGoals(DocumentGoalsJob),
@@ -162,6 +163,17 @@ pub struct SnapshotExportJob {
     pub allow: Vec<String>,
 }
 
+/// `POST /snapshots/comparator`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotComparatorJob {
+    pub against: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    pub paranoid: bool,
+    /// For each pair.
+    pub timeout_secs: u64,
+}
+
 /// A run as a Lake project, for `lake comparator`: its files, and the pairs
 /// of a spec snapshot and a head it reaches that comparator judges.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +291,7 @@ pub enum JobResult {
     SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
     SnapshotAudit(Result<api::AuditSnapshotsResponse, api::Error>),
     SnapshotExport(Result<ExportedRun, api::Error>),
+    SnapshotComparator(Result<api::ComparatorResponse, api::Error>),
     /// An opened or edited document.
     Document(Result<api::Document, api::Error>),
     DocumentGoals(Result<api::DocumentGoals, api::Error>),
