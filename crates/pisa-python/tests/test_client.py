@@ -399,6 +399,19 @@ def test_audit_against(url):
         client.audit_snapshots({"suite": "audit"}, against=[spec["id"]])
     with pytest.raises(ValueError):
         client.audit_snapshots(against=[])
+    with pytest.raises(ValueError):
+        client.audit_snapshots({"suite": "audit"}, allow=["f"])
+
+
+def test_audit_allowing(url):
+    client = Client(url, timeout=5)
+    spec = client.create_snapshot("import Foo\ndef py_f : Nat := 1\ntheorem py_t : py_f = py_f := sorry",
+                                  verify=True)["snapshot"]
+    replaces = {"snapshot_id": spec["id"], "allow": {"definitions": ["py_f"]}}
+    client.create_snapshot("import Foo\ndef py_f : Nat := 2\ntheorem py_t : py_f = py_f := rfl",
+                           replaces=replaces, verify=True)
+    assert client.audit_snapshots(against=[spec["id"]])["clean"] is False
+    assert client.audit_snapshots(against=[spec["id"]], allow=["py_f"])["clean"] is True
 
 
 def test_snapshot_labels(url):

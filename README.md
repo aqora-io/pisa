@@ -228,7 +228,7 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -595,15 +595,24 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   code being judged runs in that build. For each spec snapshot and each head
   it reaches, `comparisons` has the comparison a create replacing the spec
   snapshot with the head's code would run (see [Replacing](#replacing)), on
-  their records once the kernel has re-checked both, under every `allow` on
-  the links between them: `reasons` and `changes` if the head doesn't keep
-  the spec's statements, as a refused create says them, or else
-  `replacement`, what it filled and what allowed changes it made. For review,
-  these are what the head changed, whatever its links say.
+  their records once the kernel has re-checked both, allowing only the
+  definitions the leader names to change: `reasons` and `changes` if the
+  head doesn't keep the spec's statements, as a refused create says them, or
+  else `replacement`, what it filled and what allowed changes it made. For
+  review, these are what the head changed, whatever its links say.
+- **What may change.** `allow=<name>`, repeated, names the definitions the
+  leader lets the heads change, as `allow` names them in `replaces`
+  (`_private.h` for a private one; an inductive type for its constructors
+  and what Lean derives from it). A link's own `allow` is what its create
+  asked for, written by whoever submitted it, so it doesn't count: by default
+  no definition may change, and a head that changed one under its link's
+  `allow` is shown with `reasons` and isn't `clean`. A statement only names
+  the definitions it uses, so redefining one would change what it says.
 - **`clean`.** There is no fork, no spec snapshot was copied from one that
   is gone (see *Parameters*), every comparison found the spec's statements
-  kept (a spec of assumptions only has no targets, but statements all the
-  same), and every target is `accepted` on its head: the
+  kept with no definition changed but those `allow` names (a spec of
+  assumptions only has no targets, but statements all the same), and every
+  target is `accepted` on its head: the
   spec snapshot and the head are verified, their comparison found the
   spec's statements kept, and the target is `proved`, or `conditional` only
   on assumptions the spec permits, those declared in a spec snapshot's module
@@ -625,8 +634,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   heads, each standing for its module.
 - **Parameters.** The ids are of one version, which the audit uses; ids of
   several versions are a 400 that names them, and so is a `version` that
-  isn't theirs. `label` doesn't combine with `against` (400), and a spec
-  snapshot that doesn't exist is a 404. A [rebuild](#rebuilding) copies
+  isn't theirs. `label` doesn't combine with `against` (400), nor does
+  `allow`, which can't be empty either, and a spec snapshot that doesn't
+  exist is a 404. A [rebuild](#rebuilding) copies
   only a run's heads, so audit against the same ids after it. A spec
   snapshot that was still a head, with nothing replacing it yet, is copied
   like any head, and with `retire` its old id is deleted if its copy replaces
@@ -667,8 +677,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   submission is lost. `retire` would delete versions agents hold, so their
   submissions would answer `not_found` without `heads`.
 - **Accepting.** The run is accepted when `audit?against=` its spec ids is
-  `clean` (see [Auditing a run](#spec-audit)), after the leader has reviewed
-  what each head changed under an `allow`, in `comparisons`.
+  `clean` (see [Auditing a run](#spec-audit)), with `allow=` each definition
+  the leader decided may change, such as one its own base edit changed. What
+  the agents' links allowed doesn't count; `comparisons` and `links` show
+  what each head changed, for review.
 - **Afterwards.** The leader may retire and delete superseded versions.
   Deletes splice, so the run stays whole, and its links merge once reviewed
   (see [Retention](#retention)).
@@ -925,7 +937,7 @@ let lemma = "import Mathlib\ndef double (n : ℕ) := 2 * n\ntheorem double_two :
 let extended = client.create_snapshot_with(lemma, &opts).await?.snapshot.expect("kept");
 let above = client.list_dependents(&base.id, &run).await?; // parents first
 let audit = client.audit_snapshots(&run).await?; // statuses, assumptions, what isn't proved
-let audit = client.audit_snapshots_against([&base.id]).await?; // the run from base: audit.clean, heads, targets
+let audit = client.audit_snapshots_against([&base.id], &[]).await?; // the run from base: audit.clean, heads, targets
 let opts = pisa_client::RebuildOptions { dry_run: true, ..Default::default() };
 // Create each item, a level at a time, with its `replaces`.
 let plan = client.rebuild_snapshots(&base.id, &extended.id, &run, &opts).await?.plan;

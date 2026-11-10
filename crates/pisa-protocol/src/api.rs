@@ -948,6 +948,9 @@ pub struct RebuildItem {
 /// each head it reaches. The counts are then those of the heads' snapshots.
 /// The ids are of one version, which the audit uses, and `label` doesn't
 /// combine with them. A spec snapshot that doesn't exist is `not_found`.
+/// `allow=<name>`, repeatable, names the definitions the leader allows the
+/// heads to change; the links' own allows, which whoever created them wrote,
+/// don't count.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct AuditSnapshotsResponse {
     pub summary: AuditSummary,
@@ -959,8 +962,9 @@ pub struct AuditSnapshotsResponse {
     /// With `against`: whether the run is done. There is no fork, no spec
     /// snapshot was copied from one that is gone (as a rebuild with `retire`
     /// leaves it), every [comparison](Self::comparisons) found the spec's
-    /// statements kept, and every target is
-    /// [accepted](AuditTarget::accepted) on its head.
+    /// statements kept, with no definition changed but those the audit's
+    /// `allow` names, and every target is [accepted](AuditTarget::accepted)
+    /// on its head.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<bool>,
     /// With `against`: the snapshots the run ends at, which nothing
@@ -987,9 +991,10 @@ pub struct AuditSnapshotsResponse {
     pub links: Vec<AuditLink>,
     /// With `against`: each head compared with each spec snapshot it is
     /// reached from, from their verified records, as a create that replaced
-    /// the spec snapshot with the head's code would compare them, under what
-    /// the links on the way allow. Links record what a create's build
-    /// reported; this is what acceptance rests on.
+    /// the spec snapshot with the head's code would compare them, allowing
+    /// only the definitions the audit's `allow` names to change. Links record
+    /// what a create's build reported, and what its request allowed; this is
+    /// what acceptance rests on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comparisons: Vec<AuditComparison>,
 }
@@ -1010,7 +1015,7 @@ pub struct AuditComparison {
     /// The same, as the declarations that changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<DeclarationChange>,
-    /// What the head changed that the links on the way allow, and what it
+    /// What the head changed that the audit's `allow` names, and what it
     /// filled, if it keeps the spec's statements and both are verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement: Option<Replacement>,

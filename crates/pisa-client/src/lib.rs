@@ -761,12 +761,14 @@ impl Client {
     /// Audits a run against its spec, the snapshots `against` names, all of
     /// one version: the heads it reaches through the snapshots that replace
     /// them, the forks on the way, each spec declaration's status on each
-    /// head, the links that allowed changes, and whether the run is `clean`;
-    /// see [`AuditSnapshotsResponse`]. An empty `against` is an
+    /// head, the links that allowed changes, and whether the run is `clean`,
+    /// with no definition changed but those `allow` names; see
+    /// [`AuditSnapshotsResponse`]. An empty `against` is an
     /// [`Error::Invalid`]: without ids, the server would audit by labels.
     pub async fn audit_snapshots_against<I, S>(
         &self,
         against: I,
+        allow: &[&str],
     ) -> Result<AuditSnapshotsResponse, Error>
     where
         I: IntoIterator<Item = S>,
@@ -783,6 +785,9 @@ impl Client {
         let mut url = self.endpoint.url("snapshots/audit")?;
         for id in against {
             url.query_pairs_mut().append_pair("against", id.as_ref());
+        }
+        for name in allow {
+            url.query_pairs_mut().append_pair("allow", name);
         }
         self.endpoint.get(url).await
     }

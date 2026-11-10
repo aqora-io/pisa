@@ -2312,9 +2312,15 @@ impl Snapshots {
     }
 
     /// The audit of a run against its spec, the entries `against` names:
-    /// the walk from them to the run's heads, and the counts over the
-    /// heads; see [`AuditSnapshotsResponse`]. It reads records only.
-    pub async fn audit_against(&self, against: &[String]) -> Result<AuditSnapshotsResponse, Error> {
+    /// the walk from them to the run's heads, each head compared with its
+    /// spec as if the definitions `allow` names were allowed to change, and
+    /// the counts over the heads; see [`AuditSnapshotsResponse`]. It reads
+    /// records only.
+    pub async fn audit_against(
+        &self,
+        against: &[String],
+        allow: &[String],
+    ) -> Result<AuditSnapshotsResponse, Error> {
         let mut specs: Vec<(String, EntryMeta)> = Vec::new();
         for id in against {
             let entry = self.parse(id)?;
@@ -2333,10 +2339,9 @@ impl Snapshots {
             }
         };
         let mut forks = Vec::new();
-        // Each head once, as `(entry, module)`, and those each spec reaches,
-        // each with what the links on the way there allow.
+        // Each head once, as `(entry, module)`, and those each spec reaches.
         let mut heads: Vec<(String, String)> = Vec::new();
-        let mut reached: Vec<Vec<(String, Vec<String>)>> = Vec::new();
+        let mut reached: Vec<Vec<String>> = Vec::new();
         // Whether a spec's chain back reaches a snapshot that is gone.
         let mut cut = false;
         for (spec, spec_meta) in &specs {
@@ -2358,23 +2363,21 @@ impl Snapshots {
             // Forward through what replaces it, to the heads. A head has one
             // way back, as each snapshot replaces at most one.
             let mut ends = Vec::new();
-            let mut stack = vec![(spec.clone(), spec_meta.clone(), Vec::new())];
+            let mut stack = vec![(spec.clone(), spec_meta.clone())];
             let mut seen = HashSet::new();
-            while let Some((e, entry_meta, mut allowed)) = stack.pop() {
+            while let Some((e, entry_meta)) = stack.pop() {
                 if !seen.insert(e.clone()) {
                     continue;
                 }
                 if e != *spec {
                     add_link(&e, &entry_meta);
-                    let allow = entry_meta.replaces.as_ref().and_then(|r| r.allow.as_ref());
-                    allowed.extend(allow.into_iter().flat_map(|a| a.definitions.clone()));
                 }
                 let replacers = self.catalog.replacers(&e).await?;
                 if replacers.is_empty() {
                     if !heads.iter().any(|(h, _)| *h == e) {
                         heads.push((e.clone(), entry_meta.module));
                     }
-                    ends.push((e, allowed));
+                    ends.push(e);
                     continue;
                 }
                 if replacers.len() > 1
@@ -2388,8 +2391,7 @@ impl Snapshots {
                     });
                 }
                 // Oldest first.
-                let replacers = replacers.into_iter().rev();
-                stack.extend(replacers.map(|(r, m)| (r, m, allowed.clone())));
+                stack.extend(replacers.into_iter().rev());
             }
             reached.push(ends);
         }
@@ -2423,11 +2425,13 @@ impl Snapshots {
         }
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
         let mut comparisons = Vec::new();
+        // The links' allows are what their creates asked for, by whoever
+        // made them: the comparison takes only what the leader allows.
         for ((spec, spec_meta), ends) in specs.iter().zip(&reached) {
-            for (head, allowed) in ends {
+            for head in ends {
                 let head_module = module_of[head];
                 let compared = self
-                    .rederive(&spec_meta.module, head_module, allowed, &mut metas)
+                    .rederive(&spec_meta.module, head_module, allow, &mut metas)
                     .await?;
                 let (changes, replacement) = match compared {
                     Some(Ok(r)) => (Vec::new(), Some(r)),
@@ -2536,7 +2540,7 @@ impl Snapshots {
     fn targets(
         &self,
         specs: &[(String, EntryMeta)],
-        reached: &[Vec<(String, Vec<String>)>],
+        reached: &[Vec<String>],
         heads: &[(String, String)],
         metas: &HashMap<String, ModuleMeta>,
         permitted: &Permitted,
@@ -2555,7 +2559,7 @@ impl Snapshots {
             let declared = meta.result.declarations.iter();
             for d in declared.filter(|d| !d.generated && d.kind != "axiom") {
                 let name = normalised(&d.name);
-                for (head, _) in ends {
+                for head in ends {
                     let Some(head_meta) = metas.get(module_of[head]) else {
                         all_accepted = false;
                         continue;
@@ -3701,7 +3705,7 @@ mod tests {
             ..built(m, b"")
         };
         let specs = [("spec".to_string(), entry("s"))];
-        let reached = [vec![("head".to_string(), Vec::new())]];
+        let reached = [vec!["head".to_string()]];
         let heads = [("head".to_string(), "h".to_string())];
         // Their comparison found the statements kept.
         let compared = [AuditComparison {

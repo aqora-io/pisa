@@ -37,7 +37,16 @@ async fn get(c: &Cluster, path: &str) -> (u16, Value) {
 
 /// `GET /snapshots/audit` against the spec snapshots `specs`.
 async fn audit(c: &Cluster, specs: &[&str]) -> Value {
-    let query: Vec<String> = specs.iter().map(|s| format!("against={s}")).collect();
+    audit_allowing(c, specs, &[]).await
+}
+
+/// `GET /snapshots/audit` against the spec snapshots `specs`, allowing the
+/// definitions `allow` to change.
+async fn audit_allowing(c: &Cluster, specs: &[&str], allow: &[&str]) -> Value {
+    let against = specs.iter().map(|s| format!("against={s}"));
+    let query: Vec<String> = against
+        .chain(allow.iter().map(|n| format!("allow={n}")))
+        .collect();
     let (status, r) = get(c, &format!("/snapshots/audit?{}", query.join("&"))).await;
     assert_eq!(status, 200, "{r}");
     r
@@ -226,6 +235,43 @@ async fn a_head_whose_verified_definition_differs_from_the_spec_is_not_clean() {
     assert_eq!(
         r["comparisons"][0]["reasons"],
         json!(["statement: f has a different value"]),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_definition_changed_under_a_links_allow_is_clean_only_if_the_audit_allows_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ndef f : Nat := 1\ntheorem t : f = f := sorry",
+               "verify": true}),
+    )
+    .await;
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\ndef f : Nat := 2\ntheorem t : f = f := rfl",
+               "replaces": {"snapshot_id": id(&s), "allow": {"definitions": ["f"]}},
+               "verify": true}),
+    )
+    .await;
+    assert_eq!(p["snapshot"]["verified"], true, "{p}");
+
+    // The submitter wrote that allow: the audit doesn't take its word.
+    let r = audit(&c, &[id(&s)]).await;
+    assert_eq!(r["clean"], false, "{r}");
+    assert_eq!(
+        r["comparisons"][0]["reasons"],
+        json!(["statement: f has a different value"]),
+        "{r}"
+    );
+    assert_eq!(r["links"][0]["snapshot_id"], id(&p), "{r}");
+
+    let r = audit_allowing(&c, &[id(&s)], &["f"]).await;
+    assert_eq!(r["clean"], true, "{r}");
+    assert_eq!(
+        r["comparisons"][0]["replacement"]["changed_definitions"],
+        json!(["f"]),
         "{r}"
     );
 }
@@ -855,6 +901,9 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
         ]),
         "{r}"
     );
+    // Clean once the leader allows both edits.
+    assert_eq!(r["clean"], false, "{r}");
+    let r = audit_allowing(&c, &[id(&s0)], &["f", "g"]).await;
     assert_eq!(r["clean"], true, "{r}");
 }
 
@@ -990,6 +1039,9 @@ async fn bad_queries() {
         assert!(message.contains(&v), "{v}: {message}");
     }
     bad(format!("/snapshots/audit?against={}&label=p:1", id(&a))).await;
+    // `allow` is the leader's, for a run.
+    bad("/snapshots/audit?label=p:1&allow=f".into()).await;
+    bad(format!("/snapshots/audit?against={}&allow=", id(&a))).await;
     bad("/snapshots/audit?against=nope".into()).await;
     // A version beside the ids must be theirs.
     let (va, vb) = (c.version("va"), c.version("vb"));

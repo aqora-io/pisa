@@ -270,11 +270,13 @@ export class PisaClient {
    *  all of one version, instead: the `heads` the run reaches through the
    *  snapshots that replace them, the `forks` on the way, each spec
    *  declaration's status on each head (`targets`), the `links` that allowed
-   *  changes, and whether the run is `clean`. The ids carry the version, and
-   *  `labels` doesn't combine with them. An empty `against` is refused
-   *  (`bad_request`) without sending it, as it would be a label audit. */
+   *  changes, and whether the run is `clean`, with no definition changed
+   *  but those `allow` names (the links' own allows don't count). The ids
+   *  carry the version, and `labels` doesn't combine with them. An empty
+   *  `against` is refused (`bad_request`) without sending it, as it would be
+   *  a label audit. */
   auditSnapshots(
-    params: { labels?: Labels; against?: SnapshotId[] } = {},
+    params: { labels?: Labels; against?: SnapshotId[]; allow?: string[] } = {},
     options: VersionOptions = {},
   ): Promise<AuditSnapshotsResponse> {
     if (params.against?.length === 0) {
@@ -284,6 +286,7 @@ export class PisaClient {
     const query = params.against ? new URLSearchParams() : this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
     for (const id of params.against ?? []) query.append("against", id);
+    for (const name of params.allow ?? []) query.append("allow", name);
     return this.call("GET", ["snapshots", "audit"], undefined, options, query);
   }
 

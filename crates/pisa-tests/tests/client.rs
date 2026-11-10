@@ -224,7 +224,10 @@ async fn client_drops_a_branch() {
         let err = client.get_snapshot(gone).await.unwrap_err();
         assert_eq!(err.kind(), Some(ErrorKind::NotFound));
     }
-    let audit = client.audit_snapshots_against([&skeleton]).await.unwrap();
+    let audit = client
+        .audit_snapshots_against([&skeleton], &[])
+        .await
+        .unwrap();
     assert_eq!(audit.heads, [b1]);
     assert!(audit.forks.is_empty());
 }
@@ -447,6 +450,40 @@ async fn client_audits_a_project() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn client_audits_a_run_allowing_definitions() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let verified = CreateSnapshotOptions {
+        verify: Some(true),
+        ..Default::default()
+    };
+    let code = "import Foo\ndef f : Nat := 1\ntheorem t : f = f := sorry";
+    let spec = client.create_snapshot_with(code, &verified).await.unwrap();
+    let spec = spec.snapshot.unwrap();
+    let opts = CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: spec.id.clone(),
+            allow: Some(Allow {
+                definitions: vec!["f".into()],
+            }),
+        }),
+        ..verified
+    };
+    let code = "import Foo\ndef f : Nat := 2\ntheorem t : f = f := rfl";
+    client.create_snapshot_with(code, &opts).await.unwrap();
+    let audit = client
+        .audit_snapshots_against([&spec.id], &[])
+        .await
+        .unwrap();
+    assert_eq!(audit.clean, Some(false), "{audit:?}");
+    let audit = client
+        .audit_snapshots_against([&spec.id], &["f"])
+        .await
+        .unwrap();
+    assert_eq!(audit.clean, Some(true), "{audit:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn client_audits_a_run_against_its_spec() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
@@ -461,12 +498,15 @@ async fn client_audits_a_run_against_its_spec() {
         .unwrap()
         .snapshot
         .unwrap();
-    let audit = client.audit_snapshots_against([&spec.id]).await.unwrap();
+    let audit = client
+        .audit_snapshots_against([&spec.id], &[])
+        .await
+        .unwrap();
     assert_eq!(audit.clean, Some(false));
     assert_eq!(audit.targets[0].status, ProofStatus::Sorry);
     // No ids would be a label audit: it isn't sent.
     let none: [&str; 0] = [];
-    let refused = client.audit_snapshots_against(none).await;
+    let refused = client.audit_snapshots_against(none, &[]).await;
     assert!(matches!(refused, Err(Error::Invalid(_))), "{refused:?}");
 
     let opts = CreateSnapshotOptions {
@@ -483,7 +523,10 @@ async fn client_audits_a_run_against_its_spec() {
         .unwrap()
         .snapshot
         .unwrap();
-    let audit = client.audit_snapshots_against([&spec.id]).await.unwrap();
+    let audit = client
+        .audit_snapshots_against([&spec.id], &[])
+        .await
+        .unwrap();
     assert_eq!(audit.clean, Some(true), "{audit:?}");
     assert_eq!(audit.heads, std::slice::from_ref(&proof.id));
     let target = &audit.targets[0];

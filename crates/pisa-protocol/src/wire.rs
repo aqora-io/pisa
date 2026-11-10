@@ -137,6 +137,10 @@ pub struct SnapshotAuditJob {
     /// empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub against: Vec<String>,
+    /// The definitions the leader allows the run's heads to change; only
+    /// with `against`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
 }
 
 /// `POST /snapshots/rebuild`, as a plan.

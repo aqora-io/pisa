@@ -474,7 +474,11 @@ class Client:
         through others, parents first (by level, then oldest first): those
         with every label in `labels`, or all of them."""
     def audit_snapshots(
-        self, labels: dict[str, str] | None = None, *, against: list[str] | None = None
+        self,
+        labels: dict[str, str] | None = None,
+        *,
+        against: list[str] | None = None,
+        allow: list[str] | None = None,
     ) -> AuditSnapshotsResponse:
         """What the snapshots with every label in `labels` rest on: their
         declarations by `status` (`proved`, `conditional` on assumptions,
@@ -485,9 +489,10 @@ class Client:
         version, it audits the run instead: the `heads` it reaches through
         the snapshots that replace them, the `forks` on the way, each spec
         declaration's status on each head (`targets`), the `links` that
-        allowed changes, and whether the run is `clean`; the counts are the
-        heads'. `labels` and `against` don't combine, and `against` can't be
-        empty (ValueError)."""
+        allowed changes, and whether the run is `clean`, with no definition
+        changed but those `allow` names (the links' own allows don't count);
+        the counts are the heads'. `labels` and `against` don't combine,
+        `against` can't be empty, and `allow` needs `against` (ValueError)."""
     def rebuild_snapshots(
         self,
         from_: str,

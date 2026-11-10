@@ -161,6 +161,12 @@ describe("PisaClient", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("sends the definitions an audit against a spec allows to change", async () => {
+    const { client, sent } = recording(() => json({ summary: {}, assumptions: [], not_proved: [], clean: true }));
+    await client.auditSnapshots({ against: ["v2~s0"], allow: ["f", "_private.h"] });
+    expect(sent[0]?.url).toBe("/api/snapshots/audit?against=v2%7Es0&allow=f&allow=_private.h");
+  });
+
   it("reads a plan's links, each to the snapshot its item copies, and the runs it left out", async () => {
     const proof: RebuildItem = {
       level: 1,

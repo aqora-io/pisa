@@ -242,12 +242,14 @@ fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> 
         assumption (an axiom declared in snapshot code) with what uses it, wherever it is \
         declared, and the declarations that are `sorry` or `rejected`. With `against` \
         instead, for a run: the snapshots it reaches from the spec snapshots through the \
-        snapshots that replace them, to its heads, with the forks on the way, each spec \
-        declaration's status on each head, the links that allowed changes, and whether \
-        the run is `clean`. It reads records only.",
+        snapshots that replace them, to its heads, with the forks on the way, each head \
+        compared with its spec, allowing only the definitions `allow` names to change, \
+        each spec declaration's status on each head, the links that allowed changes, and \
+        whether the run is `clean`. It reads records only.",
     params(
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
         ("against" = Option<Vec<String>>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label`"),
+        ("allow" = Option<Vec<String>>, Query, description = "With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default no definition may change"),
         ("version" = Option<String>, Query, description = "The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given."),
     ),
     responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
@@ -260,6 +262,7 @@ pub async fn audit(
     let query = query.as_deref().unwrap_or_default();
     let (version, labels) =
         label_query(query).map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    let allow = allow_query(query)?;
     let (version, against) = match against_query(query, &labels)? {
         Some((ids, against)) => {
             // A version beside the ids must be theirs, as with a create's
@@ -276,13 +279,39 @@ pub async fn audit(
             }
             (Some(ids), against)
         }
+        None if !allow.is_empty() => {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "allow is for an audit against a spec: it names the definitions a run's heads \
+                 may change",
+            ));
+        }
         None => (app.versions.resolve(version.as_deref()), Vec::new()),
     };
-    let job = Job::SnapshotAudit(SnapshotAuditJob { labels, against });
+    let job = Job::SnapshotAudit(SnapshotAuditJob {
+        labels,
+        against,
+        allow,
+    });
     match submit(&app, job, version, Priority::Interactive).await? {
         JobResult::SnapshotAudit(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
     }
+}
+
+/// The definitions an audit's query allows to change.
+fn allow_query(query: &str) -> Result<Vec<String>, ApiError> {
+    let allow: Vec<String> = form_urlencoded::parse(query.as_bytes())
+        .filter(|(name, _)| name == "allow")
+        .map(|(_, value)| value.into_owned())
+        .collect();
+    if allow.iter().any(String::is_empty) {
+        return Err(ApiError::new(
+            ErrorKind::BadRequest,
+            "allow names a definition, and is empty",
+        ));
+    }
+    Ok(allow)
 }
 
 /// The `against` ids of an audit's query, if it has any, with the version

@@ -323,8 +323,8 @@ def statements_under_replaces():
     step("replaces: statements compare on their canonical form, from verified records")
 
 
-def audit_against(spec):
-    query = urllib.parse.urlencode({"against": spec["snapshot"]["id"]})
+def audit_against(spec, allow=()):
+    query = urllib.parse.urlencode([("against", spec["snapshot"]["id"])] + [("allow", n) for n in allow])
     status, out = call("GET", f"/snapshots/audit?{query}")
     assert status == 200, out
     return out
@@ -338,8 +338,12 @@ def allow_by_name():
     replaces = {"snapshot_id": skeleton["snapshot"]["id"], "allow": {"definitions": ["f"]}}
     changed = create_snapshot(f.format("n + 2", "rfl"), replaces=replaces, verify=True)
     assert "f" in changed["replacement"]["changed_definitions"], changed
-    # The audit finds the same from the verified records.
+    # The audit compares again from the verified records, under what the
+    # leader allows, not the link.
     out = audit_against(skeleton)
+    assert out["comparisons"][0]["reasons"] == ["statement: f has a different value"], out
+    assert out["clean"] is False, out
+    out = audit_against(skeleton, allow=["f"])
     assert out["comparisons"][0]["replacement"]["changed_definitions"] == ["f"], out
     assert out["clean"] is True, out
     delete_snapshots([changed, skeleton])
