@@ -2896,6 +2896,16 @@ impl Snapshots {
             let cleaned = cleaned.map(|m| (entry_meta.module, m));
             (vec![entry], cleaned.into_iter().collect())
         };
+        let removed = self.reap(cleaned).await;
+        let deleted = deleted.iter().map(|entry| self.id(entry)).collect();
+        Ok(DeleteSnapshotResponse { removed, deleted })
+    }
+
+    /// Removes the files of the modules whose records `cleaned` removed,
+    /// then each import that nothing needs any more, the same way; returns
+    /// the modules removed. Best effort: what fails is logged, and the
+    /// [sweep](Self::sweep) clears what is left.
+    async fn reap(&self, cleaned: Vec<(String, ModuleMeta)>) -> Vec<String> {
         let mut queue = VecDeque::from(cleaned);
         let mut removed = Vec::new();
         while let Some((id, meta)) = queue.pop_front() {
@@ -2915,10 +2925,84 @@ impl Snapshots {
                 }
             }
         }
-        let deleted = deleted.iter().map(|entry| self.id(entry)).collect();
-        Ok(DeleteSnapshotResponse { removed, deleted })
+        removed
+    }
+
+    /// Clears what deletes that stopped partway left: the modules no
+    /// snapshot is on and no module imports, as a delete removes them, then
+    /// the files in the store that no module's record names, once they are
+    /// older than `grace`, as a build uploads its files before its record.
+    /// Returns how many modules and files went.
+    pub async fn sweep(&self, grace: Duration) -> Result<(usize, usize), Error> {
+        let mut modules = 0;
+        let mut after: Option<String> = None;
+        loop {
+            let (orphans, next) = self
+                .catalog
+                .orphans_after(after.as_deref(), SWEEP_PAGE)
+                .await?;
+            for id in orphans {
+                if let Some(meta) = self.catalog.cleanup(&id).await? {
+                    modules += self.reap(vec![(id, meta)]).await.len();
+                }
+            }
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        Ok((modules, self.sweep_files(grace).await?))
+    }
+
+    /// Deletes the files of module builds that no record names, older than
+    /// `grace`; returns how many.
+    async fn sweep_files(&self, grace: Duration) -> Result<usize, Error> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let prefix = ObjectPath::from(format!("snapshots/{}", self.version));
+        let listed: Vec<_> = futures::StreamExt::collect(self.store.list(Some(&prefix))).await;
+        // Each module's own build, if it has a record.
+        let mut builds: HashMap<String, Option<String>> = HashMap::new();
+        let mut deleted = 0;
+        for meta in listed {
+            let meta = meta.map_err(internal)?;
+            if now - meta.last_modified.timestamp() < grace.as_secs() as i64 {
+                continue;
+            }
+            // `<id>.<build>.<ext>.zst`.
+            let Some(name) = meta.location.filename() else {
+                continue;
+            };
+            let mut parts = name.split('.');
+            let (Some(id), Some(build)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if !builds.contains_key(id) {
+                let own = match self.catalog.module(id).await {
+                    Ok(m) => m.modules.last().map(|own| own.build.clone()),
+                    Err(e) if e.kind == ErrorKind::NotFound => None,
+                    Err(e) => return Err(e),
+                };
+                builds.insert(id.to_string(), own);
+            }
+            if builds[id].as_deref() == Some(build) {
+                continue;
+            }
+            match self.store.delete(&meta.location).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => deleted += 1,
+                Err(e) => {
+                    tracing::warn!(path = %meta.location, "sweeping a snapshot file failed: {e}")
+                }
+            }
+        }
+        Ok(deleted)
     }
 }
+
+/// The modules the sweep looks at per query.
+const SWEEP_PAGE: u32 = 500;
 
 #[cfg(test)]
 mod tests {
@@ -3542,6 +3626,58 @@ mod tests {
         // The local copy might have been the old build: the next import
         // looks the module up again.
         assert!(!s.confirmed.lock().unwrap().contains_key(&id));
+    }
+
+    /// A worker that died while deleting C, whose module imports P's, left
+    /// P's record and files and C's files. The sweep clears them, and the
+    /// files of K's build that no record names, but not K, nor files newer
+    /// than its grace.
+    #[tokio::test]
+    async fn a_sweep_clears_what_a_stopped_delete_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::memory().await;
+        let s = snapshots(db.clone(), dir.path());
+        let catalog = Catalog::new(db.clone(), "v".into());
+        let own = |m: &ModuleMeta| m.modules.last().unwrap().clone();
+        let put = |m: Module| {
+            let s = s.clone();
+            async move {
+                let path = s.blob(&m, "olean");
+                s.store.put(&path, b"x".to_vec().into()).await.unwrap();
+            }
+        };
+        let stored = |m: Module| {
+            let s = s.clone();
+            async move { s.store.get(&s.blob(&m, "olean")).await.is_ok() }
+        };
+        let (p_id, c_id, k_id) = (snapshot::id("p"), snapshot::id("c"), snapshot::id("k"));
+        let p = built(&p_id, b"p");
+        let mut c = built(&c_id, b"c");
+        c.imports = vec![p_id.clone()];
+        c.modules.insert(0, own(&p));
+        let k = built(&k_id, b"k");
+        for m in [&p, &c, &k] {
+            put(own(m)).await;
+        }
+        let (pe, ..) = catalog.commit(&p_id, &p, None, no_labels()).await.unwrap();
+        let (ce, ..) = catalog.commit(&c_id, &c, None, no_labels()).await.unwrap();
+        catalog.commit(&k_id, &k, None, no_labels()).await.unwrap();
+        catalog.remove_entry(&pe).await.unwrap();
+        // The delete that removed C's entry and record went no further.
+        catalog.remove_entry(&ce).await.unwrap();
+        let stray = own(&built(&k_id, b"an old build"));
+        put(stray.clone()).await;
+
+        // Files are kept for their grace, as a build uploads them first.
+        let (modules, files) = s.sweep(Duration::from_secs(3600)).await.unwrap();
+        assert_eq!((modules, files), (1, 0));
+        assert!(stored(own(&c)).await && stored(stray.clone()).await);
+        let (modules, files) = s.sweep(Duration::ZERO).await.unwrap();
+        assert_eq!((modules, files), (0, 2));
+        assert!(!stored(own(&p)).await && !stored(own(&c)).await && !stored(stray).await);
+        assert!(stored(own(&k)).await);
+        assert!(catalog.module(&p_id).await.is_err());
+        assert!(catalog.module(&k_id).await.is_ok());
     }
 
     /// A re-check that passes on a module's old build. Meanwhile the module

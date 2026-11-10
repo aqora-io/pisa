@@ -745,6 +745,50 @@ pub(crate) async fn entries_after(
         .collect::<Result<_, _>>()?)
 }
 
+pub(crate) async fn orphans_after(
+    db: &Handle,
+    v: &str,
+    after: Option<&str>,
+    limit: i64,
+) -> Result<(Vec<String>, Option<String>), Error> {
+    let mut c = conn(db).await?;
+    let conn = &mut *c;
+    // Every id is past "", which no module has.
+    let ids: Vec<String> = modules::table
+        .filter(modules::version.eq(v))
+        .filter(modules::id.gt(after.unwrap_or_default()))
+        .order(modules::id)
+        .limit(limit)
+        .select(modules::id)
+        .load(conn)
+        .await
+        .map_err(DbError::from)?;
+    let held: HashSet<String> = entries::table
+        .filter(entries::version.eq(v))
+        .filter(entries::module.eq_any(&ids))
+        .select(entries::module)
+        .load::<String>(conn)
+        .await
+        .map_err(DbError::from)?
+        .into_iter()
+        .collect();
+    let imported: HashSet<String> = module_imports::table
+        .filter(module_imports::version.eq(v))
+        .filter(module_imports::parent.eq_any(&ids))
+        .select(module_imports::parent)
+        .load::<String>(conn)
+        .await
+        .map_err(DbError::from)?
+        .into_iter()
+        .collect();
+    let next = (ids.len() as i64 == limit).then(|| ids.last().cloned()).flatten();
+    let orphans = ids
+        .into_iter()
+        .filter(|m| !held.contains(m) && !imported.contains(m))
+        .collect();
+    Ok((orphans, next))
+}
+
 pub(crate) async fn modules_with_decls_after(
     db: &Handle,
     v: &str,
