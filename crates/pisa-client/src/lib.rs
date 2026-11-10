@@ -767,7 +767,8 @@ impl Client {
     /// one version: the heads it reaches through the snapshots that replace
     /// them, the forks on the way, each spec declaration's status on each
     /// head, the links that allowed changes, and whether the run is `clean`,
-    /// with no definition changed but those `allow` names; see
+    /// with no definition changed but the spec's holes and those `allow`
+    /// names; see
     /// [`AuditSnapshotsResponse`]. An empty `against` is an
     /// [`Error::Invalid`]: without ids, the server would audit by labels.
     pub async fn audit_snapshots_against<I, S>(

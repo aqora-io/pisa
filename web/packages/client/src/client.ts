@@ -271,7 +271,8 @@ export class PisaClient {
    *  snapshots that replace them, the `forks` on the way, each spec
    *  declaration's status on each head (`targets`), the `links` that allowed
    *  changes, and whether the run is `clean`, with no definition changed
-   *  but those `allow` names (the links' own allows don't count). The ids
+   *  but the spec's holes and those `allow` names (the links' own allows
+   *  don't count). The ids
    *  carry the version, and `labels` doesn't combine with them. An empty
    *  `against` is refused (`bad_request`) without sending it, as it would be
    *  a label audit. */

@@ -138,7 +138,7 @@
           },
           "replacement": {
             "$ref": "#/components/schemas/Replacement",
-            "description": "What the head changed that the audit's `allow` names, and what it\nfilled, if it keeps the spec's statements and both are verified."
+            "description": "What the head changed of the spec's holes and of what the audit's\n`allow` names, and what it filled, if it keeps the spec's statements\nand both are verified."
           },
           "spec": {
             "description": "The spec snapshot.",
@@ -196,7 +196,7 @@
         "type": "object"
       },
       "AuditSnapshotsResponse": {
-        "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.\n\nWith `against=<snapshot id>` instead of labels, repeatable, it audits a\nrun against its spec, the snapshots named. From each, it follows the\nsnapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever\ntheir labels, to the run's `heads`, and judges each spec declaration on\neach head it reaches. The counts are then those of the heads' snapshots.\nThe ids are of one version, which the audit uses, and `label` doesn't\ncombine with them. A spec snapshot that doesn't exist is `not_found`.\n`allow=<name>`, repeatable, names the definitions the leader allows the\nheads to change; the links' own allows, which whoever created them wrote,\ndon't count.",
+        "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.\n\nWith `against=<snapshot id>` instead of labels, repeatable, it audits a\nrun against its spec, the snapshots named. From each, it follows the\nsnapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever\ntheir labels, to the run's `heads`, and judges each spec declaration on\neach head it reaches. The counts are then those of the heads' snapshots.\nThe ids are of one version, which the audit uses, and `label` doesn't\ncombine with them. A spec snapshot that doesn't exist is `not_found`.\nThe heads may change a spec snapshot's\n[`holes`](CreateSnapshotRequest::holes), and the definitions\n`allow=<name>`, repeatable, names: those the leader allows later. The\nlinks' own allows, which whoever created them wrote, don't count.",
         "properties": {
           "assumptions": {
             "description": "The assumptions what the snapshots declare uses, by name, wherever\nthey are declared.",
@@ -206,11 +206,11 @@
             "type": "array"
           },
           "clean": {
-            "description": "With `against`: whether the run is done. There is no fork, no spec\nsnapshot was copied from one that is gone (as a rebuild with `retire`\nleaves it), every [comparison](Self::comparisons) found the spec's\nstatements kept, with no definition changed but those the audit's\n`allow` names, and every target is [accepted](AuditTarget::accepted)\non its head.",
+            "description": "With `against`: whether the run is done. There is no fork, no spec\nsnapshot was copied from one that is gone (as a rebuild with `retire`\nleaves it), every [comparison](Self::comparisons) found the spec's\nstatements kept, with no definition changed but the spec's holes and\nthose the audit's `allow` names, and every target is\n[accepted](AuditTarget::accepted) on its head.",
             "type": "boolean"
           },
           "comparisons": {
-            "description": "With `against`: each head compared with each spec snapshot it is\nreached from, from their verified records, as a create that replaced\nthe spec snapshot with the head's code would compare them, allowing\nonly the definitions the audit's `allow` names to change. Links record\nwhat a create's build reported, and what its request allowed; this is\nwhat acceptance rests on.",
+            "description": "With `against`: each head compared with each spec snapshot it is\nreached from, from their verified records, as a create that replaced\nthe spec snapshot with the head's code would compare them, allowing\nonly the spec's holes and the definitions the audit's `allow` names to\nchange. Links record\nwhat a create's build reported, and what its request allowed; this is\nwhat acceptance rests on.",
             "items": {
               "$ref": "#/components/schemas/AuditComparison"
             },
@@ -3474,7 +3474,7 @@
     },
     "/snapshots/audit": {
       "get": {
-        "description": "For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.",
+        "description": "For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the spec's holes and the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.",
         "operationId": "auditSnapshots",
         "parameters": [
           {
@@ -3502,7 +3502,7 @@
             }
           },
           {
-            "description": "With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default no definition may change",
+            "description": "With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change",
             "in": "query",
             "name": "allow",
             "required": false,

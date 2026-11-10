@@ -221,7 +221,7 @@ export interface paths {
         };
         /**
          * What a project rests on
-         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.
+         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the spec's holes and the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.
          */
         get: operations["auditSnapshots"];
         put?: never;
@@ -430,8 +430,9 @@ export interface components {
              */
             reasons?: string[];
             /**
-             * @description What the head changed that the audit's `allow` names, and what it
-             *     filled, if it keeps the spec's statements and both are verified.
+             * @description What the head changed of the spec's holes and of what the audit's
+             *     `allow` names, and what it filled, if it keeps the spec's statements
+             *     and both are verified.
              */
             replacement?: components["schemas"]["Replacement"];
             /** @description The spec snapshot. */
@@ -478,9 +479,10 @@ export interface components {
          *     each head it reaches. The counts are then those of the heads' snapshots.
          *     The ids are of one version, which the audit uses, and `label` doesn't
          *     combine with them. A spec snapshot that doesn't exist is `not_found`.
-         *     `allow=<name>`, repeatable, names the definitions the leader allows the
-         *     heads to change; the links' own allows, which whoever created them wrote,
-         *     don't count.
+         *     The heads may change a spec snapshot's
+         *     [`holes`](CreateSnapshotRequest::holes), and the definitions
+         *     `allow=<name>`, repeatable, names: those the leader allows later. The
+         *     links' own allows, which whoever created them wrote, don't count.
          */
         AuditSnapshotsResponse: {
             /**
@@ -492,16 +494,17 @@ export interface components {
              * @description With `against`: whether the run is done. There is no fork, no spec
              *     snapshot was copied from one that is gone (as a rebuild with `retire`
              *     leaves it), every [comparison](Self::comparisons) found the spec's
-             *     statements kept, with no definition changed but those the audit's
-             *     `allow` names, and every target is [accepted](AuditTarget::accepted)
-             *     on its head.
+             *     statements kept, with no definition changed but the spec's holes and
+             *     those the audit's `allow` names, and every target is
+             *     [accepted](AuditTarget::accepted) on its head.
              */
             clean?: boolean;
             /**
              * @description With `against`: each head compared with each spec snapshot it is
              *     reached from, from their verified records, as a create that replaced
              *     the spec snapshot with the head's code would compare them, allowing
-             *     only the definitions the audit's `allow` names to change. Links record
+             *     only the spec's holes and the definitions the audit's `allow` names to
+             *     change. Links record
              *     what a create's build reported, and what its request allowed; this is
              *     what acceptance rests on.
              */
@@ -2772,7 +2775,7 @@ export interface operations {
                 label?: string[];
                 /** @description A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label` */
                 against?: string[];
-                /** @description With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default no definition may change */
+                /** @description With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change */
                 allow?: string[];
                 /** @description The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given. */
                 version?: string;

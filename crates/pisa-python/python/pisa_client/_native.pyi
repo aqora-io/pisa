@@ -500,7 +500,8 @@ class Client:
         the snapshots that replace them, the `forks` on the way, each spec
         declaration's status on each head (`targets`), the `links` that
         allowed changes, and whether the run is `clean`, with no definition
-        changed but those `allow` names (the links' own allows don't count);
+        changed but the spec's `holes` and those `allow` names (the links' own
+        allows don't count);
         the counts are the heads'. `labels` and `against` don't combine,
         `against` can't be empty, and `allow` needs `against` (ValueError)."""
     def rebuild_snapshots(
