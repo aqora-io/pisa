@@ -139,9 +139,11 @@ impl Snapshots {
             }
         };
         // The file is the submitted code, so positions need no shifting.
+        let mut messages = std::mem::take(&mut compiled.messages);
+        messages.extend(auto_implicit_hint(&split.body, &messages));
         let response = CommandResponse {
             env: 0,
-            messages: std::mem::take(&mut compiled.messages),
+            messages,
             sorries: Vec::new(),
             tactics: Vec::new(),
             at: Vec::new(),

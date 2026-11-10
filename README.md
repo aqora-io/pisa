@@ -1604,7 +1604,10 @@ Lean's `autoImplicit` option is off by default, in checks, sessions and
 snapshot builds alike, so a name that isn't bound in a statement is an error
 rather than a new implicit argument. Code can turn it back on with
 `set_option autoImplicit true`, alone or with `in`, because it is an allowlisted
-option.
+option. Code written for a library that turns it on, as Physlib does, meets
+"Unknown identifier `d`" here: when code that doesn't set the option has
+such an error (or an unknown universe level), a check's or a snapshot build's
+`messages` add an `info` hint at it, naming the option.
 
 The axiom report is a `run_cmd` call into the `Pisa` library
 (`docker/pisa-lean`, built into the worker image at `PISA_LEAN_LIB`), so

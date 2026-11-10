@@ -116,6 +116,26 @@ async fn the_report_runs_on_code_with_errors_and_says_what_it_cant_describe() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_name_hints_that_auto_implicit_is_off() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let hints = |r: &Value| -> Vec<Value> {
+        let messages = r["messages"].as_array().unwrap();
+        let hinted = messages.iter().filter(|m| {
+            m["severity"] == "info" && m["text"].as_str().unwrap().contains("autoImplicit")
+        });
+        hinted.map(|m| m["pos"].clone()).collect()
+    };
+    let r = check(&c, "import Foo\nneeds d").await;
+    assert_eq!(hints(&r), [json!({"line": 2, "column": 0})], "{r}");
+    let r = check(&c, "import Foo\nset_option autoImplicit false\nneeds d").await;
+    assert_eq!(hints(&r), Vec::<Value>::new(), "{r}");
+    let (_, r) = c
+        .post("/snapshots", json!({"code": "import Foo\n\nneeds d"}))
+        .await;
+    assert_eq!(hints(&r["check"]), [json!({"line": 3, "column": 0})], "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unsound_proofs_are_rejected() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let cases = [
