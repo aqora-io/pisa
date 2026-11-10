@@ -119,7 +119,30 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
     // since the imports declares.
     if cmd.starts_with("run_cmd _root_.Pisa.reportNew") {
         s.envs.push(prev.clone());
-        let report = format!("PISA_DECLS {}", declarations(&as_reported(&prev.local)));
+        let decls = declarations(&as_reported(&prev.local));
+        // `-- report-fails: NAME` has the report fail to describe NAME.
+        let fails: Vec<&str> = prev
+            .local
+            .lines()
+            .filter_map(|l| l.split_once("-- report-fails: ").map(|(_, n)| n.trim()))
+            .collect();
+        if !fails.is_empty() {
+            let decls: Vec<Value> = serde_json::from_str(&decls).unwrap();
+            let kept: Vec<&Value> = decls
+                .iter()
+                .filter(|d| !fails.contains(&d["name"].as_str().unwrap()))
+                .collect();
+            let failed: Vec<Value> = fails
+                .iter()
+                .map(|n| json!({"name": n, "error": format!("describing {n}: a metavariable")}))
+                .collect();
+            let messages = [
+                message(1, "info", &format!("PISA_DECLS {}", json!(kept))),
+                message(1, "info", &format!("PISA_REPORT_FAILED {}", json!(failed))),
+            ];
+            return json!({"env": s.envs.len() - 1, "messages": messages});
+        }
+        let report = format!("PISA_DECLS {decls}");
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
     }
     if prev.local.contains("import Clash") && cmd.starts_with("#check") {

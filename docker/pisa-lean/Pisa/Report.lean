@@ -454,14 +454,37 @@ def describeAll (mod : Name) (names : Array Name) (fromKernel := false) :
     out := out.push (← describe mod n ci axioms own)
   return out
 
+/-- The same as `describeAll`, except that a declaration that can't be
+described, such as one Lean kept with a metavariable after an error, is
+given as its name and why, not described. -/
+def describeEach (mod : Name) (names : Array Name) : CoreM (Array Json × Array Json) := do
+  let env ← getEnv
+  let own := names.foldl (·.insert ·) ({} : NameSet)
+  let mut out := #[]
+  let mut failed := #[]
+  for n in names do
+    let some ci := env.find? n | continue
+    if auxiliary n ci then continue
+    try
+      out := out.push (← describe mod n ci (← collectAxioms n) own)
+    catch e =>
+      failed := failed.push (Json.mkObj [("name", toJson n), ("error", toJson (← e.toMessageData.toString))])
+  return (out, failed)
+
 /-- Logs `PISA_DECLS <descriptions>`, which the worker reads. -/
 def log (mod : Name) (names : Array Name) : Elab.Command.CommandElabM Unit := do
   let decls ← Elab.Command.liftCoreM (describeAll mod names)
   logInfo (MessageData.ofFormat (.text ("PISA_DECLS " ++ (Json.arr decls).compress)))
 
-/-- The report on the declarations added after the imports. -/
+/-- The report on the declarations added after the imports, which may have
+errors: it describes what it can, and logs `PISA_REPORT_FAILED
+[{name, error}]` for the rest. -/
 def reportNew : Elab.Command.CommandElabM Unit := do
   let env ← getEnv
-  log env.mainModule (env.constants.map₂.toList.map (·.1)).toArray
+  let names := (env.constants.map₂.toList.map (·.1)).toArray
+  let (decls, failed) ← Elab.Command.liftCoreM (describeEach env.mainModule names)
+  logInfo (MessageData.ofFormat (.text ("PISA_DECLS " ++ (Json.arr decls).compress)))
+  unless failed.isEmpty do
+    logInfo (MessageData.ofFormat (.text ("PISA_REPORT_FAILED " ++ (Json.arr failed).compress)))
 
 end Pisa

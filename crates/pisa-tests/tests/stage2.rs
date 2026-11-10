@@ -86,6 +86,36 @@ async fn declarations_are_summarised_unless_asked_for_in_full() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_report_runs_on_code_with_errors_and_says_what_it_cant_describe() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let names = |r: &Value| -> Vec<String> {
+        let decls = r["declarations"].as_array().unwrap();
+        decls
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    // One broken lemma leaves the others' statuses.
+    let r = check(
+        &c,
+        "import Foo\ntheorem good : 1 = 1 := rfl\ntheorem bad : 1 = 2 := error_here",
+    )
+    .await;
+    assert_eq!(r["reasons"], json!(["error: Lean reported errors"]), "{r}");
+    assert!(names(&r).contains(&"good".to_string()), "{r}");
+    // What the report can't describe is a reason, and the rest is reported.
+    let code =
+        "import Foo\ntheorem good : 1 = 1 := rfl\ntheorem odd : 2 = 2 := rfl -- report-fails: odd";
+    let r = check(&c, code).await;
+    assert_eq!(
+        r["reasons"],
+        json!(["error: axiom report: describing odd: a metavariable"]),
+        "{r}"
+    );
+    assert_eq!(names(&r), ["good"], "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unsound_proofs_are_rejected() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let cases = [

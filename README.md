@@ -1604,7 +1604,13 @@ a module-system header. It describes each declaration: its axioms, and the
 canonical text of its type and, for a definition, of its value, which the
 worker hashes with SHA-256. The text is injective, so two declarations with
 the same hashes have the same statement. The kernel re-check describes
-declarations with the same library. The canonical form reads code as the
+declarations with the same library. On `/check` and sessions the report runs
+even when the code has errors, so the declarations Lean kept still have a
+status; one it can't describe, such as one left with a metavariable, is a
+reason (`error: axiom report: describing x: a metavariable`), as is a report
+that fails outright (`error: axiom report unavailable: …`, with what Lean
+said). A snapshot's module and the kernel re-check describe every declaration
+or nothing. The canonical form reads code as the
 kernel does, so that what doesn't change a statement doesn't change its text:
 - Binder names don't count, and binder kinds (`(n)`, `{n}`, `[inst]`) do.
   A declaration's universe parameters count by position, so renaming one,

@@ -113,6 +113,8 @@ pub fn header_command(header: &str) -> String {
 
 /// Prefix of the info message the axiom report prints.
 const MARKER: &str = "PISA_DECLS ";
+/// What marks the declarations a report on code couldn't describe.
+const FAILED_MARKER: &str = "PISA_REPORT_FAILED ";
 
 /// Describes every declaration added after the imports (see
 /// `docker/pisa-lean/Pisa/Report.lean`): the axioms it depends on, the
@@ -197,14 +199,40 @@ impl Policy {
             })
     }
 
-    /// Judges a checked body from its response and the axiom report.
+    /// Judges a checked body from its response and the axiom report, if it
+    /// ran: what the report couldn't describe, or why it failed, is a reason.
     pub fn judge(
         &self,
         response: &CommandResponse,
         report: Option<&CommandResponse>,
     ) -> Verification {
-        let decls = report.and_then(parse_report);
-        self.judge_decls(response.has_errors(), decls)
+        let errors = response.has_errors();
+        let Some(report) = report else {
+            return self.judge_decls(errors, None);
+        };
+        let (mut v, problems) = match read_report(report) {
+            Ok(r) => {
+                let problems = r
+                    .failed
+                    .into_iter()
+                    .map(|e| format!("error: axiom report: {e}"));
+                (
+                    self.judge_decls(errors, Some(r.declarations)),
+                    problems.collect(),
+                )
+            }
+            Err(said) if said.is_empty() => (
+                self.judge_decls(errors, Some(Vec::new())),
+                vec!["error: axiom report unavailable".to_string()],
+            ),
+            Err(said) => (
+                self.judge_decls(errors, Some(Vec::new())),
+                vec![format!("error: axiom report unavailable: {said}")],
+            ),
+        };
+        v.reasons.extend(problems);
+        v.ok = v.reasons.is_empty();
+        v
     }
 
     /// Judges from whether the body had errors and the declarations the axiom
@@ -269,13 +297,56 @@ impl Policy {
     }
 }
 
+/// What the axiom report on code says: the declarations it described, and
+/// why it couldn't describe others, e.g. `describing x: a metavariable`.
+pub struct Report {
+    pub declarations: Vec<ReportedDeclaration>,
+    pub failed: Vec<String>,
+}
+
+/// The axiom report's response read, or what Lean said if it has no
+/// declarations.
+pub fn read_report(report: &CommandResponse) -> Result<Report, String> {
+    #[derive(serde::Deserialize)]
+    struct Failure {
+        error: String,
+    }
+    let info = |marker: &str| {
+        let mut infos = report
+            .messages
+            .iter()
+            .filter(|m| m.severity == Severity::Info);
+        infos.find_map(|m| m.data.strip_prefix(marker))
+    };
+    let Some(declarations) =
+        info(MARKER).and_then(|json| parse_declarations(serde_json::from_str(json).ok()?))
+    else {
+        let errors = report
+            .messages
+            .iter()
+            .filter(|m| m.severity == Severity::Error);
+        return Err(errors
+            .map(|m| m.data.as_str())
+            .collect::<Vec<_>>()
+            .join("; "));
+    };
+    let failed = match info(FAILED_MARKER) {
+        None => Vec::new(),
+        Some(json) => match serde_json::from_str::<Vec<Failure>>(json) {
+            Ok(failed) => failed.into_iter().map(|f| f.error).collect(),
+            Err(_) => vec!["what it couldn't describe doesn't parse".into()],
+        },
+    };
+    Ok(Report {
+        declarations,
+        failed,
+    })
+}
+
+/// The declarations of a module's report, which must describe them all.
 pub fn parse_report(report: &CommandResponse) -> Option<Vec<ReportedDeclaration>> {
-    report
-        .messages
-        .iter()
-        .filter(|m| m.severity == Severity::Info)
-        .find_map(|m| m.data.strip_prefix(MARKER))
-        .and_then(|json| parse_declarations(serde_json::from_str(json).ok()?))
+    let read = read_report(report).ok()?;
+    read.failed.is_empty().then_some(read.declarations)
 }
 
 /// Declarations as `Pisa`'s `describe` gives them, in the report or the
@@ -856,6 +927,36 @@ mod tests {
             Some(&response(json!({"env": 2}))),
         );
         assert_eq!(v.reasons, ["error: axiom report unavailable"]);
+    }
+
+    #[test]
+    fn a_report_says_what_it_couldnt_describe_and_why_it_failed() {
+        let p = policy();
+        let message = |severity: &str, data: String| json!({"severity": severity, "pos": {"line": 1, "column": 0}, "data": data});
+        let x = json!([{"name": "x", "kind": "theorem", "axioms": ["propext"], "assumes": [],
+            "type": "1", "type_refs": [], "value_refs": []}]);
+        let failed = json!([{"name": "y", "error": "describing y: a metavariable"}]);
+        let report = response(json!({"env": 2, "messages": [
+            message("info", format!("PISA_DECLS {x}")),
+            message("info", format!("PISA_REPORT_FAILED {failed}"))]}));
+        let v = p.judge(&response(json!({"env": 1})), Some(&report));
+        assert_eq!(v.declarations[0].name, "x");
+        assert_eq!(
+            v.reasons,
+            ["error: axiom report: describing y: a metavariable"]
+        );
+        assert!(!v.ok);
+        // A module's report is all or nothing.
+        assert_eq!(parse_report(&report), None);
+
+        // One that failed outright says why.
+        let broken = response(json!({"env": 2, "messages": [
+            message("error", "unknown constant 'Pisa.reportNew'".into())]}));
+        let v = p.judge(&response(json!({"env": 1})), Some(&broken));
+        assert_eq!(
+            v.reasons,
+            ["error: axiom report unavailable: unknown constant 'Pisa.reportNew'"]
+        );
     }
 
     #[test]

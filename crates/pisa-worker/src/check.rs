@@ -201,12 +201,10 @@ pub async fn run(
     }
 }
 
-/// Runs the axiom report in the environment the body produced. Skipped when
-/// the body has errors, since the verdict is already negative.
+/// Runs the axiom report in the environment the body produced, errors or
+/// not: a declaration Lean took despite an error in another still has a
+/// status.
 pub async fn axiom_report(slot: &mut Lease, body: &CommandResponse) -> Option<CommandResponse> {
-    if body.has_errors() {
-        return None;
-    }
     let cmd = ReplCommand::cmd(AXIOM_REPORT, Some(body.env));
     match run(slot, &cmd, REPORT_TIMEOUT).await {
         Ok(ReplResponse::Command(r)) => Some(r),
