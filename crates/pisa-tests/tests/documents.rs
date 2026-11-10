@@ -128,10 +128,15 @@ async fn goals_and_probes_land_where_the_code_says() {
     assert_eq!(d.sorries[0].end_pos, Some(pos(4, 7)));
 
     // The second `𝓝` is column 16; a line alone is its first tactic; the
-    // header has no goals.
-    let g = goals(&c, &id, Some(1), &[(3, Some(16)), (4, None), (1, None)])
-        .await
-        .unwrap();
+    // header, and a line outside any proof, have no goals.
+    let g = goals(
+        &c,
+        &id,
+        Some(1),
+        &[(3, Some(16)), (4, None), (1, None), (2, None)],
+    )
+    .await
+    .unwrap();
     let at: Vec<_> = g.at.iter().map(|a| (a.pos, a.goals.clone())).collect();
     assert_eq!(
         at,
@@ -139,6 +144,7 @@ async fn goals_and_probes_land_where_the_code_says() {
             (pos(3, 16), vec!["⊢ 𝓝 := by".to_string()]),
             (pos(4, 2), vec!["⊢ sorry".to_string()]),
             (pos(1, 0), vec![]),
+            (pos(2, 0), vec![]),
         ]
     );
     let past = goals(&c, &id, None, &[(9, None)]).await.unwrap_err();

@@ -12,7 +12,9 @@
 //! When the document exists on disk it is read, as Beam reads it: `update`
 //! and `sync` give it a new version when its text changed, each `sorry` is a
 //! warning and a `todo` item, and the goal at a position is the rest of that
-//! line, so tests can tell where a position landed. Otherwise the answers are
+//! line, so tests can tell where a position landed. Where the rest is blank,
+//! there are no goals, which Beam answers with an `invalidParams` error.
+//! Probe messages have no range, as Beam's don't. Otherwise the answers are
 //! fixed.
 
 use std::collections::HashMap;
@@ -163,7 +165,7 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
             "proof_state": {"goals": [goal("True")]}}]})),
         "lean_goals" => tool_ok(json!({"goals": [goal("True")]})),
         "lean_run_at" | "lean_run_at_handle" | "lean_run_with" | "lean_run_with_linear" => {
-            tool_ok(probe(name, text, None))
+            tool_ok(probe(name, text))
         }
         "lean_release" | "lean_close" => tool_ok(json!({})),
         "lean_save" => tool_ok(json!({"module": "Docs.A", "olean": "/fake/Docs/A.olean"})),
@@ -173,19 +175,14 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
     }
 }
 
-/// A probe's result: `rfl` or `trivial` closes the goal, anything else fails
-/// (at `at`, when given).
-fn probe(name: &str, text: &str, at: Option<Value>) -> Value {
+/// A probe's result: `rfl` or `trivial` closes the goal, anything else fails.
+fn probe(name: &str, text: &str) -> Value {
     let closes = text.contains("rfl") || text.contains("trivial");
     let mut result = if closes {
         json!({"success": true, "messages": [], "proof_state": {"goals": []}, "traces": []})
     } else {
-        let mut message = json!({"severity": "error", "text": "fake: tactic failed"});
-        if let Some(at) = at {
-            message["range"] = json!({"start": at, "end": at});
-        }
         json!({"success": false, "traces": [], "proof_state": {"goals": [goal("True")]},
-               "messages": [message]})
+               "messages": [{"severity": "error", "text": "fake: tactic failed"}]})
     };
     if closes && name != "lean_run_at" {
         let n = HANDLES.fetch_add(1, Ordering::SeqCst);
@@ -250,10 +247,6 @@ fn document_call(
             &format!("document version {asked} is stale; accepted {version}"),
         );
     }
-    let at = match (args.get("line"), args.get("character")) {
-        (Some(line), Some(character)) => Some(json!({"line": line, "character": character})),
-        _ => None,
-    };
     match name {
         "lean_todo" => {
             let items: Vec<Value> = sorries(&doc)
@@ -270,11 +263,19 @@ fn document_call(
             let line = args["line"].as_u64().unwrap_or_default() as usize;
             let character = args["character"].as_u64().unwrap_or_default() as usize;
             let rest = rest_of_line(&doc, line, character);
-            let goals: Vec<Value> = (!rest.is_empty()).then(|| goal(rest)).into_iter().collect();
-            tool_ok(json!({"goals": goals}))
+            if rest.is_empty() {
+                return tool_err(
+                    "invalidParams",
+                    &format!(
+                        "position ({line}, {character}) is inside the document, but Lean has no \
+                         proof goals there; try a position inside a tactic or proof body"
+                    ),
+                );
+            }
+            tool_ok(json!({"goals": [goal(rest)]}))
         }
         "lean_run_at" | "lean_run_at_handle" | "lean_run_with" | "lean_run_with_linear" => {
-            tool_ok(probe(name, text, at))
+            tool_ok(probe(name, text))
         }
         "lean_save" => tool_ok(json!({"module": "Docs.A", "olean": "/fake/Docs/A.olean"})),
         "lean_release" => tool_ok(json!({})),

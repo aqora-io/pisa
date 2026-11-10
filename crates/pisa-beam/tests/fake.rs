@@ -180,26 +180,15 @@ async fn documents_on_disk_are_read_where_positions_land() {
         .await
         .unwrap();
     assert_eq!(goals[0].target, "𝓝 := by");
-    let failed = beam
-        .run_at(
-            doc,
-            sync.version,
-            LspPos {
-                line: 1,
-                character: 2,
-            },
-            "omega",
-            T,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        failed.messages[0].range.unwrap().start,
-        LspPos {
-            line: 1,
-            character: 2
-        }
-    );
+    // Past `by`, the rest is blank: Beam says there are no goals there.
+    let end = LspPos {
+        line: 0,
+        character: 26,
+    };
+    match beam.goals(doc, sync.version, end, Mode::Before, T).await {
+        Err(BeamError::Tool { code, .. }) => assert_eq!(code, "invalidParams"),
+        other => panic!("{other:?}"),
+    }
 
     // An edit is a new version; the old one is stale.
     ws.write("Docs/D.lean", "theorem t : 1 = 1 := by\n  rfl\n")

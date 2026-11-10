@@ -507,11 +507,18 @@ impl Documents {
                 let goals = match lsp {
                     Some(lsp) => {
                         let doc = self.slots[open.slot].workspace.doc(&file);
-                        let goals = open
+                        let asked = open
                             .beam
                             .goals(doc, open.version, lsp, mode, budget.left())
-                            .await?;
-                        goals.iter().map(pisa_beam::goal::render).collect()
+                            .await;
+                        match asked {
+                            Ok(goals) => goals.iter().map(pisa_beam::goal::render).collect(),
+                            // Beam's answer where Lean has no goals.
+                            Err(BeamError::Tool { code, .. }) if code == "invalidParams" => {
+                                Vec::new()
+                            }
+                            Err(e) => return Err(e),
+                        }
                     }
                     None => Vec::new(),
                 };
@@ -570,7 +577,7 @@ impl Documents {
                     .run_at(doc, open.version, lsp, candidate, budget.left())
                     .await;
                 results.push(match run {
-                    Ok(r) => open.map.probe_result(candidate, r),
+                    Ok(r) => open.map.probe_result(candidate, r, lsp),
                     Err(BeamError::Timeout) => refused(Error::timeout(budget.secs)),
                     Err(BeamError::Tool { message, .. }) => {
                         refused(Error::new(ErrorKind::Lean, message))
@@ -642,7 +649,7 @@ async fn sync(
         .diagnostics
         .items
         .iter()
-        .map(|d| map.message(&d.severity, &d.message, d.range))
+        .map(|d| map.message(&d.severity, &d.message, d.range, None))
         .collect();
     let mut sorries = Vec::new();
     for item in todo.items {
@@ -831,7 +838,15 @@ impl CodeMap {
         }
     }
 
-    fn message(&self, severity: &str, text: &str, range: Option<Range>) -> api::Message {
+    /// A message of Beam's, at the code's start, or at `at`, if it has no
+    /// range.
+    fn message(
+        &self,
+        severity: &str,
+        text: &str,
+        range: Option<Range>,
+        at: Option<LspPos>,
+    ) -> api::Message {
         let severity = match severity {
             "error" => api::Severity::Error,
             "warning" => api::Severity::Warning,
@@ -840,13 +855,19 @@ impl CodeMap {
         };
         api::Message {
             severity,
-            pos: range.map_or(Pos { line: 1, column: 0 }, |r| self.to_code(r.start)),
+            pos: match (range, at) {
+                (Some(r), _) => self.to_code(r.start),
+                (None, Some(at)) => self.to_code(at),
+                (None, None) => Pos { line: 1, column: 0 },
+            },
             end_pos: range.map(|r| self.to_code(r.end)),
             text: text.to_string(),
         }
     }
 
-    fn probe_result(&self, candidate: &str, r: RunResult) -> ProbeResult {
+    /// The result of `candidate`, run at `at`, where its messages without a
+    /// range are.
+    fn probe_result(&self, candidate: &str, r: RunResult, at: LspPos) -> ProbeResult {
         let goals: Vec<String> = match (r.success, r.proof_state) {
             (true, Some(state)) => state.goals.iter().map(pisa_beam::goal::render).collect(),
             _ => Vec::new(),
@@ -858,7 +879,7 @@ impl CodeMap {
             messages: r
                 .messages
                 .iter()
-                .map(|m| self.message(&m.severity, &m.text, m.range))
+                .map(|m| self.message(&m.severity, &m.text, m.range, Some(at)))
                 .collect(),
             error: None,
         }
