@@ -502,6 +502,9 @@ struct Token {
 /// `«»` is one token, without them, as Lean reads it. `#` starts a token, as
 /// no name has one.
 ///
+/// Names and numbers end where Lean's do, since Lean reads whatever follows
+/// as a new token, a command included: `1run_cmd` is `1` and `run_cmd`.
+///
 /// An interpolated string (`s!"…{code}…"`) nests code in a string, to any
 /// depth, so what the lexer is inside is a stack it keeps, not its own.
 fn tokens(src: &str) -> Vec<Token> {
@@ -565,6 +568,11 @@ fn tokens(src: &str) -> Vec<Token> {
             }
             continue;
         };
+        let name_goes_on = if cur.text.is_empty() {
+            is_id_first(c)
+        } else {
+            is_id_rest(c) || c == '.' && next.is_some_and(|n| is_id_first(n) || n == '«')
+        };
         if c == '-' && next == Some('-') {
             cur.flush(&mut out);
             while i < chars.len() && chars[i] != '\n' {
@@ -612,6 +620,10 @@ fn tokens(src: &str) -> Vec<Token> {
         {
             i = end;
         } else if c == '«' {
+            // Only a dot carries a name on into `«»`.
+            if !cur.text.ends_with('.') {
+                cur.flush(&mut out);
+            }
             if cur.text.is_empty() {
                 cur.at = i;
                 cur.quoted = true;
@@ -630,9 +642,17 @@ fn tokens(src: &str) -> Vec<Token> {
             cur.flush(&mut out);
             cur.push(c, i);
             i += 1;
-        } else if c.is_alphanumeric() || matches!(c, '_' | '.' | '\'' | '!' | '?') {
+        } else if name_goes_on {
             cur.push(c, i);
             i += 1;
+        } else if cur.text.is_empty() && c.is_ascii_digit() {
+            let end = number_end(&chars, i);
+            out.push(Token {
+                text: chars[i..end].iter().collect(),
+                at: i,
+                quoted: false,
+            });
+            i = end;
         } else {
             cur.flush(&mut out);
             match c {
@@ -653,6 +673,67 @@ fn tokens(src: &str) -> Vec<Token> {
     }
     cur.flush(&mut out);
     out
+}
+
+/// Whether Lean starts a name with `c` (`isIdFirst`, Lean 4.36).
+fn is_id_first(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || is_letter_like(c)
+}
+
+/// Whether Lean goes on with a name at `c` (`isIdRest`).
+fn is_id_rest(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(c, '_' | '\'' | '!' | '?')
+        || is_letter_like(c)
+        || matches!(c as u32, 0x2080..=0x209c | 0x1d62..=0x1d6a | 0x2c7c)
+}
+
+/// Lean's `isLetterLike`: Greek but λ, Π and Σ, Coptic, letter-like
+/// symbols (ℝ), mathematical alphanumerics, and Latin-1 and Latin
+/// Extended-A letters but × and ÷.
+fn is_letter_like(c: char) -> bool {
+    matches!(c as u32,
+        0x3b1..=0x3c9 | 0x391..=0x3a9 | 0x3ca..=0x3fb | 0x1f00..=0x1ffe | 0x2100..=0x214f
+        | 0x1d49c..=0x1d59f | 0x00c0..=0x00ff | 0x0100..=0x017f)
+        && !matches!(c, 'λ' | 'Π' | 'Σ' | '×' | '÷')
+}
+
+/// The end of the number at `i`, where Lean starts its next token: digits
+/// with `_` between them, in base 2, 8 or 16 after `0b`, `0o` or `0x`, else
+/// decimal with an optional `.` and fraction and an exponent. Past an `e`
+/// with no digits Lean errs; what follows may still run, so the number ends
+/// after it.
+fn number_end(chars: &[char], i: usize) -> usize {
+    let at = |k: usize| chars.get(k).copied();
+    let digits = |mut k: usize, digit: fn(&char) -> bool| {
+        while at(k).is_some_and(|c| c == '_' || digit(&c)) {
+            k += 1;
+        }
+        k
+    };
+    if chars[i] == '0' {
+        let base: Option<fn(&char) -> bool> = match at(i + 1) {
+            Some('b' | 'B') => Some(|c| matches!(c, '0' | '1')),
+            Some('o' | 'O') => Some(|c| matches!(c, '0'..='7')),
+            Some('x' | 'X') => Some(char::is_ascii_hexdigit),
+            _ => None,
+        };
+        if let Some(digit) = base {
+            return digits(i + 2, digit);
+        }
+    }
+    let mut k = digits(i + 1, char::is_ascii_digit);
+    if at(k) == Some('.') && at(k + 1) != Some('.') {
+        k = digits(k + 1, char::is_ascii_digit);
+    }
+    if matches!(at(k), Some('e' | 'E')) {
+        k += 1;
+        if matches!(at(k), Some('+' | '-')) {
+            k += 1;
+        }
+        k = digits(k, char::is_ascii_digit);
+    }
+    k
 }
 
 /// The end of the raw string literal (`r"…"`, `r#"…"#`, …) at `i`, if
@@ -1124,8 +1205,39 @@ mod tests {
                 "«x»set_option debug.skipKernelTC true in\ntheorem t : True := trivial",
                 "option: debug.skipKernelTC",
             ),
+            (
+                "def n : Nat := 1set_option debug.skipKernelTC true in\ntheorem t : True := trivial",
+                "option: debug.skipKernelTC",
+            ),
+            ("def n : Nat := 1unsafe def f := 1", "forbidden: unsafe"),
+            (
+                "def f := 1\ndef n : Nat := 1attribute [init] f",
+                "forbidden: init",
+            ),
+            ("run_cmd«Lean».logInfo \"x\"", "forbidden: run_cmd"),
         ] {
             assert_eq!(p.scan(code, false), [reason], "{code}");
+        }
+        // Lean ends a number, and starts a name, where these do; each runs
+        // the command in Lean 4.36.
+        for glued in [
+            "1", "1_", "1.", "1.5", "1e5", "1e+", "0x", "0xa", "0b1", "0o7", "x.1", "!", "?", "λ",
+            "Σ", "Mᵀ", "д",
+        ] {
+            let code = format!("def n : Nat := {glued}run_cmd Lean.logInfo \"x\"");
+            assert_eq!(p.scan(&code, false), ["forbidden: run_cmd"], "{code}");
+        }
+        // These are one name to Lean, so nothing runs.
+        for name in [
+            "érun_cmd",
+            "αrun_cmd",
+            "x'run_cmd",
+            "foo_run_cmd",
+            "h.run_cmd",
+            "x1run_cmd",
+        ] {
+            let code = format!("def {name} : Nat := 1");
+            assert!(p.scan(&code, false).is_empty(), "{code}");
         }
         // A name in «» goes on through a dot.
         let texts: Vec<String> = tokens("«x».y z").into_iter().map(|t| t.text).collect();
