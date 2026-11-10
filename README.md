@@ -396,10 +396,10 @@ proofs one tactic at a time, as a tree of states:
 - `POST /sessions/{id}/check` checks the assembled proof from scratch, as
   `/check` does, and also requires the session's original statements and
   imports.
-- The worker that holds the session's document keeps the latest 256 states
-  it made or used. Another worker, or this one for an older state, replays
-  the state's tactics from the nearest state it keeps, or from the `sorry`,
-  reopening the document first if it isn't open there.
+- The worker that holds the session's document keeps the last 256 states it
+  made. Another worker, or this one for an older state, replays the state's
+  tactics from the nearest state it keeps, or from the `sorry`, reopening
+  the document first if it isn't open there.
 - `DELETE /documents/{id}` closes a session, and its states then answer 404.
   A session expires `PISA_STATE_TTL_SECS` after it starts.
 - Only workers with Beam slots serve sessions. Without one, `/sessions` and
