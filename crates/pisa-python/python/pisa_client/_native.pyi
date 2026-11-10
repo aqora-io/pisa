@@ -549,8 +549,9 @@ class Client:
         """Search declarations by free `text` or by the fields that apply: a
         description, LaTeX, a Lean pattern, a goal state or a (partial) name.
         `snapshots` also searches snapshot modules: "all", or {"labels":
-        {...}} for the modules of the snapshots with every label. Unknown
-        names and empty results are answers, not errors."""
+        {...}} for the modules of the heads with every label, heads being the
+        snapshots that nothing replaces. Unknown names and empty results are
+        answers, not errors."""
     def search_batch(self, queries: list[Query]) -> list[QueryResult]:
         """Run up to 64 queries in one request; results keep their order."""
     def resolve(self, names: list[str]) -> list[Resolution]:

@@ -65,13 +65,15 @@ pub struct Query {
     /// Also return declarations that depend on `sorry`, flagged.
     #[serde(default)]
     pub include_sorried: bool,
-    /// Snapshots to search as well as the base libraries (default: none).
+    /// Snapshots to search as well as the base libraries (default: none):
+    /// heads only, those that no other snapshot replaces.
     #[serde(default, skip_serializing_if = "SnapshotScope::is_none")]
     pub snapshots: SnapshotScope,
 }
 
-/// Which snapshot modules a query searches: `"none"`, `"all"`, or
-/// `{"labels": {"k": "v"}}`, the modules of the snapshots that have every label.
+/// Which snapshot modules a query searches: `"none"`, `"all"` (those with a
+/// head), or `{"labels": {"k": "v"}}`, the modules of the heads that have
+/// every label. A head is a snapshot that no other snapshot replaces.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SnapshotScope {
@@ -152,7 +154,7 @@ pub struct Hit {
     pub text: String,
     /// For a declaration of a snapshot module (named in `module`, with the
     /// header that loads it in `flags.imports`): the ids of the query's
-    /// snapshots of the module, newest first, at most 10.
+    /// heads on the module, newest first, at most 10.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub snapshot_ids: Vec<String>,
     /// For a snapshot module's declaration: what its own axioms make it, as

@@ -1,7 +1,7 @@
 // The snapshot catalog's queries, for `Catalog` (see `crate::catalog`).
 // Included by `backend.rs` once per backend.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
 use diesel::dsl::{exists, not};
@@ -9,7 +9,7 @@ use diesel::{
     BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
 };
 use diesel_async::RunQueryDsl;
-use pisa_protocol::api::{Error, ErrorKind};
+use pisa_protocol::api::{Error, ErrorKind, Replaces};
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::snapshot;
 use serde_json::Value;
@@ -143,6 +143,18 @@ async fn log(
         ))
         .execute(conn)
         .await?;
+    Ok(())
+}
+
+/// Logs the entry that `link` names, with its module, if it is kept: a link
+/// that the transaction adds or removes makes it a head or stops it being one.
+async fn log_replaced(conn: &mut Conn, v: &str, link: Option<&Replaces>) -> Result<(), Fail> {
+    let Some(link) = link else {
+        return Ok(());
+    };
+    if let Some(meta) = entry_in(conn, v, &link.snapshot_id).await? {
+        log(conn, v, Some(&link.snapshot_id), Some(&meta.module)).await?;
+    }
     Ok(())
 }
 
@@ -346,6 +358,7 @@ pub(crate) async fn commit(
             };
             let (e, entry_meta) = add(conn, v, m, entry).await?;
             log(conn, v, Some(&e), Some(m)).await?;
+            log_replaced(conn, v, entry.replaces.as_ref()).await?;
             Ok((e, entry_meta, stored))
         })
     })
@@ -374,6 +387,7 @@ pub(crate) async fn add_entry(
             }
             let added = add(conn, v, m, entry).await?;
             log(conn, v, Some(&added.0), Some(m)).await?;
+            log_replaced(conn, v, entry.replaces.as_ref()).await?;
             Ok(Some(added))
         })
     })
@@ -398,6 +412,7 @@ pub(crate) async fn remove_entry(
             let Some(meta) = entry_in(conn, v, e).await? else {
                 return Err(Fail::Api(unknown_entry(v, e)));
             };
+            let mut repointed = Vec::new();
             for (r, replacer) in replacers_in(conn, v, e).await? {
                 // A root has no link to give: what replaces it keeps its own.
                 let Some((replaces, replacement)) = splice(&meta, &replacer) else {
@@ -411,12 +426,17 @@ pub(crate) async fn remove_entry(
                     ))
                     .execute(conn)
                     .await?;
+                repointed.push((r, replacer.module));
             }
             diesel::delete(entries::table.find((v, e)))
                 .execute(conn)
                 .await?;
             let module = clean(conn, v, &meta.module).await?;
             log(conn, v, Some(e), Some(&meta.module)).await?;
+            log_replaced(conn, v, meta.replaces.as_ref()).await?;
+            for (r, module) in &repointed {
+                log(conn, v, Some(r), Some(module)).await?;
+            }
             Ok((meta, module))
         })
     })
@@ -462,6 +482,7 @@ pub(crate) async fn remove_branch(
                     modules.push(module);
                 }
             }
+            log_replaced(conn, v, first.replaces.as_ref()).await?;
             // A module goes once the modules that import it have, so go round
             // until a round cleans none.
             let mut cleaned = Vec::new();
@@ -803,6 +824,45 @@ pub(crate) async fn has_entries(db: &Handle, v: &str, m: &str) -> Result<bool, E
     .await
     .map_err(DbError::from)?;
     Ok(found)
+}
+
+/// Whether an entry on `m` is a head: one that no entry replaces.
+pub(crate) async fn has_heads(db: &Handle, v: &str, m: &str) -> Result<bool, Error> {
+    let replacer = diesel::alias!(entries as replacer);
+    let found = diesel::select(exists(
+        entries::table
+            .filter(entries::version.eq(v))
+            .filter(entries::module.eq(m))
+            .filter(not(exists(
+                replacer.filter(
+                    replacer
+                        .field(entries::version)
+                        .eq(entries::version)
+                        .and(replacer.field(entries::replaces).eq(entries::id.nullable())),
+                ),
+            ))),
+    ))
+    .get_result(&mut *conn(db).await?)
+    .await
+    .map_err(DbError::from)?;
+    Ok(found)
+}
+
+/// Those of `es` that an entry replaces.
+pub(crate) async fn replaced_among(
+    db: &Handle,
+    v: &str,
+    es: &[String],
+) -> Result<HashSet<String>, Error> {
+    let replaced: Vec<Option<String>> = entries::table
+        .filter(entries::version.eq(v))
+        .filter(entries::replaces.eq_any(es))
+        .select(entries::replaces)
+        .distinct()
+        .load(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    Ok(replaced.into_iter().flatten().collect())
 }
 
 pub(crate) async fn decls(db: &Handle, v: &str, m: &str) -> Result<Option<SnapshotDecls>, Error> {

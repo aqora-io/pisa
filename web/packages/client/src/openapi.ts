@@ -896,7 +896,7 @@ export interface components {
             /**
              * @description For a declaration of a snapshot module (named in `module`, with the
              *     header that loads it in `flags.imports`): the ids of the query's
-             *     snapshots of the module, newest first, at most 10.
+             *     heads on the module, newest first, at most 10.
              */
             snapshot_ids?: string[];
             source_url?: string;
@@ -1020,7 +1020,10 @@ export interface components {
             name?: string;
             /** @description A Lean expression or pattern, e.g. `Matrix.trace ?A = 1`. */
             pattern?: string;
-            /** @description Snapshots to search as well as the base libraries (default: none). */
+            /**
+             * @description Snapshots to search as well as the base libraries (default: none):
+             *     heads only, those that no other snapshot replaces.
+             */
             snapshots?: components["schemas"]["SnapshotScope"];
             /** @description Free text from a person; classified as natural language, LaTeX, Lean or a name. */
             text?: string;
@@ -1394,8 +1397,9 @@ export interface components {
             exports?: components["schemas"]["Export"][];
         };
         /**
-         * @description Which snapshot modules a query searches: `"none"`, `"all"`, or
-         *     `{"labels": {"k": "v"}}`, the modules of the snapshots that have every label.
+         * @description Which snapshot modules a query searches: `"none"`, `"all"` (those with a
+         *     head), or `{"labels": {"k": "v"}}`, the modules of the heads that have
+         *     every label. A head is a snapshot that no other snapshot replaces.
          */
         SnapshotScope: "none" | "all" | {
             labels: {

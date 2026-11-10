@@ -19,7 +19,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use pisa_db::catalog::{Catalog, Module, ModuleMeta, NewEntry, SnapshotDecl, SnapshotDecls};
 use pisa_db::db::Db;
-use pisa_protocol::api::{CheckResult, Declaration, ProofStatus};
+use pisa_protocol::api::{CheckResult, Declaration, ProofStatus, Replacement, Replaces};
 use pisa_protocol::search::{Hit, Query, QueryResult, SnapshotScope};
 use pisa_protocol::verify::ReportedDeclaration;
 use pisa_search::anthropic::Client;
@@ -400,6 +400,32 @@ async fn create_checked(
     e
 }
 
+/// [`create`], replacing entry `replaced`, whose declarations `decls` keeps.
+async fn replace(
+    catalog: &Catalog,
+    id: &str,
+    decls: Vec<SnapshotDecl>,
+    labels: &[(&str, &str)],
+    replaced: &str,
+) -> String {
+    let proved = decls
+        .iter()
+        .map(|d| checked(&d.name, &[], ProofStatus::Proved))
+        .collect();
+    let m = meta(id, proved);
+    let decls = SnapshotDecls::new(&m, decls);
+    let entry = NewEntry {
+        replaces: Some(Replaces {
+            snapshot_id: replaced.into(),
+            allow: None,
+        }),
+        replacement: Some(Replacement::default()),
+        ..labelled(labels)
+    };
+    let (e, _, _) = catalog.commit(id, &m, Some(&decls), entry).await.unwrap();
+    e
+}
+
 fn doubling() -> Vec<SnapshotDecl> {
     vec![snapshot_decl(
         "double_eq",
@@ -467,6 +493,40 @@ async fn until_true(f: impl AsyncFn() -> bool) {
 
 fn has(hits: &[Hit], name: &str) -> bool {
     hits.iter().any(|h| h.name == name)
+}
+
+/// The modules of the hits for `double_eq`, in order.
+fn doubling_modules(hits: &[Hit]) -> Vec<&str> {
+    let mut modules: Vec<&str> = hits
+        .iter()
+        .filter(|h| h.name == "double_eq")
+        .map(|h| h.module.as_str())
+        .collect();
+    modules.sort();
+    modules
+}
+
+/// The `snapshot_ids` of the hit for `double_eq` of module `m`.
+fn ids_on<'a>(hits: &'a [Hit], m: &str) -> &'a [String] {
+    let hit = hits.iter().find(|h| h.name == "double_eq" && h.module == m);
+    &hit.unwrap_or_else(|| panic!("no hit on {m}")).snapshot_ids
+}
+
+/// Waits until the indexer has applied what the catalog has logged so far,
+/// which it applies in order: until module `m`, created now, is found.
+async fn caught_up(catalog: &Catalog, e: &Engine, m: &str) {
+    let halving = vec![snapshot_decl(
+        "halve_eq",
+        "halve_eq (n : ℕ) : halve (2 * n) = n",
+        "Halving undoes doubling.",
+    )];
+    create(catalog, m, halving, &[]).await;
+    let q = Query {
+        name: Some("halve_eq".into()),
+        ..about_doubling(SnapshotScope::All)
+    };
+    let module = format!("PisaSnap.s{m}");
+    until(e, q, |h| h.iter().any(|h| h.module == module)).await;
 }
 
 /// Module `m`'s stored record for declaration `name`.
@@ -967,5 +1027,126 @@ async fn a_name_in_two_modules_is_two_hits() {
         .collect();
     modules.sort();
     assert_eq!(modules, ["PisaSnap.sa1", "PisaSnap.sb2"]);
+    s.done(e).await;
+}
+
+/// Search covers heads only: a snapshot leaves it once another replaces it,
+/// and comes back when that one is deleted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_replaced_snapshot_leaves_search() {
+    let Some(mut s) = setup().await else { return };
+    let run = &[("run", "1")];
+    let old = create(&s.catalog, "a1", doubling(), run).await;
+    let e = s.engine().await;
+    s.index(&e, false);
+    until(&e, about_doubling(labels(run)), |h| {
+        doubling_modules(h) == ["PisaSnap.sa1"]
+    })
+    .await;
+
+    let new = replace(&s.catalog, "a2", doubling(), run, &old).await;
+    for scope in [labels(run), SnapshotScope::All] {
+        let hits = until(&e, about_doubling(scope), |h| {
+            doubling_modules(h) == ["PisaSnap.sa2"]
+        })
+        .await;
+        assert_eq!(
+            ids_on(&hits, "PisaSnap.sa2"),
+            [format!("{}~{new}", s.version)]
+        );
+    }
+
+    s.catalog.remove_entry(&new).await.unwrap();
+    for scope in [labels(run), SnapshotScope::All] {
+        let hits = until(&e, about_doubling(scope), |h| {
+            doubling_modules(h) == ["PisaSnap.sa1"]
+        })
+        .await;
+        assert_eq!(
+            ids_on(&hits, "PisaSnap.sa1"),
+            [format!("{}~{old}", s.version)]
+        );
+    }
+    s.done(e).await;
+}
+
+/// A module keeps its hits while one of its snapshots is a head, and they
+/// list only its heads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_module_with_a_head_and_a_replaced_entry_stays() {
+    let Some(mut s) = setup().await else { return };
+    let run = &[("run", "1")];
+    let e1 = create(&s.catalog, "a1", doubling(), run).await;
+    let (e2, _) = s
+        .catalog
+        .add_entry("a1", labelled(run))
+        .await
+        .unwrap()
+        .unwrap();
+    let e3 = replace(&s.catalog, "a2", doubling(), run, &e1).await;
+    let e = s.engine().await;
+    s.index(&e, false);
+    let id = |entry: &str| format!("{}~{entry}", s.version);
+    for scope in [labels(run), SnapshotScope::All] {
+        let hits = until(&e, about_doubling(scope), |h| {
+            doubling_modules(h) == ["PisaSnap.sa1", "PisaSnap.sa2"]
+        })
+        .await;
+        assert_eq!(ids_on(&hits, "PisaSnap.sa1"), [id(&e2)]);
+        assert_eq!(ids_on(&hits, "PisaSnap.sa2"), [id(&e3)]);
+    }
+    s.done(e).await;
+}
+
+/// Deleting the snapshot between two re-points the last at the first, which
+/// stays replaced; deleting the last with its branch makes the first a head.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_splice_and_a_branch_delete_move_heads() {
+    let Some(mut s) = setup().await else { return };
+    let run = &[("run", "1")];
+    let e = s.engine().await;
+    s.index(&e, false);
+    let first = create(&s.catalog, "a1", doubling(), run).await;
+    let between = replace(&s.catalog, "a2", doubling(), run, &first).await;
+    let last = replace(&s.catalog, "a3", doubling(), run, &between).await;
+    for scope in [labels(run), SnapshotScope::All] {
+        until(&e, about_doubling(scope), |h| {
+            doubling_modules(h) == ["PisaSnap.sa3"]
+        })
+        .await;
+    }
+
+    s.catalog.remove_entry(&between).await.unwrap();
+    caught_up(&s.catalog, &e, "b1").await;
+    for scope in [labels(run), SnapshotScope::All] {
+        let hits = search(&e, about_doubling(scope)).await;
+        assert_eq!(doubling_modules(&hits), ["PisaSnap.sa3"]);
+    }
+
+    s.catalog.remove_branch(&last).await.unwrap();
+    for scope in [labels(run), SnapshotScope::All] {
+        until(&e, about_doubling(scope), |h| {
+            doubling_modules(h) == ["PisaSnap.sa1"]
+        })
+        .await;
+    }
+    s.done(e).await;
+}
+
+/// A new leader's reconcile sets which snapshots are heads, with no change
+/// log to follow.
+#[tokio::test(flavor = "multi_thread")]
+async fn reconcile_sets_heads() {
+    let Some(mut s) = setup().await else { return };
+    let run = &[("run", "1")];
+    let old = create(&s.catalog, "a1", doubling(), run).await;
+    replace(&s.catalog, "a2", doubling(), run, &old).await;
+    s.catalog.prune_log(Duration::ZERO).await.unwrap();
+    let e = s.engine().await;
+    s.index(&e, false);
+    for scope in [labels(run), SnapshotScope::All] {
+        let hits = until(&e, about_doubling(scope), |h| has(h, "double_eq")).await;
+        assert_eq!(doubling_modules(&hits), ["PisaSnap.sa2"]);
+    }
     s.done(e).await;
 }

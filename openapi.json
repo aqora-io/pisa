@@ -952,7 +952,7 @@
             "type": "string"
           },
           "snapshot_ids": {
-            "description": "For a declaration of a snapshot module (named in `module`, with the\nheader that loads it in `flags.imports`): the ids of the query's\nsnapshots of the module, newest first, at most 10.",
+            "description": "For a declaration of a snapshot module (named in `module`, with the\nheader that loads it in `flags.imports`): the ids of the query's\nheads on the module, newest first, at most 10.",
             "items": {
               "type": "string"
             },
@@ -1195,7 +1195,7 @@
           },
           "snapshots": {
             "$ref": "#/components/schemas/SnapshotScope",
-            "description": "Snapshots to search as well as the base libraries (default: none)."
+            "description": "Snapshots to search as well as the base libraries (default: none):\nheads only, those that no other snapshot replaces."
           },
           "text": {
             "description": "Free text from a person; classified as natural language, LaTeX, Lean or a name.",
@@ -1817,7 +1817,7 @@
         "description": "`GET /snapshots/{id}`: a snapshot with its module's code, check and\nexports."
       },
       "SnapshotScope": {
-        "description": "Which snapshot modules a query searches: `\"none\"`, `\"all\"`, or\n`{\"labels\": {\"k\": \"v\"}}`, the modules of the snapshots that have every label.",
+        "description": "Which snapshot modules a query searches: `\"none\"`, `\"all\"` (those with a\nhead), or `{\"labels\": {\"k\": \"v\"}}`, the modules of the heads that have\nevery label. A head is a snapshot that no other snapshot replaces.",
         "oneOf": [
           {
             "enum": [

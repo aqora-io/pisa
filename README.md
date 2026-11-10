@@ -1074,8 +1074,8 @@ Each hit carries:
 - flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
 - a score, comparable only within one query, and a source link;
 - `text`, about 150 tokens ready for a model's context;
-- for a snapshot declaration, `snapshot_ids`, `status` and `verified` (see
-  [below](#snapshot-search)).
+- for a snapshot declaration, `snapshot_ids` (its module's heads), `status` and
+  `verified` (see [below](#snapshot-search)).
 
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists
@@ -1111,16 +1111,20 @@ without one; for the Python ones, first run
 the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
 - **Scope.** A query's `snapshots` says which: `"none"` (the default), `"all"`,
   or `{"labels": {"run": "7"}}`, the modules of the snapshots that have every
-  label, as `GET /snapshots?label=` matches them. The snapshots those import
-  aren't included. Snapshot declarations are in the library `PisaSnap`, so
-  adding `"libraries": ["PisaSnap"]` searches snapshots only.
+  label, as `GET /snapshots?label=&heads=true` matches them. The snapshots
+  those import aren't included. Both cover heads only, the snapshots that
+  nothing replaces (see [Replacing](#replacing)): a skeleton drops out once
+  its proof replaces it, and comes back if the proof is deleted. A head keeps
+  every statement of what it replaces, so none is lost. Snapshot declarations
+  are in the library `PisaSnap`, so adding `"libraries": ["PisaSnap"]`
+  searches snapshots only.
 - **Hits.** A hit's `module` is the snapshot's module, e.g. `PisaSnap.s1f…`,
   and `flags.imports` the header that loads it. `snapshot_ids` lists the
-  scope's snapshots of that module, newest first, at most 10. `status` is the
-  declaration's own, so a proved lemma next to a `sorry` is `proved`, and
-  `verified` is the module's. Names can repeat across snapshots, and each is a
-  hit of its own. `/resolve` covers the bundle only, and so does
-  `/declarations/{name}` without `module`.
+  scope's heads on that module, the snapshots to build on or replace, newest
+  first, at most 10. `status` is the declaration's own, so a proved lemma
+  next to a `sorry` is `proved`, and `verified` is the module's. Names can
+  repeat across snapshots, and each is a hit of its own. `/resolve` covers the
+  bundle only, and so does `/declarations/{name}` without `module`.
 - **The leader.** One server at a time, holding a lease in the database
   (30 s, renewed every 10 s), indexes snapshots: it writes each module's
   declarations to Qdrant, and each snapshot to `pisa-<env_id>-entries`, which

@@ -655,6 +655,16 @@ impl Catalog {
         dispatch!(&self.db, has_entries(&self.version, m))
     }
 
+    /// Whether an entry on module `m` is a head: one that no entry replaces.
+    pub async fn has_heads(&self, m: &str) -> Result<bool, Error> {
+        dispatch!(&self.db, has_heads(&self.version, m))
+    }
+
+    /// Those of `entries` (bare hex) that an entry replaces, so aren't heads.
+    pub async fn replaced_among(&self, entries: &[String]) -> Result<HashSet<String>, Error> {
+        dispatch!(&self.db, replaced_among(&self.version, entries))
+    }
+
     /// Entry `e`, if it exists.
     pub async fn find_entry(&self, e: &str) -> Result<Option<EntryMeta>, Error> {
         dispatch!(&self.db, entry(&self.version, e))
@@ -1472,6 +1482,32 @@ mod tests {
             catalog.add_entry("x", no_labels()).await.unwrap();
             catalog.remove_entry(&e).await.unwrap();
             assert!(catalog.has_entries("x").await.unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn which_entries_are_heads() {
+        for catalog in catalogs().await {
+            let (s, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            assert!(catalog.has_heads("x").await.unwrap());
+            let (p, _, _) = catalog
+                .commit("y", &meta("y"), None, step(&s, &[], &[], &[]))
+                .await
+                .unwrap();
+            assert!(!catalog.has_heads("x").await.unwrap());
+            assert!(catalog.has_heads("y").await.unwrap());
+            assert!(!catalog.has_heads("z").await.unwrap());
+            let both = [s.clone(), p.clone()];
+            let replaced = catalog.replaced_among(&both).await.unwrap();
+            assert_eq!(replaced, HashSet::from([s.clone()]));
+            assert!(catalog.replaced_among(&[]).await.unwrap().is_empty());
+
+            catalog.remove_entry(&p).await.unwrap();
+            assert!(catalog.has_heads("x").await.unwrap());
+            assert!(catalog.replaced_among(&both).await.unwrap().is_empty());
         }
     }
 

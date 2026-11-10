@@ -182,3 +182,78 @@ async fn relabels_and_deletes_are_logged_and_deletes_clean_up() {
             .unwrap()
     );
 }
+
+/// `POST /snapshots` of `code` replacing the snapshot `replaced`.
+async fn replace(c: &Cluster, code: &str, replaced: &Value) -> Value {
+    let replaces = json!({"snapshot_id": replaced["snapshot"]["id"]});
+    let (status, r) = c
+        .post("/snapshots", json!({"code": code, "replaces": replaces}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert!(r["snapshot"]["id"].is_string(), "{r}");
+    r
+}
+
+/// `DELETE /snapshots/{id}{query}` of the snapshot `r`.
+async fn delete(c: &Cluster, r: &Value, query: &str) {
+    let path = format!(
+        "/snapshots/{}{query}",
+        r["snapshot"]["id"].as_str().unwrap()
+    );
+    let deleted = c.client.delete(c.url(&path)).send().await.unwrap();
+    assert_eq!(deleted.status(), 200);
+}
+
+/// The change a create's snapshot is logged with.
+fn touched(r: &Value) -> Change {
+    Change {
+        entry: Some(entry(r)),
+        module: Some(module(r)),
+    }
+}
+
+const SKELETON: &str = "import Foo\n\ntheorem t : 2 = 2 := sorry";
+const PROOF: &str = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+const MORE: &str = "import Foo\n\ntheorem t : 2 = 2 := rfl\ntheorem h : 1 = 1 := rfl";
+
+/// A create that replaces a snapshot, and a delete of it, log the replaced
+/// snapshot too, which stops or starts being a head.
+#[tokio::test(flavor = "multi_thread")]
+async fn links_are_logged_at_both_ends() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let s = create(&c, SKELETON, json!({})).await;
+    let p = replace(&c, PROOF, &s).await;
+    let (s_, p_) = (touched(&s), touched(&p));
+    assert_eq!(
+        changes(&catalog).await,
+        [s_.clone(), p_.clone(), s_.clone()]
+    );
+
+    delete(&c, &p, "").await;
+    assert_eq!(
+        changes(&catalog).await,
+        [s_.clone(), p_.clone(), s_.clone(), p_, s_]
+    );
+}
+
+/// A splice logs what the deleted snapshot replaced and what it re-points;
+/// a branch delete logs what the branch's first snapshot replaced.
+#[tokio::test(flavor = "multi_thread")]
+async fn splices_and_branch_deletes_are_logged_at_both_ends() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let s = create(&c, SKELETON, json!({})).await;
+    let p = replace(&c, PROOF, &s).await;
+    let q = replace(&c, MORE, &p).await;
+    let before = changes(&catalog).await.len();
+
+    delete(&c, &p, "").await;
+    let (s_, p_, q_) = (touched(&s), touched(&p), touched(&q));
+    assert_eq!(
+        changes(&catalog).await[before..],
+        [p_, s_.clone(), q_.clone()]
+    );
+    delete(&c, &q, "?with_replacers=true").await;
+    assert_eq!(changes(&catalog).await[before + 3..], [q_, s_]);
+}

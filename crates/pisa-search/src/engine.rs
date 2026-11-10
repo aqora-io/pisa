@@ -515,16 +515,15 @@ impl Engine {
         out
     }
 
-    /// The modules of each label scope, from the entries collection.
+    /// The modules of each label scope's heads, from the entries collection.
     async fn scopes(&self, queries: &[Query]) -> Result<Vec<Option<Vec<String>>>, SearchError> {
         let lookups = queries.iter().map(|q| async move {
             let SnapshotScope::Labels(labels) = &q.snapshots else {
                 return Ok(None);
             };
-            let filter = and(labels
-                .iter()
-                .map(|(k, v)| is("labels", format!("{k}={v}")))
-                .collect());
+            let mut must = vec![is("head", true)];
+            must.extend(labels.iter().map(|(k, v)| is("labels", format!("{k}={v}"))));
+            let filter = and(must);
             let modules = self
                 .q
                 .facet(&self.entries, "module_id", filter, MAX_SCOPE_MODULES + 1)
@@ -547,7 +546,7 @@ impl Engine {
             SnapshotScope::None => base,
             SnapshotScope::All => json!({"should": [
                 base,
-                and(vec![is("source", "snapshot"), is("has_entries", true)]),
+                and(vec![is("source", "snapshot"), is("has_heads", true)]),
             ]}),
             SnapshotScope::Labels(_) => match modules {
                 Some(ms) if !ms.is_empty() => json!({"should": [
@@ -790,8 +789,8 @@ impl Engine {
         Ok(())
     }
 
-    /// For each query's snapshot hits, the ids of the query's snapshots of
-    /// their modules, newest first. Without a snapshot version there are none.
+    /// For each query's snapshot hits, the ids of the query's heads on their
+    /// modules, newest first. Without a snapshot version there are none.
     async fn hit_entries(
         &self,
         queries: &[Query],
@@ -808,7 +807,7 @@ impl Engine {
                 if !seen.insert(m) {
                     continue;
                 }
-                let mut must = vec![is("module_id", m.as_str())];
+                let mut must = vec![is("module_id", m.as_str()), is("head", true)];
                 if let SnapshotScope::Labels(labels) = &queries[i].snapshots {
                     must.extend(labels.iter().map(|(k, v)| is("labels", format!("{k}={v}"))));
                 }

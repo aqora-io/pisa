@@ -190,6 +190,7 @@ struct Module {
     decls: SnapshotDecls,
     described: HashMap<String, Described>,
     has_entries: bool,
+    has_heads: bool,
 }
 
 pub struct Indexer {
@@ -327,7 +328,15 @@ impl Indexer {
         let _describer = AbortOnDrop(tokio::spawn(Arc::clone(&self).describe_queue(rx)));
         loop {
             let since = now_micros().saturating_sub(LOOKBACK.as_micros() as u64);
-            if let Err(e) = self.reconcile().await {
+            let reconciled = async {
+                // Collections loaded before heads were indexed lack these.
+                let q = &self.engine.q;
+                q.index(&self.engine.entries, "head", "bool").await?;
+                q.index(&self.engine.collection, "has_heads", "bool")
+                    .await?;
+                self.reconcile().await
+            };
+            if let Err(e) = reconciled.await {
                 tracing::warn!("reconciling the snapshot index failed: {e}");
                 tokio::time::sleep(POLL_EVERY).await;
                 continue;
@@ -343,10 +352,12 @@ impl Indexer {
         };
         let described = parse_described(self.catalog.described(m).await.map_err(store)?);
         let has_entries = self.catalog.has_entries(m).await.map_err(store)?;
+        let has_heads = self.catalog.has_heads(m).await.map_err(store)?;
         Ok(Some(Module {
             decls,
             described,
             has_entries,
+            has_heads,
         }))
     }
 
@@ -357,6 +368,7 @@ impl Indexer {
         let described: std::collections::BTreeMap<_, _> = module.described.iter().collect();
         h.update(serde_json::to_vec(&described).unwrap_or_default());
         h.update([u8::from(module.has_entries)]);
+        h.update([u8::from(module.has_heads)]);
         let manifest = &self.engine.manifest;
         h.update(serde_json::to_vec(&manifest.field_stats).unwrap_or_default());
         h.update(manifest.embedding_model.as_deref().unwrap_or_default());
@@ -405,6 +417,7 @@ impl Indexer {
                 payload.status = Some(d.status);
                 payload.verified = decls.verified;
                 payload.has_entries = module.has_entries;
+                payload.has_heads = module.has_heads;
                 payload.rev = Some(rev.to_string());
                 let id = points::snapshot_id(m, &d.name);
                 points::point(
@@ -555,10 +568,14 @@ impl Indexer {
                 .entries_after(after.as_deref(), PAGE)
                 .await
                 .map_err(store)?;
+            let ids: Vec<String> = page.iter().map(|(e, _)| e.clone()).collect();
+            let replaced = self.catalog.replaced_among(&ids).await.map_err(store)?;
             for (e, meta) in &page {
                 let id = points::entry_id(e);
                 want_entries.insert(id.clone());
-                let point = points::entry_point(e, &meta.module, meta.created_micros, &meta.labels);
+                let head = !replaced.contains(e);
+                let point =
+                    points::entry_point(e, &meta.module, meta.created_micros, &meta.labels, head);
                 if have_entries.get(&id) != Some(&point["payload"]) {
                     entries.push(point);
                 }
@@ -690,8 +707,14 @@ impl Indexer {
             self.writable()?;
             match self.catalog.find_entry(e).await.map_err(store)? {
                 Some(meta) => {
-                    let point =
-                        points::entry_point(e, &meta.module, meta.created_micros, &meta.labels);
+                    let head = self.catalog.replacers(e).await.map_err(store)?.is_empty();
+                    let point = points::entry_point(
+                        e,
+                        &meta.module,
+                        meta.created_micros,
+                        &meta.labels,
+                        head,
+                    );
                     q.upsert(&self.engine.entries, vec![point]).await?;
                 }
                 None => {

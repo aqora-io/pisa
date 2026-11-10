@@ -91,7 +91,8 @@ pub struct PointPayload {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub used_by: Vec<String>,
     /// For a snapshot declaration: its module's id, its own status, and its
-    /// module's state and revision.
+    /// module's state (whether it has entries, and heads among them) and
+    /// revision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -100,6 +101,8 @@ pub struct PointPayload {
     pub verified: bool,
     #[serde(default)]
     pub has_entries: bool,
+    #[serde(default)]
+    pub has_heads: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
 }
@@ -206,6 +209,7 @@ pub const INDEXES: &[(&str, &str)] = &[
     ("hidden", "bool"),
     ("uses_sorry", "bool"),
     ("has_entries", "bool"),
+    ("has_heads", "bool"),
 ];
 
 /// The entries collection: payload only.
@@ -217,20 +221,24 @@ pub const ENTRY_INDEXES: &[(&str, &str)] = &[
     ("module_id", "keyword"),
     ("labels", "keyword"),
     ("created", "integer"),
+    ("head", "bool"),
 ];
 
-/// A snapshot entry's point.
+/// A snapshot entry's point; `head` if no entry replaces it.
 pub fn entry_point(
     e: &str,
     module: &str,
     created: u64,
     labels: &BTreeMap<String, String>,
+    head: bool,
 ) -> Value {
     let labels: Vec<String> = labels.iter().map(|(k, v)| format!("{k}={v}")).collect();
     json!({
         "id": entry_id(e),
         "vector": {},
-        "payload": {"entry": e, "module_id": module, "created": created, "labels": labels},
+        "payload": {
+            "entry": e, "module_id": module, "created": created, "labels": labels, "head": head,
+        },
     })
 }
 
