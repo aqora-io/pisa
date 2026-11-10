@@ -1608,6 +1608,11 @@ export interface components {
              */
             snapshot_id?: string;
         };
+        /** @description A snapshot a rebuild run was to delete and couldn't. */
+        RebuildNotDeleted: {
+            error: components["schemas"]["Error"];
+            snapshot_id: string;
+        };
         /**
          * @description A labelled snapshot left out of a rebuild because one without every label
          *     replaces it.
@@ -1693,9 +1698,16 @@ export interface components {
             /** @description For a run, the items whose create kept nothing. */
             failed?: components["schemas"]["RebuildFailed"][];
             /**
+             * @description For a run, the snapshots it was to delete and couldn't, each with why:
+             *     support snapshots, and with `retire` the first old one it couldn't,
+             *     which leaves the rest. Sending the rebuild again deletes them.
+             */
+            not_deleted?: components["schemas"]["RebuildNotDeleted"][];
+            /**
              * @description For a plan, whether there is one: false when `to` changes what `from`
              *     states and `allow_changes` isn't set. For a run, whether every item
-             *     was created, and retired if asked.
+             *     was created, and everything it was to delete deleted, the old
+             *     snapshots too if asked to retire them.
              */
             ok: boolean;
             /**
@@ -2111,6 +2123,7 @@ export type QueryResult = components['schemas']['QueryResult'];
 export type RebuildCreated = components['schemas']['RebuildCreated'];
 export type RebuildFailed = components['schemas']['RebuildFailed'];
 export type RebuildItem = components['schemas']['RebuildItem'];
+export type RebuildNotDeleted = components['schemas']['RebuildNotDeleted'];
 export type RebuildReplaced = components['schemas']['RebuildReplaced'];
 export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];

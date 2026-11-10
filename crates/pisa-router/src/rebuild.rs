@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use pisa_protocol::api::{
     CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, Error, ErrorKind, RebuildCreated,
-    RebuildFailed, RebuildItem, RebuildSkipped, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
+    RebuildFailed, RebuildItem, RebuildNotDeleted, RebuildSkipped, RebuildSnapshotsRequest,
+    RebuildSnapshotsResponse,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -44,7 +45,8 @@ pub(crate) fn version(req: &RebuildSnapshotsRequest) -> Result<String, ApiError>
 /// Plans `req` (as a dry run) and runs the plan on `version`, the one
 /// [`version`] found; see [`RebuildSnapshotsResponse`]. The snapshots of the
 /// plan's support items, made so that the items above them could build, are
-/// deleted once every level has run, whether or not they did.
+/// deleted once every level has run, whether or not they did; those it can't
+/// delete are in `not_deleted`.
 pub(crate) async fn run(
     app: &Arc<App>,
     req: &RebuildSnapshotsRequest,
@@ -137,11 +139,19 @@ pub(crate) async fn run(
     }
     response.ok = response.failed.is_empty() && response.skipped.is_empty();
     for entry in support.into_iter().rev() {
-        delete(app, entry, version.clone()).await?;
+        if let Err(e) = delete(app, entry.clone(), version.clone()).await {
+            response.not_deleted.push(RebuildNotDeleted {
+                snapshot_id: entry,
+                error: e.0,
+            });
+        }
     }
     if req.retire && response.ok {
-        response.retired = retire(app, &response.plan, version).await?;
+        let (retired, left) = retire(app, &response.plan, version).await;
+        response.retired = retired;
+        response.not_deleted.extend(left);
     }
+    response.ok &= response.not_deleted.is_empty();
     Ok(response)
 }
 
@@ -188,20 +198,27 @@ async fn create(
 /// Deletes the plan's old snapshots whose copies replace them, from the top
 /// down, each delete splicing the run through the copy; the rest, and
 /// `from`, stay. One already gone counts, as when a rebuild that retired
-/// some is sent again.
+/// some is sent again. The first it can't delete stops it, and comes back
+/// with what it retired.
 async fn retire(
     app: &App,
     plan: &[RebuildItem],
     version: Option<String>,
-) -> Result<Vec<String>, ApiError> {
+) -> (Vec<String>, Option<RebuildNotDeleted>) {
     let linked = plan.iter().rev().filter(|i| i.replaces.is_some());
     let old = linked.filter_map(|i| i.snapshot_id.clone());
     let mut retired = Vec::new();
     for entry in old {
-        delete(app, entry.clone(), version.clone()).await?;
+        if let Err(e) = delete(app, entry.clone(), version.clone()).await {
+            let left = RebuildNotDeleted {
+                snapshot_id: entry,
+                error: e.0,
+            };
+            return (retired, Some(left));
+        }
         retired.push(entry);
     }
-    Ok(retired)
+    (retired, None)
 }
 
 /// Deletes snapshot `entry` on `version`; one already gone counts.

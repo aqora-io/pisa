@@ -1289,3 +1289,59 @@ async fn a_rebuild_plans_past_a_thousand_items() {
     assert_eq!((status, &r["ok"]), (200, &json!(true)), "{r}");
     assert_eq!(r["plan"].as_array().map(Vec::len), Some(1100));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_the_run_cant_delete_is_reported_and_a_resend_deletes_it() {
+    let router = pisa_router::RouterConfig {
+        max_wait_secs: 1,
+        ..common::router_config()
+    };
+    let mut c = Cluster::start_with(router, &[], |w| w).await;
+    let stop = c.add_drainable_worker(common::worker_config("w0", "v", 2));
+    c.wait_for_workers(1).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    let m = create(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
+    // N′ builds long enough for its worker to be told to stop meanwhile.
+    let code = on(&m, "theorem n : 3 = 3 := rfl\nSLEEP 800");
+    create(&c, json!({"code": code, "labels": {"p": "1"}})).await;
+    let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
+    let b2 = create(
+        &c,
+        json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+
+    let body = json!({"from": entry(&b), "to": entry(&b2), "labels": {"p": "1"}});
+    let running = {
+        let (client, url) = (c.client.clone(), c.url("/snapshots/rebuild"));
+        let body = body.clone();
+        tokio::spawn(async move {
+            let r = client.post(url).json(&body).send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stop.send(()).unwrap();
+    // With no worker left, M′'s snapshot can't be deleted: the copies stand,
+    // and the answer says what is left.
+    let (status, r) = running.await.unwrap();
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["created"].as_array().unwrap().len(), 2, "{r}");
+    let left = r["not_deleted"].as_array().unwrap();
+    assert_eq!(left.len(), 1, "{r}");
+    assert_eq!(left[0]["error"]["kind"], "capacity", "{r}");
+    let support = left[0]["snapshot_id"].as_str().unwrap().to_string();
+
+    c.add_worker(common::worker_config("w1", "v", 2));
+    c.wait_for_workers(1).await;
+    let again = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(again["ok"], true, "{again}");
+    assert!(again.get("not_deleted").is_none(), "{again}");
+    let (status, _) = get(&c, &format!("/snapshots/{support}")).await;
+    assert_eq!(status, 404);
+}

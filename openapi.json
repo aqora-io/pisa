@@ -1908,6 +1908,22 @@
         ],
         "type": "object"
       },
+      "RebuildNotDeleted": {
+        "description": "A snapshot a rebuild run was to delete and couldn't.",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "error"
+        ],
+        "type": "object"
+      },
       "RebuildReplaced": {
         "description": "A labelled snapshot left out of a rebuild because one without every label\nreplaces it.",
         "properties": {
@@ -2027,8 +2043,15 @@
             },
             "type": "array"
           },
+          "not_deleted": {
+            "description": "For a run, the snapshots it was to delete and couldn't, each with why:\nsupport snapshots, and with `retire` the first old one it couldn't,\nwhich leaves the rest. Sending the rebuild again deletes them.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildNotDeleted"
+            },
+            "type": "array"
+          },
           "ok": {
-            "description": "For a plan, whether there is one: false when `to` changes what `from`\nstates and `allow_changes` isn't set. For a run, whether every item\nwas created, and retired if asked.",
+            "description": "For a plan, whether there is one: false when `to` changes what `from`\nstates and `allow_changes` isn't set. For a run, whether every item\nwas created, and everything it was to delete deleted, the old\nsnapshots too if asked to retire them.",
             "type": "boolean"
           },
           "plan": {
