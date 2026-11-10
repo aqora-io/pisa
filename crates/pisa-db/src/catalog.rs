@@ -347,8 +347,10 @@ pub(crate) fn allow_column(replaced: &Replaces) -> Result<Option<String>, Fail> 
 }
 
 /// The link and comparison of `replacer` once `deleted`, which it replaces,
-/// is gone: `deleted`'s link with the allowed changes of both steps. `None`
-/// if `deleted` has no link.
+/// is gone: `deleted`'s link, allowing what either step allowed, and both
+/// steps' comparisons. The allows are what the links' authors declared,
+/// which the audit reads; a comparison is what a create's build reported.
+/// `None` if `deleted` has no link.
 pub(crate) fn splice(deleted: &EntryMeta, replacer: &EntryMeta) -> Option<(Replaces, Replacement)> {
     let link = deleted.replaces.as_ref()?;
     let none = Replacement::default();
@@ -359,9 +361,12 @@ pub(crate) fn splice(deleted: &EntryMeta, replacer: &EntryMeta) -> Option<(Repla
         changed_definitions: union(&first.changed_definitions, &second.changed_definitions),
         affected: union(&first.affected, &second.affected),
     };
-    let allow = (!replacement.changed_definitions.is_empty()).then(|| Allow {
-        definitions: replacement.changed_definitions.clone(),
-    });
+    let allowed = |r: &EntryMeta| {
+        let allow = r.replaces.as_ref().and_then(|r| r.allow.as_ref());
+        allow.map_or(&[][..], |a| a.definitions.as_slice()).to_vec()
+    };
+    let definitions = union(&allowed(deleted), &allowed(replacer));
+    let allow = (!definitions.is_empty()).then_some(Allow { definitions });
     let replaces = Replaces {
         snapshot_id: link.snapshot_id.clone(),
         allow,
@@ -1140,6 +1145,25 @@ mod tests {
             );
             assert_eq!(replacer_ids(&catalog, &s0).await, [p2]);
         }
+    }
+
+    #[test]
+    fn a_splice_allows_what_either_link_allowed() {
+        let entry = |replaces, replacement| EntryMeta {
+            module: "x".into(),
+            labels: BTreeMap::new(),
+            key: None,
+            created_micros: 0,
+            replaces,
+            replacement,
+        };
+        // The comparisons are what the creates' builds reported; the allows
+        // are what the links' authors declared, which an audit reads.
+        let deleted = entry(link("s0", &["f", "k"]), Some(replacement(&[], &["f"], &[])));
+        let top = entry(link("p1", &["g"]), Some(replacement(&[], &[], &[])));
+        let (replaces, spliced) = splice(&deleted, &top).unwrap();
+        assert_eq!(Some(replaces), link("s0", &["f", "k", "g"]));
+        assert_eq!(spliced, replacement(&[], &["f"], &[]));
     }
 
     #[tokio::test]

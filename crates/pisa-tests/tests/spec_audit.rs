@@ -296,6 +296,40 @@ async fn a_rebuilt_specs_own_link_is_listed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_spec_whose_original_was_retired_is_not_clean() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let p1 = json!({"p": "1"});
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ndef g : Nat := 1", "verify": true}),
+    )
+    .await;
+    let s = create(
+        &c,
+        json!({"code": on(&b, "theorem t : g = g := rfl"), "labels": p1, "verify": true}),
+    )
+    .await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ndef g : Nat := 0 + 1", "verify": true,
+               "replaces": {"snapshot_id": id(&b), "allow": {"definitions": ["g"]}}}),
+    )
+    .await;
+    let body = json!({"from": id(&b), "to": id(&b2), "labels": p1, "retire": true,
+                      "verify": true});
+    let (status, rebuilt) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!((status, &rebuilt["ok"]), (200, &json!(true)), "{rebuilt}");
+    assert_eq!(rebuilt["retired"], json!([id(&s)]), "{rebuilt}");
+    let s_ = made(&rebuilt, &s);
+
+    // The copy proves its statement, but the spec it was copied from is
+    // gone, so nothing can show that it states what the original did.
+    let r = audit(&c, &[&s_]).await;
+    assert_eq!(targets(&r), [format!("t {s_} {s_} proved true")]);
+    assert_eq!(r["clean"], false, "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn assumptions_permitted_by_the_spec() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let s = create(

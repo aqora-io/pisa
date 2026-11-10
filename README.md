@@ -561,7 +561,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   each target and each head reached from its spec snapshot, with its `status`
   there and whether the head is `verified`. A replacement keeps every
   statement of what it replaces, so every head has them all.
-- **`clean`.** There is no fork, and every target is accepted on its head:
+- **`clean`.** There is no fork, no spec snapshot was copied from one that
+  is gone (see *Parameters*), and every target is accepted on its head:
   the spec snapshot and the head are verified, the head declares the target
   as the same kind of declaration with the same type, and the target is
   `proved`, or `conditional` only on assumptions the spec permits, those
@@ -586,7 +587,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   only a run's heads, so audit against the same ids after it. A spec
   snapshot that was still a head, with nothing replacing it yet, is copied
   like any head, and with `retire` its old id is deleted if its copy replaces
-  it: find its copy in `created` and audit against that.
+  it. Its copy in `created` then replaces a snapshot that is gone, so nothing
+  shows that it states what the original did, and an audit against it isn't
+  `clean`: rebuild a run's spec snapshots without `retire`.
 
 <a id="agent-runs"></a>
 **Running agents on snapshots.** A leader hands targets to agents, and
@@ -815,10 +818,11 @@ removes its module once nothing else needs it, then each of that module's
 imports on the same terms, and `removed` lists them. So deleting a snapshot
 whose module others build on removes nothing yet, and the code on top keeps
 working. Deleting a snapshot that [replaced](#replacing) another re-points
-what replaced it at that one, with the two links composed: `allow` and the
-`replacement` hold the changes of both steps, so a run isn't cut. A snapshot
-with no link, such as a spec snapshot, leaves its replacers' links as they
-are. With `?with_replacers=true` a delete takes the snapshot and every
+what replaced it at that one, with the two links composed: `allow` names
+what either link allowed, and `replacement` holds the changes both steps
+found, so a run isn't cut. A snapshot with no link, such as a spec snapshot,
+leaves its replacers' links as they are, pointing at a snapshot that is gone:
+the [audit](#spec-audit) of a spec copied from it isn't `clean`. With `?with_replacers=true` a delete takes the snapshot and every
 snapshot that replaces it, directly or through others, in one step and
 splices nothing; what the snapshot replaced is a head again if nothing else
 replaces it, and `deleted` lists every snapshot that went, the asked one

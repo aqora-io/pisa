@@ -2216,6 +2216,8 @@ impl Snapshots {
         // Each head once, as `(entry, module)`, and those each spec reaches.
         let mut heads: Vec<(String, String)> = Vec::new();
         let mut reached: Vec<Vec<String>> = Vec::new();
+        // Whether a spec's chain back reaches a snapshot that is gone.
+        let mut cut = false;
         for (spec, spec_meta) in &specs {
             // Back through what it replaced, as far as the entries exist.
             let mut back = Some((spec.clone(), spec_meta.clone()));
@@ -2229,6 +2231,7 @@ impl Snapshots {
                 }
                 add_link(&e, &entry_meta);
                 let older = self.catalog.find_entry(&replaces.snapshot_id).await?;
+                cut |= older.is_none();
                 back = older.map(|m| (replaces.snapshot_id.clone(), m));
             }
             // Forward through what replaces it, to the heads.
@@ -2292,7 +2295,9 @@ impl Snapshots {
             }
         }
         let (targets, accepted) = self.targets(&specs, &reached, &heads, &metas, &permitted);
-        let clean = forks.is_empty() && accepted;
+        // A spec copied from a snapshot that is gone, as a retiring rebuild
+        // leaves it, can't be shown to state what the original did.
+        let clean = forks.is_empty() && accepted && !cut;
 
         // Each head stands for its module.
         let mut entries: BTreeMap<String, String> = BTreeMap::new();

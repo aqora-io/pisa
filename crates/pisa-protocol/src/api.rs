@@ -951,8 +951,9 @@ pub struct AuditSnapshotsResponse {
     pub assumptions: Vec<AuditAssumption>,
     /// The declarations that are `sorry` or `rejected`.
     pub not_proved: Vec<AuditUnproved>,
-    /// With `against`: whether the run is done. There is no fork, and every
-    /// target is accepted on its head: the spec snapshot's module and the
+    /// With `against`: whether the run is done. There is no fork, no spec
+    /// snapshot was copied from one that is gone (as a rebuild with `retire`
+    /// leaves it), and every target is accepted on its head: the spec snapshot's module and the
     /// head's are verified, the head declares the target as the same kind of
     /// declaration with the same type, and the target is `proved`, or
     /// `conditional` on assumptions the spec permits (see
