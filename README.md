@@ -1161,7 +1161,12 @@ first (a plain delete lists one). A create that replaces a snapshot deleted
 while it was being built answers with a `not_found` in `check.error`. Each
 worker checks a module it has cached against the store at most every
 `PISA_SNAPSHOT_CONFIRM_SECS` (60), so a removal takes effect everywhere within
-that time.
+that time. Past a snapshot's own entry, a delete is best effort: a worker
+that stops partway leaves modules nothing needs, and files in the store.
+Every hour one worker of each version sweeps them: the modules no snapshot
+is on and no module imports go as a delete would remove them, then the
+files no module's record names, once a day old, as a build uploads its files
+before its record.
 
 **Trust.** A snapshot that isn't `verified` has the same guarantee as a
 `/check`: the policy scan and an axiom report from the process that imported

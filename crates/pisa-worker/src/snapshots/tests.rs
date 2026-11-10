@@ -143,6 +143,58 @@ async fn a_delete_leaves_a_new_build_of_its_module_alone() {
     assert!(!s.confirmed.lock().unwrap().contains_key(&id));
 }
 
+/// A worker that died while deleting C, whose module imports P's, left
+/// P's record and files and C's files. The sweep clears them, and the
+/// files of K's build that no record names, but not K, nor files newer
+/// than its grace.
+#[tokio::test]
+async fn a_sweep_clears_what_a_stopped_delete_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::memory().await;
+    let s = snapshots(db.clone(), dir.path());
+    let catalog = Catalog::new(db.clone(), "v".into());
+    let own = |m: &ModuleMeta| m.modules.last().unwrap().clone();
+    let put = |m: Module| {
+        let s = s.clone();
+        async move {
+            let path = s.blob(&m, "olean");
+            s.store.put(&path, b"x".to_vec().into()).await.unwrap();
+        }
+    };
+    let stored = |m: Module| {
+        let s = s.clone();
+        async move { s.store.get(&s.blob(&m, "olean")).await.is_ok() }
+    };
+    let (p_id, c_id, k_id) = (snapshot::id("p"), snapshot::id("c"), snapshot::id("k"));
+    let p = built(&p_id, b"p");
+    let mut c = built(&c_id, b"c");
+    c.imports = vec![p_id.clone()];
+    c.modules.insert(0, own(&p));
+    let k = built(&k_id, b"k");
+    for m in [&p, &c, &k] {
+        put(own(m)).await;
+    }
+    let (pe, ..) = catalog.commit(&p_id, &p, None, no_labels()).await.unwrap();
+    let (ce, ..) = catalog.commit(&c_id, &c, None, no_labels()).await.unwrap();
+    catalog.commit(&k_id, &k, None, no_labels()).await.unwrap();
+    catalog.remove_entry(&pe).await.unwrap();
+    // The delete that removed C's entry and record went no further.
+    catalog.remove_entry(&ce).await.unwrap();
+    let stray = own(&built(&k_id, b"an old build"));
+    put(stray.clone()).await;
+
+    // Files are kept for their grace, as a build uploads them first.
+    let (modules, files) = s.sweep(Duration::from_secs(3600)).await.unwrap();
+    assert_eq!((modules, files), (1, 0));
+    assert!(stored(own(&c)).await && stored(stray.clone()).await);
+    let (modules, files) = s.sweep(Duration::ZERO).await.unwrap();
+    assert_eq!((modules, files), (0, 2));
+    assert!(!stored(own(&p)).await && !stored(own(&c)).await && !stored(stray).await);
+    assert!(stored(own(&k)).await);
+    assert!(catalog.module(&p_id).await.is_err());
+    assert!(catalog.module(&k_id).await.is_ok());
+}
+
 /// A re-check that passes on a module's old build. Meanwhile the module
 /// was deleted and built again: the new build stays unverified, and so
 /// does the old one's record, which no longer exists.

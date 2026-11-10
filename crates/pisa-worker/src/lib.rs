@@ -31,6 +31,12 @@ use sessions::Sessions;
 
 /// How often a worker deletes the snapshot change log's expired rows.
 const LOG_PRUNE_EVERY: Duration = Duration::from_secs(600);
+/// How often one worker of a version sweeps what deletes left behind, under
+/// a lease of this name; and how long a module file without a record is
+/// kept, as a build uploads its files before its record.
+const SWEEP_EVERY: Duration = Duration::from_secs(3600);
+const SWEEP_LEASE: &str = "snapshot-sweep";
+const SWEEP_GRACE: Duration = Duration::from_secs(24 * 3600);
 
 /// Runs the worker until SIGTERM or Ctrl-C, then drains and exits.
 pub async fn run(cfg: WorkerConfig) -> anyhow::Result<()> {
@@ -98,6 +104,28 @@ pub async fn run_with_stores(
         None
     };
     prewarm(&pool, &cfg.prewarm);
+    {
+        let (pool, owner) = (pool.clone(), worker_id.clone());
+        let catalog = catalog::Catalog::new(db.clone(), version.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SWEEP_EVERY);
+            // Not as the worker starts, only once it has run an interval.
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                match catalog.take_lease(SWEEP_LEASE, &owner, SWEEP_EVERY).await {
+                    Ok(Some(_)) => match pool.snapshots().sweep(SWEEP_GRACE).await {
+                        Ok((modules, files)) => {
+                            tracing::info!(modules, files, "swept what deletes left")
+                        }
+                        Err(e) => tracing::warn!("sweeping snapshots failed: {e}"),
+                    },
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("taking the sweep's lease failed: {e}"),
+                }
+            }
+        });
+    }
     let catalog = catalog::Catalog::new(db.clone(), version.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(LOG_PRUNE_EVERY);

@@ -775,6 +775,18 @@ impl Catalog {
         dispatch!(&self.db, entries_after(&self.version, after, limit.into()))
     }
 
+    /// The modules that no entry is on and no module imports, what a delete
+    /// that stopped partway leaves, among the next `limit` modules in id
+    /// order after `after`; and the module to go on after, if there may be
+    /// more. `limit` stays within a query's bound values.
+    pub async fn orphans_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<(Vec<String>, Option<String>), Error> {
+        dispatch!(&self.db, orphans_after(&self.version, after, limit.into()))
+    }
+
     /// Up to `limit` ids, in order, of the modules with declarations for
     /// search, after the module `after`.
     pub async fn modules_with_decls_after(
@@ -2110,6 +2122,48 @@ mod tests {
             assert_eq!(removed.unwrap().imports, ["p"]);
             assert!(catalog.cleanup("p").await.unwrap().is_some());
             assert!(catalog.db.rows(&catalog.version).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn orphans_are_the_modules_nothing_holds() {
+        for catalog in catalogs().await {
+            let parent = meta("p");
+            let (pe, ..) = catalog
+                .commit("p", &parent, None, no_labels())
+                .await
+                .unwrap();
+            let (ce, ..) = catalog
+                .commit("c", &child("c", &parent), None, no_labels())
+                .await
+                .unwrap();
+            catalog
+                .commit("k", &meta("k"), None, no_labels())
+                .await
+                .unwrap();
+            assert_eq!(
+                catalog.orphans_after(None, 10).await.unwrap().0,
+                Vec::<String>::new()
+            );
+            // P's entry goes, but C imports it.
+            catalog.remove_entry(&pe).await.unwrap();
+            assert_eq!(
+                catalog.orphans_after(None, 10).await.unwrap().0,
+                Vec::<String>::new()
+            );
+            // C's entry goes with its module, and a delete that stopped there
+            // leaves P to nothing.
+            catalog.remove_entry(&ce).await.unwrap();
+            assert_eq!(catalog.orphans_after(None, 10).await.unwrap().0, ["p"]);
+            // A page of one module says where to go on.
+            assert_eq!(
+                catalog.orphans_after(None, 1).await.unwrap(),
+                (vec![], Some("k".into()))
+            );
+            assert_eq!(
+                catalog.orphans_after(Some("p"), 10).await.unwrap().0,
+                Vec::<String>::new()
+            );
         }
     }
 
