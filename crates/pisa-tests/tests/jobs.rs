@@ -76,7 +76,8 @@ async fn each_long_endpoint_answers_later_as_it_would_have_at_once() {
     // own, on a module of its own.
     let mut snapshots = Vec::new();
     for code in ["def kept := 1", "def kept' := 1"] {
-        let (_, kept) = c.post("/snapshots", json!({"code": code})).await;
+        let body = json!({"code": code, "verify": false});
+        let (_, kept) = c.post("/snapshots", body).await;
         snapshots.push(kept["snapshot"]["id"].as_str().unwrap().to_string());
     }
     let cases = [

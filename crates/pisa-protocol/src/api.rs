@@ -706,11 +706,12 @@ pub struct CreateSnapshotRequest {
     /// each module the kernel re-check covers, once their imports are loaded.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
-    /// Whether to re-check the code through the kernel. `true` also re-checks
-    /// its imports, so the snapshot ends [`verified`](Snapshot::verified) or
-    /// the check has an error, except on a [`key`](Self::key) replay. `false`
-    /// never re-checks. By default, only code that uses macros, its own or an
-    /// import's, is re-checked.
+    /// Whether to re-check the code through the kernel. By default the code
+    /// is re-checked, and its imports are not. `true` also re-checks its
+    /// imports, so the snapshot ends [`verified`](Snapshot::verified) or the
+    /// check has an error, except on a [`key`](Self::key) replay. `false`
+    /// skips the re-check, except for module-system code, which only the
+    /// re-check can describe: the statuses are then the build's own report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<bool>,
     /// The new snapshot's labels; see

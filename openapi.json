@@ -757,7 +757,7 @@
             "type": "integer"
           },
           "verify": {
-            "description": "Whether to re-check the code through the kernel. `true` also re-checks\nits imports, so the snapshot ends [`verified`](Snapshot::verified) or\nthe check has an error, except on a [`key`](Self::key) replay. `false`\nnever re-checks. By default, only code that uses macros, its own or an\nimport's, is re-checked.",
+            "description": "Whether to re-check the code through the kernel. By default the code\nis re-checked, and its imports are not. `true` also re-checks its\nimports, so the snapshot ends [`verified`](Snapshot::verified) or the\ncheck has an error, except on a [`key`](Self::key) replay. `false`\nskips the re-check, except for module-system code, which only the\nre-check can describe: the statuses are then the build's own report.",
             "type": "boolean"
           },
           "version": {

@@ -1,8 +1,10 @@
 //! The audit against a spec: from its spec snapshots, a run is walked
 //! forward through `replaces` links to its heads, and each spec declaration
 //! is judged on each head it reaches.
-//! fake-lean's theorems use `sorryAx` when their code has a `sorry`, and
-//! every axiom their own code declares.
+//! The fake Lean's theorems use `sorryAx` when their code has a `sorry`, and
+//! every axiom their own code declares. Code that makes the build's report
+//! lie (`-- reported-as:`) is created with `verify: false`, so that the
+//! build's report is what its create compares.
 
 mod common;
 
@@ -123,7 +125,7 @@ async fn a_sorry_target_is_not_clean() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let s = create(
         &c,
-        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry", "verify": false}),
     )
     .await;
     let r = audit(&c, &[id(&s)]).await;
@@ -136,7 +138,7 @@ async fn a_sorry_target_is_not_clean() {
     // A proof that the kernel hasn't re-checked isn't accepted either.
     let p = create(
         &c,
-        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": replacing(&s)}),
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": replacing(&s), "verify": false}),
     )
     .await;
     let r = audit(&c, &[id(&s)]).await;
@@ -149,7 +151,7 @@ async fn a_spec_the_kernel_hasnt_rechecked_is_not_clean() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let s = create(
         &c,
-        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry", "verify": false}),
     )
     .await;
     create(
@@ -176,7 +178,7 @@ async fn a_head_whose_verified_statement_differs_from_the_spec_is_not_clean() {
     let p = create(
         &c,
         json!({"code": "import Foo\n\n-- reported-as: theorem t : 2 = 2 := rfl\ntheorem t : 3 = 3 := rfl",
-               "replaces": replacing(&s)}),
+               "replaces": replacing(&s), "verify": false}),
     )
     .await;
     let (status, v) = c
@@ -218,7 +220,7 @@ async fn a_head_whose_verified_definition_differs_from_the_spec_is_not_clean() {
     let p = create(
         &c,
         json!({"code": "import Foo\n\n-- reported-as: def f : Nat := 1\ndef f : Nat := 2\ntheorem t : f = f := rfl",
-               "replaces": replacing(&s)}),
+               "replaces": replacing(&s), "verify": false}),
     )
     .await;
     let (status, v) = c
@@ -322,7 +324,7 @@ async fn a_spec_without_targets_is_clean_only_if_its_head_keeps_it() {
     let p = create(
         &c,
         json!({"code": "import Foo\n\n-- reported-as: axiom a : 1 = 1\naxiom a : 2 = 2",
-               "replaces": replacing(&s)}),
+               "replaces": replacing(&s), "verify": false}),
     )
     .await;
     let (status, v) = c
@@ -361,12 +363,12 @@ async fn a_base_swapped_under_the_run_is_compared_from_its_verified_record() {
     // its create compares against that claim.
     let b2 = create(
         &c,
-        json!({"code": "import Foo\n\n-- reported-as: def g : Nat := 1\ndef g : Nat := 2"}),
+        json!({"code": "import Foo\n\n-- reported-as: def g : Nat := 1\ndef g : Nat := 2", "verify": false}),
     )
     .await;
     let p = create(
         &c,
-        json!({"code": on(&b2, "theorem t : g = g := rfl"), "replaces": replacing(&s)}),
+        json!({"code": on(&b2, "theorem t : g = g := rfl"), "replaces": replacing(&s), "verify": false}),
     )
     .await;
     let (status, v) = c

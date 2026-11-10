@@ -126,11 +126,10 @@ pub struct CheckOptions {
 /// Options for [`Client::create_snapshot_with`].
 #[derive(Debug, Clone, Default)]
 pub struct CreateSnapshotOptions {
-    /// Whether to run the kernel re-check. `true` also re-checks the
-    /// imports, so the snapshot ends `verified` or the check has an error.
-    /// `false` skips it even for macros, and the snapshot stays not
-    /// `verified`. By default it runs only for code that uses macros, its
-    /// own or an import's.
+    /// Whether to run the kernel re-check, which runs by default for the code
+    /// itself. `true` also re-checks the imports, so the snapshot ends
+    /// `verified` or the check has an error. `false` skips it, but for
+    /// module-system code, and the snapshot stays not `verified`.
     pub verify: Option<bool>,
     /// Labels for the new snapshot.
     pub labels: BTreeMap<String, String>,
@@ -509,8 +508,8 @@ impl Client {
     /// snapshot that holds it until the snapshot is deleted. Start that code
     /// with the snapshot's `header` to reuse the Lean process that already
     /// has the module loaded. Code with `sorry` is kept, with that `status`.
-    /// The kernel re-check runs only if the code uses macros, its own or an
-    /// import's; see [`verify_snapshot`](Self::verify_snapshot).
+    /// The kernel re-check runs on the code; see
+    /// [`verify_snapshot`](Self::verify_snapshot) for its imports.
     pub async fn create_snapshot(&self, code: &str) -> Result<CreateSnapshotResponse, Error> {
         self.create_snapshot_with(code, &CreateSnapshotOptions::default())
             .await

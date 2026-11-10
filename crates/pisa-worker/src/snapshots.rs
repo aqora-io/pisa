@@ -1451,7 +1451,7 @@ impl Snapshots {
         // imports, so only the verifier, which loads those whole, can
         // describe it.
         let module_system = split.header.lines().next() == Some("module");
-        let recheck = module_system || job.verify.unwrap_or(macros);
+        let recheck = module_system || job.verify != Some(false);
         // The snapshots a replacement swaps follow from its imports, so a
         // misnamed `allow` costs no build.
         let swapped = match replacing {

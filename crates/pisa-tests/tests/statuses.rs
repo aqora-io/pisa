@@ -1,6 +1,6 @@
 //! Statuses and the audit: an axiom that snapshot code declares is an
 //! assumption, so what rests only on assumptions is `conditional`, apart
-//! from `sorry` and what is `rejected`. fake-lean's theorems use every axiom
+//! from `sorry` and what is `rejected`. The fake Lean's theorems use every axiom
 //! their own code declares or uses, and the imported ones their line names.
 
 mod common;
@@ -8,7 +8,9 @@ mod common;
 use common::Cluster;
 use serde_json::{Value, json};
 
-async fn create(c: &Cluster, body: Value) -> Value {
+/// Creates a snapshot without the kernel re-check, which the test runs later.
+async fn create(c: &Cluster, mut body: Value) -> Value {
+    body["verify"] = json!(false);
     let (status, r) = c.post("/snapshots", body).await;
     assert_eq!(status, 200, "{r}");
     assert!(r["snapshot"]["id"].is_string(), "{r}");

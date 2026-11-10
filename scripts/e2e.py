@@ -235,22 +235,23 @@ def snapshots():
     assert not opted_out["snapshot"]["verified"], opted_out
     step("snapshot: macros are re-checked unless the request opts out")
 
-    # Everything else skips the re-check, until it is asked for.
-    assert not root["snapshot"]["verified"] and not child["snapshot"]["verified"], (root, child)
-    status, verified = call("POST", f"/snapshots/{child['snapshot']['id']}/verify")
+    # Everything else is re-checked too, unless the request opts out.
+    assert root["snapshot"]["verified"] and child["snapshot"]["verified"], (root, child)
+    assert child["snapshot"]["status"] == "sorry", child
+    one = f"{sibling['snapshot']['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl"
+    opted = post("/snapshots", {"code": one, "verify": False, "timeout": 600})
+    created.append(opted)
+    assert not opted["snapshot"]["verified"], opted
+    status, verified = call("POST", f"/snapshots/{opted['snapshot']['id']}/verify")
     assert status == 200 and verified["snapshot"]["verified"], verified
-    assert verified["snapshot"]["id"] == child["snapshot"]["id"], verified
-    assert verified["checked"] == [root["snapshot"]["module"], child["snapshot"]["module"]], verified
-    assert verified["snapshot"]["status"] == "sorry" and "failure" not in verified, verified
-    assert call("GET", f"/snapshots/{root['snapshot']['id']}")[1]["verified"]
-    assert call("POST", f"/snapshots/{child['snapshot']['id']}/verify")[1]["checked"] == []
-    asked, _ = create(f"{sibling['snapshot']['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl")
-    assert not asked["snapshot"]["verified"], asked
-    asked = post("/snapshots", {"code": f"{sibling['snapshot']['header']}\n\ntheorem Snap.one : Snap.double 1 = 2 := rfl",
-                                "verify": True, "timeout": 600})
+    assert verified["snapshot"]["id"] == opted["snapshot"]["id"], verified
+    assert verified["checked"] == [opted["snapshot"]["module"]], verified
+    assert "failure" not in verified, verified
+    assert call("POST", f"/snapshots/{opted['snapshot']['id']}/verify")[1]["checked"] == []
+    asked = post("/snapshots", {"code": one, "verify": True, "timeout": 600})
     created.append(asked)
     assert asked["snapshot"]["verified"], asked
-    step("snapshot: verify on request, at creation or later, keeps sorry's status")
+    step("snapshot: re-checked by default, or later when the request opts out, keeping sorry's status")
 
     status, info = call("GET", f"/snapshots/{child['snapshot']['id']}")
     assert status == 200 and info["imports"] == [root["snapshot"]["module"]], info

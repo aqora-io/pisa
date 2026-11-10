@@ -123,8 +123,12 @@ async fn client_asks_about_positions() {
 async fn client_covers_snapshots() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let verify = |verify| CreateSnapshotOptions {
+        verify: Some(verify),
+        ..Default::default()
+    };
     let base = client
-        .create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
+        .create_snapshot_with("import Foo\ntheorem base : 1 = 1 := rfl", &verify(false))
         .await
         .unwrap();
     assert!(base.check.ok, "{:?}", base.check);
@@ -150,10 +154,6 @@ async fn client_covers_snapshots() {
     assert_eq!(verified.checked, std::slice::from_ref(&name));
     assert!(verified.failure.is_none());
     assert!(client.get_snapshot(&id).await.unwrap().snapshot.verified);
-    let verify = |verify| CreateSnapshotOptions {
-        verify: Some(verify),
-        ..Default::default()
-    };
     let forged = client
         .create_snapshot_with("import Foo\ntheorem forge : 1 = 1 := rfl", &verify(true))
         .await

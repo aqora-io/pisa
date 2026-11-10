@@ -316,7 +316,7 @@ async fn a_failed_create_leaves_its_key_unused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_re_check_leaves_its_key_unused() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    kept(&c, FORGED).await;
+    unverified(&c, FORGED).await;
     let body = json!({"code": FORGED, "verify": true, "key": "k5"});
     let (status, r) = c.post("/snapshots", body).await;
     assert_eq!(status, 200, "{r}");
@@ -324,7 +324,8 @@ async fn a_failed_re_check_leaves_its_key_unused() {
     assert!(r.get("snapshot").is_none(), "{r}");
     assert!(!has_key(&c, "k5").await);
 
-    let r = create_keyed(&c, FORGED, "k5", json!({})).await;
+    let body = json!({"code": FORGED, "verify": false, "key": "k5"});
+    let (_, r) = c.post("/snapshots", body).await;
     assert!(r["snapshot"]["id"].is_string(), "{r}");
     assert!(has_key(&c, "k5").await);
 }
@@ -720,6 +721,14 @@ async fn create_with(c: &Cluster, code: &str, verify: bool) -> Value {
     r
 }
 
+/// Creates a snapshot without the kernel re-check, which must be kept.
+async fn unverified(c: &Cluster, code: &str) -> Value {
+    let r = create_with(c, code, false).await;
+    assert!(r["snapshot"].is_object(), "{code}: {r}");
+    assert_eq!(r["snapshot"]["verified"], false, "{r}");
+    r
+}
+
 fn module(snapshot: &Value) -> &str {
     snapshot["snapshot"]["module"].as_str().unwrap()
 }
@@ -759,19 +768,44 @@ fn assert_rejected_by_kernel(r: &Value) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn snapshots_skip_the_kernel_re_check_by_default() {
+async fn snapshots_are_re_checked_by_default_unless_the_request_opts_out() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let forged = kept(&c, FORGED).await;
-    assert_eq!(forged["snapshot"]["verified"], false, "{forged}");
+    let before = stored(&c).await;
+    let r = create(&c, FORGED).await;
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_rejected_by_kernel(&r);
+    assert_eq!(stored(&c).await, before);
+    let sorry = "import Foo\n\ntheorem d : 1 = 1 := by sorry";
+    let checked = kept(&c, sorry).await;
+    assert_eq!(checked["snapshot"]["verified"], true, "{checked}");
+    assert_eq!(checked["snapshot"]["status"], "sorry", "{checked}");
+
+    // Opted out, the build's own report stands.
+    let forged = unverified(&c, FORGED).await;
     assert_eq!(forged["check"]["ok"], true, "{forged}");
     assert_eq!(names(&forged["check"]), ["forge"]);
     assert_eq!(info(&c, &forged).await["verified"], false);
-
     // The axiom report still runs, so `sorry` is still caught.
-    let sorry = kept(&c, "import Foo\n\ntheorem d : 1 = 1 := by sorry").await;
-    assert_eq!(sorry["snapshot"]["verified"], false, "{sorry}");
+    let sorry = unverified(&c, &format!("{sorry}\n-- opted out")).await;
     assert_eq!(sorry["snapshot"]["status"], "sorry", "{sorry}");
     assert_eq!(sorry["check"]["reasons"], json!(["axiom: d uses sorryAx"]));
+}
+
+/// Code outside the module system with no macros whose re-check runs out of
+/// time is kept, with the build's statuses, unverified.
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_code_whose_re_check_runs_out_of_time_is_kept_unverified() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let (status, r) = c
+        .post("/snapshots", json!({"code": SLOW, "timeout": 1}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["snapshot"]["verified"], false, "{r}");
+    assert_eq!(r["check"]["ok"], true, "{r}");
+    assert_eq!(r["unverified"]["module"], module(&r), "{r}");
+    let reason = r["unverified"]["reason"].as_str().unwrap();
+    assert!(reason.contains("more than 1s"), "{reason}");
+    assert_eq!(verify(&c, &r).await["snapshot"]["verified"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -826,7 +860,7 @@ async fn metaprogramming_is_re_checked_on_a_pool_that_allows_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_macro_chunk_on_unverified_imports_is_not_verified_yet() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let root = kept(&c, ROOT).await;
+    let root = unverified(&c, ROOT).await;
     let chunk = kept(&c, &on(&root, "macro \"twice\" : term => `(2)")).await;
     assert_eq!(chunk["snapshot"]["verified"], false, "{chunk}");
 
@@ -843,13 +877,13 @@ async fn verify_true_re_checks_the_chunk_and_its_imports() {
     assert_rejected_by_kernel(&r);
     assert_eq!(stored(&c).await, (vec![], vec![]));
 
-    let parent = kept(&c, ROOT).await;
+    let parent = unverified(&c, ROOT).await;
     let child = create_with(&c, &on(&parent, "theorem c : 2 = 2 := rfl"), true).await;
     assert_eq!(child["snapshot"]["verified"], true, "{child}");
     assert_eq!(info(&c, &parent).await["verified"], true);
 
     // A forged import stops it, and the chunk is not built.
-    let forged = kept(&c, FORGED).await;
+    let forged = unverified(&c, FORGED).await;
     let before = stored(&c).await;
     let r = create_with(&c, &on(&forged, "theorem c : 2 = 2 := rfl"), true).await;
     assert!(r.get("snapshot").is_none(), "{r}");
@@ -860,8 +894,7 @@ async fn verify_true_re_checks_the_chunk_and_its_imports() {
 
     // Asking again for code that is already kept verifies what is there.
     let code = "import Foo\n\ntheorem existing : 1 = 1 := rfl";
-    let first = kept(&c, code).await;
-    assert_eq!(first["snapshot"]["verified"], false, "{first}");
+    let first = unverified(&c, code).await;
     let again = create_with(&c, code, true).await;
     assert_eq!(module(&again), module(&first));
     assert_eq!(again["snapshot"]["verified"], true, "{again}");
@@ -880,9 +913,9 @@ async fn verify_true_re_checks_the_chunk_and_its_imports() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_checks_imports_first_and_remembers() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let root = kept(&c, ROOT).await;
-    let mid = kept(&c, &on(&root, "theorem mid : 2 = 2 := rfl")).await;
-    let leaf = kept(&c, &on(&mid, "theorem leaf : 3 = 3 := rfl")).await;
+    let root = unverified(&c, ROOT).await;
+    let mid = unverified(&c, &on(&root, "theorem mid : 2 = 2 := rfl")).await;
+    let leaf = unverified(&c, &on(&mid, "theorem leaf : 3 = 3 := rfl")).await;
 
     let r = verify(&c, &leaf).await;
     assert_eq!(
@@ -905,8 +938,7 @@ async fn verify_checks_imports_first_and_remembers() {
     assert_eq!(r["checked"], json!([]));
 
     // A new chunk starts unverified, and only it is checked.
-    let next = kept(&c, &on(&leaf, "theorem next : 4 = 4 := rfl\nneeds base")).await;
-    assert_eq!(next["snapshot"]["verified"], false, "{next}");
+    let next = unverified(&c, &on(&leaf, "theorem next : 4 = 4 := rfl\nneeds base")).await;
     assert_eq!(verify(&c, &next).await["checked"], json!([module(&next)]));
     assert_eq!(info(&c, &next).await["verified"], true);
 
@@ -919,15 +951,15 @@ async fn verify_checks_imports_first_and_remembers() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_checks_a_merged_import_once() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let root = kept(&c, ROOT).await;
-    let left = kept(&c, &on(&root, "theorem l : 2 = 2 := rfl")).await;
-    let right = kept(&c, &on(&root, "theorem r : 3 = 3 := rfl")).await;
+    let root = unverified(&c, ROOT).await;
+    let left = unverified(&c, &on(&root, "theorem l : 2 = 2 := rfl")).await;
+    let right = unverified(&c, &on(&root, "theorem r : 3 = 3 := rfl")).await;
     let merge = format!(
         "import Foo\nimport {}\nimport {}\n\ntheorem m : 4 = 4 := rfl",
         module(&left),
         module(&right),
     );
-    let merged = kept(&c, &merge).await;
+    let merged = unverified(&c, &merge).await;
     assert_eq!(
         verify(&c, &merged).await["checked"],
         json!([
@@ -942,9 +974,9 @@ async fn verify_checks_a_merged_import_once() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_reports_a_forged_module_and_stops_there() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let root = kept(&c, ROOT).await;
-    let forged = kept(&c, &on(&root, "theorem forge : 2 = 2 := rfl")).await;
-    let leaf = kept(&c, &on(&forged, "theorem leaf : 3 = 3 := rfl")).await;
+    let root = unverified(&c, ROOT).await;
+    let forged = unverified(&c, &on(&root, "theorem forge : 2 = 2 := rfl")).await;
+    let leaf = unverified(&c, &on(&forged, "theorem leaf : 3 = 3 := rfl")).await;
 
     let r = verify(&c, &leaf).await;
     assert_eq!(r["snapshot"]["verified"], false, "{r}");
@@ -972,7 +1004,7 @@ async fn verify_reports_a_forged_module_and_stops_there() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_takes_the_axioms_from_the_kernel_re_check() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let snapshot = kept(&c, "import Foo\n\ntheorem d : 1 = 1 := by sorry").await;
+    let snapshot = unverified(&c, "import Foo\n\ntheorem d : 1 = 1 := by sorry").await;
     let id = &module(&snapshot)["PisaSnap.s".len()..];
     let catalog = Catalog::new(c.db.clone(), c.version("v"));
     let build = catalog
@@ -1009,8 +1041,8 @@ async fn verify_takes_the_axioms_from_the_kernel_re_check() {
 async fn verify_runs_on_a_worker_that_never_saw_the_snapshot() {
     let mut c = Cluster::start(&[("w0", "v", 1)]).await;
     // Plain code: module-system code is re-checked when it is created.
-    let root = kept(&c, ROOT).await;
-    let child = kept(&c, &on(&root, "theorem mchild : 3 = 3 := rfl")).await;
+    let root = unverified(&c, ROOT).await;
+    let child = unverified(&c, &on(&root, "theorem mchild : 3 = 3 := rfl")).await;
 
     c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;
@@ -1046,7 +1078,7 @@ async fn checks_on_a_snapshot_dont_wait_for_its_verification() {
         w
     })
     .await;
-    let snapshot = kept(&c, SLOW).await;
+    let snapshot = unverified(&c, SLOW).await;
     let running = verifying(&c, &snapshot).await;
 
     let start = Instant::now();
@@ -1068,7 +1100,7 @@ async fn checks_on_a_snapshot_dont_wait_for_its_verification() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_deleted_during_verification_stays_deleted() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let snapshot = kept(&c, SLOW).await;
+    let snapshot = unverified(&c, SLOW).await;
     let running = verifying(&c, &snapshot).await;
 
     delete_all(&c, &[&snapshot]).await;
@@ -1081,7 +1113,7 @@ async fn a_snapshot_deleted_during_verification_stays_deleted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_verify_that_runs_out_of_time_stops_at_the_module() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let snapshot = kept(&c, SLOW).await;
+    let snapshot = unverified(&c, SLOW).await;
     let path = format!("/snapshots/{}/verify?timeout=1", entry(&snapshot));
     let (status, r) = request(&c, reqwest::Method::POST, &path).await;
     assert_eq!(status, 200, "{r}");
@@ -1124,7 +1156,7 @@ async fn a_re_check_out_of_time_refuses_what_only_the_kernel_vouches_for() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_deleted_while_a_create_verifies_it_is_built_again() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let snapshot = kept(&c, SLOW).await;
+    let snapshot = unverified(&c, SLOW).await;
     let creating = tokio::spawn({
         let (client, url) = (c.client.clone(), c.url("/snapshots"));
         async move {

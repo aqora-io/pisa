@@ -1,7 +1,7 @@
 //! Replacing a snapshot: a create that names the snapshot it replaces is kept
 //! only if it keeps that snapshot's statements, and the new snapshot records
 //! the link.
-//! fake-lean's "type hash" is a declaration's text between its name and
+//! The fake Lean's "type hash" is a declaration's text between its name and
 //! `:=`, and a `def`'s "value hash" the text after it.
 
 mod common;

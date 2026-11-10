@@ -46,7 +46,7 @@ async fn a_create_records_declarations_and_a_change() {
 
     let decls = catalog.decls(&m).await.unwrap().expect("declarations");
     assert_eq!(decls.header, r["snapshot"]["header"].as_str().unwrap());
-    assert!(!decls.verified);
+    assert!(decls.verified);
     let names: Vec<&str> = decls.decls.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(names, ["one", "two"]);
     assert_eq!(decls.decls[0].kind, "theorem");
@@ -117,7 +117,7 @@ async fn sorry_is_flagged() {
 }
 
 /// A declaration is indexed with its own status, not its module's worst.
-/// fake-lean's theorems all use `sorry` when their code does, so the proved
+/// The fake Lean's theorems all use `sorry` when their code does, so the proved
 /// one is a definition.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hit_has_its_own_status_and_its_modules_ids() {

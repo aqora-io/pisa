@@ -1048,22 +1048,21 @@ sections. Re-open what a chunk needs.
 - Imports of an unknown or deleted snapshot are `not_found`.
 
 <a id="verifying"></a>
-**Verifying.** The kernel re-check imports the snapshot's dependencies again and
-re-runs the kernel over its declarations, which adds about 9 s to a small chunk
-on `import Mathlib`. So most code skips it while exploring and runs it at the
-end. It depends on `verify` in the request:
+**Verifying.** The kernel re-check runs in a clean process (`pisa verify`): it
+imports the snapshot's dependencies again and re-runs the kernel over its
+declarations, so its statuses don't depend on the build being honest. It adds
+about 2 s to a small chunk on `import Mathlib`. Every create runs it, unless
+`verify` in the request says otherwise:
 
 | `verify` | Kernel re-check at creation |
 | --- | --- |
-| omitted, no macros | None |
-| omitted, the code uses macros or imports a snapshot that does | This chunk; if the kernel rejects it, it isn't kept |
+| omitted | This chunk; if the kernel rejects it, it isn't kept |
 | `true` | This chunk and any unverified imports; the snapshot is `verified`, or `check` has an `error` |
-| `false` | None, even with macros |
-| any, module-system code | This chunk, as for macros: the build's report sees only what the module exports |
+| `false` | None, and the statuses are the build's own report; module-system code is re-checked all the same, as only the re-check can describe it |
 
 `verified` means the snapshot and everything it imports have passed the
-re-check. So a macro chunk on top of unverified snapshots is re-checked but not
-yet `verified`.
+re-check. So a chunk re-checked on top of unverified snapshots isn't `verified`
+yet.
 
 The re-check at creation has the request's `timeout` for each module, once
 their imports are loaded. If it runs out of time or memory, code outside the
@@ -1605,10 +1604,10 @@ build with the kernel check skipped is caught even though no forbidden keyword
 appears in the source. Because that verdict doesn't depend on the build being
 honest, snapshot creation allows the **macro family** (`macro`, `macro_rules`,
 `syntax`, `declare_syntax_cat`) — pure syntax transformers whose only risk is
-what they expand into, which the re-check covers. It runs by default for code
-that uses them, and `verify: false` opts out. It also runs for module-system
-code, whatever `verify` says: the build's own report imports the module as
-code on top of it does, seeing only what it exports. `/check` and
+what they expand into, which the re-check covers. It runs by default, and
+`verify: false` opts out, but for module-system code, whatever `verify` says:
+its build exports its theorems as axioms, so only the re-check can describe
+it. `/check` and
 `/sessions`, which don't produce a module to re-check, keep the scan as-is.
 
 ## Limits

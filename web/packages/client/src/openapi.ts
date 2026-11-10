@@ -963,11 +963,12 @@ export interface components {
              */
             timeout?: number;
             /**
-             * @description Whether to re-check the code through the kernel. `true` also re-checks
-             *     its imports, so the snapshot ends [`verified`](Snapshot::verified) or
-             *     the check has an error, except on a [`key`](Self::key) replay. `false`
-             *     never re-checks. By default, only code that uses macros, its own or an
-             *     import's, is re-checked.
+             * @description Whether to re-check the code through the kernel. By default the code
+             *     is re-checked, and its imports are not. `true` also re-checks its
+             *     imports, so the snapshot ends [`verified`](Snapshot::verified) or the
+             *     check has an error, except on a [`key`](Self::key) replay. `false`
+             *     skips the re-check, except for module-system code, which only the
+             *     re-check can describe: the statuses are then the build's own report.
              */
             verify?: boolean;
             /**

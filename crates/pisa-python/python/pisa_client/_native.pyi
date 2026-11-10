@@ -396,11 +396,11 @@ class Client:
         snapshot frees it. A key is 1 to 256 bytes of letters, digits and
         `._:/-`.
 
-        The kernel re-check runs by default only if the code uses macros, its
-        own or an import's. `verify=True` always runs it and also re-checks the
-        imports, so the snapshot ends `verified` or the check has an error,
-        except on a `key` replay, which can be `verified: False` with no error.
-        `verify=False` skips it, and the snapshot stays not `verified`.
+        The kernel re-check runs on the code by default. `verify=True` also
+        re-checks the imports, so the snapshot ends `verified` or the check has
+        an error, except on a `key` replay, which can be `verified: False` with
+        no error. `verify=False` skips it, but for module-system code, and the
+        snapshot stays not `verified`.
 
         `replaces` names the snapshot this code replaces, e.g. the skeleton a
         proof fills in, as `{"snapshot_id": …}`. The code is kept only if it
