@@ -970,8 +970,8 @@ export interface components {
             /** @description Deprecated; use this name instead. */
             deprecated_to?: string;
             /**
-             * @description The import header that loads it, when the index's default header
-             *     (`import Mathlib` and `import Physlib`) doesn't.
+             * @description The import header that loads it, one import a line, when the index's
+             *     default header (`import Mathlib` and `import Physlib`) doesn't.
              */
             imports?: string;
             /** @description A Physlib informal result: stated, not proved. */
@@ -1413,6 +1413,11 @@ export interface components {
             /** @description For a deprecated name, its replacement. */
             deprecated_to?: string;
             exists: boolean;
+            /**
+             * @description For an existing name, the header that loads it if the default
+             *     imports don't, as in a hit's `flags.imports`.
+             */
+            imports?: string;
             name: string;
             /** @description Closest existing names, best first; empty for an exact match. */
             suggestions?: components["schemas"]["Suggestion"][];
@@ -1589,6 +1594,8 @@ export interface components {
             pos?: components["schemas"]["Pos"];
         };
         Suggestion: {
+            /** @description The header that loads it if the default imports don't. */
+            imports?: string;
             kind: string;
             name: string;
             signature: string;

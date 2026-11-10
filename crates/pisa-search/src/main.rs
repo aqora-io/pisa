@@ -53,11 +53,11 @@ enum Command {
         /// Report what changed against an earlier corpus.
         #[arg(long)]
         previous: Option<PathBuf>,
-        /// `ENV=HEADER`: declarations from exporter environment ENV are
-        /// loaded by HEADER rather than the default imports, e.g.
-        /// `physlib-quantuminfo=import Physlib; import QuantumInfo`.
+        /// `LIBRARY=MODULE,MODULE,…`: the library's declarations are loaded
+        /// by importing these modules rather than the default imports, e.g.
+        /// `QuantumInfo=Mathlib,Physlib,QuantumInfo`.
         #[arg(long)]
-        env_imports: Vec<String>,
+        library_imports: Vec<String>,
     },
     /// Store LeanSearch v2's Mathlib descriptions for matching declarations.
     ImportLsv2 {
@@ -311,20 +311,13 @@ async fn main() -> anyhow::Result<()> {
             project,
             out,
             previous,
-            env_imports,
+            library_imports,
         } => {
             let env_id = pisa_protocol::version::project_version(&project)?;
             let manifest = project.join("lake-manifest.json");
             let exports: Vec<&Path> = export.iter().map(PathBuf::as_path).collect();
-            let env_imports = env_imports
-                .iter()
-                .map(|e| {
-                    e.split_once('=')
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .ok_or_else(|| anyhow::anyhow!("--env-imports {e}: expected ENV=HEADER"))
-                })
-                .collect::<anyhow::Result<_>>()?;
-            let c = corpus::ingest(&exports, env_id, Some(&manifest), &env_imports)?;
+            let library_imports = corpus::library_imports(&library_imports)?;
+            let c = corpus::ingest(&exports, env_id, Some(&manifest), &library_imports)?;
             c.write(&out)?;
             println!("{}", serde_json::to_string_pretty(&c.manifest)?);
             if let Some(prev) = previous {

@@ -183,8 +183,8 @@ pub struct Flags {
     /// The `to_additive` counterpart, folded into this hit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additive_sibling: Option<String>,
-    /// The import header that loads it, when the index's default header
-    /// (`import Mathlib` and `import Physlib`) doesn't.
+    /// The import header that loads it, one import a line, when the index's
+    /// default header (`import Mathlib` and `import Physlib`) doesn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imports: Option<String>,
 }
@@ -230,6 +230,10 @@ pub struct Resolution {
     /// For a deprecated name, its replacement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deprecated_to: Option<String>,
+    /// For an existing name, the header that loads it if the default
+    /// imports don't, as in a hit's `flags.imports`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<String>,
     /// Closest existing names, best first; empty for an exact match.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggestions: Vec<Suggestion>,
@@ -240,6 +244,9 @@ pub struct Suggestion {
     pub name: String,
     pub kind: String,
     pub signature: String,
+    /// The header that loads it if the default imports don't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imports: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

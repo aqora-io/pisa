@@ -569,6 +569,9 @@ def mathlib():
     assert r["ok"], r
     r = check("import Mathlib\nimport PhyslibAlpha\n#check ClassicalFieldTheory.Local.Lagrangian")
     assert r["ok"], r
+    # So the search index is exported from all four together.
+    r = check("import Mathlib\nimport Physlib\nimport QuantumInfo\nimport PhyslibAlpha\n#check MState")
+    assert r["ok"], r
     r = check("import Physlib\n\n#check SpaceTime")
     assert r["messages"][0]["pos"]["line"] == 3, r
     r = check("import Mathlib\n\n" + TACTIC_PROOF, detail=["tactics"])

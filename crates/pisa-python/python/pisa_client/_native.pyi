@@ -676,11 +676,13 @@ class Suggestion(TypedDict):
     name: str
     kind: str
     signature: str
+    imports: NotRequired[str]
 
 class Resolution(TypedDict):
     name: str
     exists: bool
     deprecated_to: NotRequired[str]
+    imports: NotRequired[str]
     suggestions: NotRequired[list[Suggestion]]
 
 class DeclarationDetail(TypedDict):
