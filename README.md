@@ -55,7 +55,13 @@ docker compose up --build              # Lean v4.36.0-rc2 + Mathlib + Physlib (f
 PROJECT=lean-core docker compose up --build   # no Mathlib, for quick checks
 python3 scripts/e2e.py [--mathlib] [--search]   # end-to-end checks against the running stack
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
+(cd docker/pisa-lean && lake build) && cargo test -p pisa-worker --test real_lean -- --ignored   # the report and the verifier on real Lean
 ```
+
+CI (`.github/workflows/ci.yml`) runs these on every pull request and push to
+main: the workspace's tests with PostgreSQL as well as SQLite, the real-Lean
+tests, the web and Python clients' tests, and `scripts/e2e.py` on a
+`lean-core` stack, without `--mathlib` or `--search`.
 
 Compose is laid out like a deployment: Traefik on port 8000 (`PISA_PORT` to
 change it) spreads requests over two servers, which it finds through Docker
