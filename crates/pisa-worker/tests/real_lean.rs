@@ -1,8 +1,8 @@
 //! The axiom report and the kernel verifier on real Lean: code is compiled to
 //! snapshot modules as a worker builds them, reported as the builder reports
 //! them, and re-checked by `docker/verifier/PisaVerify.lean`. Each test needs
-//! elan's Lean 4.36.0-rc2 on `PATH` and the `Pisa` library built, so they are
-//! ignored by default:
+//! elan on `PATH` and the `Pisa` library built, and runs on the library's
+//! toolchain, so they are ignored by default:
 //!
 //! ```text
 //! (cd docker/pisa-lean && lake build)
@@ -56,18 +56,22 @@ impl Snapshots {
     }
 
     /// Runs `lean` on the snapshot modules, and with `pisa` on the `Pisa`
-    /// library, as the worker's REPL and verifier run.
+    /// library, as the worker's REPL and verifier run. It runs on the
+    /// library's toolchain, whatever elan's default, as the image builds both
+    /// with one.
     fn lean(&self, args: &[&str], pisa: bool) -> std::process::Output {
         let mut path = vec![self.root.path().to_path_buf()];
         if pisa {
             path.push(docker().join("pisa-lean/.lake/build/lib/lean"));
         }
+        let toolchain = std::fs::read_to_string(docker().join("pisa-lean/lean-toolchain")).unwrap();
         Command::new("lean")
             .args(args)
             .current_dir(self.root.path())
+            .env("ELAN_TOOLCHAIN", toolchain.trim())
             .env("LEAN_PATH", std::env::join_paths(path).unwrap())
             .output()
-            .expect("running lean (is elan's Lean 4.36.0-rc2 on PATH?)")
+            .expect("running lean (is elan on PATH?)")
     }
 
     /// Compiles `code` to its snapshot module, then reports and re-checks it.
