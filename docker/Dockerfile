@@ -66,11 +66,15 @@ FROM lean AS worker
 # sandbox. A package that enables Lake's artifact cache, as Physlib does,
 # writes to its build files whenever Lake replays one; without the cache Lake
 # uses the builds where they are. The sandbox covers /run/user, which has to
-# exist for that.
+# exist for that. Lean Beam's `lake setup-file` replays what a document
+# imports on the packages, read-only too, and the first replay of a Mathlib
+# module that the project's build doesn't reach writes a build file, so
+# Mathlib is replayed here.
 RUN if [ -d /opt/project/.lake/packages ]; then \
         find /opt/project/.lake/packages -mindepth 2 -maxdepth 2 -name lakefile.toml \
             -exec sed -i -e '/^enableArtifactCache/d' -e '/^restoreAllArtifacts/d' {} +; \
     fi \
+    && if grep -q mathlib lakefile.toml; then lake build Mathlib; fi \
     && mkdir -p /run/user
 COPY --from=build /usr/local/bin/pisa-worker /usr/local/bin/
 ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl
