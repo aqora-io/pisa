@@ -651,6 +651,21 @@ async fn snapshots_work_in_the_sandbox() {
 
 const MODULE_ROOT: &str = "module\npublic import Foo\n\npublic theorem mbase : 1 = 1 := rfl\ntheorem mhidden : 2 = 2 := rfl";
 
+/// The builder imports a module-system snapshot as code on top of it does,
+/// which sees only what the module exports, so the kernel verifier, which
+/// reads all of it, describes its declarations.
+#[tokio::test(flavor = "multi_thread")]
+async fn module_system_snapshots_are_re_checked() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    for body in [json!({}), json!({"verify": false})] {
+        let mut body = body;
+        body["code"] = json!(format!("{MODULE_ROOT}\n-- {body}"));
+        let (status, r) = c.post("/snapshots", body).await;
+        assert_eq!(status, 200, "{r}");
+        assert_eq!(r["snapshot"]["verified"], true, "{r}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn module_system_snapshots_keep_all_their_files() {
     let mut c = Cluster::start(&[("w0", "v", 1)]).await;
@@ -993,8 +1008,9 @@ async fn verify_takes_the_axioms_from_the_kernel_re_check() {
 #[tokio::test(flavor = "multi_thread")]
 async fn verify_runs_on_a_worker_that_never_saw_the_snapshot() {
     let mut c = Cluster::start(&[("w0", "v", 1)]).await;
-    let root = kept(&c, MODULE_ROOT).await;
-    let child = kept(&c, &on(&root, "public theorem mchild : 3 = 3 := rfl")).await;
+    // Plain code: module-system code is re-checked when it is created.
+    let root = kept(&c, ROOT).await;
+    let child = kept(&c, &on(&root, "theorem mchild : 3 = 3 := rfl")).await;
 
     c.add_worker(common::worker_config("w1", "v", 1));
     c.wait_for_workers(2).await;

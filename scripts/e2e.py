@@ -400,14 +400,16 @@ def module_snapshots():
     assert child["check"]["reasons"] == ["axiom: MSnap.cheat uses sorryAx"], child
     r = on(child, "public theorem uses : 1 = 2 := MSnap.cheat")
     assert r["reasons"] == ["axiom: uses uses sorryAx"], r
-    assert not child["snapshot"]["verified"], child
+    # Module-system code is re-checked when it is created: the build sees it
+    # only as importers do.
+    assert root["snapshot"]["verified"] and child["snapshot"]["verified"], child
     step("module snapshot: sorry in a proof body is still reported")
 
     status, verified = call("POST", f"/snapshots/{child['snapshot']['id']}/verify")
     assert status == 200 and verified["snapshot"]["verified"], verified
     assert verified["snapshot"]["status"] == "sorry", verified
-    assert verified["checked"] == [root["snapshot"]["module"], child["snapshot"]["module"]], verified
-    step("module snapshot: verify re-checks the chain")
+    assert verified["checked"] == [], verified
+    step("module snapshot: re-checked at creation")
 
     code = f"{root['snapshot']['header']}\n\npublic theorem t (n : Nat) : MSnap.double n = n + n := by sorry"
     s = post("/sessions", {"code": code})

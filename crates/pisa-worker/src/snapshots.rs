@@ -1312,7 +1312,11 @@ impl Snapshots {
             Err(e) => return fail(outcome, e),
         };
         let macros = uses_macros(&split.body) || parents.iter().any(|p| p.macros);
-        let recheck = job.verify.unwrap_or(macros);
+        // The builder imports module-system code as the code on top of it
+        // does, seeing only what it exports, so only the verifier, which
+        // reads all of it, can describe it.
+        let module_system = split.header.lines().next() == Some("module");
+        let recheck = module_system || job.verify.unwrap_or(macros);
         // The snapshots a replacement swaps follow from its imports, so a
         // misnamed `allow` costs no build.
         let swapped = match replacing {

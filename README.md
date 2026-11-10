@@ -790,6 +790,7 @@ end. It depends on `verify` in the request:
 | omitted, the code uses macros or imports a snapshot that does | This chunk; if the kernel rejects it, it isn't kept |
 | `true` | This chunk and any unverified imports; the snapshot is `verified`, or `check` has an `error` |
 | `false` | None, even with macros |
+| any, module-system code | This chunk, as for macros: the build's report sees only what the module exports |
 
 `verified` means the snapshot and everything it imports have passed the
 re-check. So a macro chunk on top of unverified snapshots is re-checked but not
@@ -1284,8 +1285,10 @@ appears in the source. Because that verdict doesn't depend on the build being
 honest, snapshot creation allows the **macro family** (`macro`, `macro_rules`,
 `syntax`, `declare_syntax_cat`) — pure syntax transformers whose only risk is
 what they expand into, which the re-check covers. It runs by default for code
-that uses them, and `verify: false` opts out. `/check` and `/sessions`, which
-don't produce a module to re-check, keep the scan as-is.
+that uses them, and `verify: false` opts out. It also runs for module-system
+code, whatever `verify` says: the build's own report imports the module as
+code on top of it does, seeing only what it exports. `/check` and
+`/sessions`, which don't produce a module to re-check, keep the scan as-is.
 
 ## Limits
 
