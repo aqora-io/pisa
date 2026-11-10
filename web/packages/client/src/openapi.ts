@@ -305,7 +305,7 @@ export interface paths {
         };
         /**
          * What a project rests on
-         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the spec's holes and the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. It reads records only.
+         * @description For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the spec's holes and the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. The server reads the records itself, so the audit needs no worker.
          */
         get: operations["auditSnapshots"];
         put?: never;
@@ -1469,7 +1469,7 @@ export interface components {
         };
         /**
          * @description What a declaration's axioms make it, besides the allowed ones (by default
-         *     `propext`, `Classical.choice` and `Quot.sound`), worst last.
+         *     [`DEFAULT_AXIOMS`]), worst last.
          * @enum {string}
          */
         ProofStatus: "proved" | "conditional" | "sorry" | "rejected";
@@ -3464,7 +3464,7 @@ export interface operations {
                 after?: string;
                 /** @description `true` for the snapshots that no other snapshot replaces; every snapshot by default */
                 heads?: boolean;
-                /** @description The worker version; the server's default when absent. */
+                /** @description The version whose snapshots to list; when absent, the server's default, or else the one version the live workers serve. */
                 version?: string;
             };
             header?: never;
@@ -3656,7 +3656,7 @@ export interface operations {
                 against?: string[];
                 /** @description With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change */
                 allow?: string[];
-                /** @description The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given. */
+                /** @description The version whose snapshots to audit; when absent, the server's default, or else the one version the live workers serve. With `against`, the ids' version, which it must be if given. */
                 version?: string;
                 /** @description With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value */
                 review?: boolean;

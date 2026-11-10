@@ -11,6 +11,7 @@ use axum::http::{HeaderValue, Method, header};
 use pisa_db::db::Db;
 use pisa_db::queue::Queue;
 use pisa_protocol::version::Versions;
+use pisa_snapshots::Readers;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -51,6 +52,12 @@ pub struct RouterConfig {
     /// sharing a database need queues of their own.
     #[arg(long, env = "PISA_QUEUE", default_value = "pisa")]
     pub queue: String,
+    /// Axioms a checked declaration may depend on, as the workers allow
+    /// them: an audit leaves them out of what it lists of a declaration
+    /// that isn't proved.
+    #[arg(long, env = "PISA_ALLOWED_AXIOMS", value_delimiter = ',',
+          default_value = pisa_protocol::verify::DEFAULT_AXIOMS)]
+    pub allowed_axioms: Vec<String>,
     /// Origins whose pages may call the API from a browser, e.g.
     /// `https://app.example.com`, or `*` for any. Separate several with ','.
     /// None by default.
@@ -155,6 +162,7 @@ pub async fn start_with(
     db: Db,
     extra: impl FnOnce(Arc<App>) -> axum::Router,
 ) -> anyhow::Result<Running> {
+    let snapshots = Readers::new(db.clone(), cfg.allowed_axioms.clone());
     let queue = Queue::new(db, cfg.queue.clone());
     let dispatcher = Dispatcher::start(
         queue.clone(),
@@ -168,6 +176,7 @@ pub async fn start_with(
     let app = Arc::new(App {
         dispatcher: Arc::new(dispatcher),
         versions,
+        snapshots,
         draining: AtomicBool::new(false),
     });
 

@@ -13,6 +13,7 @@ form_urlencoded.workspace = true
 futures.workspace = true
 pisa-db.workspace = true
 pisa-protocol.workspace = true
+pisa-snapshots.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tar.workspace = true

@@ -47,6 +47,11 @@ router:
   defaultVersion: ""
   aliases: []
 
+# The axioms every proof may use, for the workers' verdicts and the servers'
+# audits alike. Empty keeps the default: propext, Classical.choice,
+# Quot.sound.
+allowedAxioms: []
+
 worker:
   image:
     # Built from docker/Dockerfile (target worker). The default project bundles

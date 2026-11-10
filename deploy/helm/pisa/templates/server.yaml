@@ -55,6 +55,9 @@ spec:
             {{- with .Values.router.aliases }}
             - { name: PISA_ALIASES, value: {{ join "," . | quote }} }
             {{- end }}
+            {{- with .Values.allowedAxioms }}
+            - { name: PISA_ALLOWED_AXIOMS, value: {{ join "," . | quote }} }
+            {{- end }}
             {{- with .Values.server.corsOrigins }}
             - { name: PISA_CORS_ORIGINS, value: {{ join "," . | quote }} }
             {{- end }}

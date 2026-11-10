@@ -220,6 +220,90 @@ async fn listings_are_per_version() {
     }
     assert_eq!(listed(&c, &[("version", "a")]).await, [entry(&created[0])]);
     assert_eq!(listed(&c, &[("version", "b")]).await, [entry(&created[1])]);
+    // With two versions live and no default, a listing must name one.
+    let (status, r) = list(&c, &[]).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("name a version"), "{message}");
+}
+
+/// A listing or a label audit that names no version, with no default, reads
+/// the one version the live workers serve.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_without_a_version_reads_the_one_live_version() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let made = create(&c, json!({"p": "1"})).await;
+    assert_eq!(listed(&c, &[]).await, [entry(&made)]);
+    let r = c
+        .client
+        .get(c.url("/snapshots/audit?label=p:1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let audit: Value = r.json().await.unwrap();
+    assert_eq!(audit["summary"]["proved"], 1, "{audit}");
+}
+
+/// The servers read the catalog themselves: with no worker live, every read
+/// answers, and only what runs Lean or touches the store waits for one.
+#[tokio::test(flavor = "multi_thread")]
+async fn reads_need_no_worker() {
+    let mut c = Cluster::start(&[("w0", "v", 1)]).await;
+    let made = create(&c, json!({"p": "1"})).await;
+    let id = entry(&made).to_string();
+    let child = format!(
+        "{}\n\ntheorem child : 2 = 2 := rfl",
+        made["snapshot"]["header"].as_str().unwrap()
+    );
+    let (status, child) = c
+        .post("/snapshots", json!({"code": child, "labels": {"p": "1"}}))
+        .await;
+    assert_eq!(status, 200, "{child}");
+    let other = "import Foo\n\ntheorem base : 1 = 1 := by rfl";
+    let (status, to) = c.post("/snapshots", json!({"code": other})).await;
+    assert_eq!(status, 200, "{to}");
+    let to = entry(&to).to_string();
+    c.kill_worker(0).await;
+
+    let version = c.version("v");
+    assert_eq!(listed(&c, &[("version", &version)]).await.len(), 3);
+    assert_eq!(info(&c, &id).await["id"], id);
+    let get = |path: String| {
+        let r = c.client.get(c.url(&path)).send();
+        async move {
+            let r = r.await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        }
+    };
+    let (status, r) = get(format!("/snapshots/{id}/dependents")).await;
+    assert_eq!(
+        (status, r["snapshots"].as_array().map(Vec::len)),
+        (200, Some(1)),
+        "{r}"
+    );
+    let (status, r) = get(format!("/snapshots/audit?label=p:1&version={version}")).await;
+    assert_eq!((status, &r["summary"]["proved"]), (200, &json!(2)), "{r}");
+    let (status, r) = get(format!("/snapshots/audit?against={id}&review=true")).await;
+    assert_eq!((status, r["review"].is_array()), (200, true), "{r}");
+    let (status, r) = patch(&c, &id, json!({"labels": {"q": "2"}})).await;
+    assert_eq!((status, &r["labels"]["q"]), (200, &json!("2")), "{r}");
+    let body = json!({"from": id, "to": to, "labels": {"p": "1"}, "dry_run": true});
+    let (status, r) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!((status, &r["ok"]), (200, &json!(true)), "{r}");
+    assert_eq!(r["plan"].as_array().map(Vec::len), Some(1), "{r}");
+    // A create waits for a worker, and then gives up.
+    let body = json!({"code": "import Foo\n\ntheorem other : 3 = 3 := rfl", "version": version});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (429, &json!("capacity")),
+        "{r}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

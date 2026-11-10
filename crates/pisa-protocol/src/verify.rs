@@ -139,8 +139,11 @@ impl ReportedDeclaration {
     }
 }
 
+/// The axioms every proof may use by default (`PISA_ALLOWED_AXIOMS`).
+pub const DEFAULT_AXIOMS: &str = "propext,Classical.choice,Quot.sound";
+
 /// What a declaration's axioms make it, besides the allowed ones (by default
-/// `propext`, `Classical.choice` and `Quot.sound`), worst last.
+/// [`DEFAULT_AXIOMS`]), worst last.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ToSchema,
 )]

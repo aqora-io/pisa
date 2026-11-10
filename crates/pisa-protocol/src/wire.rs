@@ -21,14 +21,9 @@ pub enum Job {
     /// kind of its own so that a worker that doesn't know the field refuses
     /// it as [`Job::Unsupported`], rather than keeping the code unchecked.
     SnapshotReplace(SnapshotCreateJob),
-    SnapshotGet(SnapshotJob),
     SnapshotDelete(SnapshotDeleteJob),
     SnapshotVerify(SnapshotVerifyJob),
-    SnapshotList(SnapshotListJob),
-    SnapshotLabels(SnapshotLabelsJob),
-    SnapshotDependents(SnapshotDependentsJob),
     SnapshotRebuild(SnapshotRebuildJob),
-    SnapshotAudit(SnapshotAuditJob),
     SnapshotExport(SnapshotExportJob),
     SnapshotComparator(SnapshotComparatorJob),
     DocumentOpen(DocumentOpenJob),
@@ -99,12 +94,6 @@ pub struct SnapshotCreateJob {
     pub holes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotJob {
-    /// The snapshot id, `<version>~<entry id>`.
-    pub entry: String,
-}
-
 /// `POST /snapshots/{id}/verify`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotVerifyJob {
@@ -128,50 +117,6 @@ pub struct SnapshotDeleteJob {
     /// through others, rather than splice them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub with_replacers: bool,
-}
-
-/// `GET /snapshots`, its query parsed and checked by the router.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotListJob {
-    /// `(key, value)` pairs that an entry must all have, in request order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub labels: Vec<(String, String)>,
-    pub limit: usize,
-    /// The cursor to start after.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub after: Option<String>,
-    /// Whether to list only the snapshots that no other snapshot replaces.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub heads: bool,
-}
-
-/// `GET /snapshots/{id}/dependents`, its filters parsed and checked by the
-/// router.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotDependentsJob {
-    /// The snapshot id.
-    pub entry: String,
-    /// `(key, value)` pairs that an entry must all have.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub labels: Vec<(String, String)>,
-}
-
-/// `GET /snapshots/audit`, its filters parsed and checked by the router.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotAuditJob {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub labels: Vec<(String, String)>,
-    /// The spec's snapshot ids, of the job's version; with them, `labels` is
-    /// empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub against: Vec<String>,
-    /// The definitions the leader allows the run's heads to change; only
-    /// with `against`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<String>,
-    /// With `against`, also the review list.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub review: bool,
 }
 
 /// `GET /snapshots/export`, its query checked by the router.
@@ -227,7 +172,8 @@ pub struct ExportedPair {
     pub skipped: Vec<String>,
 }
 
-/// `POST /snapshots/rebuild`, as a plan.
+/// `POST /snapshots/rebuild`, as a plan, and as the record of a run the
+/// server holds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRebuildJob {
     pub from: String,
@@ -235,15 +181,6 @@ pub struct SnapshotRebuildJob {
     pub labels: BTreeMap<String, String>,
     #[serde(default)]
     pub allow_changes: bool,
-}
-
-/// `PATCH /snapshots/{id}`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotLabelsJob {
-    /// The snapshot id.
-    pub entry: String,
-    /// The request's merge patch: `None` removes a label, `Some` sets it.
-    pub labels: BTreeMap<String, Option<String>>,
 }
 
 /// `POST /documents`.
@@ -303,14 +240,9 @@ pub enum JobResult {
     SessionChecked(SessionChecked),
     /// Failures are in-band, in `check.error`, as for checks.
     SnapshotCreated(Box<api::CreateSnapshotResponse>),
-    Snapshot(Result<Box<api::SnapshotDetail>, api::Error>),
     SnapshotDeleted(Result<api::DeleteSnapshotResponse, api::Error>),
     SnapshotVerified(Result<api::VerifySnapshotResponse, api::Error>),
-    SnapshotList(Result<api::ListSnapshotsResponse, api::Error>),
-    SnapshotLabels(Result<api::Snapshot, api::Error>),
-    SnapshotDependents(Result<api::ListDependentsResponse, api::Error>),
     SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
-    SnapshotAudit(Result<api::AuditSnapshotsResponse, api::Error>),
     SnapshotExport(Result<ExportedRun, api::Error>),
     SnapshotComparator(Result<api::ComparatorResponse, api::Error>),
     /// An opened or edited document.
@@ -468,8 +400,11 @@ mod tests {
     fn jobs_of_other_releases_decode_or_fail_alone() {
         let decode = serde_json::from_value::<Job>;
         assert!(decode(serde_json::json!({"kind": "check", "code": 5})).is_err());
-        // A job from a server of the release before entries.
-        let old = serde_json::json!({"kind": "snapshot_get", "snapshot": "PisaSnap.s0"});
+        // A malformed job of a known kind fails; a kind this worker doesn't
+        // know, such as a read the servers now answer, is unsupported.
+        let old = serde_json::json!({"kind": "snapshot_delete", "snapshot": "PisaSnap.s0"});
         assert!(decode(old).is_err());
+        let gone = serde_json::json!({"kind": "snapshot_get", "entry": "v~0"});
+        assert!(matches!(decode(gone), Ok(Job::Unsupported)));
     }
 }

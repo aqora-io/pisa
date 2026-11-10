@@ -548,6 +548,22 @@ pub(crate) async fn registry(
         .collect())
 }
 
+pub(crate) async fn live_versions(
+    db: &Handle,
+    q: &str,
+    stale: Duration,
+) -> Result<Vec<String>, DbError> {
+    let now = now();
+    Ok(workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::seen_micros.ge(now - micros(stale)))
+        .select(workers::version)
+        .distinct()
+        .order(workers::version)
+        .load::<String>(&mut *conn(db).await?)
+        .await?)
+}
+
 pub(crate) async fn serving_documents(
     db: &Handle,
     q: &str,

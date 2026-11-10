@@ -1985,6 +1985,7 @@ dependencies = [
  "futures",
  "pisa-db",
  "pisa-protocol",
+ "pisa-snapshots",
  "serde",
  "serde_json",
  "tar",

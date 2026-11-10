@@ -16,6 +16,7 @@ fn config(search: SearchArgs) -> ServerConfig {
             default_version: None,
             alias: Vec::new(),
             queue: "pisa".into(),
+            allowed_axioms: Vec::new(),
             cors_origins: Vec::new(),
         },
         database_url: String::new(),

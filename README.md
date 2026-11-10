@@ -458,6 +458,17 @@ such as an import after a block comment on the same line: the record would
 miss what the module builds on, so it is a `bad_request` that asks for each
 import on its own line.
 
+**Who answers.** The servers read the catalog themselves: `GET` of a
+snapshot, listings, dependents, label edits, audits and their review lists,
+and rebuild plans need no worker, so they answer at once even while builds
+keep every Lean slot busy, and even when no worker of the version is live.
+Creates, deletes, verifies, exports and comparator runs go to a worker. A
+listing or a label audit that names no `version` reads the server's default
+(`PISA_DEFAULT_VERSION`), or else the one version the live workers serve, and
+asks for a `version` when there are several. The servers take
+`PISA_ALLOWED_AXIOMS` as the workers do, for what an audit lists of a
+declaration that isn't proved; set it on both, or on neither.
+
 `GET /snapshots/{id}` adds the module's `code`, its `check`, and its
 `exports`: the declarations that code importing it sees, each `{name, kind,
 signature, docstring?, description?}`. `description` is `{title, text,

@@ -10,6 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::future::join_all;
+use pisa_db::queue::LIVE;
 use pisa_protocol::api::{
     self, Accepted, ApiErrors, CheckBatchRequest, CheckBatchResponse, CheckRequest, CheckResult,
     Detail, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, Pos, PreferAsync,
@@ -18,6 +19,7 @@ use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
 use pisa_protocol::version::Versions;
 use pisa_protocol::wire::{CheckJob, Job, JobResult};
+use pisa_snapshots::Readers;
 use serde::de::DeserializeOwned;
 
 use crate::dispatch::{DispatchError, Dispatcher, Prepared, Priority, Route};
@@ -27,6 +29,8 @@ use crate::{documents, sessions, snapshots};
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
     pub versions: Versions,
+    /// Reads the snapshot catalog, which the server answers itself.
+    pub snapshots: Readers,
     /// Set when the server is about to stop: `/health` fails, so that load
     /// balancers stop sending it requests while it still serves them.
     pub draining: AtomicBool,
@@ -125,6 +129,12 @@ impl From<DispatchError> for api::Error {
     }
 }
 
+impl From<api::Error> for ApiError {
+    fn from(e: api::Error) -> Self {
+        ApiError(e)
+    }
+}
+
 impl From<DispatchError> for ApiError {
     fn from(e: DispatchError) -> Self {
         ApiError(e.into())
@@ -151,6 +161,34 @@ pub async fn health(State(app): State<Arc<App>>) -> (StatusCode, Json<Health>) {
 }
 
 impl App {
+    /// The version a snapshot read is of: the one `requested` resolves to,
+    /// through the aliases and the default, or, with neither, the one
+    /// version the live workers serve.
+    pub async fn read_version(&self, requested: Option<&str>) -> Result<String, ApiError> {
+        if let Some(version) = self.versions.resolve(requested) {
+            return Ok(version);
+        }
+        let live = self
+            .dispatcher
+            .queue()
+            .live_versions(LIVE)
+            .await
+            .map_err(|e| ApiError::new(ErrorKind::Unavailable, e.to_string()))?;
+        match <[String; 1]>::try_from(live) {
+            Ok([version]) => Ok(version),
+            Err(live) => {
+                let served = match live.is_empty() {
+                    true => "no live worker says which".to_string(),
+                    false => format!("the live workers serve {}", live.join(", ")),
+                };
+                Err(ApiError::new(
+                    ErrorKind::BadRequest,
+                    format!("name a version: the server has no default, and {served}"),
+                ))
+            }
+        }
+    }
+
     /// The API's health: up, or 503 once draining, with the number of live
     /// workers on the queue, `null` if the queue can't be read.
     pub async fn health(&self) -> (StatusCode, Health) {

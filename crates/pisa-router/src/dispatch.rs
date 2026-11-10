@@ -465,7 +465,7 @@ fn decode(result: serde_json::Value) -> JobResult {
 mod tests {
     use super::*;
     use pisa_db::db::Db;
-    use pisa_protocol::wire::SnapshotJob;
+    use pisa_protocol::wire::SnapshotRebuildJob;
 
     #[tokio::test]
     async fn a_held_job_is_no_workers_and_reads_lost_once_its_server_stops() {
@@ -475,7 +475,12 @@ mod tests {
             ..Default::default()
         };
         let d = Dispatcher::start(queue.clone(), cfg).await;
-        let job = Job::SnapshotGet(SnapshotJob { entry: "e".into() });
+        let job = Job::SnapshotRebuild(SnapshotRebuildJob {
+            from: "f".into(),
+            to: "t".into(),
+            labels: Default::default(),
+            allow_changes: false,
+        });
         let looked = |token: String| {
             let d = &d;
             async move { d.look(&token, Duration::ZERO).await.unwrap().unwrap().state }

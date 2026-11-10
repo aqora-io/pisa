@@ -257,6 +257,11 @@ impl Queue {
         dispatch!(&self.db, registry(&self.name, version, stale))
     }
 
+    /// The versions of the workers seen within `stale`, in order.
+    pub async fn live_versions(&self, stale: Duration) -> Result<Vec<String>, DbError> {
+        dispatch!(&self.db, live_versions(&self.name, stale))
+    }
+
     /// How many workers of `version` (of any, for `None`) seen within `stale`
     /// serve documents: those with Beam slots that aren't draining.
     pub async fn serving_documents(

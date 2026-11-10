@@ -22,16 +22,15 @@ use pisa_protocol::labels::{
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
-    ExportedRun, Job, JobResult, SnapshotAuditJob, SnapshotComparatorJob, SnapshotCreateJob,
-    SnapshotDeleteJob, SnapshotDependentsJob, SnapshotExportJob, SnapshotJob, SnapshotLabelsJob,
-    SnapshotListJob, SnapshotRebuildJob, SnapshotVerifyJob,
+    ExportedRun, Job, JobResult, SnapshotComparatorJob, SnapshotCreateJob, SnapshotDeleteJob,
+    SnapshotExportJob, SnapshotRebuildJob, SnapshotVerifyJob,
 };
 use serde::Deserialize;
 use utoipa::IntoParams;
 
-use crate::dispatch::{DispatchError, Prepared, Priority, Route};
+use crate::dispatch::{Prepared, Priority, Route};
 use crate::http::{ApiError, App, Body};
-use crate::jobs::{Params, Prefer, accepted, respond};
+use crate::jobs::{Params, Prefer, accepted};
 use crate::rebuild;
 use crate::sessions::unexpected;
 
@@ -157,11 +156,7 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> Result<Json<SnapshotDetail>, ApiError> {
     let version = parse_id(&id)?.version;
-    let job = Job::SnapshotGet(SnapshotJob { entry: id });
-    match submit(&app, job, Some(version), Priority::Interactive).await? {
-        JobResult::Snapshot(r) => Ok(Json(*r.map_err(ApiError)?)),
-        other => Err(unexpected(other)),
-    }
+    Ok(Json(app.snapshots.version(&version).get(&id).await?))
 }
 
 #[utoipa::path(
@@ -174,7 +169,7 @@ pub async fn get(
         ("limit" = Option<usize>, Query, description = "1–1000, by default 100"),
         ("after" = Option<String>, Query, description = "The previous page's `next`"),
         ("heads" = Option<bool>, Query, description = "`true` for the snapshots that no other snapshot replaces; every snapshot by default"),
-        ("version" = Option<String>, Query, description = "The worker version; the server's default when absent."),
+        ("version" = Option<String>, Query, description = "The version whose snapshots to list; when absent, the server's default, or else the one version the live workers serve."),
     ),
     responses((status = 200, description = "A page of snapshots", body = ListSnapshotsResponse), ApiErrors),
 )]
@@ -184,13 +179,21 @@ pub async fn list(
     State(app): State<Arc<App>>,
     RawQuery(query): RawQuery,
 ) -> Result<Json<ListSnapshotsResponse>, ApiError> {
-    let (version, job) = list_query(query.as_deref().unwrap_or_default())
+    let (version, q) = list_query(query.as_deref().unwrap_or_default())
         .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
-    let version = app.versions.resolve(version.as_deref());
-    match submit(&app, Job::SnapshotList(job), version, Priority::Interactive).await? {
-        JobResult::SnapshotList(r) => Ok(Json(r.map_err(ApiError)?)),
-        other => Err(unexpected(other)),
-    }
+    let reader = app
+        .snapshots
+        .version(&app.read_version(version.as_deref()).await?);
+    let listed = reader.list(&q.labels, q.limit, q.after.as_deref(), q.heads);
+    Ok(Json(listed.await?))
+}
+
+/// `GET /snapshots`'s filters, page and `heads`.
+struct ListQuery {
+    labels: Vec<(String, String)>,
+    limit: usize,
+    after: Option<String>,
+    heads: bool,
 }
 
 /// A query's `label` filters, as `(key, value)` pairs.
@@ -220,9 +223,9 @@ fn label_query(query: &str) -> Result<(Option<String>, Filters), String> {
 /// Splits the query of `GET /snapshots` into the version and the job, and
 /// checks the job's filters (see [`label_query`]), limit, cursor and
 /// `heads`. Other parameters are ignored.
-fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> {
+fn list_query(query: &str) -> Result<(Option<String>, ListQuery), String> {
     let (version, labels) = label_query(query)?;
-    let mut job = SnapshotListJob {
+    let mut job = ListQuery {
         labels,
         limit: DEFAULT_LIMIT,
         after: None,
@@ -264,12 +267,13 @@ fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> 
         snapshots that replace them, to its heads, with the forks on the way, each head \
         compared with its spec, allowing only the spec's holes and the definitions `allow` \
         names to change, each spec declaration's status on each head, the links that \
-        allowed changes, and whether the run is `clean`. It reads records only.",
+        allowed changes, and whether the run is `clean`. The server reads the records \
+        itself, so the audit needs no worker.",
     params(
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
         ("against" = Option<Vec<String>>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label`"),
         ("allow" = Option<Vec<String>>, Query, description = "With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change"),
-        ("version" = Option<String>, Query, description = "The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given."),
+        ("version" = Option<String>, Query, description = "The version whose snapshots to audit; when absent, the server's default, or else the one version the live workers serve. With `against`, the ids' version, which it must be if given."),
         ("review" = Option<bool>, Query, description = "With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value"),
     ),
     responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
@@ -314,18 +318,20 @@ pub async fn audit(
                  depend on, on each head",
             ));
         }
-        None => (app.versions.resolve(version.as_deref()), Vec::new()),
+        None => (
+            Some(app.read_version(version.as_deref()).await?),
+            Vec::new(),
+        ),
     };
-    let job = Job::SnapshotAudit(SnapshotAuditJob {
-        labels,
-        against,
-        allow,
-        review,
-    });
-    match submit(&app, job, version, Priority::Interactive).await? {
-        JobResult::SnapshotAudit(r) => Ok(Json(r.map_err(ApiError)?)),
-        other => Err(unexpected(other)),
+    let reader = app.snapshots.version(&version.unwrap_or_default());
+    if against.is_empty() {
+        return Ok(Json(reader.audit(&labels).await?));
     }
+    let mut audit = reader.audit_against(&against, &allow).await?;
+    if review {
+        audit.review = pisa_snapshots::review::review(&reader, &audit.comparisons, &allow).await?;
+    }
+    Ok(Json(audit))
 }
 
 /// Whether an audit's query asks for the review list.
@@ -545,11 +551,8 @@ pub async fn dependents(
     let version = parse_id(&id)?.version;
     let (_, labels) = label_query(query.as_deref().unwrap_or_default())
         .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
-    let job = Job::SnapshotDependents(SnapshotDependentsJob { entry: id, labels });
-    match submit(&app, job, Some(version), Priority::Interactive).await? {
-        JobResult::SnapshotDependents(r) => Ok(Json(r.map_err(ApiError)?)),
-        other => Err(unexpected(other)),
-    }
+    let reader = app.snapshots.version(&version);
+    Ok(Json(reader.dependents(&id, &labels).await?))
 }
 
 #[utoipa::path(
@@ -586,16 +589,16 @@ pub async fn rebuild(
         Err(e) => return e.into_response(),
     };
     if req.dry_run {
-        let job = Job::SnapshotRebuild(SnapshotRebuildJob {
+        let plan = SnapshotRebuildJob {
             from: req.from,
             to: req.to,
             labels: req.labels,
             allow_changes: req.allow_changes,
-        });
-        return respond(
-            JobKind::RebuildSnapshots,
-            submit_job(&app, job, version).await,
-        );
+        };
+        return match app.snapshots.version(&version).rebuild_plan(&plan).await {
+            Ok(r) => Json(r).into_response(),
+            Err(e) => ApiError(e).into_response(),
+        };
     }
     if !prefer.respond_async {
         return match rebuild::run(&app, &req, &version).await {
@@ -650,14 +653,8 @@ pub async fn update(
     Body(req): Body<UpdateSnapshotRequest>,
 ) -> Result<Json<Snapshot>, ApiError> {
     let version = parse_id(&id)?.version;
-    let job = Job::SnapshotLabels(SnapshotLabelsJob {
-        entry: id,
-        labels: req.labels,
-    });
-    match submit(&app, job, Some(version), Priority::Interactive).await? {
-        JobResult::SnapshotLabels(r) => Ok(Json(r.map_err(ApiError)?)),
-        other => Err(unexpected(other)),
-    }
+    let reader = app.snapshots.version(&version);
+    Ok(Json(reader.set_labels(&id, &req.labels).await?))
 }
 
 #[utoipa::path(
@@ -764,13 +761,6 @@ fn prepare(job: Job, version: Option<String>, priority: Priority) -> Prepared {
         route,
         priority,
     }
-}
-
-/// Runs a catalog job on a worker of `version`, as an interactive one.
-async fn submit_job(app: &App, job: Job, version: String) -> Result<JobResult, DispatchError> {
-    app.dispatcher
-        .submit(prepare(job, Some(version), Priority::Interactive))
-        .await
 }
 
 pub(crate) async fn submit(

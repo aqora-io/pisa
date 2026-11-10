@@ -47,6 +47,9 @@ spec:
             - { name: PISA_BEAM_DOCUMENTS, value: {{ $w.beamDocuments | quote }} }
             - { name: PISA_BEAM_MEMORY_MAX_MB, value: {{ $w.beamMemoryMaxMb | quote }} }
             - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ $w.drainTimeoutSecs | quote }} }
+            {{- with $.Values.allowedAxioms }}
+            - { name: PISA_ALLOWED_AXIOMS, value: {{ join "," . | quote }} }
+            {{- end }}
             - { name: PISA_STORE, value: s3 }
             - name: PISA_DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ required "metadata.database.urlSecret.name is required" .Values.metadata.database.urlSecret.name | quote }}, key: {{ .Values.metadata.database.urlSecret.key | quote }} } }

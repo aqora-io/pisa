@@ -1,5 +1,5 @@
-//! A rebuild that the server runs: the plan a worker makes (see
-//! `POST /snapshots/rebuild` with `dry_run`), created a level at a time
+//! A rebuild that the server runs: its plan (see `POST /snapshots/rebuild`
+//! with `dry_run`), created a level at a time
 //! through ordinary create jobs, then the support snapshots deleted, and, if
 //! asked, the old snapshots retired. Each create has the plan's idempotency
 //! key, so running the same rebuild again replays the creates that are done.
@@ -50,17 +50,14 @@ pub(crate) async fn run(
     req: &RebuildSnapshotsRequest,
     version: &str,
 ) -> Result<RebuildSnapshotsResponse, ApiError> {
-    let job = Job::SnapshotRebuild(SnapshotRebuildJob {
+    let plan = SnapshotRebuildJob {
         from: req.from.clone(),
         to: req.to.clone(),
         labels: req.labels.clone(),
         allow_changes: req.allow_changes,
-    });
-    let version = Some(version.to_string());
-    let mut response = match submit(app, job, version.clone(), Priority::Interactive).await? {
-        JobResult::SnapshotRebuild(r) => r.map_err(ApiError)?,
-        other => return Err(unexpected(other)),
     };
+    let mut response = app.snapshots.version(version).rebuild_plan(&plan).await?;
+    let version = Some(version.to_string());
     if !response.ok {
         return Ok(response);
     }

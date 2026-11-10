@@ -60,7 +60,7 @@ const FORBIDDEN_ATTRIBUTES: &[&str] = &[
 /// opts out, and is then marked as not verified; other endpoints don't.
 const MACRO_FAMILY: &[&str] = &["macro", "macro_rules", "syntax", "declare_syntax_cat"];
 
-pub const DEFAULT_AXIOMS: &str = "propext,Classical.choice,Quot.sound";
+pub use pisa_protocol::verify::DEFAULT_AXIOMS;
 /// `backward.*` options restore older elaborator behaviour (unification,
 /// `dsimp`, match compilation, equation lemmas); the kernel still checks the
 /// result. Mathlib-style code sets them often.

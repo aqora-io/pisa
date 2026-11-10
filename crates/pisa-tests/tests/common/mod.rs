@@ -51,6 +51,7 @@ pub fn router_config() -> RouterConfig {
         default_version: None,
         alias: Vec::new(),
         queue: "pisa".into(),
+        allowed_axioms: split(pisa_worker::policy::DEFAULT_AXIOMS),
         cors_origins: Vec::new(),
     }
 }
