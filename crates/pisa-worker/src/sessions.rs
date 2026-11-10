@@ -90,6 +90,20 @@ impl Sessions {
                 if let Some(e) = started.error {
                     return failed(e);
                 }
+                // Checks are held to the statements the report describes, so
+                // one it couldn't describe would go unguarded.
+                let unguarded = started
+                    .verification
+                    .iter()
+                    .flat_map(|v| &v.reasons)
+                    .find(|r| r.starts_with("error: axiom report"));
+                if let Some(reason) = unguarded {
+                    let reason = reason.trim_start_matches("error: ");
+                    return failed(Error::new(
+                        ErrorKind::Lean,
+                        format!("the session can't guard its statements: {reason}"),
+                    ));
+                }
                 let declarations = started.verification.map(|v| v.declarations);
                 session.declarations = Some(declarations.unwrap_or_default());
                 let meta = serde_json::to_value(&session).unwrap_or_default();

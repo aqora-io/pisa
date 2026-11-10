@@ -231,3 +231,23 @@ async fn bad_keys_unknown_states_and_policy() {
     let (status, body) = c.post("/sessions", json!({"code": "#eval 1"})).await;
     assert_eq!((status, &body["error"]["kind"]), (422, &json!("policy")));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_whose_statements_cant_be_described_cant_be_checked() {
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    // Its checks are held to the statements the report describes, so one it
+    // can't describe could change unseen.
+    let code = "import Foo\ntheorem goal : 1 = 1 := by sorry -- report-fails: goal";
+    let s = start(&c, code).await;
+    let r = check(&c, &s["id"], "import Foo\ntheorem goal : 2 = 2 := rfl").await;
+    assert_eq!(
+        (&r["ok"], &r["error"]["kind"]),
+        (&json!(false), &json!("lean")),
+        "{r}"
+    );
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("axiom report: describing goal: a metavariable"),
+        "{message}"
+    );
+}
