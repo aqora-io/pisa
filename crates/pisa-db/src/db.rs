@@ -435,6 +435,82 @@ async fn establish_pg(
 mod tests {
     use super::*;
 
+    #[derive(diesel::QueryableByName, Debug, PartialEq)]
+    struct LinkRow {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        entry: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        replaces: String,
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+        allow: Option<String>,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        replacement: String,
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        run_root: String,
+    }
+
+    /// The links an earlier release kept on its entries move to `links`, each
+    /// with the entry its run starts at.
+    #[test]
+    fn links_move_to_their_table_with_their_runs_root() {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        conn.batch_execute("PRAGMA foreign_keys = ON;").unwrap();
+        let pending = conn.pending_migrations(SQLITE_MIGRATIONS).unwrap();
+        let at = pending
+            .iter()
+            .position(|m| m.name().to_string().ends_with("_links"))
+            .unwrap();
+        for m in &pending[..at] {
+            conn.run_migration(m).unwrap();
+        }
+        // `a` starts a run that `b`, then `c` and the fork `e` continue; `d`
+        // replaces `z`, which is gone.
+        conn.batch_execute(
+            "INSERT INTO modules (version, id, meta) VALUES ('v', 'm', jsonb('{}'));
+             INSERT INTO entries (version, id, module, labels, created_micros, replaces,
+                                  replaces_allow, replacement) VALUES
+               ('v', 'a', 'm', jsonb('{}'), 1, NULL, NULL, NULL),
+               ('v', 'b', 'm', jsonb('{}'), 2, 'a', '{\"definitions\":[\"f\"]}', '{\"filled\":[\"t\"]}'),
+               ('v', 'c', 'm', jsonb('{}'), 3, 'b', NULL, '{}'),
+               ('v', 'e', 'm', jsonb('{}'), 4, 'b', NULL, NULL),
+               ('v', 'd', 'm', jsonb('{}'), 5, 'z', NULL, '{}');",
+        )
+        .unwrap();
+        conn.run_pending_migrations(SQLITE_MIGRATIONS).unwrap();
+        let links: Vec<LinkRow> = diesel::RunQueryDsl::load(
+            diesel::sql_query(
+                "SELECT entry, replaces, allow, replacement, run_root FROM links ORDER BY entry",
+            ),
+            &mut conn,
+        )
+        .unwrap();
+        let link =
+            |entry: &str, replaces: &str, allow: Option<&str>, replacement: &str, root: &str| {
+                LinkRow {
+                    entry: entry.into(),
+                    replaces: replaces.into(),
+                    allow: allow.map(String::from),
+                    replacement: replacement.into(),
+                    run_root: root.into(),
+                }
+            };
+        assert_eq!(
+            links,
+            [
+                link(
+                    "b",
+                    "a",
+                    Some("{\"definitions\":[\"f\"]}"),
+                    "{\"filled\":[\"t\"]}",
+                    "a"
+                ),
+                link("c", "b", None, "{}", "a"),
+                link("d", "z", None, "{}", "z"),
+                link("e", "b", None, "{}", "a"),
+            ]
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn retry_reruns_on_conflict() {
         let start = tokio::time::Instant::now();

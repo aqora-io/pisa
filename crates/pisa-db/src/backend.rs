@@ -3,7 +3,8 @@
 //! the queries:
 //! - `Handle`, what a [`Db`](crate::db::Db) variant holds;
 //! - `conn`, a connection from it;
-//! - `begin`, which begins a serializable transaction;
+//! - `begin`, which begins a serializable transaction, and `begin_read`, a
+//!   transaction that reads one state of the database;
 //! - `label_filter`, which narrows an entries query to those with labels;
 //! - `notify`, which sends a [`Notice`](crate::db::Notice) to whoever
 //!   listens.
@@ -28,6 +29,16 @@ pub(crate) use dispatch;
 macro_rules! tx {
     ($conn:ident, $body:block) => {{
         begin($conn).await?;
+        let result: Result<_, Fail> = async { $body }.await;
+        crate::backend::finish($conn, result).await
+    }};
+}
+
+/// Runs `$body` in a read-only transaction on `$conn`, whose reads all see
+/// one state of the database.
+macro_rules! read_tx {
+    ($conn:ident, $body:block) => {{
+        begin_read($conn).await?;
         let result: Result<_, Fail> = async { $body }.await;
         crate::backend::finish($conn, result).await
     }};
@@ -86,6 +97,16 @@ pub(crate) mod pg {
         AnsiTransactionManager::begin_transaction_sql(
             conn,
             "BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        )
+        .await
+    }
+
+    /// A snapshot of the database for the transaction's reads, which never
+    /// fails on serialization.
+    async fn begin_read(conn: &mut Conn) -> QueryResult<()> {
+        AnsiTransactionManager::begin_transaction_sql(
+            conn,
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
         )
         .await
     }
@@ -159,6 +180,18 @@ pub(crate) mod sqlite {
             diesel::connection::AnsiTransactionManager::begin_transaction_sql(
                 conn,
                 "BEGIN IMMEDIATE",
+            )
+        })
+        .await
+    }
+
+    /// Reads from one snapshot of the database from the first read on, as
+    /// SQLite's WAL gives a transaction.
+    async fn begin_read(conn: &mut Conn) -> QueryResult<()> {
+        conn.spawn_blocking(|conn| {
+            diesel::connection::AnsiTransactionManager::begin_transaction_sql(
+                conn,
+                "BEGIN DEFERRED",
             )
         })
         .await

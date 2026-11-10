@@ -315,29 +315,29 @@ fn has_nul(value: &Value) -> bool {
     }
 }
 
-/// An entry's id, module, labels, key, creation time, the entry it replaces
-/// with what it allowed and the comparison, and its holes, the last three
-/// as JSON text, as selected.
-pub(crate) type EntryRow = (
-    String,
-    String,
-    Value,
-    Option<String>,
-    i64,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
+/// An entry's id, module, labels, key, creation time and holes (JSON text),
+/// as selected.
+pub(crate) type EntryRow = (String, String, Value, Option<String>, i64, Option<String>);
 
-pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail> {
-    let (e, module, labels, key, created, replaces, allow, replacement, holes) = row;
-    let replaces = match replaces {
-        Some(entry) => Some(Replaces {
-            snapshot_id: entry,
-            allow: allow.map(|text| serde_json::from_str(&text)).transpose()?,
-        }),
-        None => None,
+/// A link: the entry that replaces, the entry it replaces, what it allowed
+/// (JSON text) and the comparison (JSON text), as selected.
+pub(crate) type LinkRow = (String, String, Option<String>, String);
+
+/// The entry of `row`, with its link if it has one.
+pub(crate) fn entry_from_row(
+    row: EntryRow,
+    link: Option<LinkRow>,
+) -> Result<(String, EntryMeta), Fail> {
+    let (e, module, labels, key, created, holes) = row;
+    let (replaces, replacement) = match link {
+        Some((_, replaced, allow, replacement)) => (
+            Some(Replaces {
+                snapshot_id: replaced,
+                allow: allow.map(|text| serde_json::from_str(&text)).transpose()?,
+            }),
+            Some(serde_json::from_str(&replacement)?),
+        ),
+        None => (None, None),
     };
     let meta = EntryMeta {
         module,
@@ -345,9 +345,7 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
         key,
         created_micros: created as u64,
         replaces,
-        replacement: replacement
-            .map(|text| serde_json::from_str(&text))
-            .transpose()?,
+        replacement,
         holes: holes
             .map(|text| serde_json::from_str(&text))
             .transpose()?
@@ -356,8 +354,8 @@ pub(crate) fn entry_from_row(row: EntryRow) -> Result<(String, EntryMeta), Fail>
     Ok((e, meta))
 }
 
-/// What the `replaces_allow` column holds for `replaced`: its `allow` as
-/// JSON text.
+/// What a link's `allow` column holds for `replaced`: its `allow` as JSON
+/// text.
 pub(crate) fn allow_column(replaced: &Replaces) -> Result<Option<String>, Fail> {
     Ok(replaced
         .allow
@@ -590,6 +588,14 @@ impl Catalog {
     /// first.
     pub async fn replacers(&self, entry: &str) -> Result<Vec<(String, EntryMeta)>, Error> {
         dispatch!(&self.db, replacers(&self.version, entry))
+    }
+
+    /// Every entry of the runs that `entries` (bare hex) are on, by id, with
+    /// its link, in one read of the catalog: the entries a run starts at,
+    /// and those linked to them through what replaces what. A run's root is
+    /// absent once it is deleted, and what replaced it keeps its link.
+    pub async fn runs(&self, entries: &[String]) -> Result<HashMap<String, EntryMeta>, Error> {
+        dispatch!(&self.db, runs(&self.version, entries))
     }
 
     /// The entries of this version that replace each of `entries`, oldest
@@ -1187,6 +1193,56 @@ mod tests {
                 Some(replacement(&["t"], &["f", "g"], &["t"]))
             );
             assert_eq!(replacer_ids(&catalog, &s0).await, [p2]);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_is_read_whole_from_any_of_its_entries() {
+        for catalog in catalogs().await {
+            let (s0, ..) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let p1 = added(&catalog, step(&s0, &["t"], &[], &[])).await;
+            let p2 = added(&catalog, step(&p1, &[], &[], &[])).await;
+            let fork = NewEntry {
+                fork: true,
+                ..step(&p1, &[], &[], &[])
+            };
+            let p3 = added(&catalog, fork).await;
+            let other = added(&catalog, no_labels()).await;
+            let run = |es: Vec<String>| {
+                let catalog = catalog.clone();
+                async move {
+                    let mut ids: Vec<String> =
+                        catalog.runs(&es).await.unwrap().into_keys().collect();
+                    ids.sort();
+                    ids
+                }
+            };
+            let mut whole = vec![s0.clone(), p1.clone(), p2.clone(), p3.clone()];
+            whole.sort();
+            for from in [&s0, &p1, &p3] {
+                assert_eq!(run(vec![from.clone()]).await, whole);
+            }
+            let both = run(vec![p2.clone(), other.clone()]).await;
+            assert_eq!(both.len(), 5);
+            assert!(both.contains(&other));
+
+            // A splice keeps the run; so does deleting its root, which goes.
+            catalog.remove_entry(&p1).await.unwrap();
+            let mut spliced = vec![s0.clone(), p2.clone(), p3.clone()];
+            spliced.sort();
+            assert_eq!(run(vec![p2.clone()]).await, spliced);
+            catalog.remove_entry(&s0).await.unwrap();
+            let mut rootless = vec![p2.clone(), p3.clone()];
+            rootless.sort();
+            assert_eq!(run(vec![p3.clone()]).await, rootless);
+            let found = catalog.runs(std::slice::from_ref(&p3)).await.unwrap();
+            assert_eq!(found[&p3].replaces.as_ref().unwrap().snapshot_id, s0);
+            // A branch delete takes its entries out of the run.
+            catalog.remove_branch(&p2).await.unwrap();
+            assert_eq!(run(vec![p3.clone()]).await, std::slice::from_ref(&p3));
         }
     }
 

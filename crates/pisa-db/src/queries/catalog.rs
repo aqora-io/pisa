@@ -1,12 +1,12 @@
 // The snapshot catalog's queries, for `Catalog` (see `crate::catalog`).
 // Included by `backend.rs` once per backend.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use diesel::dsl::{exists, not};
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
+    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl,
 };
 use diesel_async::RunQueryDsl;
 use pisa_protocol::api::{Error, ErrorKind, Replaces};
@@ -15,12 +15,11 @@ use pisa_protocol::snapshot;
 use serde_json::Value;
 
 use crate::catalog::{
-    EntryMeta, EntryRow, Fail, Logged, ModuleMeta, NewEntry, SnapshotDecls, allow_column,
-    entry_from_row,
-    now_micros, splice, to_record, unknown_entry, unknown_module,
+    EntryMeta, EntryRow, Fail, LinkRow, Logged, ModuleMeta, NewEntry, SnapshotDecls,
+    allow_column, entry_from_row, now_micros, splice, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
-use crate::schema::{changes, described, entries, leases, module_imports, modules};
+use crate::schema::{changes, described, entries, leases, links, module_imports, modules};
 
 const ENTRY: (
     entries::id,
@@ -28,9 +27,6 @@ const ENTRY: (
     entries::labels,
     entries::idempotency_key,
     entries::created_micros,
-    entries::replaces,
-    entries::replaces_allow,
-    entries::replacement,
     entries::holes,
 ) = (
     entries::id,
@@ -38,15 +34,65 @@ const ENTRY: (
     entries::labels,
     entries::idempotency_key,
     entries::created_micros,
-    entries::replaces,
-    entries::replaces_allow,
-    entries::replacement,
     entries::holes,
 );
 
-/// The entry ids a query of [`replacers_among`] takes, so that SQLite's limit
-/// on bound values is never reached.
+const LINK: (links::entry, links::replaces, links::allow, links::replacement) = (
+    links::entry,
+    links::replaces,
+    links::allow,
+    links::replacement,
+);
+
+/// The ids a query takes at once, so that SQLite's limit on bound values is
+/// never reached.
 const REPLACED_CHUNK: usize = 1000;
+
+/// The entries of `rows`, in order, with their links.
+async fn with_links(
+    conn: &mut Conn,
+    v: &str,
+    rows: Vec<EntryRow>,
+) -> Result<Vec<(String, EntryMeta)>, Fail> {
+    let ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    let mut found: HashMap<String, LinkRow> = HashMap::new();
+    for chunk in ids.chunks(REPLACED_CHUNK) {
+        let links = links::table
+            .filter(links::version.eq(v))
+            .filter(links::entry.eq_any(chunk))
+            .select(LINK)
+            .load::<LinkRow>(conn)
+            .await?;
+        found.extend(links.into_iter().map(|l| (l.0.clone(), l)));
+    }
+    rows.into_iter()
+        .map(|row| {
+            let link = found.remove(&row.0);
+            entry_from_row(row, link)
+        })
+        .collect()
+}
+
+/// The entries with ids `ids`, oldest first, with their links.
+async fn entries_by_id(
+    conn: &mut Conn,
+    v: &str,
+    ids: &[String],
+) -> Result<Vec<(String, EntryMeta)>, Fail> {
+    let mut rows = Vec::new();
+    for chunk in ids.chunks(REPLACED_CHUNK) {
+        rows.extend(
+            entries::table
+                .filter(entries::version.eq(v))
+                .filter(entries::id.eq_any(chunk))
+                .select(ENTRY)
+                .load::<EntryRow>(conn)
+                .await?,
+        );
+    }
+    rows.sort_by(|a, b| (a.4, &a.0).cmp(&(b.4, &b.0)));
+    with_links(conn, v, rows).await
+}
 
 async fn module_in(conn: &mut Conn, v: &str, m: &str) -> Result<Option<ModuleMeta>, Fail> {
     let record = modules::table
@@ -71,7 +117,8 @@ async fn entry_in(conn: &mut Conn, v: &str, e: &str) -> Result<Option<EntryMeta>
         .first::<EntryRow>(conn)
         .await
         .optional()?;
-    Ok(row.map(entry_from_row).transpose()?.map(|(_, meta)| meta))
+    let found = with_links(conn, v, row.into_iter().collect()).await?;
+    Ok(found.into_iter().next().map(|(_, meta)| meta))
 }
 
 /// The entry made with idempotency key `k`, if there is one.
@@ -83,19 +130,18 @@ async fn keyed_in(conn: &mut Conn, v: &str, k: &str) -> Result<Option<(String, E
         .first::<EntryRow>(conn)
         .await
         .optional()?;
-    row.map(entry_from_row).transpose()
+    Ok(with_links(conn, v, row.into_iter().collect()).await?.pop())
 }
 
-/// The entries whose `replaces` is `e`, oldest first.
+/// The entries whose link replaces `e`, oldest first.
 async fn replacers_in(conn: &mut Conn, v: &str, e: &str) -> Result<Vec<(String, EntryMeta)>, Fail> {
-    let rows = entries::table
-        .filter(entries::version.eq(v))
-        .filter(entries::replaces.eq(e))
-        .order((entries::created_micros, entries::id))
-        .select(ENTRY)
-        .load::<EntryRow>(conn)
+    let ids: Vec<String> = links::table
+        .filter(links::version.eq(v))
+        .filter(links::replaces.eq(e))
+        .select(links::entry)
+        .load(conn)
         .await?;
-    rows.into_iter().map(entry_from_row).collect()
+    entries_by_id(conn, v, &ids).await
 }
 
 /// Fails with `not_found` if `entry` replaces an entry that is gone, and
@@ -118,9 +164,9 @@ async fn check_replaced(conn: &mut Conn, v: &str, entry: &NewEntry) -> Result<()
         return Ok(());
     }
     let replaced: bool = diesel::select(exists(
-        entries::table
-            .filter(entries::version.eq(v))
-            .filter(entries::replaces.eq(&replaces.snapshot_id)),
+        links::table
+            .filter(links::version.eq(v))
+            .filter(links::replaces.eq(&replaces.snapshot_id)),
     ))
     .get_result(conn)
     .await?;
@@ -182,14 +228,8 @@ async fn add(
         replacement: entry.replacement.clone(),
         holes: entry.holes.clone(),
     };
-    let allow = meta.replaces.as_ref().map(allow_column).transpose()?;
     let holes = (!meta.holes.is_empty())
         .then(|| serde_json::to_string(&meta.holes))
-        .transpose()?;
-    let replacement = meta
-        .replacement
-        .as_ref()
-        .map(serde_json::to_string)
         .transpose()?;
     diesel::insert_into(entries::table)
         .values((
@@ -199,13 +239,31 @@ async fn add(
             entries::labels.eq(to_record(&meta.labels)?),
             entries::idempotency_key.eq(meta.key.as_deref()),
             entries::created_micros.eq(meta.created_micros as i64),
-            entries::replaces.eq(meta.replaces.as_ref().map(|r| r.snapshot_id.as_str())),
-            entries::replaces_allow.eq(allow.flatten()),
-            entries::replacement.eq(replacement),
             entries::holes.eq(holes),
         ))
         .execute(conn)
         .await?;
+    if let Some(replaced) = &meta.replaces {
+        // The run starts where the replaced entry's starts, or at it.
+        let root: Option<String> = links::table
+            .find((v, &replaced.snapshot_id))
+            .select(links::run_root)
+            .first(conn)
+            .await
+            .optional()?;
+        let replacement = meta.replacement.clone().unwrap_or_default();
+        diesel::insert_into(links::table)
+            .values((
+                links::version.eq(v),
+                links::entry.eq(&e),
+                links::replaces.eq(&replaced.snapshot_id),
+                links::allow.eq(allow_column(replaced)?),
+                links::replacement.eq(serde_json::to_string(&replacement)?),
+                links::run_root.eq(root.as_deref().unwrap_or(&replaced.snapshot_id)),
+            ))
+            .execute(conn)
+            .await?;
+    }
     Ok((e, meta))
 }
 
@@ -431,11 +489,12 @@ pub(crate) async fn remove_entry(
                 let Some((replaces, replacement)) = splice(&meta, &replacer) else {
                     break;
                 };
-                diesel::update(entries::table.find((v, &r)))
+                // The run's root stays: the link now skips `e`.
+                diesel::update(links::table.find((v, &r)))
                     .set((
-                        entries::replaces.eq(&replaces.snapshot_id),
-                        entries::replaces_allow.eq(allow_column(&replaces)?),
-                        entries::replacement.eq(serde_json::to_string(&replacement)?),
+                        links::replaces.eq(&replaces.snapshot_id),
+                        links::allow.eq(allow_column(&replaces)?),
+                        links::replacement.eq(serde_json::to_string(&replacement)?),
                     ))
                     .execute(conn)
                     .await?;
@@ -530,15 +589,14 @@ pub(crate) async fn list(
     after: Option<(i64, &str)>,
     heads: bool,
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
+    let mut c = conn(db).await?;
     let mut query = entries::table.filter(entries::version.eq(v)).into_boxed();
     if heads {
-        let replacer = diesel::alias!(entries as replacer);
         query = query.filter(not(exists(
-            replacer.filter(
-                replacer
-                    .field(entries::version)
+            links::table.filter(
+                links::version
                     .eq(entries::version)
-                    .and(replacer.field(entries::replaces).eq(entries::id.nullable())),
+                    .and(links::replaces.eq(entries::id)),
             ),
         )));
     }
@@ -553,13 +611,10 @@ pub(crate) async fn list(
         .order((entries::created_micros.desc(), entries::id.desc()))
         .limit(limit)
         .select(ENTRY)
-        .load::<EntryRow>(&mut *conn(db).await?)
+        .load::<EntryRow>(&mut *c)
         .await
         .map_err(DbError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(entry_from_row)
-        .collect::<Result<_, _>>()?)
+    Ok(with_links(&mut c, v, rows).await?)
 }
 
 /// Each module that imports `m`, directly or through others, with those of
@@ -605,6 +660,47 @@ pub(crate) async fn replacers(
     Ok(replacers_in(&mut *conn(db).await?, v, e).await?)
 }
 
+/// Every entry of the runs that `es` are on, with its link, in one read:
+/// the run of an entry with a link is its link's root's, and an entry
+/// without one starts a run.
+pub(crate) async fn runs(
+    db: &Handle,
+    v: &str,
+    es: &[String],
+) -> Result<HashMap<String, EntryMeta>, Error> {
+    let found = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        read_tx!(conn, {
+            let mut roots: BTreeSet<String> = es.iter().cloned().collect();
+            for chunk in es.chunks(REPLACED_CHUNK) {
+                let linked: Vec<String> = links::table
+                    .filter(links::version.eq(v))
+                    .filter(links::entry.eq_any(chunk))
+                    .select(links::run_root)
+                    .load(conn)
+                    .await?;
+                roots.extend(linked);
+            }
+            let roots: Vec<String> = roots.into_iter().collect();
+            let mut members: BTreeSet<String> = roots.iter().cloned().collect();
+            for chunk in roots.chunks(REPLACED_CHUNK) {
+                let linked: Vec<String> = links::table
+                    .filter(links::version.eq(v))
+                    .filter(links::run_root.eq_any(chunk))
+                    .select(links::entry)
+                    .load(conn)
+                    .await?;
+                members.extend(linked);
+            }
+            let members: Vec<String> = members.into_iter().collect();
+            Ok(entries_by_id(conn, v, &members).await?.into_iter().collect())
+        })
+    })
+    .await?;
+    Ok(found)
+}
+
 pub(crate) async fn replacers_among(
     db: &Handle,
     v: &str,
@@ -612,23 +708,23 @@ pub(crate) async fn replacers_among(
 ) -> Result<HashMap<String, Vec<(String, EntryMeta)>>, Error> {
     let mut found: HashMap<String, Vec<(String, EntryMeta)>> = HashMap::new();
     let mut c = conn(db).await?;
+    let mut replacers: Vec<String> = Vec::new();
     for chunk in es.chunks(REPLACED_CHUNK) {
-        let rows = entries::table
-            .filter(entries::version.eq(v))
-            .filter(entries::replaces.eq_any(chunk))
-            .order((entries::created_micros, entries::id))
-            .select(ENTRY)
-            .load::<EntryRow>(&mut *c)
+        let ids: Vec<String> = links::table
+            .filter(links::version.eq(v))
+            .filter(links::replaces.eq_any(chunk))
+            .select(links::entry)
+            .load(&mut *c)
             .await
             .map_err(DbError::from)?;
-        for row in rows {
-            let (e, meta) = entry_from_row(row)?;
-            if let Some(replaced) = &meta.replaces {
-                found
-                    .entry(replaced.snapshot_id.clone())
-                    .or_default()
-                    .push((e, meta));
-            }
+        replacers.extend(ids);
+    }
+    for (e, meta) in entries_by_id(&mut c, v, &replacers).await? {
+        if let Some(replaced) = &meta.replaces {
+            found
+                .entry(replaced.snapshot_id.clone())
+                .or_default()
+                .push((e, meta));
         }
     }
     Ok(found)
@@ -641,6 +737,7 @@ pub(crate) async fn entries_on(
     modules: &[String],
     labels: &[(String, String)],
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
+    let mut c = conn(db).await?;
     let query = entries::table
         .filter(entries::version.eq(v))
         .filter(entries::module.eq_any(modules.to_vec()))
@@ -648,13 +745,10 @@ pub(crate) async fn entries_on(
     let rows = label_filter(query, labels)
         .order((entries::created_micros, entries::id))
         .select(ENTRY)
-        .load::<EntryRow>(&mut *conn(db).await?)
+        .load::<EntryRow>(&mut *c)
         .await
         .map_err(DbError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(entry_from_row)
-        .collect::<Result<_, _>>()?)
+    Ok(with_links(&mut c, v, rows).await?)
 }
 
 pub(crate) async fn set_labels(
@@ -728,6 +822,7 @@ pub(crate) async fn entries_after(
     after: Option<&str>,
     limit: i64,
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
+    let mut c = conn(db).await?;
     let mut query = entries::table.filter(entries::version.eq(v)).into_boxed();
     if let Some(after) = after {
         query = query.filter(entries::id.gt(after));
@@ -736,13 +831,10 @@ pub(crate) async fn entries_after(
         .order(entries::id)
         .limit(limit)
         .select(ENTRY)
-        .load::<EntryRow>(&mut *conn(db).await?)
+        .load::<EntryRow>(&mut *c)
         .await
         .map_err(DbError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(entry_from_row)
-        .collect::<Result<_, _>>()?)
+    Ok(with_links(&mut c, v, rows).await?)
 }
 
 pub(crate) async fn modules_with_decls_after(
@@ -870,17 +962,15 @@ pub(crate) async fn has_entries(db: &Handle, v: &str, m: &str) -> Result<bool, E
 
 /// Whether an entry on `m` is a head: one that no entry replaces.
 pub(crate) async fn has_heads(db: &Handle, v: &str, m: &str) -> Result<bool, Error> {
-    let replacer = diesel::alias!(entries as replacer);
     let found = diesel::select(exists(
         entries::table
             .filter(entries::version.eq(v))
             .filter(entries::module.eq(m))
             .filter(not(exists(
-                replacer.filter(
-                    replacer
-                        .field(entries::version)
+                links::table.filter(
+                    links::version
                         .eq(entries::version)
-                        .and(replacer.field(entries::replaces).eq(entries::id.nullable())),
+                        .and(links::replaces.eq(entries::id)),
                 ),
             ))),
     ))
@@ -896,15 +986,20 @@ pub(crate) async fn replaced_among(
     v: &str,
     es: &[String],
 ) -> Result<HashSet<String>, Error> {
-    let replaced: Vec<Option<String>> = entries::table
-        .filter(entries::version.eq(v))
-        .filter(entries::replaces.eq_any(es))
-        .select(entries::replaces)
-        .distinct()
-        .load(&mut *conn(db).await?)
-        .await
-        .map_err(DbError::from)?;
-    Ok(replaced.into_iter().flatten().collect())
+    let mut replaced = HashSet::new();
+    let mut c = conn(db).await?;
+    for chunk in es.chunks(REPLACED_CHUNK) {
+        let found: Vec<String> = links::table
+            .filter(links::version.eq(v))
+            .filter(links::replaces.eq_any(chunk))
+            .select(links::replaces)
+            .distinct()
+            .load(&mut *c)
+            .await
+            .map_err(DbError::from)?;
+        replaced.extend(found);
+    }
+    Ok(replaced)
 }
 
 pub(crate) async fn decls(db: &Handle, v: &str, m: &str) -> Result<Option<SnapshotDecls>, Error> {

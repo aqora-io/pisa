@@ -26,10 +26,18 @@ diesel::table! {
         labels -> Jsonb,
         idempotency_key -> Nullable<Text>,
         created_micros -> BigInt,
-        replaces -> Nullable<Text>,
-        replaces_allow -> Nullable<Text>,
-        replacement -> Nullable<Text>,
         holes -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    links (version, entry) {
+        version -> Text,
+        entry -> Text,
+        replaces -> Text,
+        allow -> Nullable<Text>,
+        replacement -> Text,
+        run_root -> Text,
     }
 }
 
@@ -130,3 +138,5 @@ diesel::table! {
         beam_slots -> Integer,
     }
 }
+
+diesel::allow_tables_to_appear_in_same_query!(entries, links);
