@@ -23,6 +23,18 @@ const FORBIDDEN: &[&str] = &[
     "initialize",
     "builtin_initialize",
     "unsafe",
+    "simproc",
+    "dsimproc",
+    "simproc_decl",
+    "dsimproc_decl",
+    "builtin_simproc",
+];
+
+/// Attributes that run code, or install it to run while later code
+/// elaborates. Their names are words code may use as names (`init`,
+/// `tactic`, `extern`), so they are forbidden only where an attribute is
+/// named: in `@[…]` and `attribute […]`.
+const FORBIDDEN_ATTRIBUTES: &[&str] = &[
     "implemented_by",
     "extern",
     "command_elab",
@@ -32,17 +44,6 @@ const FORBIDDEN: &[&str] = &[
     "builtin_term_elab",
     "builtin_tactic",
     "builtin_macro",
-    "simproc",
-    "dsimproc",
-    "simproc_decl",
-    "dsimproc_decl",
-    "builtin_simproc",
-];
-
-/// Attributes that run code, or install it to run while later code
-/// elaborates. Their names are common words (`init`, `tactic`), so they are
-/// forbidden only where an attribute is named: in `@[…]` and `attribute […]`.
-const FORBIDDEN_ATTRIBUTES: &[&str] = &[
     "init",
     "builtin_init",
     "tactic",
@@ -64,9 +65,11 @@ pub use pisa_protocol::verify::DEFAULT_AXIOMS;
 /// `backward.*` options restore older elaborator behaviour (unification,
 /// `dsimp`, match compilation, equation lemmas); the kernel still checks the
 /// result. Mathlib-style code sets them often.
+/// `diagnostics` is what Lean's own heartbeat message suggests, and notation
+/// over section variables needs `quotPrecheck`.
 pub const DEFAULT_OPTIONS: &str = "maxHeartbeats,maxRecDepth,synthInstance.maxHeartbeats,\
-synthInstance.maxSize,autoImplicit,relaxedAutoImplicit,linter.*,pp.*,trace.*,\
-exponentiation.threshold,backward.*";
+synthInstance.maxSize,maxSynthPendingDepth,autoImplicit,relaxedAutoImplicit,linter.*,pp.*,\
+trace.*,exponentiation.threshold,backward.*,diagnostics,quotPrecheck*";
 
 /// The report is the `Pisa` library's (`docker/pisa-lean`), so every header a
 /// worker imports gets it. It brings `Lean.Elab.Command`, which `run_cmd`
@@ -144,10 +147,24 @@ pub fn parse_export(export: serde_json::Value) -> Option<Vec<SnapshotDecl>> {
 /// uses them is re-checked through the kernel.
 pub fn uses_macros(body: &str) -> bool {
     let tokens = tokens(body);
+    let command = |t: &&Token| !t.quoted;
     tokens
         .iter()
-        .any(|t| FORBIDDEN.contains(&t.as_str()) || MACRO_FAMILY.contains(&t.as_str()))
-        || attributes(&tokens).any(|a| FORBIDDEN_ATTRIBUTES.contains(&a))
+        .filter(command)
+        .any(|t| FORBIDDEN.contains(&t.text.as_str()) || MACRO_FAMILY.contains(&t.text.as_str()))
+        || attributes(&tokens).any(|a| FORBIDDEN_ATTRIBUTES.contains(&a.text.as_str()))
+}
+
+/// A reason the scan refuses code, where it is, and what to do instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Finding {
+    /// As in a check's `reasons`, e.g. `forbidden: #eval`.
+    pub reason: String,
+    /// Where in the scanned text: the line from 1 and the column from 0, in
+    /// code points.
+    pub line: u64,
+    pub column: u64,
+    pub hint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -162,32 +179,65 @@ impl Policy {
     /// the macro family, for code that can be re-checked through the kernel
     /// (snapshots).
     pub fn scan(&self, body: &str, allow_macros: bool) -> Vec<String> {
+        let found = self.findings(body, allow_macros);
+        found.into_iter().map(|f| f.reason).collect()
+    }
+
+    /// The same as [`scan`](Self::scan), each reason once, at the first
+    /// place it is found, with a hint.
+    pub fn findings(&self, body: &str, allow_macros: bool) -> Vec<Finding> {
         let tokens = tokens(body);
-        let mut reasons = Vec::new();
-        for (i, t) in tokens.iter().enumerate() {
-            let t_str = t.as_str();
-            let forbidden =
-                FORBIDDEN.contains(&t_str) || (!allow_macros && MACRO_FAMILY.contains(&t_str));
-            if !self.allow_metaprogramming && forbidden {
-                reasons.push(format!("forbidden: {t}"));
+        let mut found: Vec<Finding> = Vec::new();
+        let mut add = |reason: String, t: &Token, hint: String| {
+            if !found.iter().any(|f| f.reason == reason) {
+                let (line, column) = position(body, t.at);
+                found.push(Finding {
+                    reason,
+                    line,
+                    column,
+                    hint,
+                });
             }
-            if t == "set_option"
+        };
+        for (i, t) in tokens.iter().enumerate() {
+            let text = t.text.as_str();
+            let macros = !allow_macros && MACRO_FAMILY.contains(&text);
+            if !self.allow_metaprogramming && !t.quoted && (FORBIDDEN.contains(&text) || macros) {
+                let hint = if macros {
+                    "the macro family (`macro`, `macro_rules`, `syntax`, `declare_syntax_cat`) is \
+                     allowed only in snapshots, which re-check what it expands into through the \
+                     kernel: put it in one with POST /snapshots and import that"
+                        .to_string()
+                } else {
+                    format!(
+                        "`{text}` runs a metaprogram or unsafe code, which is refused before the code runs"
+                    )
+                };
+                add(format!("forbidden: {text}"), t, hint);
+            }
+            if text == "set_option"
                 && let Some(option) = tokens.get(i + 1)
-                && !self.option_allowed(option)
+                && !self.option_allowed(&option.text)
             {
-                reasons.push(format!("option: {option}"));
+                let hint = format!(
+                    "the options code may set are {}",
+                    self.allowed_options.join(", ")
+                );
+                add(format!("option: {}", option.text), option, hint);
             }
         }
         if !self.allow_metaprogramming {
-            for a in attributes(&tokens).filter(|a| FORBIDDEN_ATTRIBUTES.contains(a)) {
-                let reason = format!("forbidden: {a}");
-                if !reasons.contains(&reason) {
-                    reasons.push(reason);
-                }
+            let named =
+                attributes(&tokens).filter(|a| FORBIDDEN_ATTRIBUTES.contains(&a.text.as_str()));
+            for a in named {
+                let hint = format!(
+                    "the `{}` attribute runs or installs code that runs while later code elaborates",
+                    a.text
+                );
+                add(format!("forbidden: {}", a.text), a, hint);
             }
         }
-        reasons.dedup();
-        reasons
+        found
     }
 
     fn option_allowed(&self, option: &str) -> bool {
@@ -359,6 +409,14 @@ pub fn parse_declarations(json: serde_json::Value) -> Option<Vec<ReportedDeclara
     Some(decls)
 }
 
+/// A token of Lean source: its text, where it starts (in characters), and
+/// whether it is a name in `«»`, which no command or keyword can be.
+struct Token {
+    text: String,
+    at: usize,
+    quoted: bool,
+}
+
 /// Splits Lean source into identifier-like tokens, with the brackets,
 /// parentheses, commas and `@` that [`attributes`] reads as tokens of their
 /// own, skipping comments and string and character literals. A name in
@@ -367,7 +425,7 @@ pub fn parse_declarations(json: serde_json::Value) -> Option<Vec<ReportedDeclara
 ///
 /// An interpolated string (`s!"…{code}…"`) nests code in a string, to any
 /// depth, so what the lexer is inside is a stack it keeps, not its own.
-fn tokens(src: &str) -> Vec<String> {
+fn tokens(src: &str) -> Vec<Token> {
     /// What the lexer is inside, innermost last.
     enum Inside {
         /// Code, with the braces open in it; an interpolation's code ends at
@@ -376,13 +434,36 @@ fn tokens(src: &str) -> Vec<String> {
         /// An interpolated string.
         Interpolated,
     }
+    /// The token being read.
+    struct Cur {
+        text: String,
+        at: usize,
+        quoted: bool,
+    }
+    impl Cur {
+        fn push(&mut self, c: char, i: usize) {
+            if self.text.is_empty() {
+                self.at = i;
+            }
+            self.text.push(c);
+        }
+        fn flush(&mut self, out: &mut Vec<Token>) {
+            if !self.text.is_empty() {
+                out.push(Token {
+                    text: std::mem::take(&mut self.text),
+                    at: self.at,
+                    quoted: self.quoted,
+                });
+            }
+            self.quoted = false;
+        }
+    }
     let chars: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
-    let mut cur = String::new();
-    let flush = |cur: &mut String, out: &mut Vec<String>| {
-        if !cur.is_empty() {
-            out.push(std::mem::take(cur));
-        }
+    let mut cur = Cur {
+        text: String::new(),
+        at: 0,
+        quoted: false,
     };
     let mut inside = vec![Inside::Code { braces: 0 }];
     let mut i = 0;
@@ -406,12 +487,12 @@ fn tokens(src: &str) -> Vec<String> {
             continue;
         };
         if c == '-' && next == Some('-') {
-            flush(&mut cur, &mut out);
+            cur.flush(&mut out);
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
         } else if c == '/' && next == Some('-') {
-            flush(&mut cur, &mut out);
+            cur.flush(&mut out);
             let mut nested = 0;
             while i < chars.len() {
                 match (chars[i], chars.get(i + 1).copied()) {
@@ -431,8 +512,8 @@ fn tokens(src: &str) -> Vec<String> {
             }
         } else if c == '"' {
             // `s!"…"` and the like interpolate `{…}`.
-            let interpolated = cur.ends_with('!');
-            flush(&mut cur, &mut out);
+            let interpolated = cur.text.ends_with('!');
+            cur.flush(&mut out);
             i += 1;
             if interpolated {
                 inside.push(Inside::Interpolated);
@@ -442,43 +523,56 @@ fn tokens(src: &str) -> Vec<String> {
                 }
                 i += 1;
             }
-        } else if let Some(end) = cur.is_empty().then(|| raw_string(&chars, i)).flatten() {
+        } else if let Some(end) = cur.text.is_empty().then(|| raw_string(&chars, i)).flatten() {
             i = end;
-        } else if let Some(end) = cur.is_empty().then(|| char_literal(&chars, i)).flatten() {
+        } else if let Some(end) = cur
+            .text
+            .is_empty()
+            .then(|| char_literal(&chars, i))
+            .flatten()
+        {
             i = end;
         } else if c == '«' {
+            if cur.text.is_empty() {
+                cur.at = i;
+                cur.quoted = true;
+            }
             i += 1;
             while i < chars.len() && chars[i] != '»' {
-                cur.push(chars[i]);
+                cur.text.push(chars[i]);
                 i += 1;
             }
             i += 1;
             // The name goes on only through a dot.
             if chars.get(i) != Some(&'.') {
-                flush(&mut cur, &mut out);
+                cur.flush(&mut out);
             }
         } else if c == '#' {
-            flush(&mut cur, &mut out);
-            cur.push(c);
+            cur.flush(&mut out);
+            cur.push(c, i);
             i += 1;
         } else if c.is_alphanumeric() || matches!(c, '_' | '.' | '\'' | '!' | '?') {
-            cur.push(c);
+            cur.push(c, i);
             i += 1;
         } else {
-            flush(&mut cur, &mut out);
+            cur.flush(&mut out);
             match c {
                 '{' => *braces += 1,
                 '}' if *braces == 0 && depth > 1 => {
                     inside.pop();
                 }
                 '}' => *braces = braces.saturating_sub(1),
-                '@' | '[' | ']' | '(' | ')' | ',' => out.push(c.to_string()),
+                '@' | '[' | ']' | '(' | ')' | ',' => out.push(Token {
+                    text: c.to_string(),
+                    at: i,
+                    quoted: false,
+                }),
                 _ => {}
             }
             i += 1;
         }
     }
-    flush(&mut cur, &mut out);
+    cur.flush(&mut out);
     out
 }
 
@@ -533,13 +627,14 @@ fn char_literal(chars: &[char], i: usize) -> Option<usize> {
     (chars.get(j) == Some(&'\'')).then_some(j + 1)
 }
 
-/// The names of the attributes `tokens` applies, in `@[…]` and
-/// `attribute […]`: the first name of each entry, after `scoped` or `local`.
-fn attributes(tokens: &[String]) -> impl Iterator<Item = &str> {
+/// The attributes `tokens` applies, in `@[…]` and `attribute […]`: the
+/// first name of each entry, after `scoped` or `local`.
+fn attributes(tokens: &[Token]) -> impl Iterator<Item = &Token> {
     let mut names = Vec::new();
     let mut i = 0;
     while i + 1 < tokens.len() {
-        let opens = matches!(tokens[i].as_str(), "@" | "attribute") && tokens[i + 1] == "[";
+        let opens =
+            matches!(tokens[i].text.as_str(), "@" | "attribute") && tokens[i + 1].text == "[";
         i += 1;
         if !opens {
             continue;
@@ -549,8 +644,8 @@ fn attributes(tokens: &[String]) -> impl Iterator<Item = &str> {
         let (mut depth, mut entry_start) = (0usize, true);
         i += 1;
         while i < tokens.len() {
-            let t = tokens[i].as_str();
-            match t {
+            let t = &tokens[i];
+            match t.text.as_str() {
                 "[" | "(" => depth += 1,
                 "]" if depth == 0 => break,
                 "]" | ")" => depth = depth.saturating_sub(1),
@@ -567,6 +662,21 @@ fn attributes(tokens: &[String]) -> impl Iterator<Item = &str> {
         }
     }
     names.into_iter()
+}
+
+/// The line, from 1, and column, from 0 in code points, of the character at
+/// `at` in `src`.
+fn position(src: &str, at: usize) -> (u64, u64) {
+    let (mut line, mut column) = (1, 0);
+    for c in src.chars().take(at) {
+        if c == '\n' {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
 }
 
 #[cfg(test)]
@@ -709,6 +819,69 @@ mod tests {
     }
 
     #[test]
+    fn options_that_lean_suggests_may_be_set() {
+        let p = policy();
+        for code in [
+            "set_option diagnostics true in\ntheorem t : True := trivial",
+            "set_option maxSynthPendingDepth 3 in\nexample : True := trivial",
+            "set_option quotPrecheck false in\nnotation \"d\" => 2",
+            "set_option quotPrecheck.allowSectionVars true",
+        ] {
+            assert!(p.scan(code, false).is_empty(), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_name_or_an_attribute_s_name_is_just_a_name() {
+        let p = policy();
+        for code in [
+            "def «initialize» : Nat := 1",
+            "def «#eval» : Nat := 1",
+            "def extern : Nat := 1",
+            "theorem implemented_by : True := trivial",
+        ] {
+            assert!(p.scan(code, false).is_empty(), "{code}");
+        }
+        // As attributes they are refused.
+        for (code, reason) in [
+            ("@[extern \"c_f\"] opaque f : Nat", "forbidden: extern"),
+            (
+                "@[implemented_by g] def f := 1",
+                "forbidden: implemented_by",
+            ),
+            ("attribute [command_elab foo] f", "forbidden: command_elab"),
+            ("@[term_elab foo] def e := 1", "forbidden: term_elab"),
+            (
+                "@[builtin_tactic foo] def t := 1",
+                "forbidden: builtin_tactic",
+            ),
+        ] {
+            assert_eq!(p.scan(code, false), [reason], "{code}");
+            assert!(uses_macros(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn a_finding_says_where_and_what_to_do() {
+        let p = policy();
+        let found = p.findings("theorem t : True := trivial\n  syntax \"x\" : term", false);
+        let first = &found[0];
+        assert_eq!(
+            (first.reason.as_str(), first.line, first.column),
+            ("forbidden: syntax", 2, 2)
+        );
+        assert!(first.hint.contains("POST /snapshots"), "{}", first.hint);
+        let found = p.findings("set_option debug.skipKernelTC true", false);
+        assert_eq!(
+            (found[0].reason.as_str(), found[0].line, found[0].column),
+            ("option: debug.skipKernelTC", 1, 11)
+        );
+        assert!(found[0].hint.contains("maxHeartbeats"), "{}", found[0].hint);
+        let found = p.findings("@[init] def f : IO Unit := pure ()", false);
+        assert_eq!((found[0].line, found[0].column), (1, 2));
+    }
+
+    #[test]
     fn attributes_that_install_code_are_refused_where_they_are_attributes() {
         let p = policy();
         for (code, reason) in [
@@ -809,7 +982,8 @@ mod tests {
             assert_eq!(p.scan(code, false), [reason], "{code}");
         }
         // A name in «» goes on through a dot.
-        assert_eq!(tokens("«x».y z"), ["x.y", "z"]);
+        let texts: Vec<String> = tokens("«x».y z").into_iter().map(|t| t.text).collect();
+        assert_eq!(texts, ["x.y", "z"]);
         assert!(p.scan("def «a b».c := 1\n#check «a b».c", false).is_empty());
     }
 

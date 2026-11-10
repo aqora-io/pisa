@@ -436,17 +436,25 @@ impl Documents {
         }
     }
 
-    fn scan(&self, text: &str) -> Result<(), Error> {
-        let rejected = self.pool.policy().scan(text, false);
-        if rejected.is_empty() {
+    /// Refuses what the policy refuses in `text`, which starts `header_lines`
+    /// lines into its code.
+    fn scan(&self, text: &str, header_lines: u64) -> Result<(), Error> {
+        let found = self.pool.policy().findings(text, false);
+        if found.is_empty() {
             Ok(())
         } else {
-            Err(policy_error(&rejected))
+            Err(policy_error(&found, header_lines))
         }
     }
 
+    /// [`scan`](Self::scan) on `code`'s body, at its lines in `code`.
+    fn scan_code(&self, code: &str) -> Result<(), Error> {
+        let split = split_header(code);
+        self.scan(&split.body, split.header_lines)
+    }
+
     async fn open(&self, j: DocumentOpenJob) -> Result<api::Document, Error> {
-        self.scan(&split_header(&j.code).body)?;
+        self.scan_code(&j.code)?;
         let budget = Budget::new(j.timeout_secs);
         let mut doc = self.lock(&j.document).await;
         self.load(&mut doc, &j.document, &j.code, 1, budget).await?;
@@ -470,7 +478,7 @@ impl Documents {
                  session",
             ));
         }
-        self.scan(&split_header(&j.code).body)?;
+        self.scan_code(&j.code)?;
         let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
         let mut doc = self.lock(id).await;
@@ -575,7 +583,7 @@ impl Documents {
         let ran = async {
             let mut results = Vec::new();
             for candidate in &j.candidates {
-                if let Err(e) = self.scan(candidate) {
+                if let Err(e) = self.scan(candidate, 0) {
                     results.push(refused(e));
                     continue;
                 }

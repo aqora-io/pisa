@@ -98,10 +98,12 @@ impl Snapshots {
         }
         // Macros are allowed: `build` re-checks them through the kernel unless
         // the request opts out, which marks the snapshot as not verified.
-        let rejected = pool.policy().scan(&split.body, true);
-        if !rejected.is_empty() {
-            response.check.error = Some(policy_error(&rejected));
-            response.check.reasons = rejected;
+        let found = pool.policy().findings(&split.body, true);
+        if !found.is_empty() {
+            response.check.error = Some(policy_error(&found, split.header_lines));
+            response.check.messages =
+                pisa_protocol::api::messages(policy_messages(&found, split.header_lines));
+            response.check.reasons = found.into_iter().map(|f| f.reason).collect();
             return response;
         }
         if let Some(key) = &job.key {

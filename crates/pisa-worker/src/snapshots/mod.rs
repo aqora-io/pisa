@@ -52,7 +52,7 @@ use crate::catalog::{
     Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, SnapshotDecls, record_fits,
     unknown_module,
 };
-use crate::check::{header_error, policy_error};
+use crate::check::{header_error, policy_error, policy_messages};
 use crate::db::Db;
 use crate::launcher::{Unfinished, Verdict};
 use crate::policy::{Policy, parse_declarations, parse_export, uses_macros};

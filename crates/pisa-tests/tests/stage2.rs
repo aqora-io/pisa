@@ -160,7 +160,24 @@ async fn policy_rejects_before_running() {
         let r = check(&c, code).await;
         assert_eq!(r["error"]["kind"], "policy", "{r}");
         assert_eq!(r["reasons"], json!([reason]), "{r}");
+        // A message says where, and what to do instead.
+        let message = &r["messages"][0];
+        assert_eq!(
+            (&message["severity"], &message["pos"]["line"]),
+            (&json!("error"), &json!(1)),
+            "{r}"
+        );
+        assert!(message["text"].as_str().unwrap().starts_with(reason), "{r}");
     }
+    // In the code as submitted, after its header.
+    let r = check(&c, "import Foo\n\nsyntax \"x\" : term").await;
+    assert_eq!(
+        r["messages"][0]["pos"],
+        json!({"line": 3, "column": 0}),
+        "{r}"
+    );
+    let text = r["messages"][0]["text"].as_str().unwrap();
+    assert!(text.contains("POST /snapshots"), "{r}");
     let r = check(
         &c,
         "set_option maxHeartbeats 400000 in\ntheorem t : 1 = 1 := rfl",

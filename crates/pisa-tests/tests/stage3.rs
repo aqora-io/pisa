@@ -202,9 +202,11 @@ async fn bad_keys_unknown_states_and_policy() {
 
     let (status, body) = try_tactic(&c, &json!(unknown), "run_tac pure ()").await;
     assert_eq!(status, 422);
-    assert_eq!(
-        body["error"],
-        json!({"kind": "policy", "message": "rejected: forbidden: run_tac"})
+    assert_eq!(body["error"]["kind"], "policy", "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("rejected: forbidden: run_tac (line 1: "),
+        "{message}"
     );
 
     let no_session = format!("{}~{}", c.version("v"), "0".repeat(32));

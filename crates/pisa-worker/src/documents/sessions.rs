@@ -86,7 +86,7 @@ impl Documents {
     /// Opens `j.code` as document `j.document` and records it as a session,
     /// with a state for each of its `sorry`s.
     pub(super) async fn start_session(&self, j: SessionStartJob) -> Result<Session, Error> {
-        self.scan(&split_header(&j.code).body)?;
+        self.scan_code(&j.code)?;
         let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
         let mut doc = self.lock(id).await;
@@ -145,7 +145,7 @@ impl Documents {
         let key = Key::parse(&j.state)
             .filter(|k| k.version == self.version)
             .ok_or_else(|| bad_request(format!("invalid state id: {}", j.state)))?;
-        self.scan(&j.tactic)?;
+        self.scan(&j.tactic, 0)?;
         let (session, state) = (&key.session, &key.id);
         let unknown = || {
             Error::new(
