@@ -13,6 +13,7 @@ pub mod cgroup;
 pub mod check;
 pub mod claims;
 pub mod config;
+pub mod documents;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
@@ -21,6 +22,7 @@ pub mod snapshots;
 pub mod store;
 
 pub use config::WorkerConfig;
+use documents::Documents;
 pub use pisa_db::{catalog, db, queue, records};
 use pool::{Pool, PoolConfig};
 use sessions::Sessions;
@@ -79,6 +81,20 @@ pub async fn run_with_stores(
         },
     );
     tracing::info!(%worker_id, %version, slots = pool.slots(), "worker starting");
+    let documents = if cfg.beam_slots > 0 {
+        let documents = Documents::new(
+            pool.clone(),
+            db.clone(),
+            version.clone(),
+            worker_id.clone(),
+            &cfg,
+        )
+        .await?;
+        tracing::info!(beam_slots = documents.beam_slots(), "serving documents");
+        Some(Arc::new(documents))
+    } else {
+        None
+    };
     prewarm(&pool, &cfg.prewarm);
     let catalog = catalog::Catalog::new(db.clone(), version.clone());
     tokio::spawn(async move {
@@ -123,6 +139,7 @@ pub async fn run_with_stores(
         lease: Duration::from_secs(cfg.lease_secs.max(1)),
         pool,
         sessions,
+        documents,
         warm: warm_rx,
     };
     claims
@@ -130,7 +147,12 @@ pub async fn run_with_stores(
         .await
 }
 
-pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> JobResult {
+pub(crate) async fn run_job(
+    pool: &Arc<Pool>,
+    sessions: &Sessions,
+    documents: Option<&Documents>,
+    job: Job,
+) -> JobResult {
     match job {
         Job::Check(c) => JobResult::Check(check::run_check(pool, c).await),
         Job::SessionStart(j) => JobResult::SessionStarted(sessions.start(pool, j).await),
@@ -168,6 +190,11 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
         Job::SnapshotAudit(j) => {
             JobResult::SnapshotAudit(pool.snapshots().audit_against(&j.against, &j.allow).await)
         }
+        job @ (Job::DocumentOpen(_)
+        | Job::DocumentEdit(_)
+        | Job::DocumentGoals(_)
+        | Job::DocumentProbe(_)
+        | Job::DocumentClose(_)) => documents::run(documents, job).await,
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the server".into(),
         },

@@ -84,6 +84,19 @@ pub fn worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
         state_ttl_secs: 0,
         snapshot_confirm_secs: 60,
         drain_timeout_secs: 30,
+        beam_slots: 0,
+        beam_documents: 4,
+        beam_bin: None,
+        beam_memory_max_mb: 0,
+    }
+}
+
+/// [`worker_config`] with one Beam slot, on the fake Beam.
+pub fn beam_worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
+    WorkerConfig {
+        beam_slots: 1,
+        beam_bin: Some(PathBuf::from(env!("CARGO_BIN_EXE_fake-beam"))),
+        ..worker_config(name, version, slots)
     }
 }
 

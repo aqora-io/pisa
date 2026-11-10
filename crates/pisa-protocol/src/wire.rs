@@ -29,6 +29,11 @@ pub enum Job {
     SnapshotDependents(SnapshotDependentsJob),
     SnapshotRebuild(SnapshotRebuildJob),
     SnapshotAudit(SnapshotAuditJob),
+    DocumentOpen(DocumentOpenJob),
+    DocumentEdit(DocumentEditJob),
+    DocumentGoals(DocumentGoalsJob),
+    DocumentProbe(DocumentProbeJob),
+    DocumentClose(DocumentJob),
     /// A job kind this worker doesn't know, from a newer server. It is
     /// answered with [`JobResult::Failed`].
     #[serde(other)]
@@ -165,6 +170,54 @@ pub struct SnapshotLabelsJob {
     pub labels: BTreeMap<String, Option<String>>,
 }
 
+/// `POST /documents`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentOpenJob {
+    /// The new document's id within the job's version: 32 lowercase hex.
+    pub document: String,
+    pub code: String,
+    pub timeout_secs: u64,
+}
+
+/// `PATCH /documents/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentEditJob {
+    pub document: String,
+    pub code: String,
+    /// The revision the edit replaces.
+    pub revision: u64,
+    pub timeout_secs: u64,
+}
+
+/// `POST /documents/{id}/goals`, its positions checked by the router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentGoalsJob {
+    pub document: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    pub at: Vec<api::LinePos>,
+    #[serde(default)]
+    pub mode: api::GoalsMode,
+    pub timeout_secs: u64,
+}
+
+/// `POST /documents/{id}/probes`, its candidates counted by the router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentProbeJob {
+    pub document: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    pub at: api::ProbeAt,
+    pub candidates: Vec<String>,
+    pub timeout_secs: u64,
+}
+
+/// `DELETE /documents/{id}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentJob {
+    pub document: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobResult {
@@ -182,6 +235,11 @@ pub enum JobResult {
     SnapshotDependents(Result<api::ListDependentsResponse, api::Error>),
     SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
     SnapshotAudit(Result<api::AuditSnapshotsResponse, api::Error>),
+    /// An opened or edited document.
+    Document(Result<api::Document, api::Error>),
+    DocumentGoals(Result<api::DocumentGoals, api::Error>),
+    DocumentProbes(Result<api::DocumentProbes, api::Error>),
+    DocumentClosed(Result<(), api::Error>),
     /// The worker could not run the job at all.
     Failed {
         error: String,
@@ -275,6 +333,34 @@ mod tests {
         };
         assert_eq!(back.replaces.unwrap().snapshot_id, "e");
         assert!(back.fork);
+    }
+
+    #[test]
+    fn document_jobs_and_results_round_trip() {
+        let job = Job::DocumentProbe(DocumentProbeJob {
+            document: "d".into(),
+            revision: None,
+            at: api::ProbeAt::Sorry { sorry: 0 },
+            candidates: vec!["rfl".into()],
+            timeout_secs: 5,
+        });
+        let value = serde_json::to_value(&job).unwrap();
+        assert_eq!(value["kind"], "document_probe");
+        assert_eq!(value["at"], serde_json::json!({"sorry": 0}));
+        let Ok(Job::DocumentProbe(back)) = serde_json::from_value(value) else {
+            panic!("not a probe")
+        };
+        assert_eq!(back.candidates, ["rfl"]);
+
+        for result in [
+            JobResult::DocumentClosed(Ok(())),
+            JobResult::DocumentClosed(Err(api::Error::new(api::ErrorKind::NotFound, "gone"))),
+        ] {
+            let value = serde_json::to_value(&result).unwrap();
+            assert_eq!(value["kind"], "document_closed");
+            let back: JobResult = serde_json::from_value(value).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{result:?}"));
+        }
     }
 
     #[test]

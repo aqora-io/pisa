@@ -97,8 +97,10 @@ impl Launcher {
             Some(root) => {
                 let memory = (cfg.memory_max_mb > 0).then_some(cfg.memory_max_mb * 1024 * 1024);
                 let pids = (cfg.pids_max > 0).then_some(cfg.pids_max);
+                let beam =
+                    (cfg.beam_memory_max_mb > 0).then_some(cfg.beam_memory_max_mb * 1024 * 1024);
                 match Cgroups::init(root, memory, pids) {
-                    Ok(c) => Some(c),
+                    Ok(c) => Some(c.with_beam(cfg.slots(), beam)),
                     Err(e) => {
                         tracing::warn!(root = %root.display(), "cgroups unavailable, running without per-process limits: {e}");
                         None

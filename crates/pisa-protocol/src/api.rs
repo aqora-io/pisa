@@ -523,6 +523,159 @@ pub struct CheckSessionRequest {
     pub timeout: u64,
 }
 
+/// The most candidates a probe can try.
+pub const MAX_CANDIDATES: usize = 64;
+
+/// `POST /documents`: opens code on Lean Beam, for the goals at positions in
+/// it and candidate tactics probed there. A worker keeps it open, and the
+/// code is stored so that another can reopen it. Nothing a document says is a
+/// verdict: check finished code with `/check`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OpenDocumentRequest {
+    pub code: String,
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Lean's time limit in seconds.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+/// `PATCH /documents/{id}`: replaces the document's code.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct EditDocumentRequest {
+    pub code: String,
+    /// The revision the edit replaces; if the document is at another, the
+    /// edit is a 409 `conflict`.
+    pub revision: u64,
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+/// An open document, as Lean elaborated its code.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Document {
+    /// Its id, `<version>~<32 hex>`.
+    pub id: String,
+    /// 1 when opened, then one more for each edit.
+    pub revision: u64,
+    /// Lean's errors and warnings.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    /// The code's `sorry`s in source order, each with its goals.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub sorries: Vec<Sorry>,
+}
+
+/// A position in a document's code, as for [`Pos`]. Without `column`, it is
+/// the line's first tactic: its first character that isn't blank, after a
+/// `·` or `.` bullet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LinePos {
+    pub line: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u64>,
+}
+
+/// Goals before the tactic at a position, or after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalsMode {
+    #[default]
+    Before,
+    After,
+}
+
+/// `POST /documents/{id}/goals`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DocumentGoalsRequest {
+    /// The revision asked about; if the document is at another, a 409
+    /// `conflict`. Without it, the latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    /// 1 to [`MAX_AT`] positions.
+    pub at: Vec<LinePos>,
+    #[serde(default)]
+    pub mode: GoalsMode,
+    /// Lean's time limit in seconds, which reopening the document counts
+    /// against.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DocumentGoals {
+    pub revision: u64,
+    /// One per position asked about, in order.
+    pub at: Vec<GoalsAt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct GoalsAt {
+    /// The position, its column filled in.
+    pub pos: Pos,
+    /// The goals there, as Lean prints them: none in the imports or outside
+    /// a proof.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub goals: Vec<String>,
+}
+
+/// Where probes run: at one of the document's `sorry`s, by its index in
+/// [`Document::sorries`], or at a position in the code's body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(untagged)]
+pub enum ProbeAt {
+    Sorry { sorry: usize },
+    Pos(LinePos),
+}
+
+/// `POST /documents/{id}/probes`: runs each candidate at one position, each
+/// on the document as it is: nothing a candidate does stays.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DocumentProbesRequest {
+    /// As for goals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    pub at: ProbeAt,
+    /// 1 to [`MAX_CANDIDATES`] tactics.
+    pub candidates: Vec<String>,
+    /// Lean's time limit in seconds, for all of them.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DocumentProbes {
+    pub revision: u64,
+    /// Where the candidates ran.
+    pub pos: Pos,
+    /// One per candidate, in order.
+    pub results: Vec<ProbeResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ProbeResult {
+    /// It ran without errors.
+    pub ok: bool,
+    /// It ran without errors, left no goals, and doesn't say `sorry` or
+    /// `admit`. This is no verdict: Lean Beam checks neither termination nor
+    /// what the tactic elaborated to, so check the finished code with
+    /// `/check`.
+    pub closed: bool,
+    /// The goals it left, when it ran without errors.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub goals: Vec<String>,
+    #[schema(required = true)]
+    #[serde(default)]
+    pub messages: Vec<Message>,
+    /// Why it didn't run: the policy refused it, or the time ran out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<Error>,
+}
+
 /// `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
 /// keeps it as a module that later code can import, with a new snapshot of
 /// it. Code that is already kept gets a new snapshot of its module without
@@ -1264,6 +1417,33 @@ impl std::fmt::Display for SnapshotId {
     }
 }
 
+/// A document id, `<version>~<32 lowercase hex>`, routed like a
+/// [`SnapshotId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentId {
+    pub version: String,
+    pub id: String,
+}
+
+impl DocumentId {
+    pub fn parse(s: &str) -> Option<DocumentId> {
+        let (version, id) = s.split_once('~')?;
+        if !is_id_part(version) || !crate::labels::is_entry_id(id) {
+            return None;
+        }
+        Some(DocumentId {
+            version: version.into(),
+            id: id.into(),
+        })
+    }
+}
+
+impl std::fmt::Display for DocumentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}~{}", self.version, self.id)
+    }
+}
+
 impl From<repl::Pos> for Pos {
     fn from(p: repl::Pos) -> Self {
         Pos {
@@ -1414,5 +1594,41 @@ mod tests {
         ] {
             assert_eq!(SnapshotId::parse(&bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn document_ids_round_trip() {
+        let hex = "0123456789abcdef0123456789abcdef";
+        let id = DocumentId::parse(&format!("v~{hex}")).unwrap();
+        assert_eq!((id.version.as_str(), id.id.as_str()), ("v", hex));
+        assert_eq!(id.to_string(), format!("v~{hex}"));
+        assert_eq!(DocumentId::parse(hex), None);
+        assert_eq!(DocumentId::parse(&format!("v~{}", &hex[1..])), None);
+    }
+
+    #[test]
+    fn a_probe_is_at_a_sorry_or_a_position() {
+        let at = |v| serde_json::from_value::<ProbeAt>(v).unwrap();
+        assert_eq!(at(json!({"sorry": 1})), ProbeAt::Sorry { sorry: 1 });
+        assert_eq!(
+            at(json!({"line": 3})),
+            ProbeAt::Pos(LinePos {
+                line: 3,
+                column: None
+            })
+        );
+        assert_eq!(
+            at(json!({"line": 3, "column": 2})),
+            ProbeAt::Pos(LinePos {
+                line: 3,
+                column: Some(2)
+            })
+        );
+        assert!(serde_json::from_value::<ProbeAt>(json!({"column": 2})).is_err());
+        let r: DocumentGoalsRequest = serde_json::from_value(json!({"at": [{"line": 1}]})).unwrap();
+        assert_eq!(
+            (r.mode, r.revision, r.timeout),
+            (GoalsMode::Before, None, 60)
+        );
     }
 }

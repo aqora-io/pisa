@@ -108,6 +108,20 @@ pub struct WorkerConfig {
     /// On shutdown, how long to wait for in-flight jobs before exiting anyway.
     #[arg(long, env = "PISA_DRAIN_TIMEOUT_SECS", default_value_t = 600)]
     pub drain_timeout_secs: u64,
+    /// Lean Beam processes for open documents (`/documents`), besides the
+    /// REPL slots. 0 serves no documents.
+    #[arg(long, env = "PISA_BEAM_SLOTS", default_value_t = 0)]
+    pub beam_slots: usize,
+    /// Documents each Beam process keeps open. To open another, it closes the
+    /// least recently used one that no job is using.
+    #[arg(long, env = "PISA_BEAM_DOCUMENTS", default_value_t = 4)]
+    pub beam_documents: usize,
+    /// `lean-beam-mcp`. Defaults to the one in the toolchain of `--lean`.
+    #[arg(long, env = "PISA_BEAM_BIN")]
+    pub beam_bin: Option<PathBuf>,
+    /// memory.max per Beam process, in MiB (0 for no limit).
+    #[arg(long, env = "PISA_BEAM_MEMORY_MAX_MB", default_value_t = 0)]
+    pub beam_memory_max_mb: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]

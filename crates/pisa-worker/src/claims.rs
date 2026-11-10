@@ -6,6 +6,10 @@
 //! a free slot is a better home for it: the one that stored the proof state
 //! it continues, or, when this worker hasn't imported its header, one that
 //! has. Otherwise the first to claim a job runs it.
+//!
+//! Jobs on open documents go to workers with Beam slots ([`pick_documents`]),
+//! one at a time per document, and wait for the worker holding the document
+//! while it is live.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -18,6 +22,7 @@ use pisa_protocol::wire::{Job, JobResult};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify, watch};
 
+use crate::documents::Documents;
 use crate::pool::Pool;
 use crate::sessions::Sessions;
 use crate::{prewarm, run_job};
@@ -93,6 +98,42 @@ pub fn pick(
     picked
 }
 
+/// Picks up to `free` of the jobs on documents `candidates` for worker `me` to
+/// claim: one per document, none on a document a job of `running` here
+/// works on, and none on a document that another live worker serving
+/// documents holds, which is the only one to run its jobs.
+pub fn pick_documents(
+    me: &str,
+    free: usize,
+    candidates: &[Candidate],
+    peers: &[Peer],
+    running: &HashSet<String>,
+) -> Vec<i64> {
+    let serving: HashSet<&str> = peers
+        .iter()
+        .filter(|p| p.name != me && !p.draining && p.beam_slots > 0)
+        .map(|p| p.name.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for c in candidates {
+        if ids.len() >= free {
+            break;
+        }
+        let Some(document) = c.document.as_deref() else {
+            continue;
+        };
+        if running.contains(document) || !seen.insert(document) {
+            continue;
+        }
+        if c.affinity.as_deref().is_some_and(|h| serving.contains(h)) {
+            continue;
+        }
+        ids.push(c.id);
+    }
+    ids
+}
+
 fn now_micros() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -107,6 +148,7 @@ pub struct Claims {
     pub lease: Duration,
     pub pool: Arc<Pool>,
     pub sessions: Arc<Sessions>,
+    pub documents: Option<Arc<Documents>>,
     pub warm: watch::Receiver<BTreeMap<usize, String>>,
 }
 
@@ -118,7 +160,11 @@ struct Shared {
     lease: Duration,
     pool: Arc<Pool>,
     sessions: Arc<Sessions>,
+    documents: Option<Arc<Documents>>,
+    /// Jobs running, on documents too.
     running: AtomicUsize,
+    /// The documents jobs running here work on.
+    on_documents: std::sync::Mutex<HashSet<String>>,
     finished: Notify,
     warm: watch::Receiver<BTreeMap<usize, String>>,
     /// The warm header keys last written to the registry.
@@ -146,10 +192,25 @@ impl Shared {
         }
     }
 
-    /// Runs one claimed job and writes its result.
-    async fn run_one(self: Arc<Self>, claimed: Claimed) {
+    /// Free REPL slots, and room for jobs on documents.
+    fn room(&self) -> (usize, usize) {
+        let on_documents = self.on_documents.lock().unwrap().len();
+        let running = self.running.load(Ordering::Acquire);
+        let capacity = self.documents.as_ref().map_or(0, |d| d.capacity());
+        (
+            self.pool
+                .slots()
+                .saturating_sub(running.saturating_sub(on_documents)),
+            capacity.saturating_sub(on_documents),
+        )
+    }
+
+    /// Runs one claimed job, on `document` if it is a job on one, and writes
+    /// its result.
+    async fn run_one(self: Arc<Self>, claimed: Claimed, document: Option<String>) {
+        let documents = self.documents.as_deref();
         let result = match serde_json::from_value::<Job>(claimed.job) {
-            Ok(job) => run_job(&self.pool, &self.sessions, job).await,
+            Ok(job) => run_job(&self.pool, &self.sessions, documents, job).await,
             Err(e) => {
                 tracing::warn!(id = claimed.id, "a job did not decode: {e}");
                 JobResult::Failed {
@@ -185,6 +246,9 @@ impl Shared {
                 }
             }
         }
+        if let Some(document) = &document {
+            self.on_documents.lock().unwrap().remove(document);
+        }
         self.running.fetch_sub(1, Ordering::AcqRel);
         self.finished.notify_one();
     }
@@ -206,7 +270,9 @@ impl Claims {
             lease: self.lease,
             pool: self.pool,
             sessions: self.sessions,
+            documents: self.documents,
             running: AtomicUsize::new(0),
+            on_documents: std::sync::Mutex::default(),
             finished: Notify::new(),
             warm: self.warm,
             published: Mutex::new(Vec::new()),
@@ -222,11 +288,12 @@ impl Shared {
         drain_timeout: Duration,
     ) -> anyhow::Result<()> {
         let slots = self.pool.slots();
+        let beam_slots = self.documents.as_ref().map_or(0, |d| d.beam_slots());
         let mut backoff = Duration::from_millis(100);
         let since = loop {
             match self
                 .queue
-                .register(&self.me, &self.version, slots as u32, 0)
+                .register(&self.me, &self.version, slots as u32, beam_slots as u32)
                 .await
             {
                 Ok(since) => break since,
@@ -271,10 +338,10 @@ impl Shared {
         let poll_every = self.queue.db().poll_interval();
         let mut backoff = Duration::from_millis(100);
         while !*drain.borrow() {
-            let free = slots.saturating_sub(self.running.load(Ordering::Acquire));
+            let (free, free_documents) = self.room();
             let mut wait = poll_every;
-            if free > 0 {
-                match self.claim(free).await {
+            if free > 0 || free_documents > 0 {
+                match self.claim(free, free_documents).await {
                     Ok(Round::Contended) => continue,
                     Ok(Round::Settled { release_at }) => {
                         backoff = Duration::from_millis(100);
@@ -321,22 +388,51 @@ impl Shared {
         Ok(())
     }
 
-    /// One round of reading the open jobs and claiming what [`pick`] picks.
-    /// The registry is read afresh: a worker that just warmed a header has
-    /// published it, and the job that follows should find it.
-    async fn claim(self: &Arc<Self>, free: usize) -> anyhow::Result<Round> {
-        let candidates = self.queue.candidates(&self.version, CANDIDATES).await?;
-        if candidates.is_empty() {
+    /// One round of reading the open jobs and claiming what [`pick`] and
+    /// [`pick_documents`] pick, for `free` REPL slots and `free_documents`
+    /// jobs on documents. The registry is read afresh: a worker that just
+    /// warmed a header has published it, and the job that follows should
+    /// find it.
+    async fn claim(self: &Arc<Self>, free: usize, free_documents: usize) -> anyhow::Result<Round> {
+        let candidates = match free {
+            0 => Vec::new(),
+            _ => self.queue.candidates(&self.version, CANDIDATES).await?,
+        };
+        let on_documents = match free_documents {
+            0 => Vec::new(),
+            _ => {
+                self.queue
+                    .document_candidates(&self.version, CANDIDATES)
+                    .await?
+            }
+        };
+        if candidates.is_empty() && on_documents.is_empty() {
             return Ok(Round::Settled { release_at: None });
         }
         let peers = self.queue.registry(&self.version, LIVE).await?;
         let warm: HashSet<String> = self.warm_keys().into_iter().collect();
         let picked = pick(&self.me, free, &warm, &candidates, &peers, now_micros());
-        let claimed = self.queue.claim(&self.me, &picked.ids, self.lease).await?;
-        let lost = claimed.len() < picked.ids.len();
+        let running = self.on_documents.lock().unwrap().clone();
+        let mut ids = picked.ids.clone();
+        ids.extend(pick_documents(
+            &self.me,
+            free_documents,
+            &on_documents,
+            &peers,
+            &running,
+        ));
+        let claimed = self.queue.claim(&self.me, &ids, self.lease).await?;
+        let lost = claimed.len() < ids.len();
         for c in claimed {
+            let document = on_documents
+                .iter()
+                .find(|d| d.id == c.id)
+                .and_then(|d| d.document.clone());
+            if let Some(document) = &document {
+                self.on_documents.lock().unwrap().insert(document.clone());
+            }
             self.running.fetch_add(1, Ordering::AcqRel);
-            tokio::spawn(self.clone().run_one(c));
+            tokio::spawn(self.clone().run_one(c, document));
         }
         Ok(if lost {
             Round::Contended
@@ -462,6 +558,54 @@ mod tests {
         let busy = [peer("w", 1, 1, &[])];
         assert_eq!(pick("me", 1, &keys(&[]), &jobs, &busy, NOW).ids, [1]);
         assert_eq!(pick("me", 1, &keys(&[]), &jobs, &[], NOW).ids, [1]);
+    }
+
+    fn on(id: i64, document: &str, holder: Option<&str>) -> Candidate {
+        Candidate {
+            document: Some(document.into()),
+            ..job(id, "h", holder, FRESH)
+        }
+    }
+
+    fn beam(name: &str) -> Peer {
+        Peer {
+            beam_slots: 1,
+            ..peer(name, 1, 0, &[])
+        }
+    }
+
+    #[test]
+    fn a_document_held_by_a_live_beam_worker_waits_for_it() {
+        let none = HashSet::new();
+        let jobs = [on(1, "d", Some("w")), on(2, "e", None)];
+        let peers = [beam("w")];
+        assert_eq!(pick_documents("me", 4, &jobs, &peers, &none), [2]);
+        assert_eq!(pick_documents("w", 4, &jobs, &peers, &none), [1, 2]);
+        // However long it has waited: only the holder has the document open.
+        let old = [Candidate {
+            enqueued_micros: NOW - 60_000_000,
+            ..on(1, "d", Some("w"))
+        }];
+        assert!(pick_documents("me", 4, &old, &peers, &none).is_empty());
+
+        // A holder that is gone, draining or without Beam is no home.
+        assert_eq!(pick_documents("me", 4, &jobs, &[], &none), [1, 2]);
+        let mut draining = beam("w");
+        draining.draining = true;
+        assert_eq!(pick_documents("me", 4, &jobs, &[draining], &none), [1, 2]);
+        let no_beam = [peer("w", 1, 0, &[])];
+        assert_eq!(pick_documents("me", 4, &jobs, &no_beam, &none), [1, 2]);
+    }
+
+    #[test]
+    fn one_job_per_document_runs_at_a_time() {
+        let jobs = [on(1, "d", None), on(2, "d", None), on(3, "e", None)];
+        let none = HashSet::new();
+        assert_eq!(pick_documents("me", 4, &jobs, &[], &none), [1, 3]);
+        let running = keys(&["d"]);
+        assert_eq!(pick_documents("me", 4, &jobs, &[], &running), [3]);
+        assert_eq!(pick_documents("me", 1, &jobs, &[], &none), [1]);
+        assert!(pick_documents("me", 0, &jobs, &[], &none).is_empty());
     }
 
     #[test]

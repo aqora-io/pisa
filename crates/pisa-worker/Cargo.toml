@@ -12,6 +12,7 @@ hex.workspace = true
 libc.workspace = true
 object_store.workspace = true
 serde.workspace = true
+pisa-beam.workspace = true
 pisa-db.workspace = true
 pisa-protocol.workspace = true
 pisa-repl.workspace = true

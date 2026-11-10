@@ -17,6 +17,8 @@ pub struct Cgroups {
     root: PathBuf,
     memory_max: Option<u64>,
     pids_max: Option<u64>,
+    /// The first Beam slot and Beam's memory.max, which slots from it get.
+    beam: Option<(usize, Option<u64>)>,
 }
 
 impl Cgroups {
@@ -29,7 +31,17 @@ impl Cgroups {
             root: root.to_path_buf(),
             memory_max,
             pids_max,
+            beam: None,
         })
+    }
+
+    /// Gives slots from `first_slot` on, which run Lean Beam, `memory_max`
+    /// rather than the REPL's.
+    pub fn with_beam(self, first_slot: usize, memory_max: Option<u64>) -> Self {
+        Cgroups {
+            beam: Some((first_slot, memory_max)),
+            ..self
+        }
     }
 
     fn slot_dir(&self, slot: usize) -> PathBuf {
@@ -41,7 +53,11 @@ impl Cgroups {
         let dir = self.slot_dir(slot);
         std::fs::create_dir_all(&dir)?;
         let limit = |v: Option<u64>| v.map_or("max".to_string(), |v| v.to_string());
-        std::fs::write(dir.join("memory.max"), limit(self.memory_max))?;
+        let memory_max = match self.beam {
+            Some((first, beam)) if slot >= first => beam,
+            _ => self.memory_max,
+        };
+        std::fs::write(dir.join("memory.max"), limit(memory_max))?;
         // Without swap, memory.max is a hard ceiling. Absent when swap accounting is off.
         let _ = std::fs::write(dir.join("memory.swap.max"), "0");
         std::fs::write(dir.join("pids.max"), limit(self.pids_max))?;

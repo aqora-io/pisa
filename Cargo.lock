@@ -2036,6 +2036,7 @@ dependencies = [
  "hex",
  "libc",
  "object_store",
+ "pisa-beam",
  "pisa-db",
  "pisa-protocol",
  "pisa-repl",

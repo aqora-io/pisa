@@ -116,6 +116,12 @@ impl Pool {
         &self.snapshots
     }
 
+    /// The launcher, for processes besides the REPLs: slots from
+    /// [`slots`](Self::slots) on are free for them.
+    pub fn launcher(&self) -> &Launcher {
+        &self.launcher
+    }
+
     /// Waits for a free slot, preferring one that holds proof state `state`,
     /// then one that already has `header_key` warm.
     pub async fn acquire(self: &Arc<Self>, header_key: &str, state: Option<&str>) -> Lease {
