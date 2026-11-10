@@ -15,8 +15,9 @@ use pisa_protocol::snapshot;
 use serde_json::Value;
 
 use crate::catalog::{
-    EntryMeta, EntryRow, Fail, LinkRow, Logged, ModuleMeta, NewEntry, SnapshotDecls,
-    allow_column, entry_from_row, now_micros, splice, to_record, unknown_entry, unknown_module,
+    EntryMeta, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleSummary,
+    NewEntry, SnapshotDecls, allow_column, closure_order, entry_from_row, now_micros, splice,
+    status_of, status_text, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
 use crate::schema::{changes, described, entries, leases, links, module_imports, modules};
@@ -94,14 +95,190 @@ async fn entries_by_id(
     with_links(conn, v, rows).await
 }
 
+/// An import, as the closure query gives it.
+#[derive(diesel::QueryableByName)]
+struct Edge {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    module: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    parent: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    position: i32,
+}
+
+/// A module's columns: its build, files, header, status, whether it is
+/// verified and when it was built.
+type ModuleRow = (String, String, Value, String, String, bool, i64);
+
+const MODULE: (
+    modules::id,
+    modules::build,
+    modules::files,
+    modules::header,
+    modules::status,
+    modules::verified,
+    modules::created,
+) = (
+    modules::id,
+    modules::build,
+    modules::files,
+    modules::header,
+    modules::status,
+    modules::verified,
+    modules::created,
+);
+
+/// The modules `m` needs, its own last, each after what it imports, by the
+/// imports of what it imports: one query for the imports, and one for the
+/// modules' builds.
+async fn closure_in(conn: &mut Conn, v: &str, m: &str) -> Result<Vec<Module>, Fail> {
+    let edges: Vec<Edge> = diesel::sql_query(CLOSURE_SQL)
+        .bind::<diesel::sql_types::Text, _>(v)
+        .bind::<diesel::sql_types::Text, _>(m)
+        .load(conn)
+        .await?;
+    let mut imports: HashMap<String, Vec<(i32, String)>> = HashMap::new();
+    for e in edges {
+        imports.entry(e.module).or_default().push((e.position, e.parent));
+    }
+    let imports: HashMap<String, Vec<String>> = imports
+        .into_iter()
+        .map(|(module, mut parents)| {
+            parents.sort();
+            (module, parents.into_iter().map(|(_, p)| p).collect())
+        })
+        .collect();
+    let order = closure_order(m, &imports);
+    let mut builds: HashMap<String, Module> = HashMap::new();
+    for chunk in order.chunks(REPLACED_CHUNK) {
+        let rows = modules::table
+            .filter(modules::version.eq(v))
+            .filter(modules::id.eq_any(chunk))
+            .select(MODULE)
+            .load::<ModuleRow>(conn)
+            .await?;
+        for (id, build, files, ..) in rows {
+            let files = serde_json::from_value(files)?;
+            builds.insert(id.clone(), Module { id, build, files });
+        }
+    }
+    order
+        .iter()
+        .map(|id| builds.remove(id).ok_or_else(|| Fail::Api(unknown_module(id))))
+        .collect()
+}
+
+/// The imports of each of `ms`, in the header's order.
+async fn imports_in(
+    conn: &mut Conn,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, Vec<String>>, Fail> {
+    let mut found: HashMap<String, Vec<(i32, String)>> = HashMap::new();
+    for chunk in ms.chunks(REPLACED_CHUNK) {
+        let rows: Vec<(String, String, i32)> = module_imports::table
+            .filter(module_imports::version.eq(v))
+            .filter(module_imports::module.eq_any(chunk))
+            .select((module_imports::module, module_imports::parent, module_imports::position))
+            .load(conn)
+            .await?;
+        for (module, parent, position) in rows {
+            found.entry(module).or_default().push((position, parent));
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(module, mut parents)| {
+            parents.sort();
+            (module, parents.into_iter().map(|(_, p)| p).collect())
+        })
+        .collect())
+}
+
 async fn module_in(conn: &mut Conn, v: &str, m: &str) -> Result<Option<ModuleMeta>, Fail> {
-    let record = modules::table
+    let found = modules::table
         .find((v, m))
-        .select(modules::meta)
-        .first::<Value>(conn)
+        .select((MODULE, modules::meta))
+        .first::<(ModuleRow, Value)>(conn)
         .await
         .optional()?;
-    Ok(record.map(serde_json::from_value).transpose()?)
+    let Some(((_, _, _, header, status, verified, created), body)) = found else {
+        return Ok(None);
+    };
+    let body: ModuleBody = serde_json::from_value(body)?;
+    let imports = imports_in(conn, v, &[m.to_string()]).await?.remove(m).unwrap_or_default();
+    Ok(Some(ModuleMeta {
+        imports,
+        modules: closure_in(conn, v, m).await?,
+        header,
+        code: body.code,
+        status: status_of(&status)?,
+        verified,
+        macros: body.macros,
+        result: body.result,
+        created: created as u64,
+    }))
+}
+
+/// What a listing shows of each of `ms` that is kept.
+async fn summaries_in(
+    conn: &mut Conn,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, ModuleSummary>, Fail> {
+    let mut imports = imports_in(conn, v, ms).await?;
+    let mut found = HashMap::new();
+    for chunk in ms.chunks(REPLACED_CHUNK) {
+        let rows = modules::table
+            .filter(modules::version.eq(v))
+            .filter(modules::id.eq_any(chunk))
+            .select(MODULE)
+            .load::<ModuleRow>(conn)
+            .await?;
+        for (id, _, _, header, status, verified, created) in rows {
+            let summary = ModuleSummary {
+                imports: imports.remove(&id).unwrap_or_default(),
+                header,
+                status: status_of(&status)?,
+                verified,
+                created: created as u64,
+            };
+            found.insert(id, summary);
+        }
+    }
+    Ok(found)
+}
+
+/// Writes module `m`'s columns and body as `meta` has them.
+async fn write_module(
+    conn: &mut Conn,
+    v: &str,
+    m: &str,
+    meta: &ModuleMeta,
+    decls: Option<&Value>,
+) -> Result<(), Fail> {
+    let own = meta
+        .modules
+        .last()
+        .ok_or_else(|| Fail::Api(unknown_module(m)))?;
+    let values = (
+        modules::meta.eq(to_record(&ModuleBody::of(meta))?),
+        modules::decls.eq(decls),
+        modules::build.eq(&own.build),
+        modules::files.eq(serde_json::to_value(&own.files)?),
+        modules::header.eq(&meta.header),
+        modules::status.eq(status_text(meta.status)?),
+        modules::verified.eq(meta.verified),
+        modules::created.eq(meta.created as i64),
+    );
+    diesel::insert_into(modules::table)
+        .values((modules::version.eq(v), modules::id.eq(m), values.clone()))
+        .on_conflict((modules::version, modules::id))
+        .do_update()
+        .set(values)
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 async fn module_exists(conn: &mut Conn, v: &str, m: &str) -> Result<bool, Fail> {
@@ -301,6 +478,15 @@ pub(crate) async fn module(db: &Handle, v: &str, m: &str) -> Result<Option<Modul
     Ok(module_in(&mut c, v, m).await?)
 }
 
+pub(crate) async fn summaries(
+    db: &Handle,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, ModuleSummary>, Error> {
+    let mut c = conn(db).await?;
+    Ok(summaries_in(&mut c, v, ms).await?)
+}
+
 pub(crate) async fn update_module(
     db: &Handle,
     v: &str,
@@ -312,16 +498,14 @@ pub(crate) async fn update_module(
         let mut c = conn(db).await?;
         let conn = &mut *c;
         tx!(conn, {
-            let Some((record, decls)) = modules::table
-                .find((v, m))
-                .select((modules::meta, modules::decls))
-                .first::<(Value, Option<Value>)>(conn)
-                .await
-                .optional()?
-            else {
+            let Some(mut meta) = module_in(conn, v, m).await? else {
                 return Err(Fail::Api(unknown_module(m)));
             };
-            let mut meta: ModuleMeta = serde_json::from_value(record)?;
+            let decls: Option<Value> = modules::table
+                .find((v, m))
+                .select(modules::decls)
+                .first(conn)
+                .await?;
             if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
                 return Ok(None);
             }
@@ -334,13 +518,7 @@ pub(crate) async fn update_module(
                 }
                 None => None,
             };
-            diesel::update(modules::table.find((v, m)))
-                .set((
-                    modules::meta.eq(to_record(&meta)?),
-                    modules::decls.eq(decls),
-                ))
-                .execute(conn)
-                .await?;
+            write_module(conn, v, m, &meta, decls.as_ref()).await?;
             log(conn, v, None, Some(m)).await?;
             Ok(Some(meta))
         })
@@ -363,7 +541,6 @@ pub(crate) async fn commit(
     v: &str,
     m: &str,
     meta: &ModuleMeta,
-    record: &Value,
     decls: Option<&Value>,
     entry: &NewEntry,
 ) -> Result<(String, EntryMeta, ModuleMeta), Error> {
@@ -384,11 +561,21 @@ pub(crate) async fn commit(
                 return Ok((e, taken, stored));
             }
             check_replaced(conn, v, entry).await?;
+            // Each import is still the build the module was built on: a
+            // module that another imports can't go, so its own imports can't
+            // have changed either.
             for parent in &meta.imports {
-                let Some(parent_meta) = module_in(conn, v, parent).await? else {
+                let Some(build): Option<String> = modules::table
+                    .find((v, parent))
+                    .select(modules::build)
+                    .first(conn)
+                    .await
+                    .optional()?
+                else {
                     return Err(Fail::Api(unknown_module(parent)));
                 };
-                if !parent_meta.modules.iter().all(|p| meta.modules.contains(p)) {
+                let built_on = meta.modules.iter().find(|x| x.id == *parent);
+                if built_on.map(|x| &x.build) != Some(&build) {
                     return Err(Fail::Api(Error::new(
                         ErrorKind::NotFound,
                         format!(
@@ -402,21 +589,14 @@ pub(crate) async fn commit(
             let stored = match module_in(conn, v, m).await? {
                 Some(stored) => stored,
                 None => {
-                    diesel::insert_into(modules::table)
-                        .values((
-                            modules::version.eq(v),
-                            modules::id.eq(m),
-                            modules::meta.eq(record),
-                            modules::decls.eq(decls),
-                        ))
-                        .execute(conn)
-                        .await?;
-                    for parent in &meta.imports {
+                    write_module(conn, v, m, meta, decls).await?;
+                    for (position, parent) in meta.imports.iter().enumerate() {
                         diesel::insert_into(module_imports::table)
                             .values((
                                 module_imports::version.eq(v),
                                 module_imports::module.eq(m),
                                 module_imports::parent.eq(parent),
+                                module_imports::position.eq(position as i32),
                             ))
                             .on_conflict_do_nothing()
                             .execute(conn)

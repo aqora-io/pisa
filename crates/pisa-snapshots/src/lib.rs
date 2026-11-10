@@ -8,7 +8,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use pisa_db::catalog::{Catalog, EntryMeta, Module, ModuleMeta, unknown_module};
+use pisa_db::catalog::{Catalog, EntryMeta, Module, ModuleMeta, ModuleSummary, unknown_module};
 use pisa_db::db::Db;
 use pisa_protocol::api::{
     Allow, AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditSnapshotsResponse,
@@ -119,6 +119,17 @@ impl Reader {
 
     /// Entry `entry`, on the module `meta` records, as the API answers it.
     pub fn snapshot(&self, entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> Snapshot {
+        self.snapshot_of(entry, entry_meta, &meta.summary())
+    }
+
+    /// Entry `entry`, on the module `summary` describes, as the API answers
+    /// it.
+    pub fn snapshot_of(
+        &self,
+        entry: String,
+        entry_meta: EntryMeta,
+        meta: &ModuleSummary,
+    ) -> Snapshot {
         Snapshot {
             id: self.id(&entry),
             version: self.version.clone(),

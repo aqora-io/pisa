@@ -7,6 +7,12 @@ diesel::table! {
         id -> Text,
         meta -> Jsonb,
         decls -> Nullable<Jsonb>,
+        build -> Text,
+        files -> Jsonb,
+        header -> Text,
+        status -> Text,
+        verified -> Bool,
+        created -> BigInt,
     }
 }
 
@@ -15,6 +21,7 @@ diesel::table! {
         version -> Text,
         module -> Text,
         parent -> Text,
+        position -> Integer,
     }
 }
 

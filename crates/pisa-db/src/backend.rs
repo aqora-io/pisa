@@ -111,6 +111,14 @@ pub(crate) mod pg {
         .await
     }
 
+    /// The imports among the modules a module needs: `$2` and what it
+    /// imports, through `module_imports`, of version `$1`.
+    const CLOSURE_SQL: &str = "WITH RECURSIVE closure (module) AS (
+            SELECT $2 UNION SELECT i.parent FROM module_imports i
+            JOIN closure c ON i.module = c.module WHERE i.version = $1)
+        SELECT i.module, i.parent, i.position FROM module_imports i
+        JOIN closure c ON i.module = c.module WHERE i.version = $1";
+
     /// `labels @> {…}`, which the GIN index on labels serves.
     fn label_filter<'a>(
         query: entries::BoxedQuery<'a, Pg>,
@@ -196,6 +204,13 @@ pub(crate) mod sqlite {
         })
         .await
     }
+
+    /// As PostgreSQL's, with SQLite's numbered parameters.
+    const CLOSURE_SQL: &str = "WITH RECURSIVE closure (module) AS (
+            SELECT ?2 UNION SELECT i.parent FROM module_imports i
+            JOIN closure c ON i.module = c.module WHERE i.version = ?1)
+        SELECT i.module, i.parent, i.position FROM module_imports i
+        JOIN closure c ON i.module = c.module WHERE i.version = ?1";
 
     /// A broadcast to this process only: SQLite has no `NOTIFY`, and other
     /// processes on the same file poll.

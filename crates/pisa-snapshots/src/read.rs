@@ -241,24 +241,10 @@ impl Reader {
             ));
         }
         let (listed, next) = self.catalog.list(labels, limit, after, heads).await?;
-        let mut modules: HashMap<String, Option<ModuleMeta>> = HashMap::new();
-        let mut snapshots = Vec::new();
-        for (entry, entry_meta) in listed {
-            let id = entry_meta.module.clone();
-            if !modules.contains_key(&id) {
-                let meta = match self.catalog.module(&id).await {
-                    Ok(meta) => Some(meta),
-                    // Its entries were deleted since they were listed.
-                    Err(e) if e.kind == ErrorKind::NotFound => None,
-                    Err(e) => return Err(e),
-                };
-                modules.insert(id.clone(), meta);
-            }
-            if let Some(meta) = &modules[&id] {
-                snapshots.push(self.snapshot(entry, entry_meta, meta));
-            }
-        }
-        Ok(ListSnapshotsResponse { snapshots, next })
+        Ok(ListSnapshotsResponse {
+            snapshots: self.snapshots(listed).await?,
+            next,
+        })
     }
 
     /// The entries above `entry`'s module, parents first; see
@@ -282,24 +268,26 @@ impl Reader {
         let mut found = self.catalog.entries_on(&modules, labels).await?;
         // Stable, so each level stays oldest first.
         found.sort_by_key(|(_, e)| levels.get(&e.module).copied().unwrap_or(usize::MAX));
-        let mut metas: HashMap<String, Option<ModuleMeta>> = HashMap::new();
-        let mut snapshots = Vec::new();
-        for (entry, entry_meta) in found {
-            let id = entry_meta.module.clone();
-            if !metas.contains_key(&id) {
-                let meta = match self.catalog.module(&id).await {
-                    Ok(meta) => Some(meta),
-                    // Deleted since it was found.
-                    Err(e) if e.kind == ErrorKind::NotFound => None,
-                    Err(e) => return Err(e),
-                };
-                metas.insert(id.clone(), meta);
-            }
-            if let Some(meta) = &metas[&id] {
-                snapshots.push(self.snapshot(entry, entry_meta, meta));
-            }
-        }
-        Ok(ListDependentsResponse { snapshots })
+        Ok(ListDependentsResponse {
+            snapshots: self.snapshots(found).await?,
+        })
+    }
+
+    /// The entries `found`, in order, as snapshots, from their modules'
+    /// summaries in one read: an entry whose module was deleted since it was
+    /// found is left out.
+    async fn snapshots(&self, found: Vec<(String, EntryMeta)>) -> Result<Vec<Snapshot>, Error> {
+        let mut modules: Vec<String> = found.iter().map(|(_, e)| e.module.clone()).collect();
+        modules.sort();
+        modules.dedup();
+        let summaries = self.catalog.summaries(&modules).await?;
+        Ok(found
+            .into_iter()
+            .filter_map(|(entry, entry_meta)| {
+                let summary = summaries.get(&entry_meta.module)?;
+                Some(self.snapshot_of(entry, entry_meta, summary))
+            })
+            .collect())
     }
 
     /// Edits an entry's labels with a merge patch; see

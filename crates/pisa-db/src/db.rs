@@ -449,6 +449,86 @@ mod tests {
         run_root: String,
     }
 
+    /// Module records an earlier release kept whole, closures included, read
+    /// back the same from their columns and imports.
+    #[tokio::test]
+    async fn module_records_move_to_columns_and_read_back_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pisa.db");
+        let mut conn = SqliteConnection::establish(&path.to_string_lossy()).unwrap();
+        conn.batch_execute("PRAGMA foreign_keys = ON;").unwrap();
+        let pending = conn.pending_migrations(SQLITE_MIGRATIONS).unwrap();
+        let at = pending
+            .iter()
+            .position(|m| m.name().to_string().ends_with("_module_columns"))
+            .unwrap();
+        for m in &pending[..at] {
+            conn.run_migration(m).unwrap();
+        }
+        let record = |id: &str, imports: &[&str], closure: &[&str], status: &str| {
+            let module = |m: &str| {
+                serde_json::json!({"id": m, "build": format!("b{m}"),
+                                   "files": [{"ext": "olean", "sha256": format!("h{m}")}]})
+            };
+            serde_json::json!({
+                "imports": imports, "modules": closure.iter().map(|m| module(m)).collect::<Vec<_>>(),
+                "header": format!("import PisaSnap.s{id}"), "code": format!("-- {id}"),
+                "status": status, "verified": id == "a", "macros": false,
+                "result": {"ok": true, "time": 0.5}, "created": 7,
+            })
+        };
+        // `c` imports `b` before `a`; `d` imports `a` before `c`.
+        let rows = [
+            ("a", record("a", &[], &["a"], "proved")),
+            ("b", record("b", &[], &["b"], "sorry")),
+            ("c", record("c", &["b", "a"], &["b", "a", "c"], "proved")),
+            (
+                "d",
+                record("d", &["a", "c"], &["a", "b", "c", "d"], "conditional"),
+            ),
+        ];
+        for (id, meta) in &rows {
+            let meta = meta.to_string().replace('\'', "''");
+            conn.batch_execute(&format!(
+                "INSERT INTO modules (version, id, meta) VALUES ('v', '{id}', jsonb('{meta}'));"
+            ))
+            .unwrap();
+        }
+        conn.batch_execute(
+            "INSERT INTO module_imports (version, module, parent) VALUES
+               ('v', 'c', 'b'), ('v', 'c', 'a'), ('v', 'd', 'a'), ('v', 'd', 'c');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::connect(Some(&path.to_string_lossy())).await.unwrap();
+        let catalog = crate::catalog::Catalog::new(db, "v".into());
+        for (id, meta) in &rows {
+            let read = catalog.module(id).await.unwrap();
+            let stored: crate::catalog::ModuleMeta = serde_json::from_value(meta.clone()).unwrap();
+            assert_eq!(read.modules, stored.modules, "{id}");
+            assert_eq!(read.imports, stored.imports, "{id}");
+            assert_eq!(
+                (
+                    &read.header,
+                    read.status,
+                    read.verified,
+                    read.created,
+                    &read.code
+                ),
+                (
+                    &stored.header,
+                    stored.status,
+                    stored.verified,
+                    stored.created,
+                    &stored.code
+                ),
+                "{id}"
+            );
+            assert!(read.result.ok, "{id}");
+        }
+    }
+
     /// The links an earlier release kept on its entries move to `links`, each
     /// with the entry its run starts at.
     #[test]

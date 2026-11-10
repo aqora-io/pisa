@@ -2,12 +2,18 @@
 //! and the entries, which keep them.
 //!
 //! Tables (see `migrations/`), each keyed by pool version first:
-//! - `modules`: module `m` ([`ModuleMeta`]), whose files are in object storage
-//!   under the build named in the record, uploaded before the row is written,
-//!   and its declarations for the search service ([`SnapshotDecls`])
-//! - `module_imports`: `m` imports `parent`
+//! - `modules`: module `m` ([`ModuleMeta`]): its build and files, whose
+//!   files are in object storage under the build, uploaded before the row is
+//!   written; its header, status, whether it is verified and when it was
+//!   built, which listings read ([`ModuleSummary`]); its code and check; and
+//!   its declarations for the search service ([`SnapshotDecls`]). What it
+//!   needs is read through `module_imports`, not stored with it, so a record
+//!   doesn't grow with the depth of its imports
+//! - `module_imports`: `m` imports `parent`, at `position` in its header
 //! - `entries`: entry `e` ([`EntryMeta`]), its labels, and the idempotency key
 //!   it was made with
+//! - `links`: what entry `e` replaces, with what its create allowed and
+//!   found, and the entry its run starts at
 //! - `described`: the search service's description and vector of a
 //!   declaration of `m`, which only it reads
 //! - `leases`: a lease held by one process, e.g. the search replica that
@@ -34,11 +40,14 @@ use serde_json::Value;
 use crate::backend::dispatch;
 use crate::db::{Db, DbError, IsConflict};
 
+/// A module's record. The catalog stores it as columns, `module_imports`, and
+/// a [`ModuleBody`]: what it imports is read back in the header's order, and
+/// what it needs, `modules`, is read through the imports of what it imports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleMeta {
-    /// Ids of the modules it imports.
+    /// Ids of the modules it imports, in the header's order.
     pub imports: Vec<String>,
-    /// Every module it needs, its own last.
+    /// Every module it needs, its own last, each after what it imports.
     pub modules: Vec<Module>,
     /// See [`Snapshot::header`](pisa_protocol::api::Snapshot::header).
     pub header: String,
@@ -55,6 +64,83 @@ pub struct ModuleMeta {
     pub macros: bool,
     pub result: CheckResult,
     pub created: u64,
+}
+
+/// What the catalog keeps of a module's record as JSON: its code, its check
+/// result and whether it uses macros. The rest is columns.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ModuleBody {
+    pub code: String,
+    #[serde(default)]
+    pub macros: bool,
+    pub result: CheckResult,
+}
+
+impl ModuleBody {
+    pub(crate) fn of(meta: &ModuleMeta) -> ModuleBody {
+        ModuleBody {
+            code: meta.code.clone(),
+            macros: meta.macros,
+            result: meta.result.clone(),
+        }
+    }
+}
+
+/// What a listing shows of a module: its record's columns and its imports,
+/// without its code or check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModuleSummary {
+    pub imports: Vec<String>,
+    pub header: String,
+    pub status: ProofStatus,
+    pub verified: bool,
+    pub created: u64,
+}
+
+impl ModuleMeta {
+    pub fn summary(&self) -> ModuleSummary {
+        ModuleSummary {
+            imports: self.imports.clone(),
+            header: self.header.clone(),
+            status: self.status,
+            verified: self.verified,
+            created: self.created,
+        }
+    }
+}
+
+/// A module's status as its column holds it.
+pub(crate) fn status_text(status: ProofStatus) -> Result<String, Fail> {
+    match serde_json::to_value(status)? {
+        Value::String(text) => Ok(text),
+        other => Err(Fail::Api(internal(format!("a status as {other}")))),
+    }
+}
+
+pub(crate) fn status_of(text: &str) -> Result<ProofStatus, Fail> {
+    Ok(serde_json::from_value(Value::String(text.to_string()))?)
+}
+
+/// The modules `root` needs, each after what it imports and `root` last, as
+/// the header orders imports: `imports` has each module's imports in order.
+pub(crate) fn closure_order(root: &str, imports: &HashMap<String, Vec<String>>) -> Vec<String> {
+    fn visit(
+        m: &str,
+        imports: &HashMap<String, Vec<String>>,
+        seen: &mut HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        if !seen.insert(m.to_string()) {
+            return;
+        }
+        for parent in imports.get(m).into_iter().flatten() {
+            visit(parent, imports, seen, out);
+        }
+        out.push(m.to_string());
+    }
+    let mut out = Vec::new();
+    visit(root, imports, &mut HashSet::new(), &mut out);
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +548,12 @@ impl Catalog {
         dispatch!(&self.db, module(&self.version, m))?.ok_or_else(|| unknown_module(m))
     }
 
+    /// What a listing shows of each of `ms` that is kept, by id, without
+    /// their code, check or closure: a few queries, whatever their number.
+    pub async fn summaries(&self, ms: &[String]) -> Result<HashMap<String, ModuleSummary>, Error> {
+        dispatch!(&self.db, summaries(&self.version, ms))
+    }
+
     /// Rewrites module `m`'s record with `f` if the module's own build is
     /// still `build`. `None` if it isn't, because the module was deleted and
     /// built again: the record is then left alone.
@@ -500,11 +592,12 @@ impl Catalog {
         decls: Option<&SnapshotDecls>,
         entry: NewEntry,
     ) -> Result<(String, EntryMeta, ModuleMeta), Error> {
-        let record = to_record(meta)?;
+        // Refused before the transaction if it is too large.
+        to_record(&ModuleBody::of(meta))?;
         let decls = decls.map(to_record).transpose()?;
         dispatch!(
             &self.db,
-            commit(&self.version, m, meta, &record, decls.as_ref(), &entry)
+            commit(&self.version, m, meta, decls.as_ref(), &entry)
         )
     }
 
@@ -1243,6 +1336,92 @@ mod tests {
             // A branch delete takes its entries out of the run.
             catalog.remove_branch(&p2).await.unwrap();
             assert_eq!(run(vec![p3.clone()]).await, std::slice::from_ref(&p3));
+        }
+    }
+
+    /// The order a create once stored a closure in: each import's closure in
+    /// the header's order, each module once, then the module's own.
+    fn stored_order(m: &str, imports: &HashMap<String, Vec<String>>) -> Vec<String> {
+        let mut order: Vec<String> = Vec::new();
+        for parent in imports.get(m).into_iter().flatten() {
+            for x in stored_order(parent, imports) {
+                if !order.contains(&x) {
+                    order.push(x);
+                }
+            }
+        }
+        order.push(m.to_string());
+        order
+    }
+
+    #[test]
+    fn a_closure_is_ordered_as_creates_stored_it() {
+        // Small pseudo-random DAGs: each module imports some earlier ones.
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n.max(1)
+        };
+        for _ in 0..200 {
+            let n = 2 + next(12) as usize;
+            let mut imports: HashMap<String, Vec<String>> = HashMap::new();
+            for i in 1..n {
+                let mut parents = Vec::new();
+                for _ in 0..next(4) {
+                    let p = format!("m{}", next(i as u64));
+                    if !parents.contains(&p) {
+                        parents.push(p);
+                    }
+                }
+                imports.insert(format!("m{i}"), parents);
+            }
+            let top = format!("m{}", n - 1);
+            assert_eq!(closure_order(&top, &imports), stored_order(&top, &imports));
+        }
+    }
+
+    /// A module's record reads back as it was written, its closure from what
+    /// its imports import, and a listing's summaries from its columns.
+    #[tokio::test]
+    async fn a_record_reads_back_with_its_closure() {
+        for catalog in catalogs().await {
+            let child = |id: &str, imports: &[&str], modules: Vec<Module>| ModuleMeta {
+                imports: imports.iter().map(|s| s.to_string()).collect(),
+                modules,
+                ..meta(id)
+            };
+            let own = |id: &str| meta(id).modules.pop().unwrap();
+            catalog
+                .commit("a", &meta("a"), None, no_labels())
+                .await
+                .unwrap();
+            catalog
+                .commit("b", &meta("b"), None, no_labels())
+                .await
+                .unwrap();
+            let c = child("c", &["b", "a"], vec![own("b"), own("a"), own("c")]);
+            catalog.commit("c", &c, None, no_labels()).await.unwrap();
+            let d = child(
+                "d",
+                &["a", "c"],
+                vec![own("a"), own("b"), own("c"), own("d")],
+            );
+            catalog.commit("d", &d, None, no_labels()).await.unwrap();
+
+            let read = catalog.module("d").await.unwrap();
+            let ids: Vec<&str> = read.modules.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(ids, ["a", "b", "c", "d"]);
+            assert_eq!(read.imports, ["a", "c"]);
+            assert_eq!((read.header, read.status), (d.header.clone(), d.status));
+            let summaries = catalog
+                .summaries(&["c".to_string(), "d".to_string(), "gone".to_string()])
+                .await
+                .unwrap();
+            assert_eq!(summaries.len(), 2);
+            assert_eq!(summaries["c"].imports, ["b", "a"]);
+            assert_eq!(summaries["d"], d.summary());
         }
     }
 
