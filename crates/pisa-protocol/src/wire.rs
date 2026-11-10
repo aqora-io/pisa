@@ -29,6 +29,7 @@ pub enum Job {
     SnapshotDependents(SnapshotDependentsJob),
     SnapshotRebuild(SnapshotRebuildJob),
     SnapshotAudit(SnapshotAuditJob),
+    SnapshotExport(SnapshotExportJob),
     DocumentOpen(DocumentOpenJob),
     DocumentEdit(DocumentEditJob),
     DocumentGoals(DocumentGoalsJob),
@@ -151,6 +152,48 @@ pub struct SnapshotAuditJob {
     pub allow: Vec<String>,
 }
 
+/// `GET /snapshots/export`, its query checked by the router.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotExportJob {
+    /// The spec's snapshot ids, of the job's version.
+    pub against: Vec<String>,
+    /// The definitions the leader allows the run's heads to change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+}
+
+/// A run as a Lake project, for `lake comparator`: its files, and the pairs
+/// of a spec snapshot and a head it reaches that comparator judges.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportedRun {
+    pub files: Vec<ExportedFile>,
+    pub pairs: Vec<ExportedPair>,
+    /// As in the audit: a run with one isn't accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forks: Vec<api::AuditFork>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportedFile {
+    /// Relative to the project's root.
+    pub path: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportedPair {
+    /// The spec snapshot's id.
+    pub spec: String,
+    /// The head's id.
+    pub head: String,
+    /// Its comparator configuration's path in the project.
+    pub config: String,
+    /// Targets, holes and assumptions it leaves out because they are
+    /// private, which comparator can't name across two modules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+}
+
 /// `POST /snapshots/rebuild`, as a plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapshotRebuildJob {
@@ -235,6 +278,7 @@ pub enum JobResult {
     SnapshotDependents(Result<api::ListDependentsResponse, api::Error>),
     SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
     SnapshotAudit(Result<api::AuditSnapshotsResponse, api::Error>),
+    SnapshotExport(Result<ExportedRun, api::Error>),
     /// An opened or edited document.
     Document(Result<api::Document, api::Error>),
     DocumentGoals(Result<api::DocumentGoals, api::Error>),
@@ -361,6 +405,29 @@ mod tests {
             let back: JobResult = serde_json::from_value(value).unwrap();
             assert_eq!(format!("{back:?}"), format!("{result:?}"));
         }
+    }
+
+    #[test]
+    fn an_export_round_trips() {
+        let run = ExportedRun {
+            files: vec![ExportedFile {
+                path: "lakefile.toml".into(),
+                text: "name = \"pisa_run\"\n".into(),
+            }],
+            pairs: vec![ExportedPair {
+                spec: "v~s".into(),
+                head: "v~h".into(),
+                config: "comparator/1.json".into(),
+                skipped: Vec::new(),
+            }],
+            forks: Vec::new(),
+        };
+        let value = serde_json::to_value(JobResult::SnapshotExport(Ok(run.clone()))).unwrap();
+        assert_eq!(value["kind"], "snapshot_export");
+        let Ok(JobResult::SnapshotExport(Ok(back))) = serde_json::from_value(value) else {
+            panic!("not an export")
+        };
+        assert_eq!(back, run);
     }
 
     #[test]

@@ -17,6 +17,7 @@ pub mod documents;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
+pub mod runs;
 pub mod sessions;
 pub mod snapshots;
 pub mod store;
@@ -189,6 +190,12 @@ pub(crate) async fn run_job(
         }
         Job::SnapshotAudit(j) => {
             JobResult::SnapshotAudit(pool.snapshots().audit_against(&j.against, &j.allow).await)
+        }
+        Job::SnapshotExport(j) => {
+            let project = pool.launcher().project();
+            JobResult::SnapshotExport(
+                runs::export(pool.snapshots(), project, &j.against, &j.allow).await,
+            )
         }
         job @ (Job::DocumentOpen(_)
         | Job::DocumentEdit(_)

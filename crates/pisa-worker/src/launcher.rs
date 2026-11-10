@@ -124,6 +124,11 @@ impl Launcher {
         })
     }
 
+    /// The Lake project the REPL imports from, if there is one.
+    pub fn project(&self) -> Option<&Path> {
+        self.project.as_deref()
+    }
+
     /// A private writable directory for the slot, visible inside the sandbox
     /// at the same path.
     pub fn slot_dir(&self, slot: usize) -> PathBuf {

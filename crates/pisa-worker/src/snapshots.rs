@@ -936,7 +936,11 @@ impl Snapshots {
     }
 
     /// The snapshot id of entry `entry`, as the API answers it.
-    fn id(&self, entry: &str) -> String {
+    pub(crate) fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
+    pub(crate) fn id(&self, entry: &str) -> String {
         let id = SnapshotId {
             version: self.version.clone(),
             entry: entry.to_string(),
@@ -945,7 +949,7 @@ impl Snapshots {
     }
 
     /// The entry snapshot id `id` names, if it is of this worker's version.
-    fn parse(&self, id: &str) -> Result<String, Error> {
+    pub(crate) fn parse(&self, id: &str) -> Result<String, Error> {
         let parsed = SnapshotId::parse(id)
             .ok_or_else(|| Error::new(ErrorKind::BadRequest, snapshot_id_error(id)))?;
         if parsed.version != self.version {
