@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 use pisa_protocol::api::{Detail, Error, ErrorKind};
 use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{
-    CommandResponse, Pos, ReplCommand, ReplResponse, Severity, at_positions, tactics,
+    self, CommandResponse, Pos, ReplCommand, ReplResponse, Severity, at_positions, tactics,
 };
 use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
 
-use crate::policy::AXIOM_REPORT;
+use crate::policy::{AXIOM_REPORT, Finding};
 use crate::pool::{HeaderFailure, Lease, Pool};
 
 /// Time allowed for the axiom report, which only walks the new declarations.
@@ -28,18 +28,27 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         verification: None,
     };
 
-    let mut slot = pool.acquire(&split.header_key, None).await;
-    let rejected = slot.policy().scan(&split.body, false);
-    if !rejected.is_empty() {
-        outcome.error = Some(policy_error(&rejected));
+    // Before waiting for a slot: refused code needs none.
+    let found = pool.policy().findings(&split.body, false);
+    if !found.is_empty() {
+        outcome.error = Some(policy_error(&found, split.header_lines));
+        outcome.response = Some(CommandResponse {
+            env: 0,
+            messages: policy_messages(&found, split.header_lines),
+            sorries: Vec::new(),
+            tactics: Vec::new(),
+            at: Vec::new(),
+            infotree: None,
+        });
         outcome.verification = Some(Verification {
             ok: false,
-            reasons: rejected,
+            reasons: found.into_iter().map(|f| f.reason).collect(),
             declarations: Vec::new(),
             changes: Vec::new(),
         });
         return outcome;
     }
+    let mut slot = pool.acquire(&split.header_key, None).await;
 
     let env = match slot.warm_up(&split.header, &split.header_key).await {
         Ok((env, _)) => env,
@@ -137,11 +146,30 @@ fn infotree(job: &CheckJob) -> Option<&'static str> {
     }
 }
 
-pub fn policy_error(reasons: &[String]) -> Error {
-    Error::new(
-        ErrorKind::Policy,
-        format!("rejected: {}", reasons.join(", ")),
-    )
+/// The error for code the policy refuses, which `found` says why, with
+/// where the first reason is and what to do instead. The scanned text starts
+/// after `header_lines` lines of the code.
+pub fn policy_error(found: &[Finding], header_lines: u64) -> Error {
+    let reasons: Vec<&str> = found.iter().map(|f| f.reason.as_str()).collect();
+    let mut message = format!("rejected: {}", reasons.join(", "));
+    if let Some(f) = found.first() {
+        message.push_str(&format!(" (line {}: {})", f.line + header_lines, f.hint));
+    }
+    Error::new(ErrorKind::Policy, message)
+}
+
+/// What the policy found, as messages at their places in the code.
+pub fn policy_messages(found: &[Finding], header_lines: u64) -> Vec<repl::Message> {
+    let message = |f: &Finding| repl::Message {
+        severity: Severity::Error,
+        pos: repl::Pos {
+            line: f.line + header_lines,
+            column: f.column,
+        },
+        end_pos: None,
+        data: format!("{}: {}", f.reason, f.hint),
+    };
+    found.iter().map(message).collect()
 }
 
 pub fn unexpected(response: ReplResponse) -> Error {

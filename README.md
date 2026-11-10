@@ -1343,12 +1343,21 @@ A check is `ok` only when all of these hold:
 - The code contains no metaprogramming: `#eval`, `run_cmd`, `elab`,
   elaborator attributes, `unsafe`, `implemented_by`, simprocs, attributes
   that install code to run later (`@[init]`, `@[tactic]`, delaborators,
-  `norm_num` and `positivity` extensions) and similar.
+  `norm_num` and `positivity` extensions) and similar. Attributes are refused
+  where they are applied, in `@[…]` and `attribute […]`, so `extern` or
+  `init` can still name a variable, and a name in `«»` is never a command.
 - Any `set_option` changes only an allowlisted option: resource limits
-  (`maxHeartbeats` and similar), `linter.*`, `pp.*`, `trace.*`, and
-  `backward.*`, which restores older elaborator behaviour that Mathlib-style
-  code often asks for. Options that skip the kernel, such as
-  `debug.skipKernelTC`, are rejected.
+  (`maxHeartbeats`, `maxSynthPendingDepth` and similar), `diagnostics`,
+  `quotPrecheck*`, `linter.*`, `pp.*`, `trace.*`, and `backward.*`, which
+  restores older elaborator behaviour that Mathlib-style code often asks
+  for. Options that skip the kernel, such as `debug.skipKernelTC`, are
+  rejected.
+
+Code the scan refuses is refused before it waits for a worker's Lean
+process. The result's `reasons` say what (`forbidden: syntax`), and its
+`messages` say where, each with what to do instead, such as that a snapshot
+allows the macro family; a session's or a tactic's error says the same of
+the first.
 
 Lean's `autoImplicit` option is off by default, in checks, sessions and
 snapshot builds alike, so a name that isn't bound in a statement is an error
