@@ -2048,6 +2048,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pisa-snapshots"
+version = "0.1.0"
+dependencies = [
+ "pisa-db",
+ "pisa-protocol",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pisa-tests"
 version = "0.1.0"
 dependencies = [
@@ -2081,6 +2092,7 @@ dependencies = [
  "pisa-db",
  "pisa-protocol",
  "pisa-repl",
+ "pisa-snapshots",
  "serde",
  "serde_json",
  "sha2",

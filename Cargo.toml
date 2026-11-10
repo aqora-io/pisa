@@ -16,6 +16,7 @@ pisa-repl = { path = "crates/pisa-repl" }
 pisa-worker = { path = "crates/pisa-worker" }
 pisa-router = { path = "crates/pisa-router" }
 pisa-search = { path = "crates/pisa-search" }
+pisa-snapshots = { path = "crates/pisa-snapshots" }
 
 anyhow = "1"
 axum = "0.8"

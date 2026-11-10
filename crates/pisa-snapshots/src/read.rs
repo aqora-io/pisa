@@ -3,9 +3,9 @@
 
 use super::*;
 
-impl Snapshots {
+impl Reader {
     /// The entry `r` names, with its module's declarations.
-    pub(super) async fn replacing(&self, r: &Replaces) -> Result<Replacing, Error> {
+    pub async fn replacing(&self, r: &Replaces) -> Result<Replacing, Error> {
         let entry = self.parse(&r.snapshot_id)?;
         let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
@@ -25,7 +25,7 @@ impl Snapshots {
     /// The error for a spec's `holes` that name something other than a
     /// definition or inductive type of its module, which declares
     /// `declarations`, or of the snapshot modules it builds on, `closure`.
-    pub(super) async fn holes_error(
+    pub async fn holes_error(
         &self,
         holes: &[String],
         declarations: &[Declaration],
@@ -58,10 +58,7 @@ impl Snapshots {
     /// The refusal of a create that replaces `entry` when another entry
     /// replaces it already: the error, which names the replacers and the
     /// run's heads from there, and the heads. `None` if `entry` is a head.
-    pub(super) async fn replaced_by(
-        &self,
-        entry: &str,
-    ) -> Result<Option<(Error, Vec<String>)>, Error> {
+    pub async fn replaced_by(&self, entry: &str) -> Result<Option<(Error, Vec<String>)>, Error> {
         let replacers = self.catalog.replacers(entry).await?;
         if replacers.is_empty() {
             return Ok(None);
@@ -80,7 +77,7 @@ impl Snapshots {
     /// The snapshot ids of the heads of the run from `entry`: the entries
     /// that nothing replaces, reached from `entry` through what replaces it,
     /// oldest first.
-    pub(super) async fn heads_from(&self, entry: &str) -> Result<Vec<String>, Error> {
+    pub async fn heads_from(&self, entry: &str) -> Result<Vec<String>, Error> {
         let created = self.catalog.entry(entry).await?.created_micros;
         let mut todo = vec![(entry.to_string(), created)];
         let mut heads = Vec::new();
@@ -97,7 +94,7 @@ impl Snapshots {
 
     /// The snapshot modules a replacement of `replacing` that builds on
     /// `needs` (its own module, `own`, among them) swaps; see [`Swapped`].
-    pub(super) async fn swapped(
+    pub async fn swapped(
         &self,
         replacing: &Replacing,
         needs: &[String],
@@ -110,7 +107,7 @@ impl Snapshots {
     /// [`swapped`](Self::swapped) for a replacement that builds on modules
     /// not made yet: each module `originals` maps is taken to declare what
     /// the module it maps to does. The records it reads are kept in `metas`.
-    pub(super) async fn predicted_swap(
+    pub(crate) async fn predicted_swap(
         &self,
         replacing: &Replacing,
         needs: &[String],
@@ -146,7 +143,7 @@ impl Snapshots {
     }
 
     /// The signatures the search exports of `modules` show, by name.
-    pub(super) async fn exports_of(&self, modules: &[String]) -> HashMap<String, String> {
+    pub async fn exports_of(&self, modules: &[String]) -> HashMap<String, String> {
         let mut out = HashMap::new();
         for m in modules {
             if let Ok(Some(exported)) = self.catalog.decls(m).await {
@@ -159,7 +156,7 @@ impl Snapshots {
     /// Fills `was` and `now` of each change to a type or an assumption: the
     /// signature in the replaced module or the lost snapshot it is from, by
     /// their search exports, and in `now`, the new side's signatures by name.
-    pub(super) async fn sign(
+    pub async fn sign(
         &self,
         changes: &mut [DeclarationChange],
         replacing: &Replacing,
@@ -180,7 +177,7 @@ impl Snapshots {
     }
 
     /// The records of the modules `header` imports.
-    pub(super) async fn parents(&self, header: &str) -> Result<Vec<ModuleMeta>, Error> {
+    pub async fn parents(&self, header: &str) -> Result<Vec<ModuleMeta>, Error> {
         let mut parents = Vec::new();
         for import in snapshot::imports(header).map_err(internal)? {
             parents.push(self.catalog.module(&import).await?);
@@ -204,7 +201,7 @@ impl Snapshots {
 
     /// Module `m`'s exports, each with the description search's leader has
     /// recorded for it, if any.
-    pub(super) async fn exports(&self, m: &str) -> Result<Vec<Export>, Error> {
+    pub(crate) async fn exports(&self, m: &str) -> Result<Vec<Export>, Error> {
         let Some(decls) = self.catalog.decls(m).await? else {
             return Ok(Vec::new());
         };

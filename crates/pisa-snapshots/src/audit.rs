@@ -6,17 +6,17 @@ use super::*;
 /// The assumptions a spec permits (see [`AuditSnapshotsResponse::clean`]):
 /// those declared in a spec snapshot's module or in a module it builds on.
 #[derive(Debug, Default)]
-pub(super) struct Permitted {
+pub(crate) struct Permitted {
     /// Their names.
-    pub(super) names: HashSet<String>,
+    pub names: HashSet<String>,
     /// The spec modules' own private ones, without their module: a head's
     /// module declares them as its own.
-    pub(super) own_private: HashSet<String>,
+    pub own_private: HashSet<String>,
 }
 
 impl Permitted {
     /// Adds the assumption `name`, declared in a spec module if `of_spec`.
-    pub(super) fn add(&mut self, name: &str, of_spec: bool) {
+    pub(crate) fn add(&mut self, name: &str, of_spec: bool) {
         if of_spec && name.starts_with("_private.") {
             self.own_private.insert(normalised(name).into_owned());
         }
@@ -26,14 +26,14 @@ impl Permitted {
     /// Whether it permits `assumption` on a head whose module is `head`: by
     /// name, or as a private one of the head's own module that is a spec
     /// module's own. Another module's private name isn't the spec's.
-    pub(super) fn permits(&self, assumption: &str, head: &str) -> bool {
+    pub(crate) fn permits(&self, assumption: &str, head: &str) -> bool {
         let own = format!("_private.{}.", snapshot::module(head));
         self.names.contains(assumption)
             || (assumption.starts_with(&own) && self.own_private.contains(&*normalised(assumption)))
     }
 }
 
-impl Snapshots {
+impl Reader {
     /// What the entries with every label in `labels` rest on; see
     /// [`AuditSnapshotsResponse`]. It reads records only.
     pub async fn audit(
@@ -237,7 +237,7 @@ impl Snapshots {
     /// replace it. `None` if either isn't verified, or is gone: their records
     /// are then the build's report, which the code judged could have
     /// influenced. Verified, their imports are too.
-    pub(super) async fn rederive(
+    pub(crate) async fn rederive(
         &self,
         spec: &String,
         head: &str,
@@ -294,7 +294,7 @@ impl Snapshots {
     /// every one is accepted there under the assumptions `permitted` (see
     /// [`AuditSnapshotsResponse::clean`]). `heads` holds each head's module,
     /// and `metas` the module records.
-    pub(super) fn targets(
+    pub(crate) fn targets(
         &self,
         specs: &[(String, EntryMeta)],
         reached: &[Vec<String>],
@@ -363,7 +363,7 @@ impl Snapshots {
 
     /// Entry `e`'s link, as an audit lists it, if it let definitions change:
     /// under an `allow`, or filling holes.
-    pub(super) fn audit_link(&self, e: &str, entry_meta: &EntryMeta) -> Option<AuditLink> {
+    pub(crate) fn audit_link(&self, e: &str, entry_meta: &EntryMeta) -> Option<AuditLink> {
         let changed = entry_meta
             .replacement
             .as_ref()
@@ -386,7 +386,7 @@ impl Snapshots {
     /// that stands for it: their declarations by status, the assumptions
     /// they use, and what isn't proved. `metas` holds the module records
     /// read so far, and gains those read here.
-    pub(super) async fn count(
+    pub(crate) async fn count(
         &self,
         entries: &BTreeMap<String, String>,
         metas: &mut HashMap<String, ModuleMeta>,
@@ -419,7 +419,7 @@ impl Snapshots {
                     used_by.entry(a.clone()).or_default().push(d.name.clone());
                 }
                 if status >= ProofStatus::Sorry {
-                    let allowed = &self.policy.allowed_axioms;
+                    let allowed = &self.allowed_axioms;
                     audit.not_proved.push(AuditUnproved {
                         name: d.name.clone(),
                         snapshot_id: self.id(entry),
@@ -476,7 +476,7 @@ impl Snapshots {
 
     /// Module `m`'s record, from `metas` or read into it; `None` if it is
     /// gone.
-    pub(super) async fn cached<'a>(
+    pub(crate) async fn cached<'a>(
         &self,
         m: &str,
         metas: &'a mut HashMap<String, ModuleMeta>,
@@ -493,7 +493,7 @@ impl Snapshots {
 
     /// [`cached`](Self::cached) for a module that must be kept: `not_found`
     /// if it is gone, as [`Catalog::module`] has it.
-    pub(super) async fn module_cached<'a>(
+    pub(crate) async fn module_cached<'a>(
         &self,
         m: &str,
         metas: &'a mut HashMap<String, ModuleMeta>,
@@ -505,7 +505,7 @@ impl Snapshots {
 
     /// The module among `modules` that declares the axiom `name`, loading
     /// the records `metas` doesn't hold yet.
-    pub(super) async fn declaring(
+    pub(crate) async fn declaring(
         &self,
         name: &str,
         modules: &BTreeSet<String>,

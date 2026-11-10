@@ -29,8 +29,7 @@
 //! `audit` read the catalog, and `cache`, `create`, `build`, `verify` and
 //! `delete` the store and the local cache too.
 
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -38,24 +37,15 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::api::{
-    Allow, AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditSnapshotsResponse,
-    AuditTarget, AuditUnproved, CheckResult, CreateSnapshotResponse, Declaration,
-    DeleteSnapshotResponse, Error, ErrorKind, Export, ListDependentsResponse,
-    ListSnapshotsResponse, RebuildItem, RebuildReplaced, RebuildSnapshotsResponse, Replacement,
-    Replaces, Snapshot, SnapshotDetail, SnapshotId, VerifyFailure, VerifySnapshotResponse,
+    CheckResult, CreateSnapshotResponse, DeleteSnapshotResponse, Error, ErrorKind, Replacement,
+    Snapshot, VerifyFailure, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
-use pisa_protocol::labels::{
-    MAX_LABELS, MAX_LIMIT, check_key, check_labels, is_cursor, snapshot_id_error,
-};
+use pisa_protocol::labels::{check_key, check_labels};
 use pisa_protocol::repl::CommandResponse;
-use pisa_protocol::search::{Description, Informal};
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::{
-    Change, DeclarationChange, ProofStatus, ReportedDeclaration, Verification, grouped, normalised,
-    parent_in, statement_changes,
-};
-use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob, SnapshotRebuildJob};
+use pisa_protocol::verify::{ReportedDeclaration, Verification};
+use pisa_protocol::wire::{CheckOutcome, SnapshotCreateJob};
 use sha2::{Digest, Sha256};
 
 use crate::catalog::{
@@ -68,23 +58,20 @@ use crate::launcher::{Unfinished, Verdict};
 use crate::policy::{Policy, parse_declarations, parse_export, uses_macros};
 use crate::pool::{Lease, Pool};
 
-mod audit;
 mod build;
 mod cache;
-mod compare;
 mod create;
 mod delete;
-mod plan;
-mod read;
 #[cfg(test)]
 mod tests;
 mod verify;
 
 use cache::*;
-use compare::*;
 use create::*;
-use plan::*;
 use verify::*;
+
+pub use pisa_snapshots::Reader;
+use pisa_snapshots::compare::*;
 
 pub struct Snapshots {
     store: Arc<dyn ObjectStore>,
@@ -99,8 +86,8 @@ pub struct Snapshots {
     confirmed: Mutex<HashMap<String, Instant>>,
     /// One task at a time loads or builds a given snapshot.
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// The pool's policy, for the axioms an audit lists.
-    policy: Policy,
+    /// What reads the catalog: snapshots, audits, rebuild plans.
+    reader: Reader,
 }
 
 fn internal(e: impl std::fmt::Display) -> Error {
@@ -134,60 +121,38 @@ impl Snapshots {
     ) -> Self {
         Snapshots {
             store,
-            catalog: Catalog::new(db, version.clone()),
+            catalog: Catalog::new(db.clone(), version.clone()),
+            reader: Reader::new(db, version.clone(), policy.allowed_axioms),
             version,
             root,
             confirm_every,
             cached: Mutex::default(),
             confirmed: Mutex::default(),
             locks: Mutex::default(),
-            policy,
         }
     }
 
-    /// The snapshot id of entry `entry`, as the API answers it.
+    /// What reads the catalog of this worker's version.
+    pub fn reader(&self) -> &Reader {
+        &self.reader
+    }
+
     pub(crate) fn catalog(&self) -> &Catalog {
         &self.catalog
     }
 
+    /// The snapshot id of entry `entry`, as the API answers it.
     pub(crate) fn id(&self, entry: &str) -> String {
-        let id = SnapshotId {
-            version: self.version.clone(),
-            entry: entry.to_string(),
-        };
-        id.to_string()
+        self.reader.id(entry)
     }
 
     /// The entry snapshot id `id` names, if it is of this worker's version.
     pub(crate) fn parse(&self, id: &str) -> Result<String, Error> {
-        let parsed = SnapshotId::parse(id)
-            .ok_or_else(|| Error::new(ErrorKind::BadRequest, snapshot_id_error(id)))?;
-        if parsed.version != self.version {
-            return Err(Error::new(
-                ErrorKind::BadRequest,
-                format!("snapshot {id} belongs to version {}", parsed.version),
-            ));
-        }
-        Ok(parsed.entry)
+        self.reader.parse(id)
     }
 
     /// Entry `entry`, on the module `meta` records, as the API answers it.
     fn snapshot(&self, entry: String, entry_meta: EntryMeta, meta: &ModuleMeta) -> Snapshot {
-        Snapshot {
-            id: self.id(&entry),
-            version: self.version.clone(),
-            module: snapshot::module(&entry_meta.module),
-            header: meta.header.clone(),
-            imports: meta.imports.iter().map(|i| snapshot::module(i)).collect(),
-            labels: entry_meta.labels,
-            replaces: entry_meta.replaces.map(|r| Replaces {
-                snapshot_id: self.id(&r.snapshot_id),
-                ..r
-            }),
-            holes: entry_meta.holes,
-            status: meta.status,
-            verified: meta.verified,
-            created: entry_meta.created_micros / 1_000_000,
-        }
+        self.reader.snapshot(entry, entry_meta, meta)
     }
 }

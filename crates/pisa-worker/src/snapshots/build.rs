@@ -82,7 +82,7 @@ impl Snapshots {
         if let Err(e) = self.ensure(&split.header, None).await {
             return fail(outcome, e);
         }
-        let parents = match self.parents(&split.header).await {
+        let parents = match self.reader.parents(&split.header).await {
             Ok(parents) => parents,
             Err(e) => return fail(outcome, e),
         };
@@ -103,7 +103,7 @@ impl Snapshots {
                     }
                 }
                 needs.push(id.to_string());
-                let swapped = match self.swapped(r, &needs, id).await {
+                let swapped = match self.reader.swapped(r, &needs, id).await {
                     Ok(swapped) => swapped,
                     Err(e) => return fail(outcome, e),
                 };
@@ -272,10 +272,10 @@ impl Snapshots {
                     self.unbuild(slot, id);
                     let gained: Vec<String> =
                         swapped.gained.iter().map(|(m, _)| m.clone()).collect();
-                    let mut now = self.exports_of(&gained).await;
+                    let mut now = self.reader.exports_of(&gained).await;
                     let own = exported.iter().flatten();
                     now.extend(own.map(|d| (d.name.clone(), d.signature.clone())));
-                    self.sign(&mut changes, r, swapped, &now).await;
+                    self.reader.sign(&mut changes, r, swapped, &now).await;
                     verification.ok = false;
                     verification
                         .reasons
@@ -294,6 +294,7 @@ impl Snapshots {
             .cloned()
             .collect();
         match self
+            .reader
             .holes_error(&job.holes, &verification.declarations, &closure)
             .await
         {

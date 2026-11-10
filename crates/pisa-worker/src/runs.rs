@@ -45,7 +45,7 @@ pub async fn export(
     against: &[String],
     allow: &[String],
 ) -> Result<ExportedRun, Error> {
-    let audit = snapshots.audit_against(against, allow).await?;
+    let audit = snapshots.reader().audit_against(against, allow).await?;
     let catalog = snapshots.catalog();
     let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
     let mut record = async |m: &str| -> Result<ModuleMeta, Error> {

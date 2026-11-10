@@ -17,8 +17,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use pisa_protocol::api::{AuditComparison, AuditReview, Error, ReviewDeclaration, ReviewOrigin};
 use pisa_protocol::verify::{Declaration, normalised};
 
-use crate::catalog::{ModuleMeta, SnapshotDecl};
-use crate::snapshots::Snapshots;
+use pisa_db::catalog::{Catalog, ModuleMeta, SnapshotDecl};
+
+use crate::Reader;
 
 /// Whether the walk follows a declaration's value: a definition's, and an
 /// inductive type's, whose "value" is its constructors and recursor.
@@ -66,7 +67,7 @@ pub fn closure(start: &[String], records: &HashMap<String, Declaration>) -> Vec<
 /// a head it reaches, with the spec's holes and `allow` as the definitions
 /// shown by value.
 pub async fn review(
-    snapshots: &Snapshots,
+    snapshots: &Reader,
     comparisons: &[AuditComparison],
     allow: &[String],
 ) -> Result<Vec<AuditReview>, Error> {
@@ -212,7 +213,7 @@ fn spec_order(spec: &ModuleMeta, name: &str) -> usize {
 
 async fn record(
     metas: &mut HashMap<String, ModuleMeta>,
-    catalog: &crate::catalog::Catalog,
+    catalog: &Catalog,
     m: &str,
 ) -> Result<ModuleMeta, Error> {
     if let Some(meta) = metas.get(m) {

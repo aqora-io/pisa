@@ -1,0 +1,15 @@
+[package]
+name = "pisa-snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "What reads the snapshot catalog: snapshots, the comparison of a replacement with what it replaces, audits, review lists and rebuild plans"
+
+[dependencies]
+pisa-db.workspace = true
+pisa-protocol.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -115,7 +115,7 @@ impl Snapshots {
             }
         }
         let replacing = match &job.replaces {
-            Some(r) => match self.replacing(r).await {
+            Some(r) => match self.reader.replacing(r).await {
                 Ok(r) => Some(r),
                 Err(e) => {
                     response.check.error = Some(e);
@@ -125,7 +125,7 @@ impl Snapshots {
             None => None,
         };
         if let Some(r) = replacing.as_ref().filter(|_| !job.fork) {
-            match self.replaced_by(&r.entry).await {
+            match self.reader.replaced_by(&r.entry).await {
                 Ok(Some((error, heads))) => {
                     response.check.error = Some(error);
                     response.heads = heads;
@@ -152,7 +152,7 @@ impl Snapshots {
                         .error
                         .as_ref()
                         .is_some_and(|e| e.kind == ErrorKind::Conflict)
-                    && let Ok(Some((error, heads))) = self.replaced_by(&r.entry).await
+                    && let Ok(Some((error, heads))) = self.reader.replaced_by(&r.entry).await
                 {
                     done.check.error = Some(error);
                     done.heads = heads;
@@ -292,7 +292,7 @@ impl Snapshots {
         let replacement = match replacing {
             Some(r) => {
                 let needs: Vec<String> = ids(&meta.modules).cloned().collect();
-                let swapped = match self.swapped(r, &needs, id).await {
+                let swapped = match self.reader.swapped(r, &needs, id).await {
                     Ok(swapped) => swapped,
                     Err(e) => {
                         response.check.error = Some(e);
@@ -308,8 +308,8 @@ impl Snapshots {
                     Err(mut changes) => {
                         let mut new = vec![id.to_string()];
                         new.extend(swapped.gained.iter().map(|(m, _)| m.clone()));
-                        let now = self.exports_of(&new).await;
-                        self.sign(&mut changes, r, &swapped, &now).await;
+                        let now = self.reader.exports_of(&new).await;
+                        self.reader.sign(&mut changes, r, &swapped, &now).await;
                         let mut refused = self.refused(meta);
                         refused
                             .check
@@ -324,6 +324,7 @@ impl Snapshots {
         };
         let closure: Vec<String> = ids(&meta.modules).filter(|m| *m != id).cloned().collect();
         match self
+            .reader
             .holes_error(&job.holes, &meta.result.declarations, &closure)
             .await
         {

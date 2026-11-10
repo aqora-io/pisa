@@ -6,7 +6,7 @@ use super::*;
 /// The modules of `above` (see [`Catalog::dependents`]) to rebuild for
 /// `matching`: those, and the ones among `above` they import, directly or
 /// through others.
-pub(super) fn needed(
+pub(crate) fn needed(
     above: &BTreeMap<String, Vec<String>>,
     matching: impl IntoIterator<Item = String>,
 ) -> BTreeSet<String> {
@@ -24,7 +24,7 @@ pub(super) fn needed(
 
 /// The level of each module in `above` (see [`Catalog::dependents`]) over
 /// `root`, which is 0: one more than the highest of its imports among them.
-pub(super) fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashMap<String, usize> {
+pub(crate) fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashMap<String, usize> {
     let mut levels = HashMap::from([(root.to_string(), 0)]);
     while levels.len() <= above.len() {
         let before = levels.len();
@@ -48,16 +48,16 @@ pub(super) fn levels(above: &BTreeMap<String, Vec<String>>, root: &str) -> HashM
 
 /// A rebuild item before its level: when its snapshot was made (or its
 /// module, for an item without one), and its old module.
-pub(super) struct Planned {
-    pub(super) created: u64,
-    pub(super) module: String,
-    pub(super) item: RebuildItem,
+pub(crate) struct Planned {
+    pub created: u64,
+    pub module: String,
+    pub item: RebuildItem,
 }
 
 /// The level of each item of a rebuild plan (see [`RebuildItem::level`]):
 /// one more than the highest among the items on the modules it imports,
 /// `imports[i]`.
-pub(super) fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
+pub(crate) fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
     let mut waves: Vec<Option<usize>> = vec![None; imports.len()];
     // Imports always lead down to `from`, so each pass places some.
     while waves.contains(&None) {
@@ -74,7 +74,7 @@ pub(super) fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
     waves.into_iter().flatten().collect()
 }
 
-impl Snapshots {
+impl Reader {
     /// Plans the creates that rebuild `job.from`'s dependents on `job.to`;
     /// see [`RebuildSnapshotsResponse`].
     pub async fn rebuild_plan(

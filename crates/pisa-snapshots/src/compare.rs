@@ -5,26 +5,26 @@
 use super::*;
 
 /// The entry a create replaces, as it was found before the build.
-pub(super) struct Replacing {
+pub struct Replacing {
     /// The replaced snapshot, as the request names it.
-    pub(super) replaced: Replaces,
+    pub replaced: Replaces,
     /// The replaced entry, which the new entry's link names.
-    pub(super) entry: String,
+    pub entry: String,
     /// The replaced entry's module.
-    pub(super) module: String,
+    pub module: String,
     /// The declarations of the replaced entry's module.
-    pub(super) declarations: Vec<Declaration>,
+    pub declarations: Vec<Declaration>,
     /// The snapshot modules it needs, other than its own.
-    pub(super) needs: Vec<String>,
+    pub needs: Vec<String>,
     /// The replaced entry's holes, which the replacement may change without
     /// `allow`, and inherits.
-    pub(super) holes: Vec<String>,
+    pub holes: Vec<String>,
 }
 
 impl Replacing {
     /// The link the new entry records: the replaced entry, and what the
     /// replacement may change.
-    pub(super) fn link(&self) -> Replaces {
+    pub fn link(&self) -> Replaces {
         Replaces {
             snapshot_id: self.entry.clone(),
             allow: self.replaced.allow.clone(),
@@ -36,9 +36,9 @@ impl Replacing {
 /// on and the replacement doesn't (`lost`), and those the replacement builds
 /// on and the replaced module doesn't (`gained`), each with its declarations.
 #[derive(Default)]
-pub(super) struct Swapped {
-    pub(super) lost: Vec<(String, Vec<Declaration>)>,
-    pub(super) gained: Vec<(String, Vec<Declaration>)>,
+pub struct Swapped {
+    pub lost: Vec<(String, Vec<Declaration>)>,
+    pub gained: Vec<(String, Vec<Declaration>)>,
 }
 
 /// Compares a replacement's declarations, `now`, with those of the module it
@@ -51,7 +51,7 @@ pub(super) struct Swapped {
 /// name again and Mathlib's are fixed by the version. Otherwise the
 /// comparison follows what the replaced declarations use into the snapshots
 /// it lost (see [`walk`]).
-pub(super) fn compare(
+pub fn compare(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
@@ -124,12 +124,12 @@ pub(super) fn compare(
 /// Whether `allow` names `name`, both as [`normalised`]: a definition, which
 /// may then change its value, or an inductive type, whose constructors and
 /// what Lean makes from them may then change.
-pub(super) fn allows(allow: Option<&Allow>, name: &str) -> bool {
+pub(crate) fn allows(allow: Option<&Allow>, name: &str) -> bool {
     allow.is_some_and(|a| named(&a.definitions, name))
 }
 
 /// Whether `names` names `name`, by [`normalised`] name.
-pub(super) fn named(names: &[String], name: &str) -> bool {
+pub(crate) fn named(names: &[String], name: &str) -> bool {
     let name = normalised(name);
     names.iter().any(|n| normalised(n) == name)
 }
@@ -137,7 +137,7 @@ pub(super) fn named(names: &[String], name: &str) -> bool {
 /// What a replacement's `allow` may name, the definitions (declarations with
 /// a value) and inductive types of the replaced module and of the snapshots
 /// it no longer builds on.
-pub(super) fn allowable<'a>(
+pub fn allowable<'a>(
     replacing: &'a Replacing,
     swapped: &'a Swapped,
 ) -> impl Iterator<Item = &'a Declaration> {
@@ -151,13 +151,13 @@ pub(super) fn allowable<'a>(
 
 /// Whether `allow` or `holes` may name `d`: a definition (a declaration with a
 /// value) or an inductive type.
-pub(super) fn changeable(d: &Declaration) -> bool {
+pub fn changeable(d: &Declaration) -> bool {
     d.value_hash.is_some() || d.kind == "inductive"
 }
 
 /// The first of `wanted` that isn't among `names`, by [`normalised`] name,
 /// with a hint if its private form is.
-pub(super) fn misnamed<'a>(
+pub(crate) fn misnamed<'a>(
     wanted: &'a [String],
     names: &HashSet<Cow<'_, str>>,
 ) -> Option<(&'a str, String)> {
@@ -173,7 +173,7 @@ pub(super) fn misnamed<'a>(
 
 /// The error for a replacement whose `allow` names something other than a
 /// definition it may change (see [`allowable`]), by [`normalised`] name.
-pub(super) fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Error> {
+pub fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Error> {
     let allow = replacing.replaced.allow.as_ref()?;
     let names: HashSet<_> = allowable(replacing, swapped)
         .map(|d| normalised(&d.name))
@@ -190,7 +190,7 @@ pub(super) fn allow_error(replacing: &Replacing, swapped: &Swapped) -> Option<Er
 
 /// Whether Lean made `name` rather than the code, such as the axiom
 /// `native_decide` declares: an internal name.
-pub(super) fn lean_made(name: &str) -> bool {
+pub(crate) fn lean_made(name: &str) -> bool {
     let name = normalised(name);
     let user = name.strip_prefix("_private.").unwrap_or(&name);
     user.split('.').any(|part| part.starts_with('_'))
@@ -198,7 +198,7 @@ pub(super) fn lean_made(name: &str) -> bool {
 
 /// The assumptions `decls` declare: their `axiom`s other than Lean's, by
 /// name across modules, with their type hash and their name as declared.
-pub(super) fn declared_assumptions<'a>(
+pub(crate) fn declared_assumptions<'a>(
     decls: impl IntoIterator<Item = &'a Declaration>,
 ) -> HashMap<String, (&'a str, &'a str)> {
     decls
@@ -222,7 +222,7 @@ pub(super) fn declared_assumptions<'a>(
 /// only with those of the snapshots it no longer builds on, never with the
 /// replaced module's own, which a private axiom of the same name and another
 /// statement could otherwise pass for.
-pub(super) fn added_assumptions(
+pub(crate) fn added_assumptions(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
@@ -261,7 +261,7 @@ pub(super) fn added_assumptions(
 
 /// The parent of the declaration a change to what `replacing` declares is
 /// about: of the replaced module, or of the lost snapshot it names.
-pub(super) fn parent(
+pub(crate) fn parent(
     replacing: &Replacing,
     swapped: &Swapped,
     c: &DeclarationChange,
@@ -280,7 +280,7 @@ pub(super) fn parent(
 
 /// What `d` uses: its type's refs, and its value's for a definition or an
 /// inductive.
-pub(super) fn refs_of(d: &Declaration) -> Vec<&String> {
+pub(crate) fn refs_of(d: &Declaration) -> Vec<&String> {
     let mut refs: Vec<&String> = d.type_refs.iter().collect();
     if d.value_hash.is_some() || d.kind == "inductive" {
         refs.extend(&d.value_refs);
@@ -294,7 +294,7 @@ pub(super) fn refs_of(d: &Declaration) -> Vec<&String> {
 /// [`normalised`]) that the replacement declares or builds on now. What it
 /// can't compare, because a private name is ambiguous, is an error: the
 /// replacement is refused.
-pub(super) fn walk(
+pub(crate) fn walk(
     replacing: &Replacing,
     now: &[Declaration],
     swapped: &Swapped,
@@ -362,7 +362,7 @@ pub(super) fn walk(
 /// by the refs they record: the declarations other than theorems whose type
 /// or value does, which then count as used too, and the theorems whose type
 /// does. Names are matched as [`normalised`].
-pub(super) fn uses<'a, I>(used: &HashSet<String>, items: I) -> (Vec<String>, Vec<String>)
+pub fn uses<'a, I>(used: &HashSet<String>, items: I) -> (Vec<String>, Vec<String>)
 where
     I: IntoIterator<Item = &'a Declaration>,
     I::IntoIter: Clone,
@@ -395,7 +395,7 @@ where
 }
 
 /// The worst status among a module's declarations, `decls`.
-pub(super) fn worst_status(decls: &[Declaration]) -> ProofStatus {
+pub fn worst_status(decls: &[Declaration]) -> ProofStatus {
     let statuses = decls.iter().map(|d| d.status);
     statuses.max().unwrap_or(ProofStatus::Proved)
 }

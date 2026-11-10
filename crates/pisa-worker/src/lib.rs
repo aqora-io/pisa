@@ -17,7 +17,6 @@ pub mod documents;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
-pub mod review;
 pub mod runs;
 pub mod sessions;
 pub mod snapshots;
@@ -166,7 +165,7 @@ pub(crate) async fn run_job(
             JobResult::SnapshotCreated(Box::new(pool.snapshots().create(pool, j).await))
         }
         Job::SnapshotGet(j) => {
-            JobResult::Snapshot(pool.snapshots().get(&j.entry).await.map(Box::new))
+            JobResult::Snapshot(pool.snapshots().reader().get(&j.entry).await.map(Box::new))
         }
         Job::SnapshotDelete(j) => {
             JobResult::SnapshotDeleted(pool.snapshots().delete(&j.entry, j.with_replacers).await)
@@ -177,26 +176,41 @@ pub(crate) async fn run_job(
         }
         Job::SnapshotList(j) => JobResult::SnapshotList(
             pool.snapshots()
+                .reader()
                 .list(&j.labels, j.limit, j.after.as_deref(), j.heads)
                 .await,
         ),
-        Job::SnapshotLabels(j) => {
-            JobResult::SnapshotLabels(pool.snapshots().set_labels(&j.entry, &j.labels).await)
-        }
-        Job::SnapshotDependents(j) => {
-            JobResult::SnapshotDependents(pool.snapshots().dependents(&j.entry, &j.labels).await)
-        }
+        Job::SnapshotLabels(j) => JobResult::SnapshotLabels(
+            pool.snapshots()
+                .reader()
+                .set_labels(&j.entry, &j.labels)
+                .await,
+        ),
+        Job::SnapshotDependents(j) => JobResult::SnapshotDependents(
+            pool.snapshots()
+                .reader()
+                .dependents(&j.entry, &j.labels)
+                .await,
+        ),
         Job::SnapshotRebuild(j) => {
-            JobResult::SnapshotRebuild(pool.snapshots().rebuild_plan(&j).await)
+            JobResult::SnapshotRebuild(pool.snapshots().reader().rebuild_plan(&j).await)
         }
         Job::SnapshotAudit(j) if j.against.is_empty() => {
-            JobResult::SnapshotAudit(pool.snapshots().audit(&j.labels).await)
+            JobResult::SnapshotAudit(pool.snapshots().reader().audit(&j.labels).await)
         }
         Job::SnapshotAudit(j) => {
-            let audit = pool.snapshots().audit_against(&j.against, &j.allow).await;
+            let audit = pool
+                .snapshots()
+                .reader()
+                .audit_against(&j.against, &j.allow)
+                .await;
             JobResult::SnapshotAudit(match audit {
                 Ok(mut audit) if j.review => {
-                    let listed = review::review(pool.snapshots(), &audit.comparisons, &j.allow);
+                    let listed = pisa_snapshots::review::review(
+                        pool.snapshots().reader(),
+                        &audit.comparisons,
+                        &j.allow,
+                    );
                     listed.await.map(|review| {
                         audit.review = review;
                         audit
