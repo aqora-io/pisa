@@ -1088,6 +1088,19 @@ mod tests {
                 "@[builtin_tactic foo] def t := 1",
                 "forbidden: builtin_tactic",
             ),
+            ("@[tactic_elab foo] def t := 1", "forbidden: tactic_elab"),
+            (
+                "@[builtin_command_elab foo] def c := 1",
+                "forbidden: builtin_command_elab",
+            ),
+            (
+                "@[builtin_term_elab foo] def e := 1",
+                "forbidden: builtin_term_elab",
+            ),
+            (
+                "@[builtin_macro foo] def m := 1",
+                "forbidden: builtin_macro",
+            ),
         ] {
             assert_eq!(p.scan(code, false), [reason], "{code}");
             assert!(uses_macros(code), "{code}");
