@@ -61,8 +61,8 @@ use crate::catalog::{
 use crate::check::{header_error, policy_error, policy_messages, run, unexpected};
 use crate::db::Db;
 use crate::policy::{
-    Policy, module_export, module_report, parse_declarations, parse_export, parse_report,
-    uses_macros,
+    Policy, auto_implicit_hint, module_export, module_report, parse_declarations, parse_export,
+    parse_report, uses_macros,
 };
 use crate::pool::{Lease, Pool};
 
@@ -1509,9 +1509,11 @@ impl Snapshots {
             }
         };
         // The file is the submitted code, so positions need no shifting.
+        let mut messages = compiled.messages;
+        messages.extend(auto_implicit_hint(&split.body, &messages));
         let response = CommandResponse {
             env: 0,
-            messages: compiled.messages,
+            messages,
             sorries: Vec::new(),
             tactics: Vec::new(),
             at: Vec::new(),

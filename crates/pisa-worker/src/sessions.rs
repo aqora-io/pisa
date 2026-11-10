@@ -14,7 +14,7 @@ use pisa_protocol::wire::{
 
 use crate::check::{axiom_report, header_error, policy_error, run, run_check, unexpected};
 use crate::db::DbError;
-use crate::policy::read_report;
+use crate::policy::{auto_implicit_hint, read_report};
 use crate::pool::{Lease, Pool, Resident};
 use crate::store::{SessionMeta, StateMeta, Store, now_secs};
 
@@ -274,6 +274,10 @@ impl Sessions {
                 end_pos: None,
                 data: HIDDEN.into(),
             });
+        }
+
+        if let Some(hint) = auto_implicit_hint(&split.body, &r.messages) {
+            r.messages.push(hint);
         }
 
         let session_id = uuid::Uuid::new_v4().simple().to_string();

@@ -13,7 +13,7 @@ use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
 
-use crate::policy::{AXIOM_REPORT, Finding};
+use crate::policy::{AXIOM_REPORT, Finding, auto_implicit_hint};
 use crate::pool::{HeaderFailure, Lease, Pool};
 
 /// Time allowed for the axiom report, which only walks the new declarations.
@@ -80,6 +80,9 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         Ok(ReplResponse::Command(mut r)) => {
             let report = axiom_report(&mut slot, &r).await;
             outcome.verification = Some(slot.policy().judge(&r, report.as_ref()));
+            if let Some(hint) = auto_implicit_hint(&split.body, &r.messages) {
+                r.messages.push(hint);
+            }
             read_tree(&mut r, &job, &split.body, split.header_lines);
             r.shift_lines(split.header_lines);
             // Positions in the header were asked about on line 0 of the body.

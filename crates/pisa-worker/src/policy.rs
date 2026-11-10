@@ -6,7 +6,7 @@
 //! options that weaken checking, such as `debug.skipKernelTC`.
 
 use pisa_protocol::header::import_parts;
-use pisa_protocol::repl::{CommandResponse, Severity};
+use pisa_protocol::repl::{CommandResponse, Message, Severity};
 use pisa_protocol::verify::{DescribedDeclaration, ProofStatus, ReportedDeclaration, Verification};
 
 use crate::catalog::SnapshotDecl;
@@ -743,6 +743,41 @@ fn attributes(tokens: &[Token]) -> impl Iterator<Item = &Token> {
     names.into_iter()
 }
 
+/// A hint at the first error in `messages` that `autoImplicit` being off may
+/// cause, unless `body` sets the option itself: an unknown identifier or
+/// universe level, which code written for a library that turns the option on
+/// (Physlib does) meets here, or Lean's own note on the option.
+pub fn auto_implicit_hint(body: &str, messages: &[Message]) -> Option<Message> {
+    if tokens(body).iter().any(|t| t.text == "autoImplicit") {
+        return None;
+    }
+    let cause = messages.iter().find(|m| {
+        m.severity == Severity::Error
+            && (m.data.starts_with("Unknown identifier")
+                || m.data.starts_with("unknown universe level")
+                || m.data.contains("`autoImplicit`"))
+    })?;
+    let name = cause
+        .data
+        .split('`')
+        .nth(1)
+        .filter(|n| !n.is_empty() && *n != "autoImplicit");
+    let bind = match name {
+        Some(n) => format!("bind `{n}` as an argument, as in `{{{n}}}`"),
+        None => "bind it as an argument".to_string(),
+    };
+    Some(Message {
+        severity: Severity::Info,
+        pos: cause.pos,
+        end_pos: None,
+        data: format!(
+            "pisa checks code with `autoImplicit` off. If the name is meant to be bound \
+             automatically, as in a library that turns the option on, {bind}, or add \
+             `set_option autoImplicit true`"
+        ),
+    })
+}
+
 /// The line, from 1, and column, from 0 in code points, of the character at
 /// `at` in `src`.
 fn position(src: &str, at: usize) -> (u64, u64) {
@@ -895,6 +930,38 @@ mod tests {
         for header in ["", "import Mathlib", "module\npublic import Foo"] {
             assert_eq!(header_command(header).lines().last(), Some(off));
         }
+    }
+
+    #[test]
+    fn an_unknown_name_hints_that_auto_implicit_is_off() {
+        use pisa_protocol::repl::{Message, Pos};
+        let error = |data: &str| Message {
+            severity: Severity::Error,
+            pos: Pos {
+                line: 2,
+                column: 12,
+            },
+            end_pos: None,
+            data: data.into(),
+        };
+        let code = "theorem t (x : Fin d) : x = x := rfl";
+        let hint = auto_implicit_hint(code, &[error("Unknown identifier `d`")]).unwrap();
+        assert_eq!(
+            (hint.severity, hint.pos.line, hint.pos.column),
+            (Severity::Info, 2, 12)
+        );
+        assert!(hint.data.contains("`{d}`"), "{}", hint.data);
+        assert!(
+            hint.data.contains("set_option autoImplicit true"),
+            "{}",
+            hint.data
+        );
+        // Universe levels too.
+        assert!(auto_implicit_hint(code, &[error("unknown universe level `u`")]).is_some());
+        // Not if the code sets the option itself, nor for other errors.
+        let set = format!("set_option autoImplicit false\n{code}");
+        assert!(auto_implicit_hint(&set, &[error("Unknown identifier `d`")]).is_none());
+        assert!(auto_implicit_hint(code, &[error("Type mismatch")]).is_none());
     }
 
     #[test]
