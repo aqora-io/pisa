@@ -21,7 +21,7 @@
 //! `reportModule` for a module) lists each `theorem`,
 //! `def` and `axiom` seen since the imports, or, for a module report, those
 //! of that module (see `pisa_tests::declarations`). Its declaration export
-//! (`run_cmd` … `PISA_EXPORT`) is the same declarations, with their
+//! (`run_cmd _root_.Pisa.exportModule`) is the same declarations, with their
 //! statements and docstrings (see `pisa_tests::exports`). Both read the code
 //! as `pisa_tests::as_reported` gives it, so `-- reported-as: LINE` makes them
 //! show `LINE` in place of the next line, where the verifier sees the code.
@@ -118,9 +118,8 @@ fn import(s: &mut State, header: &str) -> Value {
 
 fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
     let full = infotree == Some("full");
-    // The axiom report is a call into the `Pisa` library, the export a
-    // `run_cmd` that names its marker; each names a module, or reports what
-    // the code since the imports declares.
+    // The axiom report and the export are calls into the `Pisa` library; each
+    // names a module, or reports what the code since the imports declares.
     for (marker, report, call, module_at) in [
         (
             "PISA_DECLS",
@@ -128,9 +127,14 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
             "run_cmd _root_.Pisa.report",
             "reportModule `",
         ),
-        ("PISA_EXPORT", exports, "run_cmd", "getModuleIdx? `"),
+        (
+            "PISA_EXPORT",
+            exports,
+            "run_cmd _root_.Pisa.export",
+            "exportModule `",
+        ),
     ] {
-        if !(cmd.starts_with(call) && (marker == "PISA_DECLS" || cmd.contains(marker))) {
+        if !cmd.starts_with(call) {
             continue;
         }
         let code = match cmd.split_once(module_at) {

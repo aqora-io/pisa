@@ -134,91 +134,18 @@ pub fn module_report(module: &str) -> String {
 
 const EXPORT_MARKER: &str = "PISA_EXPORT ";
 
-/// What the search service indexes of each declaration of a snapshot module:
-/// [`SnapshotDecl`]s as JSON, without `uses_sorry` and `status`, which come
-/// from the check result. Skips what `search/exporter/PisaExport.lean`
-/// skips: internal, private and auto-generated names. Docstrings of a
-/// module-system snapshot aren't loaded in a module-system header, so they
-/// are missing there. A definition's `value` is printed with full names and
-/// no notation, which code can't dress up with notation of its own, and cut
-/// at [`VALUE_CHARS`](crate::catalog::VALUE_CHARS) characters, for the audit's
-/// review list.
-const MODULE_EXPORT: &str = r#"run_cmd do
-  let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
-  let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError "{module} is not imported"
-  let out ← _root_.Lean.Elab.Command.liftTermElabM do
-    let mut out : Array _root_.Lean.Json := #[]
-    for n in env.header.moduleData[idx.toNat]!.constNames do
-      let some ci := env.find? n | continue
-      if n.isInternalDetail || _root_.Lean.isPrivateName n then continue
-      if n matches .str _ "inj" || n matches .str _ "injEq" || n matches .str _ "noConfusionType" then continue
-      if _root_.Lean.isAuxRecursor env n || _root_.Lean.isNoConfusion env n then continue
-      if ← _root_.Lean.isRec n <||> _root_.Lean.Meta.isMatcher n then continue
-      -- Each declaration gets its own heartbeat budget.
-      let record? : Option _root_.Lean.Json ← _root_.Lean.Core.withCurrHeartbeats do try
-          let signature ← _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.deepTerms true
-              |>.set `pp.deepTerms.threshold (10000 : Nat) |>.set `pp.maxSteps (100000 : Nat)) do
-            return (← _root_.Lean.PrettyPrinter.ppSignature n).fmt.pretty 120
-          let typeFull ← _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.notation false
-              |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
-            return (← _root_.Lean.Meta.ppExpr ci.type).pretty 120
-          let valueExpr? : Option _root_.Lean.Expr := match ci with
-            | .defnInfo d => some d.value
-            | .opaqueInfo d => some d.value
-            | _ => none
-          let value? : Option String ← match valueExpr? with
-            | some v => _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.notation false
-                |>.setBool `pp.fullNames true |>.set `pp.maxSteps (100000 : Nat)) do
-                  let text := (← _root_.Lean.Meta.ppExpr v).pretty 120
-                  if text.length > {chars} then
-                    return some ((text.toList.take {chars}).asString ++ " …")
-                  else
-                    return some text
-            | none => pure none
-          let kind : String := match ci with
-            | .axiomInfo _ => "axiom"
-            | .defnInfo d =>
-              if _root_.Lean.Meta.isInstanceCore env d.name then "instance"
-              else if _root_.Lean.getReducibilityStatusCore env d.name == _root_.Lean.ReducibilityStatus.reducible then "abbrev"
-              else "def"
-            | .thmInfo _ => "theorem"
-            | .opaqueInfo _ => "opaque"
-            | .quotInfo _ => "quot"
-            | .inductInfo i =>
-              if _root_.Lean.isClass env i.name then "class"
-              else if _root_.Lean.isStructure env i.name then "structure"
-              else "inductive"
-            | .ctorInfo _ => "constructor"
-            | .recInfo _ => "recursor"
-          let typeRefs := ci.type.getUsedConstants.filter (· != n)
-          let valueRefs := match ci.value? (allowOpaque := true) with
-            | some v => v.getUsedConstantsAsSet.toArray.filter (fun r => r != n && !r.isInternalDetail)
-            | none => #[]
-          let doc : Option String := match ← _root_.Lean.findInternalDocString? env n with
-            | some (.inl s) => some s
-            | _ => none
-          let deprecated := _root_.Lean.Linter.deprecatedAttr.getParam? env n
-          pure (some (_root_.Lean.Json.mkObj [
-            ("name", _root_.Lean.ToJson.toJson n),
-            ("kind", _root_.Lean.ToJson.toJson kind),
-            ("signature", _root_.Lean.ToJson.toJson signature),
-            ("type_pp_full", _root_.Lean.ToJson.toJson typeFull),
-            ("type_refs", _root_.Lean.ToJson.toJson typeRefs),
-            ("value_refs", _root_.Lean.ToJson.toJson valueRefs),
-            ("docstring", _root_.Lean.ToJson.toJson doc),
-            ("deprecated_to", _root_.Lean.ToJson.toJson (deprecated.bind (·.newName?))),
-            ("value", _root_.Lean.ToJson.toJson value?)]))
-        catch _ => pure none
-      if let some r := record? then out := out.push r
-    return out
-  _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
-    (_root_.Std.Format.text ("PISA_EXPORT " ++ (_root_.Lean.Json.arr out).compress)))"#;
-
-/// The export of the declarations of `module`, which the process imports.
+/// The export of the declarations of `module`, which the process imports:
+/// what the search service indexes of each and the audit's review list shows,
+/// as [`SnapshotDecl`]s in JSON without `uses_sorry` and `status`, which come
+/// from the check result (see `docker/pisa-lean/Pisa/Export.lean`). A
+/// definition's `value` is cut at [`VALUE_CHARS`](crate::catalog::VALUE_CHARS)
+/// characters. Docstrings of a module-system snapshot aren't loaded in a
+/// module-system header, so they are missing there.
 pub fn module_export(module: &str) -> String {
-    MODULE_EXPORT
-        .replace("{module}", module)
-        .replace("{chars}", &crate::catalog::VALUE_CHARS.to_string())
+    format!(
+        "run_cmd _root_.Pisa.exportModule `{module} {}",
+        crate::catalog::VALUE_CHARS
+    )
 }
 
 pub fn parse_export(report: &CommandResponse) -> Option<Vec<SnapshotDecl>> {
@@ -889,11 +816,9 @@ mod tests {
 
     #[test]
     fn module_export_names_the_module_and_parses() {
-        let export = module_export("PisaSnap.s0f");
-        assert!(!export.contains("{module}"), "{export}");
-        assert!(
-            export.contains("env.getModuleIdx? `PisaSnap.s0f |"),
-            "{export}"
+        assert_eq!(
+            module_export("PisaSnap.s0f"),
+            "run_cmd _root_.Pisa.exportModule `PisaSnap.s0f 4000"
         );
         let report: CommandResponse = serde_json::from_value(json!({
             "env": 1,
