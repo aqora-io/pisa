@@ -577,11 +577,7 @@ impl Engine {
     ) -> Option<Value> {
         let w = &self.weights;
         let scope = self.filter(q, modules);
-        let mut hidden = vec![is("hidden", true)];
-        if !q.include_sorried {
-            hidden.push(is("uses_sorry", true));
-        }
-        let visible = json!({"must": [scope.clone()], "must_not": hidden});
+        let visible = json!({"must": [scope.clone()], "must_not": hidden(q)});
         let mut prefetch = Vec::new();
         let mut weights = Vec::new();
         let mut lane = |query: Value, using: &str, weight: f64| {
@@ -1281,9 +1277,39 @@ pub fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) ->
     out
 }
 
+/// What a query's hits leave out: hidden points, and those that use `sorry`
+/// unless the query includes them, which by default it does only with
+/// snapshots in scope.
+fn hidden(q: &Query) -> Vec<Value> {
+    let mut hidden = vec![is("hidden", true)];
+    if !q.include_sorried.unwrap_or(!q.snapshots.is_none()) {
+        hidden.push(is("uses_sorry", true));
+    }
+    hidden
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorried_declarations_show_when_searching_snapshots() {
+        let sorried_hidden = |q: Query| hidden(&q).contains(&is("uses_sorry", true));
+        assert!(sorried_hidden(Query::default()));
+        let in_snapshots = Query {
+            snapshots: SnapshotScope::All,
+            ..Default::default()
+        };
+        assert!(!sorried_hidden(in_snapshots.clone()));
+        assert!(sorried_hidden(Query {
+            include_sorried: Some(false),
+            ..in_snapshots
+        }));
+        assert!(!sorried_hidden(Query {
+            include_sorried: Some(true),
+            ..Default::default()
+        }));
+    }
 
     #[test]
     fn signatures_drop_instance_binders() {

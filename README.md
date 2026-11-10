@@ -1362,7 +1362,8 @@ in `crates/pisa-search/src/engine.rs`) lean on the dense lane, with lexical and
 structural matches lifting their top hits. PageRank over the dependency graph is
 a prior, added after fusion, and a name query also favours names close to it by
 edit distance. Declarations that depend on `sorry` are hidden unless
-`include_sorried` is set, and so are Lean-generated helpers (`….mk.injEq`) and
+`include_sorried` is set, which it is by default when `snapshots` is, so that
+agents find the skeleton's lemmas before they are proved; so are Lean-generated helpers (`….mk.injEq`) and
 metaprogramming internals (`Mathlib.Tactic.…`); any of them is still returned,
 flagged, when a query names it exactly. Deprecated aliases and `to_additive`
 pairs fold into one hit.

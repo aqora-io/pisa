@@ -1728,7 +1728,7 @@
             "type": "string"
           },
           "include_sorried": {
-            "description": "Also return declarations that depend on `sorry`, flagged.",
+            "description": "Also return declarations that depend on `sorry`, flagged. By default\nonly when searching snapshots, so that agents find the skeleton's\nlemmas they build on before those are proved.",
             "type": "boolean"
           },
           "kinds": {

@@ -431,7 +431,7 @@ async fn folding_flags_and_filters() {
     let r = t
         .engine
         .search(&Query {
-            include_sorried: true,
+            include_sorried: Some(true),
             ..q
         })
         .await
