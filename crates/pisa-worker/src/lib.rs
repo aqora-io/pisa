@@ -172,7 +172,8 @@ pub(crate) async fn run_job(
             JobResult::SnapshotDeleted(pool.snapshots().delete(&j.entry, j.with_replacers).await)
         }
         Job::SnapshotVerify(j) => {
-            JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.entry).await)
+            let per_module = Duration::from_secs(j.timeout_secs);
+            JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.entry, per_module).await)
         }
         Job::SnapshotList(j) => JobResult::SnapshotList(
             pool.snapshots()

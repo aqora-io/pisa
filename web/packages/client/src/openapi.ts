@@ -432,7 +432,7 @@ export interface paths {
         put?: never;
         /**
          * Re-check a snapshot's module with the kernel
-         * @description Re-checks the module and the modules it imports; `failure` says which one failed and why.
+         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why.
          */
         post: operations["verifySnapshot"];
         delete?: never;
@@ -4363,7 +4363,10 @@ export interface operations {
     };
     verifySnapshot: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Lean's time limit in seconds for each module, once their imports are loaded; 60 by default */
+                timeout?: number;
+            };
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at

@@ -5380,7 +5380,7 @@
     },
     "/snapshots/{id}/verify": {
       "post": {
-        "description": "Re-checks the module and the modules it imports; `failure` says which one failed and why.",
+        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why.",
         "operationId": "verifySnapshot",
         "parameters": [
           {
@@ -5390,6 +5390,17 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "Lean's time limit in seconds for each module, once their imports are loaded; 60 by default",
+            "in": "query",
+            "name": "timeout",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {

@@ -358,15 +358,16 @@ export class PisaClient {
     return this.call("DELETE", ["snapshots", id], undefined, options, query);
   }
 
-  /** Re-checks the snapshot's module and its imports through the kernel. A
+  /** Re-checks the snapshot's module and its imports through the kernel,
+   *  with `timeout` seconds for each module once their imports are loaded. A
    *  rejection is in `failure`, not thrown. */
-  verifySnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<VerifySnapshotResponse> {
-    return this.call("POST", ["snapshots", id, "verify"], undefined, options);
+  verifySnapshot(id: SnapshotId, options: Omit<RunOptions, "version"> = {}): Promise<VerifySnapshotResponse> {
+    return this.call("POST", ["snapshots", id, "verify"], undefined, options, this.timeoutQuery(options));
   }
 
   /** `verifySnapshot` as a job. */
-  submitVerifySnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<Job<VerifySnapshotResponse>> {
-    return this.submit(["snapshots", id, "verify"], undefined, options);
+  submitVerifySnapshot(id: SnapshotId, options: Omit<RunOptions, "version"> = {}): Promise<Job<VerifySnapshotResponse>> {
+    return this.submit(["snapshots", id, "verify"], undefined, options, this.timeoutQuery(options));
   }
 
   /** Where `job` stands, after waiting up to `wait` seconds for it to
@@ -444,8 +445,13 @@ export class PisaClient {
   }
 
   /** POSTs with `Prefer: respond-async`: the job the server queued. */
-  private async submit<T>(path: string[], body: unknown, options: RequestOptions): Promise<Job<T>> {
-    const r = await this.send("POST", path, body, undefined, options.signal, { prefer: "respond-async" });
+  private async submit<T>(
+    path: string[],
+    body: unknown,
+    options: RequestOptions,
+    query?: URLSearchParams,
+  ): Promise<Job<T>> {
+    const r = await this.send("POST", path, body, query, options.signal, { prefer: "respond-async" });
     const answer = ok<Job<T>>(r, await readJson(r));
     if (r.status !== 202) {
       throw new PisaError("bad_response", "the server answered at once: it doesn't queue requests", r.status);
@@ -461,6 +467,11 @@ export class PisaClient {
   private timeoutOf(options: RunOptions): { timeout?: number } {
     const timeout = options.timeout ?? this.timeout;
     return timeout !== undefined ? { timeout } : {};
+  }
+
+  private timeoutQuery(options: RunOptions): URLSearchParams {
+    const { timeout } = this.timeoutOf(options);
+    return new URLSearchParams(timeout !== undefined ? { timeout: String(timeout) } : {});
   }
 
   private versionQuery(options: VersionOptions): URLSearchParams {

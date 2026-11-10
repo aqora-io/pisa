@@ -566,8 +566,9 @@ impl Client {
     }
 
     /// Re-checks a snapshot's module and everything it imports through the
-    /// kernel, imports first, skipping what already passed. A module the
-    /// kernel rejects is reported in `failure`, not as an error.
+    /// kernel, imports first, skipping what already passed, with the client's
+    /// timeout for each module. A module the kernel rejects, or that runs out
+    /// of time, is reported in `failure`, not as an error.
     pub async fn verify_snapshot(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
         self.endpoint.post_url(self.verify_url(id)?).await
     }
@@ -582,11 +583,15 @@ impl Client {
             .await
     }
 
+    /// `POST /snapshots/{id}/verify`, with this client's timeout for each
+    /// module.
     fn verify_url(&self, id: &str) -> Result<Url, Error> {
         let mut url = self.snapshot_url(id)?;
         url.path_segments_mut()
             .map_err(|_| Error::Url(id.to_string()))?
             .push("verify");
+        url.query_pairs_mut()
+            .append_pair("timeout", &self.timeout.to_string());
         Ok(url)
     }
 

@@ -247,7 +247,7 @@ pnpm -C web generate
 | `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
-| `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
+| `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60) → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting with comparator](#comparator) |
 | `POST /snapshots/comparator` | `{against, allow?, paranoid?, timeout?}` → `{accepted, forks?, pairs: [{spec, head, config, accepted, exit_code?, output, skipped?}]}`; async with `Prefer: respond-async` |
 | `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
@@ -1063,13 +1063,16 @@ end. It depends on `verify` in the request:
 re-check. So a macro chunk on top of unverified snapshots is re-checked but not
 yet `verified`.
 
-`POST /snapshots/{id}/verify` re-checks the snapshot's module and everything it
-imports, imports first, and records each module that passes. A later run only
-covers new chunks, and a retry resumes where the last one stopped. `verified`
-and `status` belong to modules, so every snapshot of a module shows the result.
+`POST /snapshots/{id}/verify?timeout=60` re-checks the snapshot's module and
+everything it imports, imports first, in one process that loads their imports
+once, and records each module as it passes. A later run only covers new
+chunks, and a retry resumes where the last one stopped. `verified` and
+`status` belong to modules, so every snapshot of a module shows the result.
+- `timeout` (default 60) is the seconds each module may take once the
+  imports are loaded.
 - `snapshot` is the snapshot as the re-check left it, and `checked` lists the
   modules this run re-checked and passed.
-- If the kernel rejects a module or the re-check times out (60 s per module),
+- If the kernel rejects a module or the re-check runs out of time or memory,
   the run stops, still with a 200, and `failure` has the module and the reason.
   Nothing is deleted, because other code may import it: the module stays usable
   and not `verified`. Delete its snapshots if you don't want it.

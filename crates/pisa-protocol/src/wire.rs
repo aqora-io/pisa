@@ -23,7 +23,7 @@ pub enum Job {
     SnapshotReplace(SnapshotCreateJob),
     SnapshotGet(SnapshotJob),
     SnapshotDelete(SnapshotDeleteJob),
-    SnapshotVerify(SnapshotJob),
+    SnapshotVerify(SnapshotVerifyJob),
     SnapshotList(SnapshotListJob),
     SnapshotLabels(SnapshotLabelsJob),
     SnapshotDependents(SnapshotDependentsJob),
@@ -103,6 +103,20 @@ pub struct SnapshotCreateJob {
 pub struct SnapshotJob {
     /// The snapshot id, `<version>~<entry id>`.
     pub entry: String,
+}
+
+/// `POST /snapshots/{id}/verify`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotVerifyJob {
+    /// The snapshot id, `<version>~<entry id>`.
+    pub entry: String,
+    /// Lean's time limit for each module, once their imports are loaded.
+    #[serde(default = "default_verify_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_verify_secs() -> u64 {
+    60
 }
 
 /// `DELETE /snapshots/{id}`.

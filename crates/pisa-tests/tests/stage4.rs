@@ -1078,6 +1078,21 @@ async fn a_snapshot_deleted_during_verification_stays_deleted() {
     assert_eq!(stored(&c).await, (vec![], vec![]));
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_verify_that_runs_out_of_time_stops_at_the_module() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let snapshot = kept(&c, SLOW).await;
+    let path = format!("/snapshots/{}/verify?timeout=1", entry(&snapshot));
+    let (status, r) = request(&c, reqwest::Method::POST, &path).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["failure"]["module"], module(&snapshot), "{r}");
+    let reason = r["failure"]["reason"].as_str().unwrap();
+    assert!(reason.contains("more than 1s"), "{reason}");
+    assert_eq!(r["snapshot"]["verified"], false, "{r}");
+    // With the default time, it passes.
+    assert_eq!(verify(&c, &snapshot).await["snapshot"]["verified"], true);
+}
+
 /// A create that asks to verify a kept module whose last entry is deleted
 /// during the re-check starts over, and builds the module again.
 #[tokio::test(flavor = "multi_thread")]

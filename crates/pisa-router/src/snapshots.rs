@@ -24,7 +24,7 @@ use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
     ExportedRun, Job, JobResult, SnapshotAuditJob, SnapshotComparatorJob, SnapshotCreateJob,
     SnapshotDeleteJob, SnapshotDependentsJob, SnapshotExportJob, SnapshotJob, SnapshotLabelsJob,
-    SnapshotListJob, SnapshotRebuildJob,
+    SnapshotListJob, SnapshotRebuildJob, SnapshotVerifyJob,
 };
 use serde::Deserialize;
 use utoipa::IntoParams;
@@ -701,24 +701,46 @@ pub struct DeleteParams {
     with_replacers: bool,
 }
 
+/// `POST /snapshots/{id}/verify`'s query. Other parameters are ignored.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct VerifyParams {
+    /// Lean's time limit in seconds for each module, once their imports are loaded; 60 by default
+    #[serde(default = "default_verify_secs")]
+    timeout: u64,
+}
+
+fn default_verify_secs() -> u64 {
+    60
+}
+
 #[utoipa::path(
     post, path = "/snapshots/{id}/verify", operation_id = "verifySnapshot", tag = "snapshots",
     summary = "Re-check a snapshot's module with the kernel",
-    description = "Re-checks the module and the modules it imports; `failure` says which one \
-        failed and why.",
-    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), PreferAsync),
+    description = "Re-checks the module and the modules it imports, in one process that loads \
+        their imports once; `failure` says which one failed and why.",
+    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), VerifyParams, PreferAsync),
     responses((status = 200, description = "Whether the module passed", body = VerifySnapshotResponse), Accepted, ApiErrors),
 )]
+/// The query is taken as a `Result` so that the id is checked first.
 pub async fn verify(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    q: Result<Params<VerifyParams>, ApiError>,
     prefer: Prefer,
 ) -> Response {
     let version = match parse_id(&id) {
         Ok(id) => id.version,
         Err(e) => return e.into_response(),
     };
-    let job = Job::SnapshotVerify(SnapshotJob { entry: id });
+    let params = match q {
+        Ok(Params(params)) => params,
+        Err(e) => return e.into_response(),
+    };
+    let job = Job::SnapshotVerify(SnapshotVerifyJob {
+        entry: id,
+        timeout_secs: params.timeout,
+    });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::VerifySnapshot, p).await
 }

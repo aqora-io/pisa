@@ -1297,7 +1297,7 @@ impl Snapshots {
         }
         if job.verify == Some(true) {
             let imports = snapshot::imports(&split.header).unwrap_or_default();
-            let error = match self.verify_chain(pool, &imports).await {
+            let error = match self.verify_chain(pool, &imports, REPORT_TIMEOUT).await {
                 Ok((_, Some(failure))) => Some(failure_error(&failure)),
                 Ok((_, None)) => None,
                 Err(e) => Some(e),
@@ -1344,7 +1344,8 @@ impl Snapshots {
     ) -> Option<CreateSnapshotResponse> {
         let meta = if job.verify == Some(true) && !meta.verified {
             let verified = async {
-                let (_, failure) = self.verify_chain(pool, &[id.to_string()]).await?;
+                let ids = [id.to_string()];
+                let (_, failure) = self.verify_chain(pool, &ids, REPORT_TIMEOUT).await?;
                 Ok::<_, Error>((self.catalog.module(id).await?, failure))
             };
             match verified.await {
@@ -1805,15 +1806,17 @@ impl Snapshots {
     }
 
     /// Re-checks an entry's module and everything it imports through the
-    /// kernel, and records each module that passes.
+    /// kernel, with `per_module` for each module once their imports are
+    /// loaded, and records each module that passes.
     pub async fn verify(
         &self,
         pool: &Arc<Pool>,
         entry: &str,
+        per_module: Duration,
     ) -> Result<VerifySnapshotResponse, Error> {
         let entry = self.parse(entry)?;
         let id = self.catalog.entry(&entry).await?.module;
-        let (checked, failure) = self.verify_chain(pool, &[id]).await?;
+        let (checked, failure) = self.verify_chain(pool, &[id], per_module).await?;
         // As the entry and its module are now.
         let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
@@ -1830,7 +1833,7 @@ impl Snapshots {
     /// are. Stops at the first module that fails, or that was deleted and
     /// built again since: that one isn't verified this run, which isn't an
     /// error. Returns the modules that passed, in order, and the one that
-    /// failed.
+    /// failed. Each module has `per_module` once their imports are loaded.
     ///
     /// This doesn't take the snapshots' locks, which every check on them
     /// needs: they shouldn't wait for the kernel, and two re-checks of a
@@ -1839,6 +1842,7 @@ impl Snapshots {
         &self,
         pool: &Arc<Pool>,
         ids: &[String],
+        per_module: Duration,
     ) -> Result<(Vec<String>, Option<VerifyFailure>), Error> {
         let mut modules: Vec<Module> = Vec::new();
         for id in ids {
@@ -1868,7 +1872,7 @@ impl Snapshots {
         // The verifier imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
         let names: Vec<String> = todo.iter().map(|m| snapshot::module(&m.id)).collect();
-        let mut run = match slot.verify(&names, slot.import_timeout(), REPORT_TIMEOUT) {
+        let mut run = match slot.verify(&names, slot.import_timeout(), per_module) {
             Ok(run) => run,
             Err(e) => {
                 let failure = VerifyFailure {

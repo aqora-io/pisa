@@ -474,9 +474,10 @@ class Client:
         one first."""
     def verify_snapshot(self, id: str) -> VerifySnapshotResponse:
         """Re-check a snapshot's module and everything it imports through the
-        kernel, imports first, skipping what already passed. A module the
-        kernel rejects is reported in `failure` and stays usable. Raises
-        NotFoundError for an unknown or deleted snapshot."""
+        kernel, imports first, skipping what already passed, with the
+        client's `timeout` for each module. A module the kernel rejects, or
+        that runs out of time, is reported in `failure` and stays usable.
+        Raises NotFoundError for an unknown or deleted snapshot."""
     def submit_verify_snapshot(self, id: str) -> Job:
         """Like `verify_snapshot`, as a job."""
     def list_dependents(self, id: str, labels: dict[str, str] | None = None) -> ListDependentsResponse:
