@@ -14,7 +14,7 @@ context = ["matrix", "operator", "density", "state", "ρ"]
 
 [[symbol]]
 tokens = ["†", "dagger", "adjoint", "conjugate"]
-constants = ["Matrix.conjTranspose", "star", "ContinuousLinearMap.adjoint", "LinearMap.adjoint"]
+constants = ["Matrix.conjTranspose", "Star.star", "ContinuousLinearMap.adjoint", "LinearMap.adjoint"]
 
 [[symbol]]
 tokens = ["⊗", "tensor", "kronecker"]
@@ -42,8 +42,9 @@ constants = ["Matrix.PosSemidef", "Matrix.PosDef"]
 context = ["matrix", "operator", "semidefinite", "definite"]
 
 [[symbol]]
-tokens = ["⟨", "⟩", "inner"]
-constants = ["Inner.inner", "inner"]
+# `⟪ ⟫`, as `⟨ ⟩` is mostly Lean's anonymous constructor.
+tokens = ["⟪", "⟫", "inner"]
+constants = ["Inner.inner"]
 
 [[symbol]]
 tokens = ["‖", "norm"]
@@ -124,7 +125,8 @@ tokens = ["continuous"]
 constants = ["Continuous", "ContinuousOn"]
 
 [[symbol]]
-tokens = ["|", "abs", "absolute"]
+# Not `|`: it is a bra-ket's bar as often.
+tokens = ["abs", "absolute"]
 constants = ["abs"]
 
 [[symbol]]

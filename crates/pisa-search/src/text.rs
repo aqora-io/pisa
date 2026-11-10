@@ -39,6 +39,14 @@ pub fn latex_to_unicode(src: &str) -> String {
                 }
                 let cmd: String = chars[start..j].iter().collect();
                 i = j;
+                if let Some((sym, end)) = blackboard(&cmd, &chars, j) {
+                    // `\mathbb{R}` or `\mathbb R` → `ℝ`.
+                    out.push(' ');
+                    out.push(sym);
+                    out.push(' ');
+                    i = end;
+                    continue;
+                }
                 if WRAPPERS.contains(&cmd.as_str()) {
                     // `\operatorname{Tr}` → `Tr`: the braces are dropped below.
                     out.push(' ');
@@ -235,6 +243,33 @@ fn latex_symbol(cmd: &str) -> Option<&'static str> {
         "mathscr" => "",
         _ => return None,
     })
+}
+
+/// The number system `\mathbb` names after `j`, in braces or not, and where
+/// what it names ends.
+fn blackboard(cmd: &str, chars: &[char], j: usize) -> Option<(char, usize)> {
+    if cmd != "mathbb" {
+        return None;
+    }
+    let mut k = j;
+    while chars.get(k) == Some(&' ') {
+        k += 1;
+    }
+    let braced = chars.get(k) == Some(&'{');
+    let letter = chars.get(k + usize::from(braced))?;
+    let end = k + usize::from(braced) + 1;
+    if braced && chars.get(end) != Some(&'}') {
+        return None;
+    }
+    let sym = match letter {
+        'R' => 'ℝ',
+        'C' => 'ℂ',
+        'N' => 'ℕ',
+        'Z' => 'ℤ',
+        'Q' => 'ℚ',
+        _ => return None,
+    };
+    Some((sym, end + usize::from(braced)))
 }
 
 /// Folds ASCII operator spellings into their Unicode forms and blackboard
@@ -442,7 +477,11 @@ mod tests {
         );
         assert_eq!(
             tokens(&latex_to_unicode(r"\left( x \right)\,\mathbb{R}")),
-            ["x", "r"]
+            ["x", "ℝ"]
+        );
+        assert_eq!(
+            tokens(&latex_to_unicode(r"f : \mathbb C \to \mathbb{Z}")),
+            ["f", "ℂ", "→", "ℤ"]
         );
     }
 

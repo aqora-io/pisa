@@ -120,4 +120,23 @@ mod tests {
     fn shipped_dictionary_parses() {
         assert!(Symbols::parse(DEFAULT).unwrap().constant_names().count() > 20);
     }
+
+    #[test]
+    fn shipped_brackets_and_bars_mean_what_they_say() {
+        let s = Symbols::parse(DEFAULT).unwrap();
+        let means = |text: &str| -> Vec<String> {
+            let q = tokens(&latex_to_unicode(text));
+            s.constants(&q).into_iter().map(|(c, _)| c).collect()
+        };
+        // The inner product's brackets, not the anonymous constructor's.
+        assert_eq!(means("⟪x, y⟫"), ["Inner.inner"]);
+        assert_eq!(means("inner"), ["Inner.inner"]);
+        assert_eq!(means("⟨a, b⟩"), Vec::<String>::new());
+        // A bra-ket's bar isn't an absolute value.
+        assert_eq!(means("|ψ⟩"), Vec::<String>::new());
+        assert_eq!(means("abs"), ["abs"]);
+        // Names that exist.
+        assert!(means("adjoint").contains(&"Star.star".to_string()));
+        assert!(!s.all_constants().contains("star") && !s.all_constants().contains("inner"));
+    }
 }
