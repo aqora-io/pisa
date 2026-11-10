@@ -178,3 +178,17 @@ async fn bad_keys_unknown_states_and_policy() {
     let (status, body) = c.post("/sessions", json!({"code": "#eval 1"})).await;
     assert_eq!((status, &body["error"]["kind"]), (422, &json!("policy")));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_whose_statements_cant_be_described_doesnt_start() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    // Its later checks could change the undescribed statement unseen.
+    let code = "import Foo\ntheorem goal : 1 = 1 := by sorry -- report-fails: goal";
+    let (status, body) = c.post("/sessions", json!({"code": code})).await;
+    assert_eq!((status, &body["error"]["kind"]), (422, &json!("lean")), "{body}");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("axiom report: describing goal: a metavariable"),
+        "{message}"
+    );
+}

@@ -258,11 +258,24 @@ impl Sessions {
             ReplResponse::Error(e) => return Err(Error::new(ErrorKind::Lean, e.message)),
             other => return Err(unexpected(other)),
         };
-        let report = axiom_report(slot, &r).await;
-        let reported = report.and_then(|r| read_report(&r).ok().map(|r| r.declarations));
-        let declarations = reported
-            .map(|decls| slot.policy().judge_decls(false, Some(decls)).declarations)
-            .unwrap_or_default();
+        // Later checks may change only what the report describes, so a
+        // statement it can't describe would go unguarded.
+        let report = match axiom_report(slot, &r).await.as_ref().map(read_report) {
+            None => Err("axiom report unavailable".to_string()),
+            Some(Err(said)) if said.is_empty() => Err("axiom report unavailable".to_string()),
+            Some(Err(said)) => Err(format!("axiom report unavailable: {said}")),
+            Some(Ok(report)) => match report.failed.first() {
+                Some(failed) => Err(format!("axiom report: {failed}")),
+                None => Ok(report.declarations),
+            },
+        };
+        let reported = report.map_err(|reason| {
+            Error::new(
+                ErrorKind::Lean,
+                format!("the session can't guard its statements: {reason}"),
+            )
+        })?;
+        let declarations = slot.policy().judge_decls(false, Some(reported)).declarations;
 
         let stated = r.sorries.iter().filter(|s| s.proof_state.is_some());
         if let Some(line) =
