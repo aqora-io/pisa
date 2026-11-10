@@ -127,6 +127,11 @@ pub struct SnapshotDecl {
     pub docstring: Option<String>,
     #[serde(default)]
     pub deprecated_to: Option<String>,
+    /// A definition's value, as the build printed it with full names and no
+    /// notation, cut at [`VALUE_CHARS`] characters. None for other
+    /// declarations, and in records from before the export printed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     /// Depends on `sorry`, by the module's check result.
     #[serde(default)]
     pub uses_sorry: bool,
@@ -135,6 +140,9 @@ pub struct SnapshotDecl {
     #[serde(default = "proved")]
     pub status: ProofStatus,
 }
+
+/// How much of a definition's value the export prints.
+pub const VALUE_CHARS: usize = 4000;
 
 fn proved() -> ProofStatus {
     ProofStatus::Proved
@@ -769,6 +777,7 @@ mod tests {
             value_refs: Vec::new(),
             docstring: None,
             deprecated_to: None,
+            value: None,
             uses_sorry: false,
             status: ProofStatus::Proved,
         }

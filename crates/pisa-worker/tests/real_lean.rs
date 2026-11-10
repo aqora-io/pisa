@@ -18,8 +18,8 @@ use pisa_protocol::snapshot;
 use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
 use pisa_worker::launcher::{Verified, compile_args};
 use pisa_worker::policy::{
-    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_report, parse_declarations,
-    parse_report,
+    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_export, module_report,
+    parse_declarations, parse_export, parse_report,
 };
 
 fn docker() -> PathBuf {
@@ -132,6 +132,38 @@ impl Snapshots {
             )
         });
         policy().judge_decls(false, Some(decls)).declarations
+    }
+
+    /// The search export of module `id`, run as the builder runs it.
+    fn export(&self, code: &str, id: &str) -> Vec<pisa_worker::catalog::SnapshotDecl> {
+        let header = snapshot::next_header(&split_header(code).header, id);
+        let text = format!(
+            "{}\n{}\n",
+            header_command(&header),
+            module_export(&snapshot::module(id))
+        );
+        let file = self.root.path().join(format!("export_{id}.lean"));
+        std::fs::write(&file, text).unwrap();
+        let out = self.lean(&["--json", &file.to_string_lossy()], true);
+        let messages: Vec<Message> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        let response = CommandResponse {
+            env: 0,
+            messages,
+            sorries: Vec::new(),
+            tactics: Vec::new(),
+            at: Vec::new(),
+            infotree: None,
+        };
+        parse_export(&response).unwrap_or_else(|| {
+            panic!(
+                "no export for s{id}: {:?}\n{}",
+                response.messages,
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
     }
 
     /// The kernel verifier's declarations.
@@ -539,4 +571,29 @@ fn a_structure_with_another_field_is_one_change() {
             "{changes:?}"
         );
     }
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_export_prints_a_definitions_value_without_notation() {
+    let s = Snapshots::new();
+    let code = "def double (n : Nat) : Nat := 2 * n\n\nnotation \"twice\" => double\n\n\
+                def four : Nat := twice 2\n\ntheorem t : four = 4 := rfl\n";
+    let built = s.build(code);
+    let decls = s.export(code, &built.id);
+    let value = |name: &str| {
+        let d = decls.iter().find(|d| d.name == name);
+        d.unwrap_or_else(|| panic!("no {name} in {decls:?}"))
+            .value
+            .clone()
+    };
+    // Notation can't make a value read as something else.
+    assert_eq!(value("four").as_deref(), Some("double 2"));
+    let double = value("double").unwrap();
+    assert!(
+        double.contains("HMul.hMul") && !double.contains('*'),
+        "{double}"
+    );
+    // A proof isn't printed.
+    assert_eq!(value("t"), None);
 }

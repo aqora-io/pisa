@@ -350,6 +350,7 @@ fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
         value_refs: Vec::new(),
         docstring: Some(doc.into()),
         deprecated_to: None,
+        value: None,
         uses_sorry: false,
         status: ProofStatus::Proved,
     }

@@ -139,7 +139,10 @@ const EXPORT_MARKER: &str = "PISA_EXPORT ";
 /// from the check result. Skips what `search/exporter/PisaExport.lean`
 /// skips: internal, private and auto-generated names. Docstrings of a
 /// module-system snapshot aren't loaded in a module-system header, so they
-/// are missing there.
+/// are missing there. A definition's `value` is printed with full names and
+/// no notation, which code can't dress up with notation of its own, and cut
+/// at [`VALUE_CHARS`](crate::catalog::VALUE_CHARS) characters, for the audit's
+/// review list.
 const MODULE_EXPORT: &str = r#"run_cmd do
   let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
   let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError "{module} is not imported"
@@ -159,6 +162,19 @@ const MODULE_EXPORT: &str = r#"run_cmd do
           let typeFull ← _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.notation false
               |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
             return (← _root_.Lean.Meta.ppExpr ci.type).pretty 120
+          let valueExpr? : Option _root_.Lean.Expr := match ci with
+            | .defnInfo d => some d.value
+            | .opaqueInfo d => some d.value
+            | _ => none
+          let value? : Option String ← match valueExpr? with
+            | some v => _root_.Lean.MonadWithOptions.withOptions (fun o => o |>.setBool `pp.notation false
+                |>.setBool `pp.fullNames true |>.set `pp.maxSteps (100000 : Nat)) do
+                  let text := (← _root_.Lean.Meta.ppExpr v).pretty 120
+                  if text.length > {chars} then
+                    return some ((text.toList.take {chars}).asString ++ " …")
+                  else
+                    return some text
+            | none => pure none
           let kind : String := match ci with
             | .axiomInfo _ => "axiom"
             | .defnInfo d =>
@@ -190,7 +206,8 @@ const MODULE_EXPORT: &str = r#"run_cmd do
             ("type_refs", _root_.Lean.ToJson.toJson typeRefs),
             ("value_refs", _root_.Lean.ToJson.toJson valueRefs),
             ("docstring", _root_.Lean.ToJson.toJson doc),
-            ("deprecated_to", _root_.Lean.ToJson.toJson (deprecated.bind (·.newName?)))]))
+            ("deprecated_to", _root_.Lean.ToJson.toJson (deprecated.bind (·.newName?))),
+            ("value", _root_.Lean.ToJson.toJson value?)]))
         catch _ => pure none
       if let some r := record? then out := out.push r
     return out
@@ -199,7 +216,9 @@ const MODULE_EXPORT: &str = r#"run_cmd do
 
 /// The export of the declarations of `module`, which the process imports.
 pub fn module_export(module: &str) -> String {
-    MODULE_EXPORT.replace("{module}", module)
+    MODULE_EXPORT
+        .replace("{module}", module)
+        .replace("{chars}", &crate::catalog::VALUE_CHARS.to_string())
 }
 
 pub fn parse_export(report: &CommandResponse) -> Option<Vec<SnapshotDecl>> {

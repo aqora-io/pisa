@@ -162,6 +162,7 @@ pub fn exports(code: &str) -> String {
             "type_refs": names_in(&statement),
             "value_refs": names_in(&value),
             "docstring": doc.take(),
+            "value": (kind == "def").then_some(&value),
         }));
     }
     Value::Array(decls).to_string()
