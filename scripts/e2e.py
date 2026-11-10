@@ -303,14 +303,45 @@ def spec_audit():
     step("spec audit: a run is clean once its spec and proof are verified")
 
 
+def statements_under_replaces():
+    swap = "theorem t (a b : Prop) (h : a ∧ b) : b ∧ a"
+    skeleton = create_snapshot(f"def H : Nat := sorry\n\n{swap} := sorry", verify=True)
+    replaces = {"snapshot_id": skeleton["snapshot"]["id"]}
+    # A changed statement is refused, and the refusal says which and how.
+    weaker = "def H : Nat := sorry\n\ntheorem t (a b : Prop) (h : a ∧ b) : a ∧ b := h"
+    r = post("/snapshots", {"code": weaker, "replaces": replaces, "timeout": 600})
+    assert "snapshot" not in r, r
+    assert [(c["name"], c["change"]) for c in r["check"]["changes"]] == [("t", "type")], r
+    # An untouched stub, whose `sorry` Lean labels with where it is, and a
+    # proof by `match`, whose matcher is Lean's, keep the statements.
+    by_match = f"def H : Nat := sorry\n\n\n{swap} :=\n  match h with\n  | ⟨x, y⟩ => ⟨y, x⟩"
+    proof = create_snapshot(by_match, replaces=replaces, verify=True)
+    assert proof["replacement"]["filled"] == ["t"], proof
+    out = audit_against(skeleton)
+    assert out["comparisons"][0]["replacement"]["filled"] == ["t"], out
+    delete_snapshots([proof, skeleton])
+    step("replaces: statements compare on their canonical form, from verified records")
+
+
+def audit_against(spec):
+    query = urllib.parse.urlencode({"against": spec["snapshot"]["id"]})
+    status, out = call("GET", f"/snapshots/audit?{query}")
+    assert status == 200, out
+    return out
+
+
 def allow_by_name():
     f = "def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => {}\n\ntheorem t : f 0 = 0 := {}"
-    skeleton = create_snapshot(f.format("n", "sorry"))
+    skeleton = create_snapshot(f.format("n", "sorry"), verify=True)
     # Lean's matcher `f.match_1` is a declaration too, but the right-hand
     # sides don't change it.
     replaces = {"snapshot_id": skeleton["snapshot"]["id"], "allow": {"definitions": ["f"]}}
-    changed = create_snapshot(f.format("n + 2", "rfl"), replaces=replaces)
+    changed = create_snapshot(f.format("n + 2", "rfl"), replaces=replaces, verify=True)
     assert "f" in changed["replacement"]["changed_definitions"], changed
+    # The audit finds the same from the verified records.
+    out = audit_against(skeleton)
+    assert out["comparisons"][0]["replacement"]["changed_definitions"] == ["f"], out
+    assert out["clean"] is True, out
     delete_snapshots([changed, skeleton])
     step("allow: a pattern-matching definition's value can change by name")
 
@@ -507,6 +538,7 @@ if __name__ == "__main__":
     snapshots()
     auto_implicit()
     spec_audit()
+    statements_under_replaces()
     allow_by_name()
     allow_through_a_lost_snapshot()
     labels()
