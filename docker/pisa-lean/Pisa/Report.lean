@@ -98,10 +98,11 @@ def recurses (d : DefinitionVal) : Bool :=
 /-- What Lean made on demand, which a replacement needn't have, by name and
 shape alone, so that the verifier, which has no more than the constants,
 finds the same; only names Lean reserves, which code can't declare itself:
-- a definition's equations (`f.eq_1`, `f.eq_def`, `f.eq_unfold`) and case
-  split (`f.fun_cases`), and a recursive one's induction principles
-  (`f.induct`, `f.mutual_induct`; Lean lets code declare these for one that
-  doesn't recurse);
+- a definition's equations (`f.eq_1`, `f.eq_def`, `f.eq_unfold`), private
+  in module-system code when its body isn't exposed, and case split
+  (`f.fun_cases`), and a recursive one's induction principles (`f.induct`,
+  `f.mutual_induct`; Lean lets code declare these for one that doesn't
+  recurse);
 - a constant's congruence lemmas (`f.congr_simp`, `f.hcongr_1`), and
   `ctorIdx.hinj`;
 - a private internal name. -/
@@ -111,8 +112,9 @@ def generated (env : Environment) (n : Name) : Bool :=
   | .str p s =>
     let defn := env.find? p
     let numbered (pre : String) := pre.isPrefixOf s && (s.drop pre.length).toString.isNat
-    (["eq_def", "eq_unfold", "fun_cases", "fun_cases_unfolding"].contains s || numbered "eq_")
-      && defn matches some (.defnInfo _) ||
+    (["eq_def", "eq_unfold"].contains s || numbered "eq_")
+      && (defn <|> env.find? (privateToUserName p)) matches some (.defnInfo _) ||
+    ["fun_cases", "fun_cases_unfolding"].contains s && defn matches some (.defnInfo _) ||
     ["induct", "induct_unfolding", "mutual_induct", "mutual_induct_unfolding"].contains s
       && (match defn with | some (.defnInfo d) => recurses d | _ => false) ||
     (s == "congr_simp" || numbered "hcongr_") && defn.isSome ||

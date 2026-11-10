@@ -309,6 +309,18 @@ fn what_lean_makes_on_demand_for_a_matcher_neednt_stay() {
 
 #[test]
 #[ignore = "needs elan Lean 4.36.0-rc2"]
+fn what_lean_makes_on_demand_in_module_system_code_neednt_stay() {
+    // There Lean makes the equations of the public `f`, whose body isn't
+    // exposed, as private names: `rw [f]` makes `_private.….f.eq_1` and
+    // `eq_2`, `rw [f.eq_def]` makes `eq_def` instead.
+    let f = "module\n\npublic section\n\ndef f : Nat → Nat\n  | 0 => 0\n  | n + 1 => f n + 1\n";
+    let spec = format!("{f}theorem t (n : Nat) : f (n + 1) = f n + 1 := by rw [f]\n");
+    let proved = format!("{f}theorem t (n : Nat) : f (n + 1) = f n + 1 := by rw [f.eq_def]\n");
+    assert_eq!(changes(&spec, &proved), Vec::<String>::new());
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
 fn a_helper_prepended_keeps_every_statement() {
     // The helper's matcher is cached and reused for `f`, which then names
     // `helper.match_1` where it named `f.match_1`.
