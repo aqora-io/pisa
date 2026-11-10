@@ -833,7 +833,8 @@ pub struct RebuildSnapshotsRequest {
 pub struct RebuildSnapshotsResponse {
     /// For a plan, whether there is one: false when `to` changes what `from`
     /// states and `allow_changes` isn't set. For a run, whether every item
-    /// was created, and retired if asked.
+    /// was created, and everything it was to delete deleted, the old
+    /// snapshots too if asked to retire them.
     pub ok: bool,
     /// How `to` differs from `from`, as in a refused replacement's
     /// `check.reasons`. Empty when `to` replaces `from`: its create compared
@@ -866,6 +867,11 @@ pub struct RebuildSnapshotsResponse {
     /// failed or was skipped. Other branches go on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<RebuildSkipped>,
+    /// For a run, the snapshots it was to delete and couldn't, each with why:
+    /// support snapshots, and with `retire` the first old one it couldn't,
+    /// which leaves the rest. Sending the rebuild again deletes them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_deleted: Vec<RebuildNotDeleted>,
     /// With `retire`, the ids of the old snapshots deleted, top down.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired: Vec<String>,
@@ -906,6 +912,13 @@ pub struct RebuildFailed {
     /// The create's check: Lean's errors, a refused replacement's
     /// `reasons`, or the `error` that stopped it.
     pub check: CheckResult,
+}
+
+/// A snapshot a rebuild run was to delete and couldn't.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RebuildNotDeleted {
+    pub snapshot_id: String,
+    pub error: Error,
 }
 
 /// A [`RebuildItem`] not created, because it builds on one that wasn't.

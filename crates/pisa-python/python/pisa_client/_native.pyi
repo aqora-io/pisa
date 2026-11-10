@@ -260,6 +260,10 @@ class RebuildSkipped(TypedDict):
     snapshot_id: NotRequired[str]
     module: str
 
+class RebuildNotDeleted(TypedDict):
+    snapshot_id: str
+    error: Error
+
 class RebuildReplaced(TypedDict):
     """A labelled snapshot a rebuild left out, because snapshots without
     every label, `replaced_by`, replace it."""
@@ -275,6 +279,7 @@ class RebuildSnapshotsResponse(TypedDict):
     created: NotRequired[list[RebuildCreated]]
     failed: NotRequired[list[RebuildFailed]]
     skipped: NotRequired[list[RebuildSkipped]]
+    not_deleted: NotRequired[list[RebuildNotDeleted]]
     retired: NotRequired[list[str]]
 
 class VerifyFailure(TypedDict):
