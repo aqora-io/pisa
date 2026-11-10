@@ -1228,3 +1228,64 @@ async fn a_rebuild_onto_a_structure_with_another_field_allows_the_structure() {
         "{r}"
     );
 }
+
+/// A plan past the 1000 items a plan once stopped at: a base with 1,100
+/// dependents, committed straight to the catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_plans_past_a_thousand_items() {
+    use pisa_protocol::api::{CheckResult, ProofStatus};
+    use pisa_worker::catalog::{Catalog, Module, ModuleMeta, NewEntry};
+
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let from = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl"}),
+    )
+    .await;
+    let to = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := by rfl"}),
+    )
+    .await;
+    let base = &module(&from)["PisaSnap.s".len()..];
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let built_on = catalog.module(base).await.unwrap().modules;
+    for i in 0..1100 {
+        let code = format!(
+            "import {}\n\ntheorem d{i} : {i} = {i} := rfl",
+            module(&from)
+        );
+        let id = snapshot::id(&code);
+        let mut modules = built_on.clone();
+        modules.push(Module {
+            id: id.clone(),
+            build: "b".into(),
+            files: Vec::new(),
+        });
+        let meta = ModuleMeta {
+            imports: vec![base.to_string()],
+            modules,
+            header: snapshot::next_header(&format!("import {}", module(&from)), &id),
+            code,
+            status: ProofStatus::Proved,
+            verified: false,
+            macros: false,
+            result: CheckResult::default(),
+            created: 0,
+        };
+        let entry = NewEntry {
+            labels: [("p".to_string(), "1".to_string())].into(),
+            key: None,
+            replaces: None,
+            replacement: None,
+            holes: Vec::new(),
+            fork: false,
+        };
+        catalog.commit(&id, &meta, None, entry).await.unwrap();
+    }
+    let body =
+        json!({"from": entry(&from), "to": entry(&to), "labels": {"p": "1"}, "dry_run": true});
+    let (status, r) = c.post("/snapshots/rebuild", body).await;
+    assert_eq!((status, &r["ok"]), (200, &json!(true)), "{r}");
+    assert_eq!(r["plan"].as_array().map(Vec::len), Some(1100));
+}

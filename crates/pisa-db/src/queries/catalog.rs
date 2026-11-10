@@ -720,13 +720,15 @@ pub(crate) async fn remove_branch(
                 }
                 next += 1;
             }
-            diesel::delete(
-                entries::table
-                    .filter(entries::version.eq(v))
-                    .filter(entries::id.eq_any(&ids)),
-            )
-            .execute(conn)
-            .await?;
+            for chunk in ids.chunks(REPLACED_CHUNK) {
+                diesel::delete(
+                    entries::table
+                        .filter(entries::version.eq(v))
+                        .filter(entries::id.eq_any(chunk)),
+                )
+                .execute(conn)
+                .await?;
+            }
             let mut modules: Vec<String> = Vec::new();
             for (entry, module) in ids.iter().zip(owners) {
                 log(conn, v, Some(entry), Some(&module)).await?;
@@ -811,12 +813,17 @@ pub(crate) async fn dependents(
             let mut above: BTreeMap<String, Vec<String>> = BTreeMap::new();
             let mut frontier = vec![m.to_string()];
             while !frontier.is_empty() {
-                let edges: Vec<(String, String)> = module_imports::table
-                    .filter(module_imports::version.eq(v))
-                    .filter(module_imports::parent.eq_any(&frontier))
-                    .select((module_imports::module, module_imports::parent))
-                    .load(conn)
-                    .await?;
+                let mut edges: Vec<(String, String)> = Vec::new();
+                for chunk in frontier.chunks(REPLACED_CHUNK) {
+                    edges.extend(
+                        module_imports::table
+                            .filter(module_imports::version.eq(v))
+                            .filter(module_imports::parent.eq_any(chunk))
+                            .select((module_imports::module, module_imports::parent))
+                            .load::<(String, String)>(conn)
+                            .await?,
+                    );
+                }
                 frontier.clear();
                 for (module, parent) in edges {
                     if !above.contains_key(&module) {
@@ -918,16 +925,21 @@ pub(crate) async fn entries_on(
     labels: &[(String, String)],
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
     let mut c = conn(db).await?;
-    let query = entries::table
-        .filter(entries::version.eq(v))
-        .filter(entries::module.eq_any(modules.to_vec()))
-        .into_boxed();
-    let rows = label_filter(query, labels)
-        .order((entries::created_micros, entries::id))
-        .select(ENTRY)
-        .load::<EntryRow>(&mut *c)
-        .await
-        .map_err(DbError::from)?;
+    let mut rows = Vec::new();
+    for chunk in modules.chunks(REPLACED_CHUNK) {
+        let query = entries::table
+            .filter(entries::version.eq(v))
+            .filter(entries::module.eq_any(chunk.to_vec()))
+            .into_boxed();
+        rows.extend(
+            label_filter(query, labels)
+                .select(ENTRY)
+                .load::<EntryRow>(&mut *c)
+                .await
+                .map_err(DbError::from)?,
+        );
+    }
+    rows.sort_by(|a, b| (a.4, &a.0).cmp(&(b.4, &b.0)));
     Ok(with_links(&mut c, v, rows).await?)
 }
 

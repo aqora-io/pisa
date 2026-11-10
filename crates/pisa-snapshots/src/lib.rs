@@ -27,7 +27,7 @@ use pisa_protocol::wire::SnapshotRebuildJob;
 
 mod audit;
 pub mod compare;
-mod plan;
+pub mod plan;
 mod read;
 pub mod review;
 mod run;

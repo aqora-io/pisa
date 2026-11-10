@@ -3,6 +3,13 @@
 
 use super::*;
 
+/// The most items a rebuild plans: past that, narrow its labels.
+pub const MAX_REBUILD_ITEMS: usize = 10_000;
+
+/// The most code, in bytes, a plan's items carry in all, which a run's
+/// stored answer holds.
+pub const MAX_PLAN_CODE_BYTES: usize = 64 * 1024 * 1024;
+
 /// The modules of `above` (see [`Catalog::dependents`]) to rebuild for
 /// `matching`: those, and the ones among `above` they import, directly or
 /// through others.
@@ -208,9 +215,10 @@ impl Reader {
             .iter()
             .map(|m| matching.get(m).map_or(1, Vec::len))
             .sum();
-        if items > MAX_LIMIT {
+        if items > MAX_REBUILD_ITEMS {
             return Err(bad(&format!(
-                "the rebuild would create {items} snapshots, more than {MAX_LIMIT}: narrow its labels"
+                "the rebuild would create {items} snapshots, more than {MAX_REBUILD_ITEMS}: narrow \
+                 its labels"
             )));
         }
 
@@ -338,6 +346,15 @@ impl Reader {
             }
         }
 
+        let code: usize = planned.iter().map(|p| p.item.code.len()).sum();
+        if code > MAX_PLAN_CODE_BYTES {
+            return Err(bad(&format!(
+                "the rebuild's {} items carry {} MiB of code, more than {} MiB: narrow its labels",
+                planned.len(),
+                code / (1024 * 1024),
+                MAX_PLAN_CODE_BYTES / (1024 * 1024)
+            )));
+        }
         let mut on: HashMap<&str, Vec<usize>> = HashMap::new();
         for (i, p) in planned.iter().enumerate() {
             on.entry(&p.module).or_default().push(i);

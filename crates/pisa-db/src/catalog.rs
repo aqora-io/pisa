@@ -41,7 +41,7 @@ use crate::backend::dispatch;
 use crate::db::{Db, DbError, IsConflict};
 
 /// A module's record. The catalog stores it as columns, `module_imports`, and
-/// a [`ModuleBody`]: what it imports is read back in the header's order, and
+/// a `ModuleBody`: what it imports is read back in the header's order, and
 /// what it needs, `modules`, is read through the imports of what it imports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleMeta {

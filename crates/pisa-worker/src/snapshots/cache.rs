@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// How many of a closure's modules the cache fetches at once.
+const FETCHES: usize = 16;
+
 pub(super) fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -77,8 +80,9 @@ impl Snapshots {
                 return Err(e);
             }
         };
-        for module in &meta.modules {
-            self.fetch(module).await?;
+        // A few at a time: a library's closure can hold a thousand modules.
+        for some in meta.modules.chunks(FETCHES) {
+            futures::future::try_join_all(some.iter().map(|module| self.fetch(module))).await?;
         }
         self.confirmed
             .lock()

@@ -1019,7 +1019,7 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   a new spec, for a person to set. The copy then belongs to no run, and the
   old run stays as it was, even with `retire`. To start a new run, create
   the skeleton again on the new base, then the copy's code replacing it.
-- **Limits.** At most 1000 items, as the plan carries code.
+- **Limits.** At most 10,000 items, carrying at most 64 MiB of code in all.
 
 **How it works.**
 - **Building.** A module is its code compiled to the module
