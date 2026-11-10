@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use object_store::ObjectStore;
+use pisa_protocol::api::Detail;
 use pisa_protocol::header::split_header;
+use pisa_protocol::verify::Declaration;
 use pisa_protocol::wire::{Job, JobResult};
 use tokio::sync::watch;
 
@@ -149,6 +151,17 @@ pub async fn run_with_stores(
         .await
 }
 
+/// `declarations` as a response gives them: summarised unless `detail` asks
+/// for them in full. Records keep them in full; this is applied last.
+fn answered(declarations: &mut Vec<Declaration>, detail: &[Detail], pool: &Pool) {
+    if detail.contains(&Detail::Declarations) {
+        return;
+    }
+    let allowed = &pool.policy().allowed_axioms;
+    let full = std::mem::take(declarations);
+    *declarations = full.into_iter().map(|d| d.summarised(allowed)).collect();
+}
+
 pub(crate) async fn run_job(
     pool: &Arc<Pool>,
     sessions: &Sessions,
@@ -156,13 +169,30 @@ pub(crate) async fn run_job(
     job: Job,
 ) -> JobResult {
     match job {
-        Job::Check(c) => JobResult::Check(check::run_check(pool, c).await),
+        Job::Check(c) => {
+            let detail = c.detail.clone();
+            let mut outcome = check::run_check(pool, c).await;
+            if let Some(v) = &mut outcome.verification {
+                answered(&mut v.declarations, &detail, pool);
+            }
+            JobResult::Check(outcome)
+        }
         job @ (Job::SessionStart(_) | Job::SessionTactic(_)) => {
             documents::run(documents, job).await
         }
-        Job::SessionCheck(j) => JobResult::SessionChecked(sessions.check(pool, j).await),
+        Job::SessionCheck(j) => {
+            let detail = j.detail.clone();
+            let mut checked = sessions.check(pool, j).await;
+            if let Some(v) = &mut checked.outcome.verification {
+                answered(&mut v.declarations, &detail, pool);
+            }
+            JobResult::SessionChecked(checked)
+        }
         Job::SnapshotCreate(j) | Job::SnapshotReplace(j) => {
-            JobResult::SnapshotCreated(Box::new(pool.snapshots().create(pool, j).await))
+            let detail = j.detail.clone();
+            let mut created = pool.snapshots().create(pool, j).await;
+            answered(&mut created.check.declarations, &detail, pool);
+            JobResult::SnapshotCreated(Box::new(created))
         }
         Job::SnapshotDelete(j) => {
             JobResult::SnapshotDeleted(pool.snapshots().delete(&j.entry, j.with_replacers).await)

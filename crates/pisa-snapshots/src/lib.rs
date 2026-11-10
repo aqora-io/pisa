@@ -97,6 +97,11 @@ impl Reader {
         &self.version
     }
 
+    /// The axioms every proof may use.
+    pub fn allowed_axioms(&self) -> &[String] {
+        &self.allowed_axioms
+    }
+
     /// The snapshot id of entry `entry`, as the API answers it.
     pub fn id(&self, entry: &str) -> String {
         let id = SnapshotId {

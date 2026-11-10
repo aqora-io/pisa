@@ -106,7 +106,7 @@ export interface GetDeclarationOptions extends VersionOptions {
 }
 
 export type CreateSnapshotOptions = RunOptions &
-  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces" | "fork" | "holes">;
+  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "detail">;
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -217,14 +217,15 @@ export class PisaClient {
     return this.submit(["states", state, "tactic"], { tactic, ...this.timeoutOf(options) }, options);
   }
 
-  /** Checks the completed code of a session from scratch. */
-  checkSession(session: SessionId, code: string, options: Omit<RunOptions, "version"> = {}): Promise<CheckResult> {
-    return this.call(
-      "POST",
-      ["sessions", session, "check"],
-      { code, ...this.timeoutOf(options) },
-      options,
-    );
+  /** Checks the completed code of a session from scratch. `detail:
+   *  ["declarations"]` gives every field of its declarations. */
+  checkSession(
+    session: SessionId,
+    code: string,
+    options: Omit<RunOptions, "version"> & { detail?: Detail[] } = {},
+  ): Promise<CheckResult> {
+    const body = { code, ...this.timeoutOf(options), ...(options.detail ? { detail: options.detail } : {}) };
+    return this.call("POST", ["sessions", session, "check"], body, options);
   }
 
   /** `checkSession` as a job. */
@@ -248,9 +249,12 @@ export class PisaClient {
     return this.submit(["snapshots"], this.createSnapshotRequest(code, options), options);
   }
 
-  /** A snapshot, with its module's code, check and exports. */
-  getSnapshot(id: SnapshotId, options: RequestOptions = {}): Promise<SnapshotDetail> {
-    return this.call("GET", ["snapshots", id], undefined, options);
+  /** A snapshot, with its module's code, check and exports. `detail:
+   *  ["declarations"]` gives every field of the check's declarations. */
+  getSnapshot(id: SnapshotId, options: RequestOptions & { detail?: Detail[] } = {}): Promise<SnapshotDetail> {
+    const query = new URLSearchParams();
+    if (options.detail?.includes("declarations")) query.append("detail", "declarations");
+    return this.call("GET", ["snapshots", id], undefined, options, query.size ? query : undefined);
   }
 
   /** A page of snapshots, newest first; pass `next` back as `after`. With
@@ -441,6 +445,7 @@ export class PisaClient {
     if (options.replaces !== undefined) body.replaces = options.replaces;
     if (options.fork !== undefined) body.fork = options.fork;
     if (options.holes !== undefined) body.holes = options.holes;
+    if (options.detail !== undefined) body.detail = options.detail;
     return body;
   }
 

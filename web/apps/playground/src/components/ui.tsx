@@ -158,7 +158,7 @@ export function CheckResultView({ result }: { result: CheckResult }) {
             <tr>
               <th className="py-1 font-medium">Declaration</th>
               <th className="py-1 font-medium">Kind</th>
-              <th className="py-1 font-medium">Axioms</th>
+              <th className="py-1 font-medium">Other axioms</th>
             </tr>
           </thead>
           <tbody className="font-mono text-slate-800">

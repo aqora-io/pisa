@@ -834,6 +834,8 @@ export interface components {
          */
         CheckSessionRequest: {
             code: string;
+            /** @description Only `declarations` applies. */
+            detail?: components["schemas"]["Detail"][];
             /** Format: int64 */
             timeout?: number;
         };
@@ -901,6 +903,8 @@ export interface components {
          */
         CreateSnapshotRequest: {
             code: string;
+            /** @description Only `declarations` applies, to `check`. */
+            detail?: components["schemas"]["Detail"][];
             /**
              * @description Lets `replaces` name a snapshot that another snapshot replaces
              *     already, which forks the run. Otherwise such a create keeps nothing
@@ -1023,7 +1027,7 @@ export interface components {
              * @description Its axioms that are assumptions: declared as `axiom` in this code or
              *     in a snapshot it builds on.
              */
-            assumes: string[];
+            assumes?: string[];
             axioms: string[];
             /**
              * @description Made by Lean on demand, such as an equation lemma: code with the same
@@ -1046,12 +1050,12 @@ export interface components {
              *     without their module, and with the internal auxiliaries it uses
              *     following it.
              */
-            type_hash: string;
+            type_hash?: string;
             /**
              * @description The constants of this code and of the snapshots it builds on that its
              *     type uses, through internal auxiliaries.
              */
-            type_refs: string[];
+            type_refs?: string[];
             /**
              * @description For definitions, the same for the value, so a proof can't change what
              *     a statement means by redefining something it mentions.
@@ -1061,7 +1065,7 @@ export interface components {
              * @description The same for a definition's value, or an inductive's constructors and
              *     recursor.
              */
-            value_refs: string[];
+            value_refs?: string[];
         };
         /**
          * @description A declaration of the original code that new code doesn't keep as it
@@ -1158,7 +1162,7 @@ export interface components {
          * @description Extra detail a check can return, requested in `detail`.
          * @enum {string}
          */
-        Detail: "tactics" | "terms";
+        Detail: "tactics" | "terms" | "declarations";
         /** @description An open document, as Lean elaborated its code. */
         Document: {
             /** @description Its id, `<version>~<32 hex>`. */
@@ -4031,7 +4035,10 @@ export interface operations {
     };
     getSnapshot: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description `declarations` for every field of the check's declarations */
+                detail?: components["schemas"]["Detail"];
+            };
             header?: never;
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */

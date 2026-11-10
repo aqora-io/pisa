@@ -93,6 +93,16 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("asks for declarations in full", async () => {
+    const { client, sent } = recording(() => json({ check: {} }));
+    await client.getSnapshot("v2~e1", { detail: ["declarations"] });
+    await client.createSnapshot("def f := 1", { detail: ["declarations"] });
+    await client.checkSession("v2~h~s", "def f := 1", { detail: ["declarations"] });
+    expect(sent[0]?.url).toBe("/api/snapshots/v2~e1?detail=declarations");
+    expect(sent[1]?.body).toMatchObject({ detail: ["declarations"] });
+    expect(sent[2]?.body).toMatchObject({ detail: ["declarations"] });
+  });
+
   it("sends what a snapshot replaces", async () => {
     const { client, sent } = recording(() => json({ check: {} }));
     await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: { snapshot_id: "v1~e1" }, key: "k" });

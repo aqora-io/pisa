@@ -11,10 +11,10 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     Accepted, ApiErrors, AuditSnapshotsResponse, ComparatorRequest, ComparatorResponse,
-    CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, ErrorKind, JobKind,
-    JobStatus, ListDependentsResponse, ListSnapshotsResponse, PreferAsync, RebuildSnapshotsRequest,
-    RebuildSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest,
-    VerifySnapshotResponse,
+    CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, Detail, ErrorKind,
+    JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, PreferAsync,
+    RebuildSnapshotsRequest, RebuildSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId,
+    Tarball, UpdateSnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -125,6 +125,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         replaces: req.replaces,
         fork: req.fork,
         holes: req.holes.unwrap_or_default(),
+        detail: req.detail,
     };
     let job = if replace {
         Job::SnapshotReplace(create)
@@ -148,15 +149,26 @@ pub(crate) fn created(done: JobResult) -> Result<CreateSnapshotResponse, ApiErro
 #[utoipa::path(
     get, path = "/snapshots/{id}", operation_id = "getSnapshot", tag = "snapshots",
     summary = "A snapshot, with its module's code, check and exports",
-    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`")),
+    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), GetParams),
     responses((status = 200, description = "The snapshot", body = SnapshotDetail), ApiErrors),
 )]
+/// `GET /snapshots/{id}`. The query is taken as a `Result` so that the id is
+/// checked first.
 pub async fn get(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
+    q: Result<Params<GetParams>, ApiError>,
 ) -> Result<Json<SnapshotDetail>, ApiError> {
     let version = parse_id(&id)?.version;
-    Ok(Json(app.snapshots.version(&version).get(&id).await?))
+    let Params(GetParams { detail }) = q?;
+    let reader = app.snapshots.version(&version);
+    let mut got = reader.get(&id).await?;
+    if detail != Some(Detail::Declarations) {
+        let full = std::mem::take(&mut got.check.declarations);
+        let allowed = reader.allowed_axioms();
+        got.check.declarations = full.into_iter().map(|d| d.summarised(allowed)).collect();
+    }
+    Ok(Json(got))
 }
 
 #[utoipa::path(
@@ -687,6 +699,15 @@ pub async fn delete(
         JobResult::SnapshotDeleted(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
     }
+}
+
+/// `GET /snapshots/{id}`'s query. Other parameters are ignored.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct GetParams {
+    /// `declarations` for every field of the check's declarations
+    #[serde(default)]
+    detail: Option<Detail>,
 }
 
 /// `DELETE /snapshots/{id}`'s query. Other parameters are ignored.

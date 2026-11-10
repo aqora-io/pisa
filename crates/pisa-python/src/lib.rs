@@ -163,6 +163,7 @@ fn create_snapshot_options(
     replaces: Option<Bound<'_, PyAny>>,
     fork: bool,
     holes: Option<Vec<String>>,
+    detail: Vec<String>,
 ) -> PyResult<pisa_client::CreateSnapshotOptions> {
     Ok(pisa_client::CreateSnapshotOptions {
         verify,
@@ -171,6 +172,7 @@ fn create_snapshot_options(
         replaces: replaces.as_ref().map(replaces_of).transpose()?,
         fork,
         holes: holes.unwrap_or_default(),
+        detail: parse_detail(detail)?,
     })
 }
 
@@ -258,18 +260,23 @@ impl Client {
         })
     }
 
+    #[pyo3(signature = (session_id, code, *, detail = Vec::new()))]
     fn check_session<'py>(
         &self,
         py: Python<'py>,
         session_id: String,
         code: String,
+        detail: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let detail = parse_detail(detail)?;
         call(py, async move {
-            self.inner.check_session(&session_id, &code).await
+            self.inner
+                .check_session_with(&session_id, &code, &detail)
+                .await
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, detail = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
     fn create_snapshot<'py>(
         &self,
@@ -281,14 +288,15 @@ impl Client {
         replaces: Option<Bound<'py, PyAny>>,
         fork: bool,
         holes: Option<Vec<String>>,
+        detail: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes)?;
+        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes, detail)?;
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, detail = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
     fn submit_create_snapshot<'py>(
         &self,
@@ -300,16 +308,26 @@ impl Client {
         replaces: Option<Bound<'py, PyAny>>,
         fork: bool,
         holes: Option<Vec<String>>,
+        detail: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes)?;
+        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes, detail)?;
         call(py, async move {
             let job = self.inner.submit_create_snapshot_with(&code, &opts).await?;
             Ok(queued(job))
         })
     }
 
-    fn get_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.get_snapshot(&id).await })
+    #[pyo3(signature = (id, *, detail = Vec::new()))]
+    fn get_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let detail = parse_detail(detail)?;
+        call(py, async move {
+            self.inner.get_snapshot_with(&id, &detail).await
+        })
     }
 
     #[pyo3(signature = (labels = None, *, limit = None, after = None, heads = false))]

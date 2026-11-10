@@ -171,6 +171,7 @@ async fn create(
         replaces: item.replaces.clone(),
         fork: false,
         holes: None,
+        detail: Vec::new(),
     };
     let p = prepare_create(app, create).map_err(|e| e.0)?;
     let mut tries = 0;
