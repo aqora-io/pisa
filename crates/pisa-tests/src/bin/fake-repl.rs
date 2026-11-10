@@ -17,7 +17,8 @@
 //! when two imported modules declare the same name: every `#check` in it fails.
 //! Snapshot modules (`import PisaSnap.s…`) are read from `LEAN_PATH`, with
 //! the snapshots they import.
-//! The worker's axiom report (`run_cmd` … `PISA_DECLS`) lists each `theorem`,
+//! The worker's axiom report (`run_cmd _root_.Pisa.reportNew`, or
+//! `reportModule` for a module) lists each `theorem`,
 //! `def` and `axiom` seen since the imports, or, for a module report, those
 //! of that module (see `pisa_tests::declarations`). Its declaration export
 //! (`run_cmd` … `PISA_EXPORT`) is the same declarations, with their
@@ -163,14 +164,22 @@ fn import(s: &mut State, header: &str) -> Value {
 
 fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
     let full = infotree == Some("full");
-    for (marker, report) in [
-        ("PISA_DECLS", declarations as fn(&str) -> String),
-        ("PISA_EXPORT", exports),
+    // The axiom report is a call into the `Pisa` library, the export a
+    // `run_cmd` that names its marker; each names a module, or reports what
+    // the code since the imports declares.
+    for (marker, report, call, module_at) in [
+        (
+            "PISA_DECLS",
+            declarations as fn(&str) -> String,
+            "run_cmd _root_.Pisa.report",
+            "reportModule `",
+        ),
+        ("PISA_EXPORT", exports, "run_cmd", "getModuleIdx? `"),
     ] {
-        if !(cmd.starts_with("run_cmd") && cmd.contains(marker)) {
+        if !(cmd.starts_with(call) && (marker == "PISA_DECLS" || cmd.contains(marker))) {
             continue;
         }
-        let code = match cmd.split_once("getModuleIdx? `") {
+        let code = match cmd.split_once(module_at) {
             None => prev.local.clone(),
             Some((_, rest)) => {
                 let module = rest.split_whitespace().next().unwrap();

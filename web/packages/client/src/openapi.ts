@@ -742,8 +742,9 @@ export interface components {
             /** @description What its axioms make it, by [`ProofStatus`]. */
             status: components["schemas"]["ProofStatus"];
             /**
-             * @description A hash of its type, with private names taken without their module,
-             *     and with the internal auxiliaries it uses folded in.
+             * @description The SHA-256 of its type's canonical text, with private names taken
+             *     without their module, and with the internal auxiliaries it uses
+             *     following it.
              */
             type_hash: string;
             /**
@@ -752,8 +753,8 @@ export interface components {
              */
             type_refs: string[];
             /**
-             * @description For definitions, a hash of the value, as of the type, so a proof can't
-             *     change what a statement means by redefining something it mentions.
+             * @description For definitions, the same for the value, so a proof can't change what
+             *     a statement means by redefining something it mentions.
              */
             value_hash?: string;
             /**

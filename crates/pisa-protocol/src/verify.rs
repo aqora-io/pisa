@@ -1,11 +1,12 @@
 //! Outcome of the verification policy that workers apply to checked code.
-//! [`ReportedDeclaration`]s are parsed from the worker's Lean report, so
-//! their field names must match the JSON it prints, and a [`Declaration`]
-//! keeps the same names.
+//! [`DescribedDeclaration`]s are parsed from the worker's Lean report (the
+//! `Pisa` library's `describe`), so their field names must match the JSON it
+//! prints, and a [`Declaration`] keeps the same names.
 
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -29,11 +30,12 @@ pub struct Declaration {
     pub assumes: Vec<String>,
     /// What its axioms make it, by [`ProofStatus`].
     pub status: ProofStatus,
-    /// A hash of its type, with private names taken without their module,
-    /// and with the internal auxiliaries it uses folded in.
+    /// The SHA-256 of its type's canonical text, with private names taken
+    /// without their module, and with the internal auxiliaries it uses
+    /// following it.
     pub type_hash: String,
-    /// For definitions, a hash of the value, as of the type, so a proof can't
-    /// change what a statement means by redefining something it mentions.
+    /// For definitions, the same for the value, so a proof can't change what
+    /// a statement means by redefining something it mentions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_hash: Option<String>,
     /// The constants of this code and of the snapshots it builds on that its
@@ -48,9 +50,50 @@ pub struct Declaration {
     pub generated: bool,
 }
 
-/// A [`Declaration`] as Lean's report prints it: the same fields, without
-/// `status`, which the worker's policy works out from the axioms.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// A declaration as Lean's report prints it (`Pisa.describe`): a
+/// [`ReportedDeclaration`] with the canonical text of its type and, for a
+/// definition, of its value in place of their hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DescribedDeclaration {
+    pub name: String,
+    pub kind: String,
+    pub axioms: Vec<String>,
+    pub assumes: Vec<String>,
+    #[serde(rename = "type")]
+    pub type_text: String,
+    #[serde(rename = "value")]
+    pub value_text: Option<String>,
+    pub type_refs: Vec<String>,
+    pub value_refs: Vec<String>,
+    #[serde(default)]
+    pub generated: bool,
+}
+
+/// The SHA-256 of `text`, as hex: what a declaration's hashes are.
+fn digest(text: &str) -> String {
+    hex::encode(Sha256::digest(text.as_bytes()))
+}
+
+impl From<DescribedDeclaration> for ReportedDeclaration {
+    fn from(d: DescribedDeclaration) -> Self {
+        ReportedDeclaration {
+            type_hash: digest(&d.type_text),
+            value_hash: d.value_text.as_deref().map(digest),
+            name: d.name,
+            kind: d.kind,
+            axioms: d.axioms,
+            assumes: d.assumes,
+            type_refs: d.type_refs,
+            value_refs: d.value_refs,
+            generated: d.generated,
+        }
+    }
+}
+
+/// A [`Declaration`] as Lean's report gives it, its texts hashed (see
+/// [`DescribedDeclaration`]): the same fields, without `status`, which the
+/// worker's policy works out from the axioms.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReportedDeclaration {
     pub name: String,
     pub kind: String,
@@ -60,7 +103,6 @@ pub struct ReportedDeclaration {
     pub value_hash: Option<String>,
     pub type_refs: Vec<String>,
     pub value_refs: Vec<String>,
-    #[serde(default)]
     pub generated: bool,
 }
 
@@ -200,6 +242,28 @@ mod tests {
             ..Default::default()
         };
         reported.with_status(ProofStatus::Proved)
+    }
+
+    #[test]
+    fn a_description_is_reported_with_the_hashes_of_its_texts() {
+        let described: DescribedDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "f", "kind": "def", "axioms": [], "assumes": [],
+            "type": "C _.\"Nat\" []\nR 0", "value": "N 1\nR 0",
+            "type_refs": [], "value_refs": ["g"], "generated": false
+        }))
+        .unwrap();
+        let reported = ReportedDeclaration::from(described);
+        let sha = |text: &str| hex::encode(Sha256::digest(text.as_bytes()));
+        assert_eq!(reported.type_hash, sha("C _.\"Nat\" []\nR 0"));
+        assert_eq!(reported.value_hash, Some(sha("N 1\nR 0")));
+        assert_eq!(reported.value_refs, ["g"]);
+        // A theorem has no value to hash.
+        let theorem: DescribedDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "t", "kind": "theorem", "axioms": [], "assumes": [],
+            "type": "S 0\nR 0", "value": null, "type_refs": [], "value_refs": []
+        }))
+        .unwrap();
+        assert_eq!(ReportedDeclaration::from(theorem).value_hash, None);
     }
 
     #[test]

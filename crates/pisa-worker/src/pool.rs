@@ -17,7 +17,7 @@ use crate::policy::{Policy, header_command};
 use crate::snapshots::Snapshots;
 
 /// Succeeds only in an environment where the header's imports loaded.
-const IMPORT_PROBE: &str = "#check @Lean.Elab.Command.elabCommand";
+const IMPORT_PROBE: &str = "#check @_root_.Pisa.reportNew";
 
 pub struct PoolConfig {
     pub slots: usize,
@@ -293,7 +293,7 @@ impl Lease {
         };
         // When imports can't be loaded together (two modules declaring the same
         // name), the REPL reports no error but leaves the environment empty.
-        // Every header imports Lean.Elab.Command, so probe for it.
+        // Every header imports the report's library, so probe for it.
         let probe = ReplCommand::cmd(IMPORT_PROBE, Some(r.env));
         match repl.send(&probe, timeout).await {
             Ok(ReplResponse::Command(p)) if !p.has_errors() => {}

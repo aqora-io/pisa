@@ -47,7 +47,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONTAINER = "pisa-bench"
 PROJECT = "/opt/project"
-HEADER = "import Mathlib\nimport Lean.Elab.Command"
+HEADER = "import Mathlib\nimport Pisa"
 TOOLING = "Physlib.Meta."
 HIT = "example : (2 : ℝ) + 2 = 4 := by norm_num"
 # A module-system chunk need not import ℝ.

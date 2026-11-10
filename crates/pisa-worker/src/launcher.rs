@@ -24,8 +24,12 @@ pub struct Launcher {
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
     env: Option<Vec<(OsString, OsString)>>,
-    /// The project's module search path plus the snapshot cache.
+    /// The project's module search path plus the snapshot cache and the
+    /// `Pisa` library, for the REPL and the verifier.
     lean_path: OsString,
+    /// The same without the `Pisa` library, for building submitted code,
+    /// which has no use for it.
+    build_path: OsString,
     sandbox: Sandbox,
     work_dir: PathBuf,
     snapshot_root: PathBuf,
@@ -80,12 +84,14 @@ impl Launcher {
             .and_then(|env| env.iter().find(|(k, _)| k == "LEAN_PATH"))
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var_os("LEAN_PATH"));
-        let lean_path = std::env::join_paths(
-            base.iter()
-                .flat_map(std::env::split_paths)
-                .chain([snapshot_root.clone()]),
-        )
-        .context("building LEAN_PATH")?;
+        let build_paths: Vec<PathBuf> = base
+            .iter()
+            .flat_map(std::env::split_paths)
+            .chain([snapshot_root.clone()])
+            .collect();
+        let build_path = std::env::join_paths(&build_paths).context("building LEAN_PATH")?;
+        let lean_path = std::env::join_paths(build_paths.iter().chain([&cfg.lean_lib]))
+            .context("building LEAN_PATH")?;
         let cgroups = match &cfg.cgroup_root {
             None => None,
             Some(root) => {
@@ -108,6 +114,7 @@ impl Launcher {
             project: cfg.project.clone(),
             env,
             lean_path,
+            build_path,
             sandbox: cfg.sandbox,
             work_dir,
             snapshot_root,
@@ -133,6 +140,17 @@ impl Launcher {
     /// `program` set up like a REPL for `slot`: same environment, sandbox and
     /// cgroup.
     fn command(&self, slot: usize, program: &Path, args: &[&str]) -> std::io::Result<Command> {
+        self.command_on(slot, program, args, &self.lean_path)
+    }
+
+    /// [`command`](Self::command) with `lean_path` as LEAN_PATH.
+    fn command_on(
+        &self,
+        slot: usize,
+        program: &Path,
+        args: &[&str],
+        lean_path: &OsString,
+    ) -> std::io::Result<Command> {
         let dir = self.slot_dir(slot);
         std::fs::create_dir_all(&dir)?;
         let cwd = self.project.clone().unwrap_or_else(|| dir.clone());
@@ -154,7 +172,7 @@ impl Launcher {
         if let Some(env) = &self.env {
             cmd.env_clear().envs(env.iter().cloned());
         }
-        cmd.env("LEAN_PATH", &self.lean_path);
+        cmd.env("LEAN_PATH", lean_path);
         if let Some(cg) = &self.cgroups {
             cg.apply(slot, &mut cmd)?;
         }
@@ -209,7 +227,7 @@ impl Launcher {
         let before = self.oom_kills(slot);
         let args = compile_args(root, file, olean);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let mut cmd = self.command(slot, &self.lean, &args)?;
+        let mut cmd = self.command_on(slot, &self.lean, &args, &self.build_path)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -249,7 +267,7 @@ impl Launcher {
         let file = file.to_string_lossy().into_owned();
         let args = ["--deps", file.as_str()];
         let run = async {
-            let mut cmd = self.command(slot, &self.lean, &args)?;
+            let mut cmd = self.command_on(slot, &self.lean, &args, &self.build_path)?;
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())

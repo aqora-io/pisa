@@ -1,0 +1,7 @@
+# What the worker's axiom report and the kernel verifier share: how a
+# declaration is described (see Pisa/Report.lean). Imports only Lean core.
+name = "pisa"
+defaultTargets = ["Pisa"]
+
+[[lean_lib]]
+name = "Pisa"

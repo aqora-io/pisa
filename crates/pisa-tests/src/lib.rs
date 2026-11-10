@@ -129,8 +129,8 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// with `theorem`, `def` or `axiom`. Theorems depend on `sorryAx` if the code
 /// uses `sorry`, on `Lean.ofReduceBool` if it uses `native_decide`, on any
 /// axiom it declares, and on the axioms of imported snapshots its line names;
-/// those it declares or imports are its `assumes`. A "type hash" is the statement text between the name
-/// and `:=`, and a `def`'s "value hash" the text after it. Its refs are the
+/// those it declares or imports are its `assumes`. Its "type" is the statement text between the name
+/// and `:=`, and a `def`'s "value" the text after it, which the worker hashes. Its refs are the
 /// words of each that the code or a snapshot it imports declares.
 /// The worker's declaration export for `code`: each `theorem`, `def` and
 /// `axiom`, with its statement as the signature, the words of its statement
@@ -254,7 +254,7 @@ pub fn declarations(code: &str) -> String {
                 .iter()
                 .filter(|a| own_axioms.contains(a) || imported_axioms.contains(a))
                 .collect();
-            let value_hash = (kind == "def").then_some(&value);
+            let value_text = (kind == "def").then_some(&value);
             let refs = |text: &str| -> Vec<String> {
                 let mut refs: Vec<String> = names_in(text)
                     .into_iter()
@@ -265,8 +265,8 @@ pub fn declarations(code: &str) -> String {
                 refs
             };
             let value_refs = if kind == "def" { refs(&value) } else { Vec::new() };
-            json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes, "type_hash": statement,
-                   "value_hash": value_hash, "type_refs": refs(&statement), "value_refs": value_refs})
+            json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes, "type": statement,
+                   "value": value_text, "type_refs": refs(&statement), "value_refs": value_refs})
         })
         .collect();
     Value::Array(decls).to_string()

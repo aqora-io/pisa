@@ -59,7 +59,8 @@ use crate::catalog::{
 use crate::check::{header_error, policy_error, run, unexpected};
 use crate::db::Db;
 use crate::policy::{
-    Policy, module_export, module_report, parse_export, parse_report, uses_macros,
+    Policy, module_export, module_report, parse_declarations, parse_export, parse_report,
+    uses_macros,
 };
 use crate::pool::{Lease, Pool};
 
@@ -607,16 +608,6 @@ fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
     waves.into_iter().flatten().collect()
 }
 
-/// Marks `generated`, what the axiom report of the same module marks as
-/// generated, in `decls`, from the kernel verifier: the verifier's
-/// environment lacks what tells some of Lean's generated names apart.
-fn keep_generated<'a>(decls: &mut [Declaration], generated: impl IntoIterator<Item = &'a str>) {
-    let generated: HashSet<&str> = generated.into_iter().collect();
-    for d in decls {
-        d.generated |= generated.contains(d.name.as_str());
-    }
-}
-
 /// The worst status among a module's declarations, `decls`.
 fn worst_status(decls: &[Declaration]) -> ProofStatus {
     let statuses = decls.iter().map(|d| d.status);
@@ -647,8 +638,8 @@ async fn recheck_module(slot: &Lease, id: &str) -> Result<Vec<ReportedDeclaratio
             .reason
             .unwrap_or_else(|| "snapshot rejected".into()));
     }
-    serde_json::from_value(verified.declarations)
-        .map_err(|_| "unreadable verifier declarations".to_string())
+    parse_declarations(verified.declarations)
+        .ok_or_else(|| "unreadable verifier declarations".to_string())
 }
 
 /// Runs one of the worker's own reports in environment `env` and parses it;
@@ -1461,25 +1452,19 @@ impl Snapshots {
                 return fail(outcome, header_error(f, slot.import_timeout()));
             }
         };
-        let reported = match report_module(slot, id, env).await {
-            Ok(decls) => decls,
-            Err(e) => {
-                self.unbuild(slot, id);
-                return fail(outcome, e);
-            }
+        // The verifier's declarations, which don't depend on what ran in the
+        // build, or else the build's report.
+        let decls = match rechecked {
+            Some(decls) => decls,
+            None => match report_module(slot, id, env).await {
+                Ok(decls) => decls,
+                Err(e) => {
+                    self.unbuild(slot, id);
+                    return fail(outcome, e);
+                }
+            },
         };
-        let mut verification = match rechecked {
-            Some(decls) => {
-                let mut verification = slot.policy().judge_decls(false, Some(decls));
-                let generated = reported.iter().filter(|d| d.generated);
-                keep_generated(
-                    &mut verification.declarations,
-                    generated.map(|d| d.name.as_str()),
-                );
-                verification
-            }
-            None => slot.policy().judge_decls(false, Some(reported)),
-        };
+        let mut verification = slot.policy().judge_decls(false, Some(decls));
         // For search only, so a failure just leaves the module out of it.
         let exported = export_module(slot, id, env)
             .await
@@ -1698,10 +1683,7 @@ impl Snapshots {
                 meta.status = worst_status(&verification.declarations);
                 meta.result.ok = verification.ok;
                 meta.result.reasons = verification.reasons.clone();
-                let mut decls = verification.declarations.clone();
-                let generated = meta.result.declarations.iter().filter(|d| d.generated);
-                keep_generated(&mut decls, generated.map(|d| d.name.as_str()));
-                meta.result.declarations = decls;
+                meta.result.declarations = verification.declarations.clone();
             })
             .await?;
         Ok(match updated {
@@ -2929,19 +2911,6 @@ mod tests {
             ..swapped
         };
         assert!(compare(&replacing(old.clone(), None), &old, &swapped).is_ok());
-    }
-
-    #[test]
-    fn the_verifiers_declarations_keep_what_the_report_marks_generated() {
-        let mut verified = vec![
-            decl("f.match_1.eq_1", "1", None, &[]),
-            decl("t", "2", None, &[]),
-        ];
-        keep_generated(&mut verified, ["f.match_1.eq_1"]);
-        assert_eq!(
-            verified.iter().map(|d| d.generated).collect::<Vec<_>>(),
-            [true, false]
-        );
     }
 
     #[test]

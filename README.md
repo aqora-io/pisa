@@ -1262,9 +1262,14 @@ rather than a new implicit argument. Code can turn it back on with
 `set_option autoImplicit true`, alone or with `in`, because it is an allowlisted
 option.
 
-The axiom report is a `run_cmd` metaprogram. It needs `Lean.Elab.Command`, so
-workers add `import Lean.Elab.Command` to every header they load, or
-`meta import Lean.Elab.Command` to a module-system header.
+The axiom report is a `run_cmd` call into the `Pisa` library
+(`docker/pisa-lean`, built into the worker image at `PISA_LEAN_LIB`), so
+workers add `import Pisa` to every header they load, or `meta import Pisa` to
+a module-system header. It describes each declaration: its axioms, and the
+canonical text of its type and, for a definition, of its value, which the
+worker hashes with SHA-256. The text is injective, so two declarations with
+the same hashes have the same statement. The kernel re-check describes
+declarations with the same library.
 
 This scan is a conservative pre-filter, not the last word: it over-approximates
 "the kernel checked every declaration with sound options" by forbidding

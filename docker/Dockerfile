@@ -52,8 +52,13 @@ WORKDIR /opt/project
 RUN if [ ! -f lake-manifest.json ]; then lake update; fi \
     && if grep -q mathlib lakefile.toml; then lake exe cache get; fi \
     && lake build
-# The snapshot kernel re-verifier, run with `lean --run` (imports only Lean
-# core). After `lake build`, so editing it doesn't recompile the project.
+# What the axiom report and the kernel re-verifier share (imports only Lean
+# core), on the project's toolchain. After the project, so editing it doesn't
+# rebuild the project.
+COPY docker/pisa-lean /opt/pisa
+RUN cp /opt/project/lean-toolchain /opt/pisa/lean-toolchain \
+    && cd /opt/pisa && lake build
+# The snapshot kernel re-verifier, run with `lean --run`.
 COPY docker/verifier /opt/verifier
 
 FROM lean AS worker

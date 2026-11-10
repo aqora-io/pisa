@@ -7,7 +7,7 @@
 
 use pisa_protocol::header::import_parts;
 use pisa_protocol::repl::{CommandResponse, Severity};
-use pisa_protocol::verify::{ProofStatus, ReportedDeclaration, Verification};
+use pisa_protocol::verify::{DescribedDeclaration, ProofStatus, ReportedDeclaration, Verification};
 
 use crate::catalog::SnapshotDecl;
 
@@ -68,13 +68,14 @@ pub const DEFAULT_OPTIONS: &str = "maxHeartbeats,maxRecDepth,synthInstance.maxHe
 synthInstance.maxSize,autoImplicit,relaxedAutoImplicit,linter.*,pp.*,trace.*,\
 exponentiation.threshold,backward.*";
 
-/// `run_cmd` needs this module, so every header a worker imports gets it.
-/// Mathlib and most projects import it anyway.
-pub const REPORT_IMPORT: &str = "import Lean.Elab.Command";
+/// The report is the `Pisa` library's (`docker/pisa-lean`), so every header a
+/// worker imports gets it. It brings `Lean.Elab.Command`, which `run_cmd`
+/// needs.
+pub const REPORT_IMPORT: &str = "import Pisa";
 
 /// In a module-system header, `run_cmd` runs at compile time, so it needs a
 /// `meta` import.
-pub const MODULE_REPORT_IMPORT: &str = "meta import Lean.Elab.Command";
+pub const MODULE_REPORT_IMPORT: &str = "meta import Pisa";
 
 /// Lean defaults `autoImplicit` to true, which turns a misspelt name in a
 /// statement into a new implicit argument instead of an error. Every header
@@ -93,7 +94,7 @@ pub fn header_command(header: &str) -> String {
         .lines()
         .filter_map(import_parts)
         .any(|(prefix, modules)| {
-            modules.contains(&"Lean.Elab.Command") && (!module_system || prefix.contains("meta"))
+            modules.contains(&"Pisa") && (!module_system || prefix.contains("meta"))
         });
     let import = if module_system {
         MODULE_REPORT_IMPORT
@@ -113,108 +114,22 @@ pub fn header_command(header: &str) -> String {
 /// Prefix of the info message the axiom report prints.
 const MARKER: &str = "PISA_DECLS ";
 
-/// Lists every declaration added after the imports with the axioms it depends
-/// on, a hash of its type and, for definitions, of its value, and the
-/// constants of this code and of snapshots that its type and value use
-/// (`type_refs`, `value_refs`; an inductive's "value" is its constructors and
-/// recursor). Names are rooted so user declarations can't shadow them.
-///
-/// Internal auxiliaries, such as the `f._unary` holding the body of a
-/// well-founded definition, aren't listed: what uses one has its hashes fold
-/// in theirs, and its refs go through to what they use. Private names are
-/// hashed without their module, which differs between a module and its
-/// replacement. `generated` marks what Lean makes on demand, such as equation
-/// lemmas, which a replacement needn't have. The kernel verifier
-/// (`docker/verifier/PisaVerify.lean`) computes the same.
-pub const AXIOM_REPORT: &str = r#"run_cmd do
-  let env : _root_.Lean.Environment ← _root_.Lean.MonadEnv.getEnv
-  let tracked : _root_.Lean.Name → Bool := fun m =>
-    match env.getModuleIdxFor? m with
-    | some i => (`PisaSnap).isPrefixOf (env.header.moduleNames[i.toNat]!)
-    | none => true
-  let hidden : _root_.Lean.Name → Bool := fun m => m.isInternal && !(_root_.Lean.isPrivateName m)
-  let norm : _root_.Lean.Name → _root_.Lean.Name := fun m =>
-    match _root_.Lean.privateToUserName? m with
-    | some u => `_private ++ u
-    | none => m
-  let hashOf : _root_.Lean.Expr → UInt64 := fun e =>
-    hash (e.replace fun x => match x with
-      | .const m ls => if _root_.Lean.isPrivateName m then some (.const (norm m) ls) else none
-      | _ => none)
-  let deep : _root_.Lean.Name → _root_.Lean.Expr → UInt64 × List _root_.Lean.Name := fun self e => Id.run do
-    let mut seen : _root_.Lean.NameSet := {}
-    let mut refs : _root_.Lean.NameSet := {}
-    let mut reached : Array _root_.Lean.Name := #[]
-    let mut todo : List _root_.Lean.Name := e.getUsedConstants.toList
-    repeat
-      match todo with
-      | [] => break
-      | m :: rest =>
-        todo := rest
-        if seen.contains m || !tracked m then continue
-        seen := seen.insert m
-        if hidden m then
-          reached := reached.push m
-          if let some ci := env.find? m then
-            todo := ci.type.getUsedConstants.toList ++ todo
-            if let .defnInfo d := ci then
-              todo := d.value.getUsedConstants.toList ++ todo
-        else if m != self then
-          refs := refs.insert m
-    let mut h := hashOf e
-    for m in reached.qsort (fun a b => a.toString < b.toString) do
-      if let some ci := env.find? m then
-        h := mixHash h (mixHash (hash (norm m)) (hashOf ci.type))
-        if let .defnInfo d := ci then
-          h := mixHash h (hashOf d.value)
-    return (h, refs.toList)
-  let mut out : Array _root_.Lean.Json := #[]
-  for (n, ci) in env.constants.map₂.toList do
-    if n.isInternal && !(_root_.Lean.isPrivateName n) then continue
-    let kind : String := match ci with
-      | .thmInfo _ => "theorem"
-      | .defnInfo _ => "def"
-      | .axiomInfo _ => "axiom"
-      | .opaqueInfo _ => "opaque"
-      | .quotInfo _ => "quot"
-      | .inductInfo _ => "inductive"
-      | .ctorInfo _ => "constructor"
-      | .recInfo _ => "recursor"
-    let axioms ← _root_.Lean.collectAxioms n
-    let assumes := axioms.filter fun a => tracked a && !hidden a &&
-      (match env.find? a with | some (.axiomInfo _) => true | _ => false)
-    let (typeHash, typeRefs) := deep n ci.type
-    let (valueHash, valueRefs) : _root_.Lean.Json × List _root_.Lean.Name := match ci with
-      | .defnInfo d => let (h, refs) := deep n d.value; (_root_.Lean.ToJson.toJson (toString h), refs)
-      | .inductInfo i => (_root_.Lean.Json.null, i.ctors ++ [_root_.Lean.mkRecName i.name])
-      | _ => (_root_.Lean.Json.null, [])
-    let generated := _root_.Lean.isReservedName env n ||
-      ((_root_.Lean.privateToUserName? n).map (·.isInternal)).getD false
-    out := out.push (_root_.Lean.Json.mkObj [
-      ("name", _root_.Lean.ToJson.toJson n),
-      ("kind", _root_.Lean.ToJson.toJson kind),
-      ("axioms", _root_.Lean.ToJson.toJson axioms),
-      ("assumes", _root_.Lean.ToJson.toJson assumes),
-      ("type_hash", _root_.Lean.ToJson.toJson (toString typeHash)),
-      ("value_hash", valueHash),
-      ("type_refs", _root_.Lean.ToJson.toJson typeRefs),
-      ("value_refs", _root_.Lean.ToJson.toJson valueRefs),
-      ("generated", _root_.Lean.ToJson.toJson generated)])
-  _root_.Lean.logInfo (_root_.Lean.MessageData.ofFormat
-    (_root_.Std.Format.text ("PISA_DECLS " ++ (_root_.Lean.Json.arr out).compress)))"#;
-
-/// The loop of [`AXIOM_REPORT`] over the declarations added after the imports.
-const REPORT_LOOP: &str = "  for (n, ci) in env.constants.map₂.toList do\n";
+/// Describes every declaration added after the imports (see
+/// `docker/pisa-lean/Pisa/Report.lean`): the axioms it depends on, the
+/// canonical text of its type and, for definitions, of its value, which
+/// [`parse_report`] hashes, and the constants of this code and of snapshots
+/// that its type and value use (`type_refs`, `value_refs`; an inductive's
+/// "value" is its constructors and recursor). `generated` marks what Lean
+/// makes on demand, such as equation lemmas, which a replacement needn't
+/// have. The kernel verifier (`docker/verifier/PisaVerify.lean`) describes
+/// declarations with the same code. Rooted, so user declarations can't shadow
+/// it.
+pub const AXIOM_REPORT: &str = "run_cmd _root_.Pisa.reportNew";
 
 /// [`AXIOM_REPORT`] for the declarations of one imported module, e.g. a
 /// snapshot (whose own declarations are not "after the imports").
 pub fn module_report(module: &str) -> String {
-    let report_loop = format!(
-        "  let some idx := env.getModuleIdx? `{module} | _root_.Lean.throwError \"{module} is not imported\"\n  \
-         for n in env.header.moduleData[idx.toNat]!.constNames do\n    \
-         let some ci := env.find? n | continue\n"
-    );
-    AXIOM_REPORT.replacen(REPORT_LOOP, &report_loop, 1)
+    format!("run_cmd _root_.Pisa.reportModule `{module}")
 }
 
 const EXPORT_MARKER: &str = "PISA_EXPORT ";
@@ -438,11 +353,17 @@ pub fn parse_report(report: &CommandResponse) -> Option<Vec<ReportedDeclaration>
         .iter()
         .filter(|m| m.severity == Severity::Info)
         .find_map(|m| m.data.strip_prefix(MARKER))
-        .and_then(|json| serde_json::from_str::<Vec<ReportedDeclaration>>(json).ok())
-        .map(|mut decls| {
-            decls.sort_by(|a, b| a.name.cmp(&b.name));
-            decls
-        })
+        .and_then(|json| parse_declarations(serde_json::from_str(json).ok()?))
+}
+
+/// Declarations as `Pisa`'s `describe` gives them, in the report or the
+/// kernel verifier's verdict, by name, with their texts hashed. `None` if
+/// they aren't descriptions.
+pub fn parse_declarations(json: serde_json::Value) -> Option<Vec<ReportedDeclaration>> {
+    let decls: Vec<DescribedDeclaration> = serde_json::from_value(json).ok()?;
+    let mut decls: Vec<ReportedDeclaration> = decls.into_iter().map(Into::into).collect();
+    decls.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(decls)
 }
 
 /// Splits Lean source into identifier-like tokens, with the brackets,
@@ -766,28 +687,28 @@ mod tests {
         assert_eq!(AUTO_IMPLICIT_OFF, off);
         assert_eq!(
             header_command(""),
-            "import Lean.Elab.Command\nset_option autoImplicit false"
+            "import Pisa\nset_option autoImplicit false"
         );
         assert_eq!(
             header_command("import Mathlib"),
-            "import Mathlib\nimport Lean.Elab.Command\nset_option autoImplicit false"
+            "import Mathlib\nimport Pisa\nset_option autoImplicit false"
         );
         assert_eq!(
-            header_command("import Mathlib\nimport Lean.Elab.Command"),
-            "import Mathlib\nimport Lean.Elab.Command\nset_option autoImplicit false"
+            header_command("import Mathlib\nimport Pisa"),
+            "import Mathlib\nimport Pisa\nset_option autoImplicit false"
         );
         assert_eq!(
             header_command("module\npublic import Foo"),
-            "module\npublic import Foo\nmeta import Lean.Elab.Command\nset_option autoImplicit false"
+            "module\npublic import Foo\nmeta import Pisa\nset_option autoImplicit false"
         );
         // A module needs the `meta` import even if it imports the module.
         assert_eq!(
-            header_command("module\nimport Lean.Elab.Command"),
-            "module\nimport Lean.Elab.Command\nmeta import Lean.Elab.Command\nset_option autoImplicit false"
+            header_command("module\nimport Pisa"),
+            "module\nimport Pisa\nmeta import Pisa\nset_option autoImplicit false"
         );
         assert_eq!(
-            header_command("module\npublic meta import Lean.Elab.Command"),
-            "module\npublic meta import Lean.Elab.Command\nset_option autoImplicit false"
+            header_command("module\npublic meta import Pisa"),
+            "module\npublic meta import Pisa\nset_option autoImplicit false"
         );
         for header in ["", "import Mathlib", "module\npublic import Foo"] {
             assert_eq!(header_command(header).lines().last(), Some(off));
@@ -938,15 +859,12 @@ mod tests {
     }
 
     #[test]
-    fn module_report_walks_the_module() {
-        assert!(AXIOM_REPORT.contains(REPORT_LOOP));
-        let report = module_report("PisaSnap.s0f");
-        assert!(!report.contains("map₂"), "{report}");
-        assert!(
-            report.contains("env.getModuleIdx? `PisaSnap.s0f |"),
-            "{report}"
+    fn reports_are_rooted_calls_of_the_library() {
+        assert_eq!(AXIOM_REPORT, "run_cmd _root_.Pisa.reportNew");
+        assert_eq!(
+            module_report("PisaSnap.s0f"),
+            "run_cmd _root_.Pisa.reportModule `PisaSnap.s0f"
         );
-        assert!(report.contains("    let some ci := env.find? n | continue\n    if n.isInternal"));
     }
 
     #[test]
@@ -999,16 +917,16 @@ mod tests {
                 "pos": {"line": 1, "column": 0}, "data": format!("PISA_DECLS {decls}")}]}))
         };
         let ok = report(json!([{"name": "x", "kind": "theorem",
-            "axioms": ["propext", "Quot.sound"], "assumes": [], "type_hash": "1",
+            "axioms": ["propext", "Quot.sound"], "assumes": [], "type": "1",
             "type_refs": [], "value_refs": []}]));
         let v = p.judge(&response(json!({"env": 1})), Some(&ok));
         assert!(v.ok, "{v:?}");
         assert_eq!(v.declarations[0].name, "x");
 
         let bad = report(json!([{"name": "x", "kind": "theorem",
-            "axioms": ["sorryAx"], "assumes": [], "type_hash": "1", "type_refs": [], "value_refs": []},
+            "axioms": ["sorryAx"], "assumes": [], "type": "1", "type_refs": [], "value_refs": []},
             {"name": "y", "kind": "theorem", "axioms": ["Lean.ofReduceBool"], "assumes": [],
-             "type_hash": "2", "type_refs": [], "value_refs": []}]));
+             "type": "2", "type_refs": [], "value_refs": []}]));
         let v = p.judge(&response(json!({"env": 1})), Some(&bad));
         assert!(!v.ok);
         assert_eq!(
@@ -1035,10 +953,10 @@ mod tests {
                 "pos": {"line": 1, "column": 0}, "data": format!("PISA_DECLS {}", json!([decl]))}]}))
         };
         let decl = json!({"name": "x", "kind": "theorem", "axioms": [], "assumes": [],
-            "type_hash": "1", "value_hash": null, "type_refs": [], "value_refs": [],
+            "type": "1", "value": null, "type_refs": [], "value_refs": [],
             "generated": false});
         assert!(parse_report(&report(&decl)).is_some());
-        for field in ["type_refs", "value_refs", "assumes"] {
+        for field in ["type", "type_refs", "value_refs", "assumes"] {
             let mut without = decl.clone();
             without.as_object_mut().unwrap().remove(field);
             assert!(parse_report(&report(&without)).is_none(), "{field}");

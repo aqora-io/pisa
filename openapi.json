@@ -608,7 +608,7 @@
             "description": "What its axioms make it, by [`ProofStatus`]."
           },
           "type_hash": {
-            "description": "A hash of its type, with private names taken without their module,\nand with the internal auxiliaries it uses folded in.",
+            "description": "The SHA-256 of its type's canonical text, with private names taken\nwithout their module, and with the internal auxiliaries it uses\nfollowing it.",
             "type": "string"
           },
           "type_refs": {
@@ -619,7 +619,7 @@
             "type": "array"
           },
           "value_hash": {
-            "description": "For definitions, a hash of the value, as of the type, so a proof can't\nchange what a statement means by redefining something it mentions.",
+            "description": "For definitions, the same for the value, so a proof can't change what\na statement means by redefining something it mentions.",
             "type": "string"
           },
           "value_refs": {

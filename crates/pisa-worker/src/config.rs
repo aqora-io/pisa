@@ -30,6 +30,14 @@ pub struct WorkerConfig {
         default_value = "/opt/verifier/PisaVerify.lean"
     )]
     pub verifier: PathBuf,
+    /// The built `Pisa` library (`docker/pisa-lean`), whose report every
+    /// header imports and the verifier runs: its `.olean` root.
+    #[arg(
+        long,
+        env = "PISA_LEAN_LIB",
+        default_value = "/opt/pisa/.lake/build/lib/lean"
+    )]
+    pub lean_lib: PathBuf,
     /// Lake project whose dependencies the REPL imports (run through `lake env`).
     #[arg(long, env = "PISA_PROJECT")]
     pub project: Option<PathBuf>,

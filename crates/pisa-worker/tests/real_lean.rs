@@ -1,9 +1,11 @@
 //! The axiom report and the kernel verifier on real Lean: code is compiled to
 //! snapshot modules as a worker builds them, reported as the builder reports
 //! them, and re-checked by `docker/verifier/PisaVerify.lean`. Each test needs
-//! elan's Lean 4.35.0 on `PATH`, so they are ignored by default:
+//! elan's Lean 4.35.0 on `PATH` and the `Pisa` library built, so they are
+//! ignored by default:
 //!
 //! ```text
+//! (cd docker/pisa-lean && lake build)
 //! cargo test -p pisa-worker --test real_lean -- --ignored
 //! ```
 
@@ -13,14 +15,15 @@ use std::process::Command;
 use pisa_protocol::header::split_header;
 use pisa_protocol::repl::{CommandResponse, Message};
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::{Declaration, ReportedDeclaration, statement_changes};
+use pisa_protocol::verify::{Declaration, statement_changes};
 use pisa_worker::launcher::{Verified, compile_args};
 use pisa_worker::policy::{
-    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_report, parse_report,
+    DEFAULT_AXIOMS, DEFAULT_OPTIONS, Policy, header_command, module_report, parse_declarations,
+    parse_report,
 };
 
-fn verifier() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/verifier/PisaVerify.lean")
+fn docker() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker")
 }
 
 fn policy() -> Policy {
@@ -51,11 +54,17 @@ impl Snapshots {
         Snapshots { root }
     }
 
-    fn lean(&self, args: &[&str]) -> std::process::Output {
+    /// Runs `lean` on the snapshot modules, and with `pisa` on the `Pisa`
+    /// library, as the worker's REPL and verifier run.
+    fn lean(&self, args: &[&str], pisa: bool) -> std::process::Output {
+        let mut path = vec![self.root.path().to_path_buf()];
+        if pisa {
+            path.push(docker().join("pisa-lean/.lake/build/lib/lean"));
+        }
         Command::new("lean")
             .args(args)
             .current_dir(self.root.path())
-            .env("LEAN_PATH", self.root.path())
+            .env("LEAN_PATH", std::env::join_paths(path).unwrap())
             .output()
             .expect("running lean (is elan's Lean 4.35.0 on PATH?)")
     }
@@ -71,7 +80,7 @@ impl Snapshots {
         std::fs::write(&file, code).unwrap();
         let args = compile_args(self.root.path(), &file, &file.with_extension("olean"));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = self.lean(&args);
+        let out = self.lean(&args, false);
         assert!(
             out.status.success(),
             "lean -o failed:\n{}{}",
@@ -96,7 +105,7 @@ impl Snapshots {
         );
         let file = self.root.path().join(format!("report_{id}.lean"));
         std::fs::write(&file, text).unwrap();
-        let out = self.lean(&["--json", &file.to_string_lossy()]);
+        let out = self.lean(&["--json", &file.to_string_lossy()], true);
         let messages: Vec<Message> = String::from_utf8_lossy(&out.stdout)
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
@@ -121,8 +130,11 @@ impl Snapshots {
 
     /// The kernel verifier's declarations.
     fn verify(&self, id: &str) -> Vec<Declaration> {
-        let verifier = verifier();
-        let out = self.lean(&["--run", &verifier.to_string_lossy(), &snapshot::module(id)]);
+        let verifier = docker().join("verifier/PisaVerify.lean");
+        let out = self.lean(
+            &["--run", &verifier.to_string_lossy(), &snapshot::module(id)],
+            true,
+        );
         let stdout = String::from_utf8_lossy(&out.stdout);
         let line = stdout
             .lines()
@@ -135,9 +147,7 @@ impl Snapshots {
             });
         let verified: Verified = serde_json::from_str(line).unwrap();
         assert!(verified.ok, "s{id} rejected: {:?}", verified.reason);
-        let mut decls: Vec<ReportedDeclaration> =
-            serde_json::from_value(verified.declarations).unwrap();
-        decls.sort_by(|a, b| a.name.cmp(&b.name));
+        let decls = parse_declarations(verified.declarations).unwrap();
         policy().judge_decls(false, Some(decls)).declarations
     }
 }
@@ -197,6 +207,41 @@ fn a_changed_type_is_refused() {
     let retyped = SPEC.replace("f n = n + 1 :=", "f n = n + 2 :=");
     assert_eq!(
         changes(SPEC, &retyped),
+        ["statement: t has a different type"]
+    );
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn only_what_lean_makes_counts_as_generated() {
+    let snapshots = Snapshots::new();
+    // Lean lets code declare `bar.induct` for a definition that doesn't
+    // recurse: it is the code's own, a target like any.
+    let own = snapshots.build(
+        "def bar : Nat := 1\ntheorem bar.induct : True := trivial\n\
+         def f : Nat → Nat\n  | 0 => 0\n  | n + 1 => f n\n\
+         theorem uses : True := by\n  have := @f.induct\n  trivial\n",
+    );
+    let generated = |name: &str| {
+        let decls = own.agreed();
+        let d = decls.iter().find(|d| d.name == name);
+        d.unwrap_or_else(|| panic!("no {name}: {decls:?}"))
+            .generated
+    };
+    assert!(!generated("bar.induct"));
+    // Lean's own, made on demand for a recursive definition.
+    assert!(generated("f.induct"));
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn names_that_read_alike_are_told_apart() {
+    // `x.y` has two components, `«x.y»` one: different constants.
+    let base = "def x.y : Nat := 1\ndef «x.y» : Nat := 1\n";
+    let spec = format!("{base}theorem t : x.y = 1 := sorry\n");
+    let swapped = format!("{base}theorem t : «x.y» = 1 := sorry\n");
+    assert_eq!(
+        changes(&spec, &swapped),
         ["statement: t has a different type"]
     );
 }
