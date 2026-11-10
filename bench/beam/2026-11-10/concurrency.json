@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "cpus": 8,
+    "packages": "Symlink",
+    "sandbox": "Bwrap",
+    "toolchain": "leanprover/lean4:v4.36.0-rc2",
+    "unix_time": 1794329361,
+    "version": "v4.36.0-rc2-1e541805"
+  },
+  "result": {
+    "levels": [
+      {
+        "busy": 0,
+        "concurrency": 1,
+        "errors": 0,
+        "per_second": 10.19045947961886,
+        "probes": 24,
+        "timeouts": 0,
+        "wall_ms": 2355.144049
+      },
+      {
+        "busy": 0,
+        "concurrency": 4,
+        "errors": 0,
+        "per_second": 11.87956719891538,
+        "probes": 24,
+        "timeouts": 0,
+        "wall_ms": 2020.2756210000002
+      },
+      {
+        "busy": 0,
+        "concurrency": 16,
+        "errors": 0,
+        "per_second": 11.898327182006422,
+        "probes": 24,
+        "timeouts": 0,
+        "wall_ms": 2017.0902709999998
+      },
+      {
+        "busy": 0,
+        "concurrency": 32,
+        "errors": 0,
+        "per_second": 12.035224273169863,
+        "probes": 24,
+        "timeouts": 0,
+        "wall_ms": 1994.14647
+      }
+    ],
+    "module": "Physlib.QuantumMechanics.Operators.Momentum",
+    "usage": {
+      "cpu_secs": 29.547438,
+      "memory_mb": 1406.66796875,
+      "memory_peak_mb": 1411.328125,
+      "pids_peak": 106
+    }
+  }
+}
