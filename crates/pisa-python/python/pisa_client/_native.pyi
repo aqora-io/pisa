@@ -362,8 +362,8 @@ class Client:
         detail: list[Literal["tactics", "terms", "declarations"]] = [],
         at: list[tuple[int, int]] = [],
     ) -> list[CheckResult]:
-        """Check several pieces of code in one request; results keep the order
-        of `codes`. `detail` and `at` apply to every one."""
+        """Check several pieces of code in one request, up to 128; results
+        keep the order of `codes`. `detail` and `at` apply to every one."""
     def start_session(self, code: str) -> Session:
         """Run code containing `sorry`; returns one proof state per `sorry`."""
     def apply_tactic(self, state_id: str, tactic: str) -> ApplyTacticResponse:

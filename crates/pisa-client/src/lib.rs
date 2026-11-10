@@ -388,8 +388,9 @@ impl Client {
         }
     }
 
-    /// Checks several pieces of code in one request. Results come back in
-    /// the order of `codes`; each one's failures are in its own `error`.
+    /// Checks several pieces of code in one request, up to 128. Results come
+    /// back in the order of `codes`; each one's failures are in its own
+    /// `error`.
     pub async fn check_batch<I, C>(&self, codes: I) -> Result<Vec<CheckResult>, Error>
     where
         I: IntoIterator<Item = C>,
