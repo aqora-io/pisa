@@ -65,6 +65,7 @@ pub struct Beam {
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     pid: Option<u32>,
     tools: Vec<String>,
+    tools_list: Value,
 }
 
 impl Beam {
@@ -112,6 +113,7 @@ impl Beam {
             stderr_tail,
             pid,
             tools: Vec::new(),
+            tools_list: Value::Null,
         };
         let client = json!({"name": "pisa", "version": env!("CARGO_PKG_VERSION")});
         let init = json!({"protocolVersion": PROTOCOL, "capabilities": {}, "clientInfo": client});
@@ -124,6 +126,7 @@ impl Beam {
             .iter()
             .filter_map(|t| t["name"].as_str().map(str::to_string))
             .collect();
+        beam.tools_list = list;
         Ok(beam)
     }
 
@@ -138,6 +141,11 @@ impl Beam {
     /// The tool names the server listed.
     pub fn tools(&self) -> &[String] {
         &self.tools
+    }
+
+    /// The server's `tools/list` answer, schemas included.
+    pub fn tools_list(&self) -> &Value {
+        &self.tools_list
     }
 
     pub fn stderr_tail(&self) -> String {

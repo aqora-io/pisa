@@ -56,6 +56,9 @@ jobs:
         run: lake build
       - name: Real-Lean tests
         run: cargo test -p pisa-worker --test real_lean -- --ignored
+      # Lean Beam is beta: this catches a toolchain whose Beam tools changed.
+      - name: Real-Beam tests
+        run: cargo test -p pisa-beam --test real_beam -- --ignored
 
   clients:
     name: Web and Python clients

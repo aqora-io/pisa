@@ -135,3 +135,84 @@ async fn a_crash_says_what_it_printed_and_later_calls_fail_fast() {
     let r = beam.run_at(doc(), 1, AT, "rfl", T).await;
     assert!(matches!(r, Err(BeamError::Dead)), "{r:?}");
 }
+
+#[tokio::test]
+async fn documents_on_disk_are_read_where_positions_land() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws =
+        pisa_beam::Workspace::bare(tmp.path(), "leanprover/lean4:v4.36.0-rc2", "Docs").unwrap();
+    ws.write("Docs/D.lean", "theorem t : 𝓝 = 𝓝 := by\n  sorry\n")
+        .unwrap();
+    let doc = ws.doc("Docs/D.lean");
+    let beam = beam().await;
+    let sync = beam.sync(doc, true, T).await.unwrap();
+    assert_eq!(sync.version, 1);
+    let warning = &sync.diagnostics.items[0];
+    assert_eq!(
+        warning.range.unwrap().start,
+        LspPos {
+            line: 1,
+            character: 2
+        }
+    );
+    let todo = beam.todo(doc, sync.version, &["sorry"], T).await.unwrap();
+    assert_eq!(todo.items.len(), 1);
+    assert_eq!(
+        todo.items[0].run_at_position,
+        Some(LspPos {
+            line: 1,
+            character: 2
+        })
+    );
+    // The goal is the rest of the line. The first `𝓝` takes units 12 and
+    // 13, so the second starts at 17.
+    let goals = beam
+        .goals(
+            doc,
+            sync.version,
+            LspPos {
+                line: 0,
+                character: 17,
+            },
+            Mode::Before,
+            T,
+        )
+        .await
+        .unwrap();
+    assert_eq!(goals[0].target, "𝓝 := by");
+    let failed = beam
+        .run_at(
+            doc,
+            sync.version,
+            LspPos {
+                line: 1,
+                character: 2,
+            },
+            "omega",
+            T,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        failed.messages[0].range.unwrap().start,
+        LspPos {
+            line: 1,
+            character: 2
+        }
+    );
+
+    // An edit is a new version; the old one is stale.
+    ws.write("Docs/D.lean", "theorem t : 1 = 1 := by\n  rfl\n")
+        .unwrap();
+    assert_eq!(beam.sync(doc, true, T).await.unwrap().version, 2);
+    let stale = beam.goals(doc, 1, LspPos::default(), Mode::Before, T).await;
+    assert!(matches!(stale, Err(BeamError::Stale(_))), "{stale:?}");
+    assert!(
+        beam.todo(doc, 2, &["sorry"], T)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    beam.close(doc, T).await.unwrap();
+}

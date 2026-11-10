@@ -8,15 +8,25 @@
 //! - `FAIL`: a tool error;
 //! - `CRASH`: exit with a message on stderr;
 //! - `rfl` or `trivial`: the tactic closes the goal; anything else fails.
+//!
+//! When the document exists on disk it is read, as Beam reads it: `update`
+//! and `sync` give it a new version when its text changed, each `sorry` is a
+//! warning and a `todo` item, and the goal at a position is the rest of that
+//! line, so tests can tell where a position landed. Otherwise the answers are
+//! fixed.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 static HANDLES: AtomicU64 = AtomicU64::new(0);
+/// Each document's text and version, by path.
+static DOCS: LazyLock<Mutex<HashMap<PathBuf, (String, u64)>>> = LazyLock::new(Mutex::default);
 
 fn main() {
     let tools: Value = serde_json::from_str(include_str!("../../testdata/tools-list.json"))
@@ -135,6 +145,9 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
     if text.contains("FAIL") {
         return tool_err("invalidParams", "fake failure");
     }
+    if let Some(path) = document(&args) {
+        return document_call(name, &path, &args, text);
+    }
     match name {
         "lean_update" => tool_ok(json!({"version": 1, "changed": true})),
         "lean_sync" => tool_ok(json!({
@@ -150,19 +163,7 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
             "proof_state": {"goals": [goal("True")]}}]})),
         "lean_goals" => tool_ok(json!({"goals": [goal("True")]})),
         "lean_run_at" | "lean_run_at_handle" | "lean_run_with" | "lean_run_with_linear" => {
-            let closes = text.contains("rfl") || text.contains("trivial");
-            let mut result = if closes {
-                json!({"success": true, "messages": [], "proof_state": {"goals": []}, "traces": []})
-            } else {
-                json!({"success": false, "traces": [], "proof_state": {"goals": [goal("True")]},
-                       "messages": [{"severity": "error", "text": "fake: tactic failed"}]})
-            };
-            if closes && name != "lean_run_at" {
-                let n = HANDLES.fetch_add(1, Ordering::SeqCst);
-                result["next_handle"] = json!({"epoch": 1, "raw": {"value": format!("runAt:fake:{n}")},
-                                               "session": "fake", "workspaceId": "local:fake"});
-            }
-            tool_ok(result)
+            tool_ok(probe(name, text, None))
         }
         "lean_release" | "lean_close" => tool_ok(json!({})),
         "lean_save" => tool_ok(json!({"module": "Docs.A", "olean": "/fake/Docs/A.olean"})),
@@ -170,4 +171,147 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
         "beam_stats" => tool_ok(json!({"requests": 0})),
         _ => tool_err("invalidInput", &format!("{name} not scripted")),
     }
+}
+
+/// A probe's result: `rfl` or `trivial` closes the goal, anything else fails
+/// (at `at`, when given).
+fn probe(name: &str, text: &str, at: Option<Value>) -> Value {
+    let closes = text.contains("rfl") || text.contains("trivial");
+    let mut result = if closes {
+        json!({"success": true, "messages": [], "proof_state": {"goals": []}, "traces": []})
+    } else {
+        let mut message = json!({"severity": "error", "text": "fake: tactic failed"});
+        if let Some(at) = at {
+            message["range"] = json!({"start": at, "end": at});
+        }
+        json!({"success": false, "traces": [], "proof_state": {"goals": [goal("True")]},
+               "messages": [message]})
+    };
+    if closes && name != "lean_run_at" {
+        let n = HANDLES.fetch_add(1, Ordering::SeqCst);
+        result["next_handle"] = json!({"epoch": 1, "raw": {"value": format!("runAt:fake:{n}")},
+                                       "session": "fake", "workspaceId": "local:fake"});
+    }
+    result
+}
+
+/// The document a call names, if it exists on disk.
+fn document(args: &Map<String, Value>) -> Option<PathBuf> {
+    let root = args.get("workspace")?.get("root")?.as_str()?;
+    let path = Path::new(root).join(args.get("path")?.as_str()?);
+    path.is_file().then_some(path)
+}
+
+fn document_call(
+    name: &str,
+    path: &Path,
+    args: &Map<String, Value>,
+    text: &str,
+) -> Result<Value, Value> {
+    let mut docs = DOCS.lock().unwrap();
+    match name {
+        "lean_update" | "lean_sync" | "lean_refresh" => {
+            let now = std::fs::read_to_string(path).unwrap_or_default();
+            let entry = docs.entry(path.to_path_buf()).or_insert((String::new(), 0));
+            let changed = entry.1 == 0 || entry.0 != now;
+            if changed {
+                *entry = (now, entry.1 + 1);
+            }
+            let (text, version) = entry.clone();
+            if name == "lean_update" {
+                return tool_ok(json!({"version": version, "changed": changed}));
+            }
+            let items: Vec<Value> = sorries(&text)
+                .into_iter()
+                .map(|range| {
+                    json!({"message": "declaration uses `sorry`", "severity": "warning", "range": range})
+                })
+                .collect();
+            return tool_ok(json!({
+                "version": version,
+                "diagnostics": {"counts": {"error": 0, "warning": items.len(), "total": items.len()},
+                                "items": items},
+                "readiness": {"save_ready": true, "reason": "ok"}}));
+        }
+        "lean_close" => {
+            docs.remove(path);
+            return tool_ok(json!({"closed": true}));
+        }
+        _ => {}
+    }
+    let Some((doc, version)) = docs.get(path).cloned() else {
+        return tool_err("invalidParams", "the document was never synced");
+    };
+    if let Some(asked) = args.get("version").and_then(Value::as_u64)
+        && asked != version
+    {
+        return tool_err(
+            "contentModified",
+            &format!("document version {asked} is stale; accepted {version}"),
+        );
+    }
+    let at = match (args.get("line"), args.get("character")) {
+        (Some(line), Some(character)) => Some(json!({"line": line, "character": character})),
+        _ => None,
+    };
+    match name {
+        "lean_todo" => {
+            let items: Vec<Value> = sorries(&doc)
+                .into_iter()
+                .map(|range| {
+                    json!({"kind": "sorry", "message": "syntactic sorry", "range": range,
+                           "run_at_position": range["start"],
+                           "proof_state": {"goals": [goal("True")]}})
+                })
+                .collect();
+            tool_ok(json!({"version": version, "items": items}))
+        }
+        "lean_goals" => {
+            let line = args["line"].as_u64().unwrap_or_default() as usize;
+            let character = args["character"].as_u64().unwrap_or_default() as usize;
+            let rest = rest_of_line(&doc, line, character);
+            let goals: Vec<Value> = (!rest.is_empty()).then(|| goal(rest)).into_iter().collect();
+            tool_ok(json!({"goals": goals}))
+        }
+        "lean_run_at" | "lean_run_at_handle" | "lean_run_with" | "lean_run_with_linear" => {
+            tool_ok(probe(name, text, at))
+        }
+        "lean_save" => tool_ok(json!({"module": "Docs.A", "olean": "/fake/Docs/A.olean"})),
+        "lean_release" => tool_ok(json!({})),
+        _ => tool_err("invalidInput", &format!("{name} not scripted on documents")),
+    }
+}
+
+/// The LSP range of each `sorry` word in `text`.
+fn sorries(text: &str) -> Vec<Value> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = Vec::new();
+    for (line, s) in text.split('\n').enumerate() {
+        for (byte, _) in s.match_indices("sorry") {
+            let before = s[..byte].chars().next_back();
+            let after = s[byte + 5..].chars().next();
+            if before.is_some_and(word) || after.is_some_and(word) {
+                continue;
+            }
+            let start = s[..byte].encode_utf16().count();
+            out.push(json!({"start": {"line": line, "character": start},
+                            "end": {"line": line, "character": start + 5}}));
+        }
+    }
+    out
+}
+
+/// What follows UTF-16 position `character` on `line`, trimmed.
+fn rest_of_line(text: &str, line: usize, character: usize) -> &str {
+    let s = text.split('\n').nth(line).unwrap_or_default();
+    let mut units = 0;
+    let byte = s
+        .char_indices()
+        .find(|(_, c)| {
+            let here = units >= character;
+            units += c.len_utf16();
+            here
+        })
+        .map_or(s.len(), |(i, _)| i);
+    s[byte..].trim()
 }

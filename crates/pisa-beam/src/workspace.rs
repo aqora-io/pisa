@@ -69,7 +69,9 @@ impl Workspace {
             Packages::Symlink => {
                 std::fs::create_dir_all(dir.join(".lake"))?;
                 let link = dir.join(".lake").join("packages");
-                if !link.exists() {
+                // `exists` follows the link, and a project without packages
+                // (lean-core) leaves it dangling.
+                if link.symlink_metadata().is_err() {
                     std::os::unix::fs::symlink(&project_packages, link)?;
                 }
             }
@@ -165,5 +167,17 @@ mod tests {
             .unwrap();
         assert!(ws.root().join("BeamDocs/A.lean").is_file());
         assert_eq!(ws.doc("BeamDocs/A.lean").root, ws.root());
+    }
+
+    #[test]
+    fn a_workspace_over_a_project_without_packages_opens_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("project");
+        project(&proj);
+        std::fs::remove_dir_all(proj.join(".lake")).unwrap();
+        let dir = tmp.path().join("ws");
+        Workspace::over(&dir, &proj, "BeamDocs", Packages::Symlink).unwrap();
+        // The link dangles; a second open, as after a restart, must still work.
+        Workspace::over(&dir, &proj, "BeamDocs", Packages::Symlink).unwrap();
     }
 }

@@ -151,3 +151,59 @@ async fn the_axiom_report_runs_as_a_command_probe() {
         .unwrap_or_else(|| panic!("no report in {:?}", report.messages));
     assert!(decls.text.contains("double_add"), "{}", decls.text);
 }
+
+/// Beam is beta: if a new toolchain's tools change, the saved schemas (which
+/// the fake and the argument test use) must change with them.
+#[tokio::test]
+#[ignore = "needs elan and the Pisa library's toolchain"]
+async fn the_live_tools_list_is_the_saved_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
+    let beam = beam(&ws, None).await;
+    let saved: serde_json::Value =
+        serde_json::from_str(include_str!("../testdata/tools-list.json")).unwrap();
+    let schemas = |list: &serde_json::Value| -> Vec<(String, serde_json::Value)> {
+        let mut tools: Vec<_> = list["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["name"].as_str().unwrap().to_string(),
+                    t["inputSchema"].clone(),
+                )
+            })
+            .collect();
+        tools.sort_by(|a, b| a.0.cmp(&b.0));
+        tools
+    };
+    assert_eq!(schemas(beam.tools_list()), schemas(&saved));
+}
+
+/// Positions in a body below a header of other lines, as the worker writes
+/// documents, with a name outside the Basic Multilingual Plane.
+#[tokio::test]
+#[ignore = "needs elan and the Pisa library's toolchain"]
+async fn sorries_and_goals_below_a_header() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
+    let header = "set_option autoImplicit false\nset_option linter.unusedVariables false";
+    let body = "def 𝓝 : Nat := 2\n\ntheorem t : 𝓝 + 0 = 𝓝 := by\n  sorry\n";
+    let text = format!("{header}\n{body}");
+    ws.write("Docs/H.lean", &text).unwrap();
+    let doc = ws.doc("Docs/H.lean");
+    let beam = beam(&ws, None).await;
+    let sync = beam.sync(doc, true, T).await.unwrap();
+    let map = pisa_beam::pos::BodyMap::new(&text, 2);
+    let todo = beam.todo(doc, sync.version, &["sorry"], T).await.unwrap();
+    let at = todo.items[0].run_at_position.unwrap();
+    assert_eq!(at, map.to_lsp(4, 2));
+    assert_eq!(map.to_body(at), Some((4, 2)));
+    let goals = beam
+        .goals(doc, sync.version, at, Mode::Before, T)
+        .await
+        .unwrap();
+    assert_eq!(pisa_beam::goal::render(&goals[0]), "⊢ 𝓝 + 0 = 𝓝");
+    let probe = beam.run_at(doc, sync.version, at, "rfl", T).await.unwrap();
+    assert!(probe.success, "{:?}", probe.messages);
+}
