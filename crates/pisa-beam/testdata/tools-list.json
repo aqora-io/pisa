@@ -1,0 +1,1182 @@
+{
+ "tools": [
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Return the running Lean Beam MCP server identity for bug reports and refresh checks.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {},
+    "required": [],
+    "type": "object"
+   },
+   "name": "beam_version"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Return process-wide debug Beam broker runtime statistics for lazily cached workspaces.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {},
+    "required": [],
+    "type": "object"
+   },
+   "name": "beam_stats"
+  },
+  {
+   "description": "Beam does not upload or submit feedback. This tool creates and returns a pasteable feedback report for one explicit workspace. Non-confidential output may contain project context and caller payloads, so review it before posting. Set confidential for non-public workspaces; confidential results retain caller-authored narrative except for HOME-path redaction and do not scan it for other secrets; never post them publicly. A local evidence bundle is optional.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "actual": {
+      "description": "Observed behavior.",
+      "type": "string"
+     },
+     "bundle": {
+      "description": "Optional evidence bundle mode. Defaults to none.",
+      "enum": [
+       "none",
+       "dir",
+       "zip"
+      ],
+      "type": "string"
+     },
+     "client_request_id": {
+      "description": "Optional caller-side correlation id.",
+      "type": "string"
+     },
+     "confidential": {
+      "description": "Set true for a non-public workspace. Forces HOME-path redaction; omits automatically collected project debug context, caller-supplied request, response, evidence, and the echoed workspace descriptor; retains other caller-authored narrative without scanning it for arbitrary secrets; and marks the report as confidential. Defaults to false.",
+      "type": "boolean"
+     },
+     "evidence": {
+      "description": "Optional evidence entries to include in a bundle.",
+      "items": {
+       "additionalProperties": false,
+       "description": "Optional inline or file evidence to copy into a feedback bundle.",
+       "properties": {
+        "content": {
+         "description": "Inline JSON or text evidence to write into the bundle."
+        },
+        "name": {
+         "description": "Simple evidence filename, without path separators.",
+         "type": "string"
+        },
+        "path": {
+         "description": "Path to a local evidence file under the known root or selected Beam session directory.",
+         "type": "string"
+        }
+       },
+       "required": [
+        "name"
+       ],
+       "type": "object"
+      },
+      "type": "array"
+     },
+     "expected": {
+      "description": "Expected behavior.",
+      "type": "string"
+     },
+     "impact": {
+      "description": "Optional user impact.",
+      "type": "string"
+     },
+     "include_collected": {
+      "description": "When true, include collected Beam debug context inline in the MCP result. In confidential mode, include only the restricted runtime identity. Defaults to false.",
+      "type": "boolean"
+     },
+     "kind": {
+      "description": "Optional triage category.",
+      "enum": [
+       "bug",
+       "ux",
+       "perf",
+       "docs",
+       "question"
+      ],
+      "type": "string"
+     },
+     "redact": {
+      "description": "Whether to redact the user's home directory from the rendered report. Defaults to true.",
+      "type": "boolean"
+     },
+     "reproduction": {
+      "description": "Concrete steps or commands needed to reproduce the behavior.",
+      "type": "string"
+     },
+     "request": {
+      "description": "Optional request payload relevant to the report.",
+      "type": "object"
+     },
+     "response": {
+      "description": "Optional response payload relevant to the report.",
+      "type": "object"
+     },
+     "severity": {
+      "description": "Optional triage severity.",
+      "enum": [
+       "low",
+       "medium",
+       "high",
+       "critical"
+      ],
+      "type": "string"
+     },
+     "summary": {
+      "description": "What went wrong or what feedback should be reviewed.",
+      "type": "string"
+     },
+     "tags": {
+      "description": "Optional short labels for routing the report.",
+      "items": {
+       "description": "Feedback tag.",
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "title": {
+      "description": "Short report title.",
+      "type": "string"
+     },
+     "workaround": {
+      "description": "Optional workaround.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "title",
+     "summary",
+     "reproduction",
+     "expected",
+     "actual",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "beam_feedback_report"
+  },
+  {
+   "annotations": {
+    "idempotentHint": true
+   },
+   "description": "Evict one local Lean workspace cache and invalidate its retained proof handles. A later request recreates it lazily.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_drop_workspace"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Speculatively run one Lean command or tactic block at a file position. The text is not persisted as source and no follow-up state is kept. To keep a result, first edit and save the Lean file yourself, then call lean_sync. Tactic probes reject new local `let rec` definitions, even valid ones; save the enclosing declaration and sync instead. Probes are not an OS sandbox: Lean code may perform IO.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "text": {
+      "description": "One Lean command or tactic block to run at the selected position. Top-level command sequences are not accepted by one runAt call.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "text",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_run_at"
+  },
+  {
+   "annotations": {
+    "destructiveHint": false
+   },
+   "description": "Speculatively run one Lean command or tactic block at a file position. A successful result may include next_handle for exact follow-up execution. The text is not persisted as source. To keep a result, first edit and save the Lean file yourself, then call lean_sync. Tactic probes reject new local `let rec` definitions, even valid ones; save the enclosing declaration and sync instead. Probes are not an OS sandbox: Lean code may perform IO.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "text": {
+      "description": "One Lean command or tactic block to run at the selected position. Top-level command sequences are not accepted by one runAt call.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "text",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_run_at_handle"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Inspect Lean hover information at a file position.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_hover"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Inspect Lean signature help at a file position.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_signature_help"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Find Lean definitions for the symbol at a file position.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_definition"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Find Lean references for the symbol at a file position.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "include_declaration": {
+      "description": "When true, include the declaration location in reference results. Defaults to true.",
+      "type": "boolean"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_references"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "List Lean document symbols for one synced file.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_document_symbols"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Search Lean workspace symbols by query string.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "query": {
+      "description": "Workspace symbol search query.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "query",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_workspace_symbols"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Inspect Lean goals before or after a file position.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "character": {
+      "description": "Zero-based UTF-16 LSP character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "line": {
+      "description": "Zero-based LSP line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "mode": {
+      "description": "Whether to inspect goals before or after the file position.",
+      "enum": [
+       "before",
+       "after"
+      ],
+      "type": "string"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "line",
+     "character",
+     "mode",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_goals"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Inspect agent-actionable Lean todo items in a file, or in an optional range. Sorry, hole, and incomplete-proof items carry the goal that run_at sees at their run_at_position; run_at_position is omitted when no source position selects that goal. Code actions use one command snapshot selected by the range end; prefer a point inside the relevant syntax or a range within one command. An empty code-action result does not establish whole-range or whole-file completeness.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "end_character": {
+      "description": "Zero-based UTF-16 LSP end character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "end_line": {
+      "description": "Zero-based LSP end line.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "kinds": {
+      "description": "Todo kinds to include. Omit or pass [] for all kinds.",
+      "items": {
+       "description": "Todo kinds to include. Omit or pass [] for all kinds.",
+       "enum": [
+        "sorry",
+        "hole",
+        "diagnostic",
+        "code_action",
+        "incomplete_proof"
+       ],
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "start_character": {
+      "description": "Zero-based UTF-16 LSP start character.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "start_line": {
+      "description": "Zero-based LSP start line. Pass all four range fields, or none for the whole file without code actions.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_todo"
+  },
+  {
+   "annotations": {
+    "readOnlyHint": true
+   },
+   "description": "Resolve and return a Lean code action payload from the todo result. If it contains an LSP WorkspaceEdit, the client must apply it. Pass the CodeAction payload returned by lean_todo.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "code_action": {
+      "description": "Raw Lean LSP CodeAction payload returned by the todo operation. The action must include its data field so Lean can resolve it against this document version.",
+      "type": "object"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "version": {
+      "description": "Document version returned by a successful update or sync operation for this file.",
+      "minimum": 0,
+      "type": "integer"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "version",
+     "code_action",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_code_action_resolve"
+  },
+  {
+   "annotations": {
+    "destructiveHint": false
+   },
+   "description": "Speculatively continue from a stored handle without consuming it. The continuation is not persisted as source. To keep a result, first edit and save the Lean file so it contains the complete accepted source, then call lean_sync. Tactic probes reject new local `let rec` definitions, even valid ones; save the enclosing declaration and sync instead. Probes are not an OS sandbox: Lean code may perform IO.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "handle": {
+      "description": "Opaque broker-wrapped Lean handle from a previous tool result.",
+      "type": "object"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "text": {
+      "description": "One Lean continuation command or tactic block to run from the stored handle.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "handle",
+     "text",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_run_with"
+  },
+  {
+   "description": "Speculatively continue from a stored handle and consume it on success or failure. The continuation is not persisted as source. To keep a result, first edit and save the Lean file so it contains the complete accepted source, then call lean_sync. Tactic probes reject new local `let rec` definitions, even valid ones; save the enclosing declaration and sync instead. Probes are not an OS sandbox: Lean code may perform IO.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "handle": {
+      "description": "Opaque broker-wrapped Lean handle from a previous tool result.",
+      "type": "object"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "text": {
+      "description": "One Lean continuation command or tactic block to run from the stored handle.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "handle",
+     "text",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_run_with_linear"
+  },
+  {
+   "description": "Release a stored Lean follow-up handle.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "handle": {
+      "description": "Opaque broker-wrapped Lean handle to release.",
+      "type": "object"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "handle",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_release"
+  },
+  {
+   "description": "Read the current on-disk Lean source into the broker's LSP mirror and return its document version without waiting for diagnostics.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_update"
+  },
+  {
+   "description": "Read the current on-disk Lean source into the broker's LSP mirror, wait for diagnostics and readiness, and return its document version. This never applies or recovers speculative text.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "diagnostic_scope": {
+      "description": "Select user-facing diagnostic severities for live logging or final replay. Defaults to errors. This setting does not control Lake setup status or silent editor-only messages.",
+      "enum": [
+       "errors",
+       "all"
+      ],
+      "type": "string"
+     },
+     "diagnostics_in_result": {
+      "description": "When true, include selected current diagnostics in the final sync result; diagnostic_scope controls the severity filter.",
+      "type": "boolean"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_sync"
+  },
+  {
+   "description": "Refresh the tracked document from the current on-disk Lean source and wait for fresh diagnostics.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "diagnostic_scope": {
+      "description": "Select user-facing diagnostic severities for live logging or final replay. Defaults to errors. This setting does not control Lake setup status or silent editor-only messages.",
+      "enum": [
+       "errors",
+       "all"
+      ],
+      "type": "string"
+     },
+     "diagnostics_in_result": {
+      "description": "When true, include selected current diagnostics in the final sync result; diagnostic_scope controls the severity filter.",
+      "type": "boolean"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_refresh"
+  },
+  {
+   "description": "Read and synchronize the current on-disk Lean source, then write Lean/Lake build artifacts as a zero-build development checkpoint when possible.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "diagnostic_scope": {
+      "description": "Select user-facing diagnostic severities for live logging. Defaults to errors. This setting does not control Lake setup status or silent editor-only messages.",
+      "enum": [
+       "errors",
+       "all"
+      ],
+      "type": "string"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_save"
+  },
+  {
+   "description": "Read and synchronize the current on-disk Lean source, write the same Lean/Lake build artifacts when possible, and close the tracked LSP document.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "diagnostic_scope": {
+      "description": "Select user-facing diagnostic severities for live logging. Defaults to errors. This setting does not control Lake setup status or silent editor-only messages.",
+      "enum": [
+       "errors",
+       "all"
+      ],
+      "type": "string"
+     },
+     "path": {
+      "description": "Absolute or relative path to a regular .lean source inside the workspace root.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_close_save"
+  },
+  {
+   "annotations": {
+    "idempotentHint": true
+   },
+   "description": "Close the tracked LSP document.",
+   "inputSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "description": "Document path to close, including a deleted source.",
+      "type": "string"
+     },
+     "workspace": {
+      "additionalProperties": false,
+      "description": "Explicit local Lean workspace descriptor.",
+      "properties": {
+       "root": {
+        "description": "Absolute Lean/Lake project root path.",
+        "type": "string"
+       }
+      },
+      "required": [
+       "root"
+      ],
+      "type": "object"
+     }
+    },
+    "required": [
+     "path",
+     "workspace"
+    ],
+    "type": "object"
+   },
+   "name": "lean_close"
+  }
+ ]
+}

@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+pisa-beam = { path = "crates/pisa-beam" }
 pisa-client = { path = "crates/pisa-client" }
 pisa-db = { path = "crates/pisa-db" }
 pisa-protocol = { path = "crates/pisa-protocol" }
