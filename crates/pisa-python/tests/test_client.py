@@ -382,7 +382,7 @@ def test_audit(url):
 
 def test_audit_against(url):
     client = Client(url, timeout=5)
-    spec = client.create_snapshot("import Foo\ntheorem py_target : 2 = 2 := sorry")["snapshot"]
+    spec = client.create_snapshot("import Foo\ntheorem py_target : 2 = 2 := sorry", verify=True)["snapshot"]
     audit = client.audit_snapshots(against=[spec["id"]])
     assert audit["clean"] is False and audit["heads"] == [spec["id"]]
     assert audit["targets"][0]["status"] == "sorry"

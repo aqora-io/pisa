@@ -952,9 +952,11 @@ pub struct AuditSnapshotsResponse {
     /// The declarations that are `sorry` or `rejected`.
     pub not_proved: Vec<AuditUnproved>,
     /// With `against`: whether the run is done. There is no fork, and every
-    /// target is accepted on its head: the head's module is verified, and
-    /// the target is `proved`, or `conditional` on assumptions the spec
-    /// permits (see [`AuditAssumption::in_spec`]).
+    /// target is accepted on its head: the spec snapshot's module and the
+    /// head's are verified, the head declares the target as the same kind of
+    /// declaration with the same type, and the target is `proved`, or
+    /// `conditional` on assumptions the spec permits (see
+    /// [`AuditAssumption::in_spec`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<bool>,
     /// With `against`: the snapshots the run ends at, which nothing

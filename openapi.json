@@ -170,7 +170,7 @@
             "type": "array"
           },
           "clean": {
-            "description": "With `against`: whether the run is done. There is no fork, and every\ntarget is accepted on its head: the head's module is verified, and\nthe target is `proved`, or `conditional` on assumptions the spec\npermits (see [`AuditAssumption::in_spec`]).",
+            "description": "With `against`: whether the run is done. There is no fork, and every\ntarget is accepted on its head: the spec snapshot's module and the\nhead's are verified, the head declares the target as the same kind of\ndeclaration with the same type, and the target is `proved`, or\n`conditional` on assumptions the spec permits (see\n[`AuditAssumption::in_spec`]).",
             "type": "boolean"
           },
           "forks": {

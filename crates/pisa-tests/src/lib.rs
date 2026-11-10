@@ -174,6 +174,24 @@ fn names_in(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// `code` as fake-repl's axiom report sees it, standing in for a build
+/// process that prints what it likes: a `-- reported-as: LINE` line puts
+/// `LINE` in place of the line after it. The verifier sees the code as it is.
+pub fn as_reported(code: &str) -> String {
+    let mut out = Vec::new();
+    let mut lines = code.lines();
+    while let Some(line) = lines.next() {
+        match line.strip_prefix("-- reported-as: ") {
+            Some(reported) => {
+                out.push(reported);
+                lines.next();
+            }
+            None => out.push(line),
+        }
+    }
+    out.join("\n")
+}
+
 pub fn declarations(code: &str) -> String {
     let imported = imported_code(code).unwrap_or_default();
     let axioms_of = |code: &str| -> Vec<String> {

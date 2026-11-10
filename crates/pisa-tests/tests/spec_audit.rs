@@ -76,7 +76,8 @@ async fn a_finished_run_is_clean() {
     .await;
     let s = create(
         &c,
-        json!({"code": on(&a, "theorem t : 2 = 2 := sorry\ntheorem u : 3 = 3 := sorry")}),
+        json!({"code": on(&a, "theorem t : 2 = 2 := sorry\ntheorem u : 3 = 3 := sorry"),
+               "verify": true}),
     )
     .await;
     let p = create(
@@ -132,6 +133,55 @@ async fn a_sorry_target_is_not_clean() {
     let r = audit(&c, &[id(&s)]).await;
     assert_eq!(r["clean"], false, "{r}");
     assert_eq!(targets(&r), [format!("t {s_} {} proved false", id(&p))]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spec_the_kernel_hasnt_rechecked_is_not_clean() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl",
+               "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    // The targets are the spec's records, which only the build reported.
+    let r = audit(&c, &[id(&s)]).await;
+    assert_eq!(r["clean"], false, "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_whose_verified_statement_differs_from_the_spec_is_not_clean() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry", "verify": true}),
+    )
+    .await;
+    // The build claims the spec's statement, so the link is recorded; the
+    // code proves another.
+    let p = create(
+        &c,
+        json!({"code": "import Foo\n\n-- reported-as: theorem t : 2 = 2 := rfl\ntheorem t : 3 = 3 := rfl",
+               "replaces": replacing(&s)}),
+    )
+    .await;
+    let (status, v) = c
+        .post(&format!("/snapshots/{}/verify", id(&p)), json!({}))
+        .await;
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["snapshot"]["verified"], true, "{v}");
+
+    let r = audit(&c, &[id(&s)]).await;
+    assert_eq!(r["clean"], false, "{r}");
+    assert_eq!(
+        targets(&r),
+        [format!("t {} {} proved true", id(&s), id(&p))]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -250,7 +300,7 @@ async fn assumptions_permitted_by_the_spec() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let s = create(
         &c,
-        json!({"code": "import Foo\n\naxiom kun : 1 = 1\ntheorem t : 1 = 1 := sorry"}),
+        json!({"code": "import Foo\n\naxiom kun : 1 = 1\ntheorem t : 1 = 1 := sorry", "verify": true}),
     )
     .await;
     let p = create(
@@ -279,7 +329,7 @@ async fn assumptions_permitted_by_the_spec() {
     let n = create(&c, json!({"code": "import Foo\n\naxiom extra : 2 = 2"})).await;
     let s2 = create(
         &c,
-        json!({"code": "import Foo\n\ntheorem w : 2 = 2 := sorry"}),
+        json!({"code": "import Foo\n\ntheorem w : 2 = 2 := sorry", "verify": true}),
     )
     .await;
     let proof = on(&n, "theorem w : 2 = 2 := extra");
@@ -336,12 +386,12 @@ async fn a_spec_over_two_snapshots_survives_a_retiring_rebuild() {
     let p1 = json!({"p": "1"});
     let s_a = create(
         &c,
-        json!({"code": "import Foo\n\ntheorem ta : 1 = 1 := sorry", "labels": p1}),
+        json!({"code": "import Foo\n\ntheorem ta : 1 = 1 := sorry", "labels": p1, "verify": true}),
     )
     .await;
     let s_b = create(
         &c,
-        json!({"code": on(&s_a, "theorem tb : 2 = 2 := sorry"), "labels": p1}),
+        json!({"code": on(&s_a, "theorem tb : 2 = 2 := sorry"), "labels": p1, "verify": true}),
     )
     .await;
     let p_a = create(
@@ -603,7 +653,8 @@ async fn a_run_survives_an_allowed_edit_below_and_a_retiring_rebuild() {
     let b = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
     let s0 = create(
         &c,
-        json!({"code": on(&b, "def f : Nat := 0\ntheorem t : f = g := sorry"), "labels": p1}),
+        json!({"code": on(&b, "def f : Nat := 0\ntheorem t : f = g := sorry"), "labels": p1,
+               "verify": true}),
     )
     .await;
     let allow_f = json!({"definitions": ["f"]});
@@ -702,7 +753,7 @@ async fn a_run_whose_skeleton_is_outside_the_plan_survives_a_retiring_rebuild() 
     let h = create(&c, json!({"code": "import Foo\n\ndef hd : Nat := 1"})).await;
     let s0 = create(
         &c,
-        json!({"code": on(&a, "theorem t : 2 = 2 := sorry"), "labels": p1}),
+        json!({"code": on(&a, "theorem t : 2 = 2 := sorry"), "labels": p1, "verify": true}),
     )
     .await;
     let both = format!(

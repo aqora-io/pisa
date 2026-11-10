@@ -2303,7 +2303,13 @@ impl Snapshots {
                         all_accepted = false;
                         continue;
                     };
-                    let accepted = head_meta.verified
+                    // Both records come from the kernel re-check, not from a
+                    // build's report, and the head keeps the statement:
+                    // its link alone doesn't say so.
+                    let accepted = meta.verified
+                        && head_meta.verified
+                        && h.kind == d.kind
+                        && h.type_hash == d.type_hash
                         && match h.status {
                             ProofStatus::Proved => true,
                             ProofStatus::Conditional => h

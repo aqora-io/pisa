@@ -558,10 +558,13 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   there and whether the head is `verified`. A replacement keeps every
   statement of what it replaces, so every head has them all.
 - **`clean`.** There is no fork, and every target is accepted on its head:
-  the head is verified, and the target is `proved`, or `conditional` only on
-  assumptions the spec permits, those declared in a spec snapshot's module or
-  in a module it builds on. Each of `assumptions` says whether the spec
-  permits it (`in_spec`).
+  the spec snapshot and the head are verified, the head declares the target
+  as the same kind of declaration with the same type, and the target is
+  `proved`, or `conditional` only on assumptions the spec permits, those
+  declared in a spec snapshot's module or in a module it builds on. The
+  records of a module the kernel hasn't re-checked come from its build's
+  report, which the code being judged could influence, so they don't count.
+  Each of `assumptions` says whether the spec permits it (`in_spec`).
 - **Links.** For review, `links` lists every link that let definitions change
   (with an `allow`): those on the way to the heads, and those of each spec
   snapshot's own chain back through what it replaced, as far as those
@@ -585,7 +588,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 **Running agents on snapshots.** A leader hands targets to agents, and
 [replacing](#replacing) keeps their submissions in one run:
 - **The leader.** It creates the spec snapshots, skeletons with `sorry` and
-  one or a few targets each, with their [witnesses](#witnesses), labels the
+  one or a few targets each, with their [witnesses](#witnesses), with
+  `verify: true` (see [Verifying](#verifying)), labels the
   run (see [Labels](#labels)) and holds the spec ids. They stay valid through
   [rebuilds](#rebuilding) without `retire`.
 - **Agents.** Each gets its target's spec id and labels every snapshot with

@@ -450,8 +450,13 @@ async fn client_audits_a_project() {
 async fn client_audits_a_run_against_its_spec() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    // The kernel re-checks the spec too: the audit judges from its records.
+    let verified = CreateSnapshotOptions {
+        verify: Some(true),
+        ..Default::default()
+    };
     let spec = client
-        .create_snapshot("import Foo\ntheorem t : 1 = 1 := sorry")
+        .create_snapshot_with("import Foo\ntheorem t : 1 = 1 := sorry", &verified)
         .await
         .unwrap()
         .snapshot

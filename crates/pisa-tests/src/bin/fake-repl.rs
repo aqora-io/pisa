@@ -21,12 +21,14 @@
 //! `def` and `axiom` seen since the imports, or, for a module report, those
 //! of that module (see `pisa_tests::declarations`). Its declaration export
 //! (`run_cmd` … `PISA_EXPORT`) is the same declarations, with their
-//! statements and docstrings (see `pisa_tests::exports`).
+//! statements and docstrings (see `pisa_tests::exports`). Both read the code
+//! as `pisa_tests::as_reported` gives it, so `-- reported-as: LINE` makes them
+//! show `LINE` in place of the next line, where the verifier sees the code.
 //! Tactic `rfl` closes the goal, `fail` errors, anything else leaves a goal open.
 
 use std::io::{BufRead, Write};
 
-use pisa_tests::{declarations, declares, exports, find_module, imported_code, needs};
+use pisa_tests::{as_reported, declarations, declares, exports, find_module, imported_code, needs};
 use serde_json::{Value, json};
 
 struct State {
@@ -176,7 +178,7 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
             }
         };
         s.envs.push(prev.clone());
-        let report = format!("{marker} {}", report(&code));
+        let report = format!("{marker} {}", report(&as_reported(&code)));
         return json!({"env": s.envs.len() - 1, "messages": [message(1, "info", &report)]});
     }
     if prev.local.contains("import Clash") && cmd.starts_with("#check") {

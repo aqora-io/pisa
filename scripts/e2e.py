@@ -291,7 +291,7 @@ def spec_audit():
         return out
 
     statement = "theorem e2e_target (n : Nat) : n + 0 = n"
-    skeleton = create_snapshot(f"{statement} := sorry")
+    skeleton = create_snapshot(f"{statement} := sorry", verify=True)
     out = audit(skeleton)
     assert out["clean"] is False, out
     assert [(t["name"], t["status"]) for t in out["targets"]] == [("e2e_target", "sorry")], out
@@ -300,7 +300,7 @@ def spec_audit():
     out = audit(skeleton)
     assert out["clean"] is True and out["heads"] == [proof["snapshot"]["id"]], out
     delete_snapshots([proof, skeleton])
-    step("spec audit: a run is clean once its proof is verified")
+    step("spec audit: a run is clean once its spec and proof are verified")
 
 
 def allow_by_name():
