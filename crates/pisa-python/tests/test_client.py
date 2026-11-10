@@ -415,6 +415,8 @@ def test_snapshot_labels(url):
     page = client.list_snapshots({"suite": "labels"}, limit=1)
     assert ids(page) == [second]
     assert ids(client.list_snapshots({"suite": "labels"}, limit=1, after=page["next"])) == [first]
+    # Nothing replaces either, so both are heads.
+    assert ids(client.list_snapshots({"suite": "labels"}, heads=True)) == [second, first]
 
     updated = client.update_snapshot(first, {"k": "u"})
     assert updated["id"] == first and updated["labels"] == {"suite": "labels", "k": "u"}

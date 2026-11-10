@@ -640,14 +640,16 @@ impl Client {
     }
 
     /// Snapshots newest first: those with every label in `labels` (up to
-    /// 64), or all of them. A page has up to `limit` (1 to 1000, default
-    /// 100). Keep passing its `next` as `after` while it has one; a full page
-    /// has one, and the page after it may be empty.
+    /// 64), or all of them. With `heads`, only those that no other snapshot
+    /// replaces. A page has up to `limit` (1 to 1000, default 100). Keep
+    /// passing its `next` as `after` while it has one; a full page has one,
+    /// and the page after it may be empty.
     pub async fn list_snapshots(
         &self,
         labels: &BTreeMap<String, String>,
         limit: Option<usize>,
         after: Option<&str>,
+        heads: bool,
     ) -> Result<ListSnapshotsResponse, Error> {
         let mut url = self.endpoint.url("snapshots")?;
         add_labels(&mut url, labels);
@@ -658,6 +660,9 @@ impl Client {
             }
             if let Some(after) = after {
                 query.append_pair("after", after);
+            }
+            if heads {
+                query.append_pair("heads", "true");
             }
             if let Some(v) = &self.version {
                 query.append_pair("version", v);

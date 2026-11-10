@@ -411,11 +411,13 @@ class Client:
         *,
         limit: int | None = None,
         after: str | None = None,
+        heads: bool = False,
     ) -> ListSnapshotsResponse:
         """Snapshots newest first: those with every label in `labels` (exact
-        matches, up to 64), or all of them. A page has up to `limit` snapshots
-        (1 to 1000, default 100). Keep passing its `next` as `after` while it
-        has one; a full page has one, and the page after it may be empty."""
+        matches, up to 64), or all of them. With `heads`, only those that no
+        other snapshot replaces. A page has up to `limit` snapshots (1 to 1000,
+        default 100). Keep passing its `next` as `after` while it has one; a
+        full page has one, and the page after it may be empty."""
     def update_snapshot(self, id: str, labels: dict[str, str | None]) -> Snapshot:
         """Change a snapshot's labels as a merge patch: a label set to `None`
         is removed, one set to a string takes that value, and the rest stay.

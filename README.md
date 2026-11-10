@@ -224,7 +224,7 @@ pnpm -C web generate
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid |
 | `POST /sessions/{id}/check` | `{code, timeout?}` → check result, also requiring the session's original statements and imports |
 | `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?}` → `{snapshot?, check, replacement?, heads?}`; see [Snapshots](#snapshots) and [Replacing](#replacing) |
-| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
+| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
@@ -376,7 +376,9 @@ nothing, and a 400 on a `PATCH`, which then changes nothing.
   snapshots that have every label given, each an exact match of `key:value`
   split on the first `:`, so a value can contain `:`. Without `label` it lists
   every snapshot of the version. There is no OR or prefix matching. Two values for
-  the same key match nothing, as a snapshot has one value per key.
+  the same key match nothing, as a snapshot has one value per key. With
+  `heads=true` it lists only heads, the snapshots that nothing replaces (see
+  [Replacing](#replacing)); `heads=false`, the default, lists every snapshot.
 - **Order and pages.** Snapshots come newest first, as summaries: what
   `GET /snapshots/{id}` returns without `code`, `check` and `exports`.
   `limit` is 1–1000 (default 100), and a listing takes up to 64 `label`s. Keep

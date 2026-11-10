@@ -112,6 +112,9 @@ pub struct SnapshotListJob {
     /// The cursor to start after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<String>,
+    /// Whether to list only the snapshots that no other snapshot replaces.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub heads: bool,
 }
 
 /// `GET /snapshots/{id}/dependents`, its filters parsed and checked by the

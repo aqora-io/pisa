@@ -129,4 +129,7 @@ export interface ListSnapshotsParams {
   /** 1–1000; 100 by default. */
   limit?: number;
   after?: Cursor;
+  /** Only the snapshots that no other snapshot replaces; every snapshot by
+   *  default. */
+  heads?: boolean;
 }

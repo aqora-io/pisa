@@ -1749,12 +1749,14 @@ impl Snapshots {
     }
 
     /// The entries, newest first, that have every label in `labels`, at most
-    /// `limit`, after the cursor `after`; see [`Catalog::list`].
+    /// `limit`, after the cursor `after`, and only heads if `heads`; see
+    /// [`Catalog::list`].
     pub async fn list(
         &self,
         labels: &[(String, String)],
         limit: usize,
         after: Option<&str>,
+        heads: bool,
     ) -> Result<ListSnapshotsResponse, Error> {
         if !(1..=MAX_LIMIT).contains(&limit) || after.is_some_and(|a| !is_cursor(a)) {
             return Err(Error::new(
@@ -1771,7 +1773,7 @@ impl Snapshots {
                 ),
             ));
         }
-        let (listed, next) = self.catalog.list(labels, limit, after).await?;
+        let (listed, next) = self.catalog.list(labels, limit, after, heads).await?;
         let mut modules: HashMap<String, Option<ModuleMeta>> = HashMap::new();
         let mut snapshots = Vec::new();
         for (entry, entry_meta) in listed {
@@ -2118,7 +2120,7 @@ impl Snapshots {
         loop {
             let (page, next) = self
                 .catalog
-                .list(labels, MAX_LIMIT, after.as_deref())
+                .list(labels, MAX_LIMIT, after.as_deref(), false)
                 .await?;
             for (e, entry_meta) in page {
                 entries.entry(entry_meta.module).or_insert(e);
@@ -3181,8 +3183,8 @@ mod tests {
         let filters = |n: usize| -> Vec<(String, String)> {
             (0..n).map(|i| (i.to_string(), String::new())).collect()
         };
-        assert!(s.list(&filters(64), 10, None).await.is_ok());
-        let error = s.list(&filters(65), 10, None).await.unwrap_err();
+        assert!(s.list(&filters(64), 10, None, false).await.is_ok());
+        let error = s.list(&filters(65), 10, None, false).await.unwrap_err();
         assert_eq!(error.kind, ErrorKind::BadRequest, "{error:?}");
     }
 

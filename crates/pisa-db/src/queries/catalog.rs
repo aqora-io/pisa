@@ -4,8 +4,10 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use diesel::dsl::exists;
-use diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl};
+use diesel::dsl::{exists, not};
+use diesel::{
+    BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension, QueryDsl,
+};
 use diesel_async::RunQueryDsl;
 use pisa_protocol::api::{Error, ErrorKind};
 use pisa_protocol::labels::check_labels;
@@ -484,15 +486,28 @@ pub(crate) async fn remove_branch(
 }
 
 /// Up to `limit` entries, newest first, with every label in `labels`, from
-/// before the entry created at `after`'s time with `after`'s id.
+/// before the entry created at `after`'s time with `after`'s id. With
+/// `heads`, only those that no entry replaces.
 pub(crate) async fn list(
     db: &Handle,
     v: &str,
     labels: &[(String, String)],
     limit: i64,
     after: Option<(i64, &str)>,
+    heads: bool,
 ) -> Result<Vec<(String, EntryMeta)>, Error> {
     let mut query = entries::table.filter(entries::version.eq(v)).into_boxed();
+    if heads {
+        let replacer = diesel::alias!(entries as replacer);
+        query = query.filter(not(exists(
+            replacer.filter(
+                replacer
+                    .field(entries::version)
+                    .eq(entries::version)
+                    .and(replacer.field(entries::replaces).eq(entries::id.nullable())),
+            ),
+        )));
+    }
     if let Some((created, e)) = after {
         query = query.filter(
             entries::created_micros

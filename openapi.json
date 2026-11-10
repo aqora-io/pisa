@@ -1076,7 +1076,7 @@
         "type": "object"
       },
       "ListSnapshotsResponse": {
-        "description": "`GET /snapshots`: the version's snapshots, newest first, that have every\nlabel the query names as `label=key:value` (split on the first `:`; up to\n64 filters), at most `limit` of them (1 to 1000, default 100). Keep\nrequesting with `next` as `after` while a page has it.",
+        "description": "`GET /snapshots`: the version's snapshots, newest first, that have every\nlabel the query names as `label=key:value` (split on the first `:`; up to\n64 filters), at most `limit` of them (1 to 1000, default 100). With\n`heads=true`, only the snapshots that no other snapshot replaces, which\nare a run's current versions. Keep requesting with `next` as `after`\nwhile a page has it.",
         "properties": {
           "next": {
             "description": "Where the next page starts, if this page is full. The page after it\nmay be empty.",
@@ -3126,6 +3126,15 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "`true` for the snapshots that no other snapshot replaces; every snapshot by default",
+            "in": "query",
+            "name": "heads",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           },
           {

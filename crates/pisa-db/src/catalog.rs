@@ -526,8 +526,9 @@ impl Catalog {
 
     /// The entries, newest first, that have every `(key, value)` in `labels`
     /// (every entry if there are none), at most `limit` of them, starting
-    /// after the cursor `after` (see [`is_cursor`]). Also returns the cursor
-    /// at the last entry if there are `limit`, to go on from.
+    /// after the cursor `after` (see [`is_cursor`]). With `heads`, only those
+    /// that no other entry replaces. Also returns the cursor at the last
+    /// entry if there are `limit`, to go on from.
     ///
     /// [`is_cursor`]: pisa_protocol::labels::is_cursor
     pub async fn list(
@@ -535,14 +536,17 @@ impl Catalog {
         labels: &[(String, String)],
         limit: usize,
         after: Option<&str>,
+        heads: bool,
     ) -> Result<(Vec<(String, EntryMeta)>, Option<String>), Error> {
         let Some(wanted) = wanted(labels) else {
             return Ok((Vec::new(), None));
         };
         let after = after.map(parse_cursor).transpose()?;
         let limit_rows = i64::try_from(limit).unwrap_or(i64::MAX);
-        let entries: Vec<(String, EntryMeta)> =
-            dispatch!(&self.db, list(&self.version, &wanted, limit_rows, after))?;
+        let entries: Vec<(String, EntryMeta)> = dispatch!(
+            &self.db,
+            list(&self.version, &wanted, limit_rows, after, heads)
+        )?;
         let next = match entries.last() {
             Some((e, meta)) if entries.len() == limit => Some(format!("{}{e}", meta.rank())),
             _ => None,
@@ -921,7 +925,7 @@ mod tests {
                 let (e, added) = catalog.add_entry("x", entry).await.unwrap().unwrap();
                 assert_eq!(added.replaces, replaces);
                 assert_eq!(catalog.entry(&e).await.unwrap().replaces, replaces);
-                let (listed, _) = catalog.list(&[], 10, None).await.unwrap();
+                let (listed, _) = catalog.list(&[], 10, None, false).await.unwrap();
                 let found = listed.iter().find(|(id, _)| *id == e).unwrap();
                 assert_eq!(found.1.replaces, replaces);
             }
@@ -990,7 +994,7 @@ mod tests {
             let (e, added) = catalog.add_entry("x", entry).await.unwrap().unwrap();
             assert_eq!(added.replacement, replacement);
             assert_eq!(catalog.entry(&e).await.unwrap().replacement, replacement);
-            let (listed, _) = catalog.list(&[], 10, None).await.unwrap();
+            let (listed, _) = catalog.list(&[], 10, None, false).await.unwrap();
             let found = listed.iter().find(|(id, _)| *id == e).unwrap();
             assert_eq!(found.1.replacement, replacement);
             // An entry that replaces nothing has no comparison.
@@ -1268,7 +1272,7 @@ mod tests {
                 (err.kind, err.message.as_str()),
                 (ErrorKind::NotFound, gone)
             );
-            assert_eq!(catalog.list(&[], 10, None).await.unwrap().0.len(), 1);
+            assert_eq!(catalog.list(&[], 10, None, false).await.unwrap().0.len(), 1);
 
             // A key replay comes first.
             let (e, ..) = catalog
@@ -1526,7 +1530,7 @@ mod tests {
             };
             let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
 
-            let (all, next) = catalog.list(&[], 10, None).await.unwrap();
+            let (all, next) = catalog.list(&[], 10, None, false).await.unwrap();
             assert_eq!(all.len(), 4);
             assert!(next.is_none());
             assert_eq!(
@@ -1534,36 +1538,48 @@ mod tests {
                 [made[2].as_str(), made[1].as_str(), made[0].as_str()]
             );
 
-            let (p, _) = catalog.list(&[pair("p", "x")], 10, None).await.unwrap();
+            let (p, _) = catalog
+                .list(&[pair("p", "x")], 10, None, false)
+                .await
+                .unwrap();
             assert_eq!(p.len(), 3);
             let both = [pair("k", "a"), pair("p", "x")];
-            let (first, next) = catalog.list(&both, 1, None).await.unwrap();
+            let (first, next) = catalog.list(&both, 1, None, false).await.unwrap();
             assert_eq!(ids(&first), [made[0].as_str()]);
-            let (rest, last) = catalog.list(&both, 1, next.as_deref()).await.unwrap();
+            let (rest, last) = catalog
+                .list(&both, 1, next.as_deref(), false)
+                .await
+                .unwrap();
             assert_eq!(rest.len(), 1);
             assert_ne!(rest[0].0, made[0]);
-            let (none, end) = catalog.list(&both, 1, last.as_deref()).await.unwrap();
+            let (none, end) = catalog
+                .list(&both, 1, last.as_deref(), false)
+                .await
+                .unwrap();
             assert!(none.is_empty() && end.is_none());
 
             // Two values for a key match nothing; the same pair twice is one.
             let (none, _) = catalog
-                .list(&[pair("k", "a"), pair("k", "b")], 10, None)
+                .list(&[pair("k", "a"), pair("k", "b")], 10, None, false)
                 .await
                 .unwrap();
             assert!(none.is_empty());
             let (twice, _) = catalog
-                .list(&[pair("p", "y"), pair("p", "y")], 10, None)
+                .list(&[pair("p", "y"), pair("p", "y")], 10, None, false)
                 .await
                 .unwrap();
             assert_eq!(ids(&twice), [made[2].as_str()]);
 
             let patch = BTreeMap::from([("p".to_string(), Some("z".to_string()))]);
             catalog.set_labels(&made[2], &patch).await.unwrap();
-            let (moved, _) = catalog.list(&[pair("p", "z")], 10, None).await.unwrap();
+            let (moved, _) = catalog
+                .list(&[pair("p", "z")], 10, None, false)
+                .await
+                .unwrap();
             assert_eq!(ids(&moved), [made[2].as_str()]);
             assert!(
                 catalog
-                    .list(&[pair("p", "y")], 10, None)
+                    .list(&[pair("p", "y")], 10, None, false)
                     .await
                     .unwrap()
                     .0
@@ -1646,7 +1662,10 @@ mod tests {
             ids.sort();
             ids.dedup();
             assert_eq!(ids.len(), 8);
-            assert_eq!(catalog.list(&[], 100, None).await.unwrap().0.len(), 9);
+            assert_eq!(
+                catalog.list(&[], 100, None, false).await.unwrap().0.len(),
+                9
+            );
         }
     }
 

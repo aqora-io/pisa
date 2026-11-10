@@ -150,7 +150,7 @@ pub(crate) async fn run_job(pool: &Arc<Pool>, sessions: &Sessions, job: Job) -> 
         }
         Job::SnapshotList(j) => JobResult::SnapshotList(
             pool.snapshots()
-                .list(&j.labels, j.limit, j.after.as_deref())
+                .list(&j.labels, j.limit, j.after.as_deref(), j.heads)
                 .await,
         ),
         Job::SnapshotLabels(j) => {

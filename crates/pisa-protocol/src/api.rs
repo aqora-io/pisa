@@ -721,8 +721,10 @@ pub struct Export {
 
 /// `GET /snapshots`: the version's snapshots, newest first, that have every
 /// label the query names as `label=key:value` (split on the first `:`; up to
-/// 64 filters), at most `limit` of them (1 to 1000, default 100). Keep
-/// requesting with `next` as `after` while a page has it.
+/// 64 filters), at most `limit` of them (1 to 1000, default 100). With
+/// `heads=true`, only the snapshots that no other snapshot replaces, which
+/// are a run's current versions. Keep requesting with `next` as `after`
+/// while a page has it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ListSnapshotsResponse {
     pub snapshots: Vec<Snapshot>,

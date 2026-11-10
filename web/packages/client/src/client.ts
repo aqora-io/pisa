@@ -253,12 +253,14 @@ export class PisaClient {
     return this.call("GET", ["snapshots", id], undefined, options);
   }
 
-  /** A page of snapshots, newest first; pass `next` back as `after`. */
+  /** A page of snapshots, newest first; pass `next` back as `after`. With
+   *  `heads`, only those that no other snapshot replaces. */
   listSnapshots(params: ListSnapshotsParams = {}, options: VersionOptions = {}): Promise<ListSnapshotsResponse> {
     const query = this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
     if (params.limit !== undefined) query.set("limit", String(params.limit));
     if (params.after !== undefined) query.set("after", params.after);
+    if (params.heads) query.set("heads", "true");
     return this.call("GET", ["snapshots"], undefined, options, query);
   }
 

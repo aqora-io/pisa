@@ -118,6 +118,13 @@ describe("PisaClient", () => {
     expect(dropped.deleted).toEqual(["v1~e1", "v1~e2"]);
   });
 
+  it("asks a listing for heads only", async () => {
+    const { client, sent } = recording(() => json({ snapshots: [] }));
+    await client.listSnapshots({ heads: false });
+    await client.listSnapshots({ labels: { run: "a" }, heads: true });
+    expect(sent.map((s) => new URL(s.url, "http://h").searchParams.get("heads"))).toEqual([null, "true"]);
+  });
+
   it("updates labels with a merge patch", async () => {
     const { client, sent } = recording(() => json({ id: "v1~e1", labels: { stage: "done" } }));
     await client.updateSnapshot("v1~e1", { labels: { stage: "done", draft: null } });

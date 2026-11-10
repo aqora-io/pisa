@@ -152,6 +152,7 @@ pub async fn get(
         ("label" = Option<Vec<String>>, Query, description = "`key:value`, split on the first `:`; repeatable"),
         ("limit" = Option<usize>, Query, description = "1–1000, by default 100"),
         ("after" = Option<String>, Query, description = "The previous page's `next`"),
+        ("heads" = Option<bool>, Query, description = "`true` for the snapshots that no other snapshot replaces; every snapshot by default"),
         ("version" = Option<String>, Query, description = "The worker version; the server's default when absent."),
     ),
     responses((status = 200, description = "A page of snapshots", body = ListSnapshotsResponse), ApiErrors),
@@ -196,14 +197,15 @@ fn label_query(query: &str) -> Result<(Option<String>, Filters), String> {
 }
 
 /// Splits the query of `GET /snapshots` into the version and the job, and
-/// checks the job's filters (see [`label_query`]), limit and cursor. Other
-/// parameters are ignored.
+/// checks the job's filters (see [`label_query`]), limit, cursor and
+/// `heads`. Other parameters are ignored.
 fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> {
     let (version, labels) = label_query(query)?;
     let mut job = SnapshotListJob {
         labels,
         limit: DEFAULT_LIMIT,
         after: None,
+        heads: false,
     };
     for (name, value) in form_urlencoded::parse(query.as_bytes()) {
         match &*name {
@@ -219,6 +221,11 @@ fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> 
                 return Err(format!(
                     "after {value:?} is not a cursor: pass the `next` of the page before"
                 ));
+            }
+            "heads" => {
+                job.heads = value
+                    .parse()
+                    .map_err(|_| format!("heads {value:?} must be true or false"))?
             }
             _ => {}
         }

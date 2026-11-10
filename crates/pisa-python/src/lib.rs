@@ -306,18 +306,19 @@ impl Client {
         call(py, async move { self.inner.get_snapshot(&id).await })
     }
 
-    #[pyo3(signature = (labels = None, *, limit = None, after = None))]
+    #[pyo3(signature = (labels = None, *, limit = None, after = None, heads = false))]
     fn list_snapshots<'py>(
         &self,
         py: Python<'py>,
         labels: Option<BTreeMap<String, String>>,
         limit: Option<usize>,
         after: Option<String>,
+        heads: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = labels.unwrap_or_default();
         call(py, async move {
             self.inner
-                .list_snapshots(&labels, limit, after.as_deref())
+                .list_snapshots(&labels, limit, after.as_deref(), heads)
                 .await
         })
     }

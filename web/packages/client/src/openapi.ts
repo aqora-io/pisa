@@ -961,8 +961,10 @@ export interface components {
         /**
          * @description `GET /snapshots`: the version's snapshots, newest first, that have every
          *     label the query names as `label=key:value` (split on the first `:`; up to
-         *     64 filters), at most `limit` of them (1 to 1000, default 100). Keep
-         *     requesting with `next` as `after` while a page has it.
+         *     64 filters), at most `limit` of them (1 to 1000, default 100). With
+         *     `heads=true`, only the snapshots that no other snapshot replaces, which
+         *     are a run's current versions. Keep requesting with `next` as `after`
+         *     while a page has it.
          */
         ListSnapshotsResponse: {
             /**
@@ -2455,6 +2457,8 @@ export interface operations {
                 limit?: number;
                 /** @description The previous page's `next` */
                 after?: string;
+                /** @description `true` for the snapshots that no other snapshot replaces; every snapshot by default */
+                heads?: boolean;
                 /** @description The worker version; the server's default when absent. */
                 version?: string;
             };

@@ -508,19 +508,25 @@ async fn client_lists_and_updates_snapshots() {
     };
 
     let found = client
-        .list_snapshots(&labels("v"), None, None)
+        .list_snapshots(&labels("v"), None, None, false)
         .await
         .unwrap();
     assert_eq!(ids(&found), [created[0].clone()]);
     assert!(found.next.is_none());
     let all = BTreeMap::new();
-    let page = client.list_snapshots(&all, Some(1), None).await.unwrap();
+    let page = client
+        .list_snapshots(&all, Some(1), None, false)
+        .await
+        .unwrap();
     assert_eq!(ids(&page), [created[1].clone()]);
     let rest = client
-        .list_snapshots(&all, Some(1), page.next.as_deref())
+        .list_snapshots(&all, Some(1), page.next.as_deref(), false)
         .await
         .unwrap();
     assert_eq!(ids(&rest), [created[0].clone()]);
+    // Nothing replaces either, so both are heads.
+    let heads = client.list_snapshots(&all, None, None, true).await.unwrap();
+    assert_eq!(ids(&heads), [created[1].clone(), created[0].clone()]);
 
     let patch = |value: Option<&str>| BTreeMap::from([("k".to_string(), value.map(String::from))]);
     let updated = client
@@ -529,12 +535,12 @@ async fn client_lists_and_updates_snapshots() {
         .unwrap();
     assert_eq!((&updated.id, &updated.labels), (&created[0], &labels("u")));
     let gone = client
-        .list_snapshots(&labels("v"), None, None)
+        .list_snapshots(&labels("v"), None, None, false)
         .await
         .unwrap();
     assert!(gone.snapshots.is_empty());
     let moved = client
-        .list_snapshots(&labels("u"), None, None)
+        .list_snapshots(&labels("u"), None, None, false)
         .await
         .unwrap();
     assert_eq!(ids(&moved), [created[0].clone()]);

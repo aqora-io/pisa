@@ -321,3 +321,79 @@ async fn the_same_key_twice_matches_nothing() {
     assert_eq!(twice, listed(&c, &[("label", "k:a")]).await);
     assert_eq!(twice, [entry(&a)]);
 }
+
+const SKELETON: &str = "import Foo\n\ntheorem t : 1 = 1 := sorry";
+const PROOF: &str = "import Foo\n\ntheorem t : 1 = 1 := rfl";
+
+/// Creates a snapshot of `code` that replaces `old`, if any, with `labels`.
+async fn create_replacing(c: &Cluster, code: &str, old: Option<&Value>, labels: Value) -> Value {
+    let mut body = json!({"code": code, "labels": labels});
+    if let Some(old) = old {
+        body["replaces"] = json!({"snapshot_id": entry(old)});
+    }
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    assert!(r["snapshot"]["id"].is_string(), "{r}");
+    r
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn heads_only_lists_what_nothing_replaces() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let labels = json!({"run": "x"});
+    let skeleton = create_replacing(&c, SKELETON, None, labels.clone()).await;
+    let proof = create_replacing(&c, PROOF, Some(&skeleton), labels).await;
+    let filter = [("label", "run:x")];
+    let heads = [("label", "run:x"), ("heads", "true")];
+
+    assert_eq!(
+        listed(&c, &filter).await,
+        [entry(&proof), entry(&skeleton)],
+        "by default, every snapshot"
+    );
+    assert_eq!(listed(&c, &heads).await, [entry(&proof)]);
+    assert_eq!(
+        listed(&c, &[("label", "run:x"), ("heads", "false")]).await,
+        [entry(&proof), entry(&skeleton)]
+    );
+
+    // The skeleton's replacer is gone, so it is a head again.
+    delete(&c, &proof).await;
+    assert_eq!(listed(&c, &heads).await, [entry(&skeleton)]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn heads_only_pages_like_a_listing() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let labels = json!({"run": "x"});
+    let skeleton = |name: &str| format!("import Foo\n\ntheorem {name} : 1 = 1 := sorry");
+    let proof = |name: &str| format!("import Foo\n\ntheorem {name} : 1 = 1 := rfl");
+    let a = create_replacing(&c, &skeleton("a"), None, labels.clone()).await;
+    let b = create_replacing(&c, &proof("a"), Some(&a), labels.clone()).await;
+    let c1 = create_replacing(&c, &skeleton("c"), None, labels.clone()).await;
+    let d = create_replacing(&c, &proof("c"), Some(&c1), labels).await;
+
+    let query = [("label", "run:x"), ("heads", "true"), ("limit", "1")];
+    let (status, page) = list(&c, &query).await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(ids(&page), [entry(&d)]);
+    let next = page["next"].as_str().unwrap();
+    let (_, page) = list(&c, &[query[0], query[1], query[2], ("after", next)]).await;
+    assert_eq!(ids(&page), [entry(&b)]);
+    let next = page["next"].as_str().unwrap();
+    let (_, page) = list(&c, &[query[0], query[1], query[2], ("after", next)]).await;
+    assert!(ids(&page).is_empty(), "{page}");
+    assert!(page.get("next").is_none(), "{page}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn heads_must_be_a_boolean() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let (status, r) = list(&c, &[("heads", "yes")]).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
+    assert_eq!(r["error"]["message"], "heads \"yes\" must be true or false");
+}
