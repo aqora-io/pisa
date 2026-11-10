@@ -43,7 +43,13 @@ pub fn document_view(d: &Decl, informal: Option<&pisa_protocol::search::Informal
     }
     let room = VIEW_CHARS.saturating_sub(head.chars().count() + d.signature.chars().count());
     let mut s = head;
-    s.extend(description.chars().take(room));
+    if description.chars().count() <= room {
+        s.push_str(&description);
+    } else if room > 0 {
+        // A cut description still ends its line.
+        s.extend(description.chars().take(room - 1));
+        s.push('\n');
+    }
     s.push_str(&d.signature);
     s.chars().take(VIEW_CHARS).collect()
 }
@@ -616,7 +622,7 @@ mod tests {
         let signature = format!("t : {} = 1", "x".repeat(900));
         let view = document_view(&decl(&signature), Some(&described(&"y".repeat(3000))));
         assert_eq!(view.chars().count(), 2000);
-        assert!(view.ends_with(&signature), "{view}");
+        assert!(view.ends_with(&format!("y\n{signature}")), "{view}");
         // A signature too long on its own is cut last.
         let signature = "z".repeat(5000);
         let view = document_view(&decl(&signature), Some(&described("short")));
