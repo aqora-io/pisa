@@ -275,7 +275,10 @@ impl Sessions {
                 format!("the session can't guard its statements: {reason}"),
             )
         })?;
-        let declarations = slot.policy().judge_decls(false, Some(reported)).declarations;
+        let declarations = slot
+            .policy()
+            .judge_decls(false, Some(reported))
+            .declarations;
 
         let stated = r.sorries.iter().filter(|s| s.proof_state.is_some());
         if let Some(line) =

@@ -789,6 +789,28 @@ pub(crate) async fn orphans_after(
     Ok((orphans, next))
 }
 
+pub(crate) async fn own_builds(
+    db: &Handle,
+    v: &str,
+    ids: &[String],
+) -> Result<HashMap<String, String>, Error> {
+    let mut c = conn(db).await?;
+    let rows: Vec<(String, Option<String>)> = modules::table
+        .filter(modules::version.eq(v))
+        .filter(modules::id.eq_any(ids))
+        .select((
+            modules::id,
+            diesel::dsl::sql::<diesel::sql_types::Nullable<diesel::sql_types::Text>>(OWN_BUILD),
+        ))
+        .load(&mut *c)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, build)| Some((id, build?)))
+        .collect())
+}
+
 pub(crate) async fn modules_with_decls_after(
     db: &Handle,
     v: &str,

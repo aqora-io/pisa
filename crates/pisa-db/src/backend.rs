@@ -5,6 +5,7 @@
 //! - `conn`, a connection from it;
 //! - `begin`, which begins a serializable transaction;
 //! - `label_filter`, which narrows an entries query to those with labels;
+//! - `OWN_BUILD`, a module record's own build in SQL;
 //! - `notify`, which sends a [`Notice`](crate::db::Notice) to whoever
 //!   listens.
 
@@ -90,6 +91,8 @@ pub(crate) mod pg {
         .await
     }
 
+    const OWN_BUILD: &str = "meta #>> '{modules,-1,build}'";
+
     /// `labels @> {…}`, which the GIN index on labels serves.
     fn label_filter<'a>(
         query: entries::BoxedQuery<'a, Pg>,
@@ -174,6 +177,8 @@ pub(crate) mod sqlite {
     diesel::define_sql_function! {
         fn json_extract(json: Jsonb, path: Text) -> Nullable<Text>;
     }
+
+    const OWN_BUILD: &str = "json_extract(meta, '$.modules[#-1].build')";
 
     /// One `json_extract` per label: SQLite has no `@>`. Label keys are
     /// `[A-Za-z0-9._/-]`, so they can be quoted in a path as they are.
