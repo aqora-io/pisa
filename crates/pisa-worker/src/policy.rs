@@ -32,6 +32,26 @@ const FORBIDDEN: &[&str] = &[
     "builtin_term_elab",
     "builtin_tactic",
     "builtin_macro",
+    "simproc",
+    "dsimproc",
+    "simproc_decl",
+    "dsimproc_decl",
+    "builtin_simproc",
+];
+
+/// Attributes that run code, or install it to run while later code
+/// elaborates. Their names are common words (`init`, `tactic`), so they are
+/// forbidden only where an attribute is named: in `@[…]` and `attribute […]`.
+const FORBIDDEN_ATTRIBUTES: &[&str] = &[
+    "init",
+    "builtin_init",
+    "tactic",
+    "delab",
+    "app_delab",
+    "app_unexpander",
+    "simproc",
+    "norm_num",
+    "positivity",
 ];
 
 /// Pure syntax transformers: they can't run code, do IO or add declarations,
@@ -285,9 +305,11 @@ pub fn parse_export(report: &CommandResponse) -> Option<Vec<SnapshotDecl>> {
 /// expand into is not in the text the scan sees, so by default a snapshot that
 /// uses them is re-checked through the kernel.
 pub fn uses_macros(body: &str) -> bool {
-    tokens(body)
+    let tokens = tokens(body);
+    tokens
         .iter()
         .any(|t| FORBIDDEN.contains(&t.as_str()) || MACRO_FAMILY.contains(&t.as_str()))
+        || attributes(&tokens).any(|a| FORBIDDEN_ATTRIBUTES.contains(&a))
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +338,14 @@ impl Policy {
                 && !self.option_allowed(option)
             {
                 reasons.push(format!("option: {option}"));
+            }
+        }
+        if !self.allow_metaprogramming {
+            for a in attributes(&tokens).filter(|a| FORBIDDEN_ATTRIBUTES.contains(a)) {
+                let reason = format!("forbidden: {a}");
+                if !reasons.contains(&reason) {
+                    reasons.push(reason);
+                }
             }
         }
         reasons.dedup();
@@ -415,21 +445,52 @@ pub fn parse_report(report: &CommandResponse) -> Option<Vec<ReportedDeclaration>
         })
 }
 
-/// Splits Lean source into identifier-like tokens, skipping comments and
-/// string literals.
+/// Splits Lean source into identifier-like tokens, with the brackets,
+/// parentheses, commas and `@` that [`attributes`] reads as tokens of their
+/// own, skipping comments and string and character literals. A name in
+/// `«»` is one token, without them, as Lean reads it. `#` starts a token, as
+/// no name has one.
+///
+/// An interpolated string (`s!"…{code}…"`) nests code in a string, to any
+/// depth, so what the lexer is inside is a stack it keeps, not its own.
 fn tokens(src: &str) -> Vec<String> {
+    /// What the lexer is inside, innermost last.
+    enum Inside {
+        /// Code, with the braces open in it; an interpolation's code ends at
+        /// the `}` that closes none of them.
+        Code { braces: usize },
+        /// An interpolated string.
+        Interpolated,
+    }
     let chars: Vec<char> = src.chars().collect();
     let mut out = Vec::new();
     let mut cur = String::new();
-    let mut i = 0;
     let flush = |cur: &mut String, out: &mut Vec<String>| {
         if !cur.is_empty() {
             out.push(std::mem::take(cur));
         }
     };
+    let mut inside = vec![Inside::Code { braces: 0 }];
+    let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         let next = chars.get(i + 1).copied();
+        let depth = inside.len();
+        let Some(Inside::Code { braces }) = inside.last_mut() else {
+            match c {
+                '\\' => i += 2,
+                '"' => {
+                    inside.pop();
+                    i += 1;
+                }
+                '{' => {
+                    inside.push(Inside::Code { braces: 0 });
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+            continue;
+        };
         if c == '-' && next == Some('-') {
             flush(&mut cur, &mut out);
             while i < chars.len() && chars[i] != '\n' {
@@ -437,17 +498,17 @@ fn tokens(src: &str) -> Vec<String> {
             }
         } else if c == '/' && next == Some('-') {
             flush(&mut cur, &mut out);
-            let mut depth = 0;
+            let mut nested = 0;
             while i < chars.len() {
                 match (chars[i], chars.get(i + 1).copied()) {
                     ('/', Some('-')) => {
-                        depth += 1;
+                        nested += 1;
                         i += 2;
                     }
                     ('-', Some('/')) => {
-                        depth -= 1;
+                        nested -= 1;
                         i += 2;
-                        if depth == 0 {
+                        if nested == 0 {
                             break;
                         }
                     }
@@ -455,22 +516,143 @@ fn tokens(src: &str) -> Vec<String> {
                 }
             }
         } else if c == '"' {
+            // `s!"…"` and the like interpolate `{…}`.
+            let interpolated = cur.ends_with('!');
             flush(&mut cur, &mut out);
             i += 1;
-            while i < chars.len() && chars[i] != '"' {
-                i += if chars[i] == '\\' { 2 } else { 1 };
+            if interpolated {
+                inside.push(Inside::Interpolated);
+            } else {
+                while i < chars.len() && chars[i] != '"' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+        } else if let Some(end) = cur.is_empty().then(|| raw_string(&chars, i)).flatten() {
+            i = end;
+        } else if let Some(end) = cur.is_empty().then(|| char_literal(&chars, i)).flatten() {
+            i = end;
+        } else if c == '«' {
+            i += 1;
+            while i < chars.len() && chars[i] != '»' {
+                cur.push(chars[i]);
+                i += 1;
             }
             i += 1;
-        } else if c.is_alphanumeric() || matches!(c, '_' | '.' | '#' | '\'' | '!' | '?') {
+            // The name goes on only through a dot.
+            if chars.get(i) != Some(&'.') {
+                flush(&mut cur, &mut out);
+            }
+        } else if c == '#' {
+            flush(&mut cur, &mut out);
+            cur.push(c);
+            i += 1;
+        } else if c.is_alphanumeric() || matches!(c, '_' | '.' | '\'' | '!' | '?') {
             cur.push(c);
             i += 1;
         } else {
             flush(&mut cur, &mut out);
+            match c {
+                '{' => *braces += 1,
+                '}' if *braces == 0 && depth > 1 => {
+                    inside.pop();
+                }
+                '}' => *braces = braces.saturating_sub(1),
+                '@' | '[' | ']' | '(' | ')' | ',' => out.push(c.to_string()),
+                _ => {}
+            }
             i += 1;
         }
     }
     flush(&mut cur, &mut out);
     out
+}
+
+/// The end of the raw string literal (`r"…"`, `r#"…"#`, …) at `i`, if
+/// there is one.
+fn raw_string(chars: &[char], i: usize) -> Option<usize> {
+    if chars[i] != 'r' {
+        return None;
+    }
+    let hashes = chars[i + 1..].iter().take_while(|&&c| c == '#').count();
+    let mut j = i + 1 + hashes;
+    if chars.get(j) != Some(&'"') {
+        return None;
+    }
+    j += 1;
+    while j < chars.len() {
+        if chars[j] == '"'
+            && chars[j + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|&&c| c == '#')
+                .count()
+                == hashes
+        {
+            return Some(j + 1 + hashes);
+        }
+        j += 1;
+    }
+    Some(j)
+}
+
+/// The end of the character literal (`'a'`, `'\n'`, `'\x41'`, `'\u{…}'`) at
+/// `i`, if there is one.
+fn char_literal(chars: &[char], i: usize) -> Option<usize> {
+    if chars[i] != '\'' {
+        return None;
+    }
+    let mut j = i + 1;
+    match chars.get(j)? {
+        '\\' => {
+            j += 1;
+            match chars.get(j)? {
+                'u' if chars.get(j + 1) == Some(&'{') => {
+                    j += chars[j..].iter().position(|&c| c == '}')? + 1;
+                }
+                'x' => j += 3,
+                _ => j += 1,
+            }
+        }
+        _ => j += 1,
+    }
+    (chars.get(j) == Some(&'\'')).then_some(j + 1)
+}
+
+/// The names of the attributes `tokens` applies, in `@[…]` and
+/// `attribute […]`: the first name of each entry, after `scoped` or `local`.
+fn attributes(tokens: &[String]) -> impl Iterator<Item = &str> {
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i + 1 < tokens.len() {
+        let opens = matches!(tokens[i].as_str(), "@" | "attribute") && tokens[i + 1] == "[";
+        i += 1;
+        if !opens {
+            continue;
+        }
+        // Inside the list: brackets and parentheses nest, and a comma at
+        // the top starts the next entry.
+        let (mut depth, mut entry_start) = (0usize, true);
+        i += 1;
+        while i < tokens.len() {
+            let t = tokens[i].as_str();
+            match t {
+                "[" | "(" => depth += 1,
+                "]" if depth == 0 => break,
+                "]" | ")" => depth = depth.saturating_sub(1),
+                "," if depth == 0 => entry_start = true,
+                "scoped" | "local" if entry_start => {}
+                "@" | "," => {}
+                _ if entry_start && depth == 0 => {
+                    names.push(t);
+                    entry_start = false;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    names.into_iter()
 }
 
 #[cfg(test)]
@@ -610,6 +792,125 @@ mod tests {
         for header in ["", "import Mathlib", "module\npublic import Foo"] {
             assert_eq!(header_command(header).lines().last(), Some(off));
         }
+    }
+
+    #[test]
+    fn attributes_that_install_code_are_refused_where_they_are_attributes() {
+        let p = policy();
+        for (code, reason) in [
+            ("@[init] def f : IO Unit := pure ()", "forbidden: init"),
+            (
+                "@[simp, builtin_init] def f : IO Unit := pure ()",
+                "forbidden: builtin_init",
+            ),
+            (
+                "def f : IO Unit := pure ()\nattribute [init] f",
+                "forbidden: init",
+            ),
+            ("@[app_delab f] def d := 1", "forbidden: app_delab"),
+            ("@[delab app.f] def d := 1", "forbidden: delab"),
+            (
+                "@[app_unexpander f] def d := 1",
+                "forbidden: app_unexpander",
+            ),
+            ("@[tactic foo] def t := 1", "forbidden: tactic"),
+            ("@[local simproc] def s := 1", "forbidden: simproc"),
+            ("@[norm_num _ + _] def e := 1", "forbidden: norm_num"),
+            ("@[positivity _ + _] def e := 1", "forbidden: positivity"),
+            ("@[«init»] def f : IO Unit := pure ()", "forbidden: init"),
+            (
+                "@[«implemented_by» f] def g := 1",
+                "forbidden: implemented_by",
+            ),
+        ] {
+            assert_eq!(p.scan(code, true), [reason], "{code}");
+            assert!(uses_macros(code), "{code}");
+        }
+        for code in [
+            "def f (init : Nat) : Nat := init",
+            "theorem t : True := by\n  exact (fun init => init) trivial",
+            "@[simp] theorem init_eq : True := trivial",
+            "attribute [simp] Nat.add_zero",
+        ] {
+            assert!(p.scan(code, false).is_empty(), "{code}");
+        }
+        // A tactic macro is a macro, not a tactic attribute.
+        assert!(
+            p.scan("macro \"x\" : tactic => `(tactic| rfl)", true)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn simprocs_are_refused() {
+        let p = policy();
+        for word in [
+            "simproc",
+            "dsimproc",
+            "simproc_decl",
+            "dsimproc_decl",
+            "builtin_simproc",
+        ] {
+            let code = format!("{word} reduceFoo (foo _) := fun _ => pure .continue");
+            assert_eq!(p.scan(&code, true), [format!("forbidden: {word}")]);
+        }
+    }
+
+    #[test]
+    fn literals_and_quoted_names_cant_hide_code() {
+        let p = policy();
+        for code in [
+            "def c : Char := '\"'\n#eval 1\ndef d := \"\"",
+            "def c : Char := '\\''\ndef s := \"x\"\n#eval 1",
+            "def c : Char := '\\u{22}'\n#eval 1",
+            "def «a\"» := 1\n#eval 1\ndef b := \"\"",
+            "def «x/-» : Nat := 1\n#eval 1\n-- -/",
+            "def s := r#\"a\"b\"#\n#eval 1",
+            "def s := r\"a\\\"\n#eval 1",
+            "def s : String := s!\"{\"\\\"\"}\"\n#eval 1\ndef z := \"x\"",
+        ] {
+            assert_eq!(p.scan(code, false), ["forbidden: #eval"], "{code}");
+        }
+        // Names with primes, and strings, are still read as before.
+        assert!(
+            p.scan("theorem h' : True := trivial\ndef s := \"#eval\"", false)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tokens_glued_to_a_name_are_still_seen() {
+        let p = policy();
+        for (code, reason) in [
+            ("def a := x#eval IO.println \"hi\"", "forbidden: #eval"),
+            ("def z := 1#eval 1", "forbidden: #eval"),
+            ("def y := «x»#eval 1", "forbidden: #eval"),
+            ("def y := «x»unsafe def f := 1", "forbidden: unsafe"),
+            ("def f := 1\n«x»attribute [init] f", "forbidden: init"),
+            (
+                "«x»set_option debug.skipKernelTC true in\ntheorem t : True := trivial",
+                "option: debug.skipKernelTC",
+            ),
+        ] {
+            assert_eq!(p.scan(code, false), [reason], "{code}");
+        }
+        // A name in «» goes on through a dot.
+        assert_eq!(tokens("«x».y z"), ["x.y", "z"]);
+        assert!(p.scan("def «a b».c := 1\n#check «a b».c", false).is_empty());
+    }
+
+    #[test]
+    fn deeply_nested_interpolation_doesnt_overflow_the_stack() {
+        let depth = 20_000;
+        let code = format!("def s := {}{}", "s!\"{".repeat(depth), "}\"".repeat(depth));
+        // The worker's threads have tokio's 2 MiB stacks.
+        let scanned = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || policy().scan(&code, false))
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(scanned.is_empty());
     }
 
     #[test]

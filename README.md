@@ -1239,7 +1239,9 @@ A check is `ok` only when all of these hold:
 - Every new declaration depends only on `propext`, `Classical.choice` and
   `Quot.sound`. This rejects `sorry`, `admit`, `native_decide` and new axioms.
 - The code contains no metaprogramming: `#eval`, `run_cmd`, `elab`,
-  elaborator attributes, `unsafe`, `implemented_by` and similar.
+  elaborator attributes, `unsafe`, `implemented_by`, simprocs, attributes
+  that install code to run later (`@[init]`, `@[tactic]`, delaborators,
+  `norm_num` and `positivity` extensions) and similar.
 - Any `set_option` changes only an allowlisted option: resource limits
   (`maxHeartbeats` and similar), `linter.*`, `pp.*`, `trace.*`, and
   `backward.*`, which restores older elaborator behaviour that Mathlib-style
