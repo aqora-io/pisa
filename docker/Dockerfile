@@ -77,7 +77,13 @@ RUN if [ -d /opt/project/.lake/packages ]; then \
     && mkdir -p /run/user
 COPY --from=build /usr/local/bin/pisa-worker /usr/local/bin/
 ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl
-ENTRYPOINT ["pisa-worker"]
+# A sandbox the worker kills leaves bubblewrap's inner process to PID 1, and
+# each one left unreaped counts against its slot's pids.max until Lean can't
+# start a thread there. tini reaps them, and passes signals on to the worker.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["tini", "--", "pisa-worker"]
 
 # Exports every declaration of the project (about 30 minutes) and ingests it.
 # QuantumInfo (which couldn't be imported alongside Mathlib up to Physlib
