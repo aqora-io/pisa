@@ -17,6 +17,7 @@ pub mod documents;
 pub mod launcher;
 pub mod policy;
 pub mod pool;
+pub mod review;
 pub mod runs;
 pub mod sessions;
 pub mod snapshots;
@@ -189,7 +190,17 @@ pub(crate) async fn run_job(
             JobResult::SnapshotAudit(pool.snapshots().audit(&j.labels).await)
         }
         Job::SnapshotAudit(j) => {
-            JobResult::SnapshotAudit(pool.snapshots().audit_against(&j.against, &j.allow).await)
+            let audit = pool.snapshots().audit_against(&j.against, &j.allow).await;
+            JobResult::SnapshotAudit(match audit {
+                Ok(mut audit) if j.review => {
+                    let listed = review::review(pool.snapshots(), &audit.comparisons, &j.allow);
+                    listed.await.map(|review| {
+                        audit.review = review;
+                        audit
+                    })
+                }
+                other => other,
+            })
         }
         Job::SnapshotComparator(j) => {
             JobResult::SnapshotComparator(runs::comparator(pool, j).await)

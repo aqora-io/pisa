@@ -1181,6 +1181,11 @@ pub struct AuditSnapshotsResponse {
     /// what acceptance rests on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comparisons: Vec<AuditComparison>,
+    /// With `against` and `review=true`: for each spec snapshot and head it
+    /// reaches, what a reviewer reads to know what the spec's statements say
+    /// on the head.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review: Vec<AuditReview>,
 }
 
 /// A head compared with a spec snapshot it is reached from.
@@ -1271,6 +1276,66 @@ pub struct ComparatorPair {
     /// they are private, which comparator can't name across two modules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<String>,
+}
+
+/// What a spec snapshot's statements depend on, on one head it reaches: the
+/// declarations reached from the spec module's declarations through their
+/// types and the values of definitions and inductive types, as the head and
+/// what it builds on declare them. Theorems' proofs aren't followed, and
+/// axioms are leaves. The text is what the builds printed, for reading; the
+/// [comparison](AuditComparison) from verified records is what acceptance
+/// rests on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditReview {
+    /// The spec snapshot.
+    pub spec: String,
+    /// The head.
+    pub head: String,
+    /// The spec's declarations, then those new in the head, then those of
+    /// the snapshots below, module by module.
+    pub declarations: Vec<ReviewDeclaration>,
+    /// The constants of the version's libraries (Lean's, Mathlib's and the
+    /// like) they use, by name, which the version fixes.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub library: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReviewDeclaration {
+    pub name: String,
+    pub kind: String,
+    pub origin: ReviewOrigin,
+    /// A snapshot of its module, for one from below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    /// As the build printed it, with notation. A private declaration has
+    /// none, as the build's export leaves private names out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Its type, with full names and no notation.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_full: Option<String>,
+    /// One of the spec's holes, or a definition the audit's `allow` names.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hole: bool,
+    /// A hole's value on the head, as the build printed it with full names
+    /// and no notation, cut at 4,000 characters. None from a build before
+    /// values were printed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// Where a reviewed declaration is declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewOrigin {
+    /// The spec snapshot's module, and the head as it keeps it.
+    Spec,
+    /// The head's module, which the spec's doesn't declare.
+    Head,
+    /// A snapshot below the head.
+    Snapshot,
 }
 
 /// A snapshot that more than one snapshot replaces.

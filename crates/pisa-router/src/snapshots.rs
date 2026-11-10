@@ -270,6 +270,7 @@ fn list_query(query: &str) -> Result<(Option<String>, SnapshotListJob), String> 
         ("against" = Option<Vec<String>>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label`"),
         ("allow" = Option<Vec<String>>, Query, description = "With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change"),
         ("version" = Option<String>, Query, description = "The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given."),
+        ("review" = Option<bool>, Query, description = "With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value"),
     ),
     responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
 )]
@@ -282,6 +283,7 @@ pub async fn audit(
     let (version, labels) =
         label_query(query).map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
     let allow = allow_query(query)?;
+    let review = review_query(query)?;
     let (version, against) = match against_query(query, &labels)? {
         Some((ids, against)) => {
             // A version beside the ids must be theirs, as with a create's
@@ -305,17 +307,45 @@ pub async fn audit(
                  may change",
             ));
         }
+        None if review => {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "review is for an audit against a spec: it lists what the spec's statements \
+                 depend on, on each head",
+            ));
+        }
         None => (app.versions.resolve(version.as_deref()), Vec::new()),
     };
     let job = Job::SnapshotAudit(SnapshotAuditJob {
         labels,
         against,
         allow,
+        review,
     });
     match submit(&app, job, version, Priority::Interactive).await? {
         JobResult::SnapshotAudit(r) => Ok(Json(r.map_err(ApiError)?)),
         other => Err(unexpected(other)),
     }
+}
+
+/// Whether an audit's query asks for the review list.
+fn review_query(query: &str) -> Result<bool, ApiError> {
+    let mut review = false;
+    for (name, value) in form_urlencoded::parse(query.as_bytes()) {
+        if name == "review" {
+            review = match &*value {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(ApiError::new(
+                        ErrorKind::BadRequest,
+                        format!("review is true or false, not {value}"),
+                    ));
+                }
+            };
+        }
+    }
+    Ok(review)
 }
 
 /// The definitions an audit's query allows to change.

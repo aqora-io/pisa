@@ -235,7 +235,7 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated) → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -592,6 +592,22 @@ it, and it is a target of the [spec audit](#spec-audit) like `t`. If a change
 that `allow` lets through makes `Pre` impossible, the witness can no longer be
 proved: the audit shows it unproved, and the run isn't `clean`.
 
+<a id="existential-targets"></a>
+**Existential targets.** Where what an agent constructs isn't itself the
+result, such as an algorithm that solves a stated problem, state the target as
+its existence, and leave the construction to the proof:
+
+```lean
+theorem main : ∃ c : Circuit, Solves c problem := sorry
+```
+
+The statement names only the problem and the model, the agent defines its
+candidate in its submission, which may add declarations, and nothing the spec
+defines changes: no hole, no `allow`, so `clean` means what it says. Keep
+[holes](#replacing) for a spec whose answer is the value, such as a cost a
+run minimises, and read their values in the audit's review list (see
+[Auditing a run](#spec-audit)).
+
 <a id="statuses"></a>
 **Statuses and assumptions.** An `axiom` declared in snapshot code, or in the
 code being checked, is an assumption: a statement taken as given, such as a
@@ -698,13 +714,46 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   create's, or the union of two if the snapshot between was deleted. Those
   comparisons are the builds' reports; `comparisons` holds what the audit
   found from verified records.
+- **Review.** With `review=true`, `review` lists, for each spec snapshot and
+  head it reaches, what a reviewer reads to know what the spec's statements
+  say there: `{spec, head, declarations, library}`.
+  - **The walk.** It starts from the spec's declarations and follows, on the
+    head, each declaration's type and the values of definitions and
+    inductive types, through the head and the snapshots it builds on. It
+    doesn't follow theorems' proofs, so a candidate built inside a proof
+    adds only its statement, and axioms are leaves.
+  - **The declarations.** Each is `{name, kind, origin, snapshot_id?,
+    signature?, type?, hole?, value?}`. `origin` is `spec` (the spec's own,
+    as the head keeps them), `head` (new in the head, such as what a hole's
+    value now uses), or `snapshot` (a snapshot below, with its id).
+    `signature` has notation, and `type` has full names and no notation; a
+    private declaration has neither. A hole, or a definition `allow` names,
+    has `hole` and its `value` on the head, printed with full names and no
+    notation, which the code can't dress up, and cut at 4,000 characters.
+    Snapshots built before values were printed have none.
+  - **`library`** names the constants of Lean, Mathlib and the like that
+    they use, which the version fixes.
+  - **Trust.** The text is what the builds printed, for reading.
+    `comparisons`, from verified records, is what acceptance rests on.
+  - **What to look for.** A proof can be valid and still miss the claim:
+    - a budget defined as the candidate's own cost, so `cost ≤ budget` holds
+      for any candidate;
+    - an acceptance condition set to `True`;
+    - an input promise narrowed until the problem is trivial;
+    - an operation added to the model as a native gate.
+
+    Made to a definition that isn't a hole, each is a change the comparison
+    refuses, and the run isn't `clean`. Made to a hole, it is allowed, and
+    only a reader catches it: so read each hole's value, and prefer
+    [existential targets](#existential-targets) where the value isn't the
+    result.
 - **Counts.** `summary`, `assumptions` and `not_proved` are those of the
   heads, each standing for its module.
 - **Parameters.** The ids are of one version, which the audit uses; ids of
   several versions are a 400 that names them, and so is a `version` that
   isn't theirs. `label` doesn't combine with `against` (400), nor does
-  `allow`, which can't be empty either, and a spec snapshot that doesn't
-  exist is a 404. A [rebuild](#rebuilding) copies
+  `allow`, which can't be empty either, nor `review`, which is `true` or
+  `false`, and a spec snapshot that doesn't exist is a 404. A [rebuild](#rebuilding) copies
   only a run's heads, so audit against the same ids after it. A spec
   snapshot that was still a head, with nothing replacing it yet, is copied
   like any head, and with `retire` its old id is deleted if its copy replaces
@@ -803,7 +852,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   shares no code with the audit, accepts it with the same `allow` (see
   [Accepting with comparator](#comparator)). What the agents' links
   allowed doesn't count; `comparisons` and `links` show what each head
-  changed, for review, holes' values included.
+  changed, and `review=true` what the targets' statements depend on, each
+  hole with its value, for the leader to read before accepting.
 - **Afterwards.** The leader may retire and delete superseded versions.
   Deletes splice, so the run stays whole, and its links merge once reviewed
   (see [Retention](#retention)).

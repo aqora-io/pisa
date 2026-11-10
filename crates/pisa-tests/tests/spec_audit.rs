@@ -1108,3 +1108,85 @@ async fn bad_queries() {
         format!("unknown snapshot {}", id(&a))
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_review_lists_what_the_specs_statements_use_on_each_head() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let base = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let spec = on(
+        &base,
+        "def cost : Nat := sorry\ndef good : Prop := g = g\ntheorem t : good = cost := sorry",
+    );
+    let s = create(&c, json!({"code": spec, "holes": ["cost"], "verify": true})).await;
+    let filled = on(
+        &base,
+        "def three : Nat := 3\ndef cost : Nat := three\ndef good : Prop := g = g\n\
+         theorem t : good = cost := rfl",
+    );
+    let p = create(
+        &c,
+        json!({"code": filled, "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+
+    let (status, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&review=true", id(&s)),
+    )
+    .await;
+    assert_eq!(status, 200, "{r}");
+    let review = &r["review"][0];
+    assert_eq!(
+        (&review["spec"], &review["head"]),
+        (&json!(id(&s)), &json!(id(&p)))
+    );
+    let listed: Vec<String> = review["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            format!(
+                "{} {} {} {}",
+                d["name"].as_str().unwrap(),
+                d["origin"].as_str().unwrap(),
+                d.get("snapshot_id").map_or("-".into(), |s| s.to_string()),
+                d.get("value").map_or("-".into(), |v| v.to_string()),
+            )
+        })
+        .collect();
+    // The spec's declarations in its order, the head's `three`, which the
+    // hole's value now uses, then `g` from the snapshot below; each hole
+    // with its value on the head.
+    assert_eq!(
+        listed,
+        [
+            "cost spec - \"three\"".to_string(),
+            "good spec - -".into(),
+            "t spec - -".into(),
+            "three head - -".into(),
+            format!("g snapshot \"{}\" -", id(&base)),
+        ]
+    );
+    let cost = &review["declarations"][0];
+    assert_eq!(
+        (&cost["hole"], &cost["signature"]),
+        (&json!(true), &json!("cost : Nat"))
+    );
+    let library = review["library"].as_array().unwrap();
+    assert!(
+        library.contains(&json!("Nat")) && library.contains(&json!("Prop")),
+        "{review}"
+    );
+
+    // Only on request, and only against a spec.
+    let r = audit(&c, &[id(&s)]).await;
+    assert!(r.get("review").is_none(), "{r}");
+    for query in ["review=true", &format!("against={}&review=yes", id(&s))] {
+        let (status, e) = get(&c, &format!("/snapshots/audit?{query}")).await;
+        assert_eq!(
+            (status, &e["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{query}: {e}"
+        );
+    }
+}

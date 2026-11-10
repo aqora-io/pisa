@@ -151,6 +151,9 @@ pub struct SnapshotAuditJob {
     /// with `against`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
+    /// With `against`, also the review list.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub review: bool,
 }
 
 /// `GET /snapshots/export`, its query checked by the router.

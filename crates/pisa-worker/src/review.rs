@@ -1,0 +1,290 @@
+//! The audit's review list (`/snapshots/audit?against=…&review=true`): what a
+//! reviewer reads to know what a run's spec says on each head it reaches.
+//!
+//! From the spec module's declarations, the walk follows, on the head, each
+//! declaration's type and the values of definitions and inductive types, and
+//! an inductive type's constructors, through the head and the snapshots it
+//! builds on, by their records. It doesn't follow theorems' proofs, and
+//! axioms are leaves, so a candidate filled into a theorem's proof adds only
+//! its statement. The comparison already holds the head to the spec's
+//! declarations but for holes and what the audit allows, so on the head the
+//! walk also reaches what a hole's new value uses. Signatures and values come
+//! from the builds' declaration exports, which also name the library
+//! constants that pisa's records leave out.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use pisa_protocol::api::{AuditComparison, AuditReview, Error, ReviewDeclaration, ReviewOrigin};
+use pisa_protocol::verify::{Declaration, normalised};
+
+use crate::catalog::{ModuleMeta, SnapshotDecl};
+use crate::snapshots::Snapshots;
+
+/// Whether the walk follows a declaration's value: a definition's, and an
+/// inductive type's, whose "value" is its constructors and recursor.
+fn follows_value(kind: &str) -> bool {
+    matches!(kind, "def" | "opaque" | "inductive")
+}
+
+/// The names reached from `start` through `records` (name → declaration),
+/// each once, in the order reached. Names not among `records`, such as the
+/// library's, aren't followed, nor are what Lean generates.
+pub fn closure(start: &[String], records: &HashMap<String, Declaration>) -> Vec<String> {
+    let mut constructors: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (name, d) in records {
+        if let (Some(parent), "constructor") = (&d.parent, d.kind.as_str()) {
+            constructors.entry(parent).or_default().push(name);
+        }
+    }
+    for names in constructors.values_mut() {
+        names.sort();
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut queue: VecDeque<String> = start.iter().cloned().collect();
+    while let Some(name) = queue.pop_front() {
+        let Some(d) = records.get(&name) else {
+            continue;
+        };
+        if d.generated || !seen.insert(name.clone()) {
+            continue;
+        }
+        queue.extend(d.type_refs.iter().cloned());
+        if follows_value(&d.kind) {
+            queue.extend(d.value_refs.iter().cloned());
+        }
+        if d.kind == "inductive" {
+            let made = constructors.get(name.as_str()).into_iter().flatten();
+            queue.extend(made.map(|c| c.to_string()));
+        }
+        out.push(name);
+    }
+    out
+}
+
+/// The review list of each of the audit's `comparisons`, a spec snapshot and
+/// a head it reaches, with the spec's holes and `allow` as the definitions
+/// shown by value.
+pub async fn review(
+    snapshots: &Snapshots,
+    comparisons: &[AuditComparison],
+    allow: &[String],
+) -> Result<Vec<AuditReview>, Error> {
+    let catalog = snapshots.catalog();
+    let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
+    let mut exports: HashMap<String, HashMap<String, SnapshotDecl>> = HashMap::new();
+    let mut snapshot_ids: HashMap<String, Option<String>> = HashMap::new();
+    let mut out = Vec::new();
+    for compared in comparisons {
+        let spec = catalog.entry(&snapshots.parse(&compared.spec)?).await?;
+        let head = catalog.entry(&snapshots.parse(&compared.head)?).await?;
+        let mut modules = vec![spec.module.clone()];
+        let head_meta = record(&mut metas, catalog, &head.module).await?;
+        modules.extend(head_meta.modules.iter().map(|m| m.id.clone()));
+        for m in &modules {
+            record(&mut metas, catalog, m).await?;
+            if !exports.contains_key(m) {
+                let decls = catalog.decls(m).await?.map(|d| d.decls).unwrap_or_default();
+                let by_name = decls.into_iter().map(|d| (d.name.clone(), d)).collect();
+                exports.insert(m.clone(), by_name);
+            }
+        }
+        // Each declaration of the head and what it builds on, by name, with
+        // its module.
+        let mut records: HashMap<String, Declaration> = HashMap::new();
+        let mut module_of: HashMap<String, &str> = HashMap::new();
+        for m in head_meta.modules.iter().map(|m| &m.id) {
+            for d in &metas[m].result.declarations {
+                records.insert(d.name.clone(), d.clone());
+                module_of.insert(d.name.clone(), m);
+            }
+        }
+        // The spec's declarations, as the head names them: a private one's
+        // name carries its module.
+        let spec_names: HashSet<String> = metas[&spec.module]
+            .result
+            .declarations
+            .iter()
+            .filter(|d| !d.generated)
+            .map(|d| normalised(&d.name).into_owned())
+            .collect();
+        let mut start: Vec<String> = metas[&head.module]
+            .result
+            .declarations
+            .iter()
+            .filter(|d| spec_names.contains(normalised(&d.name).as_ref()))
+            .map(|d| d.name.clone())
+            .collect();
+        start.sort_by_key(|n| spec_order(&metas[&spec.module], n));
+        let holes: HashSet<String> = spec
+            .holes
+            .iter()
+            .chain(allow)
+            .map(|h| normalised(h).into_owned())
+            .collect();
+        let reached = closure(&start, &records);
+        let mut declarations = Vec::new();
+        let mut library = Vec::new();
+        for name in &reached {
+            let d = &records[name];
+            let m = module_of[name];
+            let exported = exports.get(m).and_then(|e| e.get(name));
+            let origin = if m != head.module {
+                ReviewOrigin::Snapshot
+            } else if spec_names.contains(normalised(name).as_ref()) {
+                ReviewOrigin::Spec
+            } else {
+                ReviewOrigin::Head
+            };
+            let snapshot_id = match origin {
+                ReviewOrigin::Snapshot => {
+                    if !snapshot_ids.contains_key(m) {
+                        let on = catalog.entries_on(&[m.to_string()], &[]).await?;
+                        let id = on.first().map(|(e, _)| snapshots.id(e));
+                        snapshot_ids.insert(m.to_string(), id);
+                    }
+                    snapshot_ids[m].clone()
+                }
+                _ => None,
+            };
+            let hole = holes.contains(normalised(name).as_ref());
+            if let Some(e) = exported {
+                let mut uses: Vec<&String> = e.type_refs.iter().collect();
+                if follows_value(&d.kind) {
+                    uses.extend(&e.value_refs);
+                }
+                for u in uses {
+                    if !records.contains_key(u) && !u.starts_with('_') && !library.contains(u) {
+                        library.push(u.clone());
+                    }
+                }
+            }
+            declarations.push(ReviewDeclaration {
+                name: name.clone(),
+                kind: d.kind.clone(),
+                origin,
+                snapshot_id,
+                signature: exported.map(|e| e.signature.clone()),
+                type_full: exported.map(|e| e.type_pp_full.clone()),
+                hole,
+                value: exported.filter(|_| hole).and_then(|e| e.value.clone()),
+            });
+        }
+        // The spec's, then the head's, then those below by module, each in
+        // the order the walk reached them.
+        let rank = |d: &ReviewDeclaration| match d.origin {
+            ReviewOrigin::Spec => (0, 0),
+            ReviewOrigin::Head => (1, 0),
+            ReviewOrigin::Snapshot => {
+                let m = module_of[&d.name];
+                (
+                    2,
+                    head_meta
+                        .modules
+                        .iter()
+                        .position(|x| x.id == m)
+                        .unwrap_or(0),
+                )
+            }
+        };
+        declarations.sort_by_key(rank);
+        library.sort();
+        out.push(AuditReview {
+            spec: compared.spec.clone(),
+            head: compared.head.clone(),
+            declarations,
+            library,
+        });
+    }
+    Ok(out)
+}
+
+/// Where `name` comes in the spec module's declarations, by the name
+/// without a private one's module.
+fn spec_order(spec: &ModuleMeta, name: &str) -> usize {
+    let name = normalised(name);
+    let declarations = &spec.result.declarations;
+    declarations
+        .iter()
+        .position(|d| normalised(&d.name) == name)
+        .unwrap_or(declarations.len())
+}
+
+async fn record(
+    metas: &mut HashMap<String, ModuleMeta>,
+    catalog: &crate::catalog::Catalog,
+    m: &str,
+) -> Result<ModuleMeta, Error> {
+    if let Some(meta) = metas.get(m) {
+        return Ok(meta.clone());
+    }
+    let meta = catalog.module(m).await?;
+    metas.insert(m.to_string(), meta.clone());
+    Ok(meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pisa_protocol::verify::ProofStatus;
+
+    fn decl(name: &str, kind: &str, type_refs: &[&str], value_refs: &[&str]) -> Declaration {
+        Declaration {
+            name: name.into(),
+            kind: kind.into(),
+            axioms: Vec::new(),
+            assumes: Vec::new(),
+            status: ProofStatus::Proved,
+            type_hash: "t".into(),
+            value_hash: None,
+            type_refs: type_refs.iter().map(|s| s.to_string()).collect(),
+            value_refs: value_refs.iter().map(|s| s.to_string()).collect(),
+            generated: false,
+            parent: None,
+        }
+    }
+
+    fn records(decls: Vec<Declaration>) -> HashMap<String, Declaration> {
+        decls.into_iter().map(|d| (d.name.clone(), d)).collect()
+    }
+
+    #[test]
+    fn the_walk_follows_types_and_definitions_but_not_proofs() {
+        let mut eq = decl("cost.eq_1", "theorem", &["cost"], &[]);
+        eq.generated = true;
+        let mut mk = decl("Gate.cnot", "constructor", &["Gate"], &[]);
+        mk.parent = Some("Gate".into());
+        let all = records(vec![
+            decl("t", "theorem", &["good", "cost"], &["helper"]),
+            decl("helper", "theorem", &["cost"], &[]),
+            decl("good", "def", &[], &["bound", "Gate"]),
+            decl("bound", "def", &[], &[]),
+            decl("cost", "def", &[], &["count", "cost.eq_1"]),
+            decl("count", "def", &[], &["lemma"]),
+            decl("lemma", "axiom", &["Gate"], &[]),
+            decl("Gate", "inductive", &[], &[]),
+            mk,
+            eq,
+            decl("unused", "def", &[], &[]),
+        ]);
+        let reached = closure(&["t".to_string()], &all);
+        assert_eq!(
+            reached,
+            [
+                "t",
+                "good",
+                "cost",
+                "bound",
+                "Gate",
+                "count",
+                "Gate.cnot",
+                "lemma"
+            ]
+        );
+        // A proof of `t` that uses `helper` doesn't bring it in, nor does a
+        // name pisa has no record of, such as a library constant's.
+        let only: HashMap<String, Declaration> =
+            records(vec![decl("u", "theorem", &["Nat"], &["helper"])]);
+        assert_eq!(closure(&["u".to_string()], &only), ["u"]);
+    }
+}

@@ -590,6 +590,31 @@ export interface components {
             snapshot_id: string;
         };
         /**
+         * @description What a spec snapshot's statements depend on, on one head it reaches: the
+         *     declarations reached from the spec module's declarations through their
+         *     types and the values of definitions and inductive types, as the head and
+         *     what it builds on declare them. Theorems' proofs aren't followed, and
+         *     axioms are leaves. The text is what the builds printed, for reading; the
+         *     [comparison](AuditComparison) from verified records is what acceptance
+         *     rests on.
+         */
+        AuditReview: {
+            /**
+             * @description The spec's declarations, then those new in the head, then those of
+             *     the snapshots below, module by module.
+             */
+            declarations: components["schemas"]["ReviewDeclaration"][];
+            /** @description The head. */
+            head: string;
+            /**
+             * @description The constants of the version's libraries (Lean's, Mathlib's and the
+             *     like) they use, by name, which the version fixes.
+             */
+            library: string[];
+            /** @description The spec snapshot. */
+            spec: string;
+        };
+        /**
          * @description `GET /snapshots/audit`: what the snapshots that have every label the
          *     query names (as in a listing) rest on. Statuses come from the build's
          *     axiom report, or the kernel re-check once a module is verified, so a
@@ -654,6 +679,12 @@ export interface components {
             links?: components["schemas"]["AuditLink"][];
             /** @description The declarations that are `sorry` or `rejected`. */
             not_proved: components["schemas"]["AuditUnproved"][];
+            /**
+             * @description With `against` and `review=true`: for each spec snapshot and head it
+             *     reaches, what a reviewer reads to know what the spec's statements say
+             *     on the head.
+             */
+            review?: components["schemas"]["AuditReview"][];
             summary: components["schemas"]["AuditSummary"];
             /**
              * @description With `against`: each declaration of a spec snapshot's module, other
@@ -1729,6 +1760,33 @@ export interface components {
             /** @description The version the index was built from. */
             version: string;
         };
+        ReviewDeclaration: {
+            /** @description One of the spec's holes, or a definition the audit's `allow` names. */
+            hole?: boolean;
+            kind: string;
+            name: string;
+            origin: components["schemas"]["ReviewOrigin"];
+            /**
+             * @description As the build printed it, with notation. A private declaration has
+             *     none, as the build's export leaves private names out.
+             */
+            signature?: string;
+            /** @description A snapshot of its module, for one from below. */
+            snapshot_id?: string;
+            /** @description Its type, with full names and no notation. */
+            type?: string;
+            /**
+             * @description A hole's value on the head, as the build printed it with full names
+             *     and no notation, cut at 4,000 characters. None from a build before
+             *     values were printed.
+             */
+            value?: string;
+        };
+        /**
+         * @description Where a reviewed declaration is declared.
+         * @enum {string}
+         */
+        ReviewOrigin: "spec" | "head" | "snapshot";
         /** @description Search's state in a server's `GET /health`. */
         SearchHealth: {
             /** @description Why the index isn't open yet. */
@@ -1969,6 +2027,7 @@ export type AuditAssumption = components['schemas']['AuditAssumption'];
 export type AuditComparison = components['schemas']['AuditComparison'];
 export type AuditFork = components['schemas']['AuditFork'];
 export type AuditLink = components['schemas']['AuditLink'];
+export type AuditReview = components['schemas']['AuditReview'];
 export type AuditSnapshotsResponse = components['schemas']['AuditSnapshotsResponse'];
 export type AuditSummary = components['schemas']['AuditSummary'];
 export type AuditTarget = components['schemas']['AuditTarget'];
@@ -2035,6 +2094,8 @@ export type Replaces = components['schemas']['Replaces'];
 export type Resolution = components['schemas']['Resolution'];
 export type ResolveRequest = components['schemas']['ResolveRequest'];
 export type ResolveResponse = components['schemas']['ResolveResponse'];
+export type ReviewDeclaration = components['schemas']['ReviewDeclaration'];
+export type ReviewOrigin = components['schemas']['ReviewOrigin'];
 export type SearchHealth = components['schemas']['SearchHealth'];
 export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
@@ -3578,6 +3639,8 @@ export interface operations {
                 allow?: string[];
                 /** @description The worker version; the server's default when absent. With `against`, the ids' version, which it must be if given. */
                 version?: string;
+                /** @description With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value */
+                review?: boolean;
             };
             header?: never;
             path?: never;

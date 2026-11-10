@@ -195,6 +195,40 @@
         ],
         "type": "object"
       },
+      "AuditReview": {
+        "description": "What a spec snapshot's statements depend on, on one head it reaches: the\ndeclarations reached from the spec module's declarations through their\ntypes and the values of definitions and inductive types, as the head and\nwhat it builds on declare them. Theorems' proofs aren't followed, and\naxioms are leaves. The text is what the builds printed, for reading; the\n[comparison](AuditComparison) from verified records is what acceptance\nrests on.",
+        "properties": {
+          "declarations": {
+            "description": "The spec's declarations, then those new in the head, then those of\nthe snapshots below, module by module.",
+            "items": {
+              "$ref": "#/components/schemas/ReviewDeclaration"
+            },
+            "type": "array"
+          },
+          "head": {
+            "description": "The head.",
+            "type": "string"
+          },
+          "library": {
+            "description": "The constants of the version's libraries (Lean's, Mathlib's and the\nlike) they use, by name, which the version fixes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "spec": {
+            "description": "The spec snapshot.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "spec",
+          "head",
+          "declarations",
+          "library"
+        ],
+        "type": "object"
+      },
       "AuditSnapshotsResponse": {
         "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.\n\nWith `against=<snapshot id>` instead of labels, repeatable, it audits a\nrun against its spec, the snapshots named. From each, it follows the\nsnapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever\ntheir labels, to the run's `heads`, and judges each spec declaration on\neach head it reaches. The counts are then those of the heads' snapshots.\nThe ids are of one version, which the audit uses, and `label` doesn't\ncombine with them. A spec snapshot that doesn't exist is `not_found`.\nThe heads may change a spec snapshot's\n[`holes`](CreateSnapshotRequest::holes), and the definitions\n`allow=<name>`, repeatable, names: those the leader allows later. The\nlinks' own allows, which whoever created them wrote, don't count.",
         "properties": {
@@ -241,6 +275,13 @@
             "description": "The declarations that are `sorry` or `rejected`.",
             "items": {
               "$ref": "#/components/schemas/AuditUnproved"
+            },
+            "type": "array"
+          },
+          "review": {
+            "description": "With `against` and `review=true`: for each spec snapshot and head it\nreaches, what a reviewer reads to know what the spec's statements say\non the head.",
+            "items": {
+              "$ref": "#/components/schemas/AuditReview"
             },
             "type": "array"
           },
@@ -2122,6 +2163,54 @@
           "results"
         ],
         "type": "object"
+      },
+      "ReviewDeclaration": {
+        "properties": {
+          "hole": {
+            "description": "One of the spec's holes, or a definition the audit's `allow` names.",
+            "type": "boolean"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "origin": {
+            "$ref": "#/components/schemas/ReviewOrigin"
+          },
+          "signature": {
+            "description": "As the build printed it, with notation. A private declaration has\nnone, as the build's export leaves private names out.",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "A snapshot of its module, for one from below.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Its type, with full names and no notation.",
+            "type": "string"
+          },
+          "value": {
+            "description": "A hole's value on the head, as the build printed it with full names\nand no notation, cut at 4,000 characters. None from a build before\nvalues were printed.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "origin"
+        ],
+        "type": "object"
+      },
+      "ReviewOrigin": {
+        "description": "Where a reviewed declaration is declared.",
+        "enum": [
+          "spec",
+          "head",
+          "snapshot"
+        ],
+        "type": "string"
       },
       "SearchHealth": {
         "description": "Search's state in a server's `GET /health`.",
@@ -4439,6 +4528,15 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "description": "With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value",
+            "in": "query",
+            "name": "review",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
