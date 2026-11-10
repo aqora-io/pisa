@@ -1,9 +1,10 @@
 //! The client against real Lean Beam, on a small dependency-free workspace.
-//! Each test needs elan's Lean 4.36.0-rc2 (whose toolchain ships
-//! `lean-beam-mcp`), so they are ignored by default:
+//! Each test needs elan on `PATH` and runs on the `Pisa` library's toolchain
+//! (v4.36 and later ship `lean-beam-mcp`), as the image does, so they are
+//! ignored by default:
 //!
 //! ```text
-//! ELAN_TOOLCHAIN=leanprover/lean4:v4.36.0-rc2 cargo test -p pisa-beam --test real_beam -- --ignored
+//! cargo test -p pisa-beam --test real_beam -- --ignored
 //! ```
 //!
 //! The report test also needs the `Pisa` library built
@@ -16,14 +17,19 @@ use pisa_beam::{Beam, LspPos, Mode, Workspace};
 use tokio::process::Command;
 
 const T: Duration = Duration::from_secs(120);
-const TOOLCHAIN: &str = "leanprover/lean4:v4.36.0-rc2";
+/// The `Pisa` library's toolchain, which the worker image installs.
+fn toolchain() -> String {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/pisa-lean/lean-toolchain");
+    std::fs::read_to_string(file).unwrap().trim().to_string()
+}
 
-/// The toolchain's `lean-beam-mcp`, next to the `lean` elan resolves.
+/// That toolchain's `lean-beam-mcp`, whatever elan's default.
 fn beam_bin() -> PathBuf {
     let out = std::process::Command::new("lean")
         .arg("--print-prefix")
+        .env("ELAN_TOOLCHAIN", toolchain())
         .output()
-        .expect("running lean (is elan's Lean 4.36.0-rc2 on PATH?)");
+        .expect("running lean (is elan on PATH?)");
     let prefix = String::from_utf8(out.stdout).unwrap();
     Path::new(prefix.trim()).join("bin/lean-beam-mcp")
 }
@@ -48,7 +54,7 @@ theorem double_add (a b : Nat) : double (a + b) = double a + double b := by
 #[ignore = "needs elan Lean 4.36.0-rc2"]
 async fn tactics_chain_from_a_sorry_and_the_file_saves() {
     let tmp = tempfile::tempdir().unwrap();
-    let ws = Workspace::bare(tmp.path(), TOOLCHAIN, "Docs").unwrap();
+    let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
     ws.write("Docs/A.lean", DOC).unwrap();
     let doc = ws.doc("Docs/A.lean");
     let beam = beam(&ws, None).await;
@@ -121,7 +127,7 @@ async fn the_axiom_report_runs_as_a_command_probe() {
         "build docker/pisa-lean first"
     );
     let tmp = tempfile::tempdir().unwrap();
-    let ws = Workspace::bare(tmp.path(), TOOLCHAIN, "Docs").unwrap();
+    let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
     let (text, end) = pisa_beam::pos::anchored(&format!("import Pisa\n{DOC}"));
     ws.write("Docs/R.lean", &text).unwrap();
     let doc = ws.doc("Docs/R.lean");
