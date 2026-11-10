@@ -6,11 +6,12 @@
     python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
     python3 scripts/e2e.py --search   # also snapshot search (PISA_SEARCH_QDRANT
                                       # set and compose --profile search)
-    python3 scripts/e2e.py --beam     # also open documents (workers started
-                                      # with PISA_BEAM_SLOTS=1)
+    python3 scripts/e2e.py --beam     # also open documents
 
-It stops and restarts each of the stack's two workers to check that tactic
-sessions resume on the other (gate 3), so run it against a dev stack only.
+Tactic sessions run on Lean Beam, so the workers need a Beam slot, as Compose
+gives them by default. It stops and restarts each of the stack's two workers
+to check that tactic sessions resume on the other (gate 3), so run it against
+a dev stack only.
 Pass --no-failover to skip that step, e.g. against Kubernetes through a
 port-forward.
 """
@@ -118,7 +119,7 @@ def core(failover=True):
     step("session start and tactic")
 
     # Gate 3: continue with each worker stopped in turn; at least one of the two
-    # steps must load the state from Garage on the other worker.
+    # steps must replay the session's steps on the other worker.
     if failover:
         first, second = worker_containers()
         docker("stop", first)
@@ -286,25 +287,22 @@ def auto_implicit():
 
 
 def sessions_and_their_own_declarations():
-    hidden = "can't use what its code declares"
-
-    def warned(session):
-        return [m["pos"]["line"] for m in session["messages"] if m["severity"] == "warning" and hidden in m["text"]]
-
-    # The REPL makes each state on the environment the code started from.
+    # A tactic runs in the context of the session's code, so it sees what the
+    # code declares before the `sorry`.
     s = post("/sessions", {"code": "def foo : Nat := 1\n\ntheorem t : foo = 1 := by sorry"})
-    assert warned(s) == [1], s
-    status, out = call("POST", f"/states/{s['states'][0]['id']}/tactic", {"tactic": "decide"})
-    errors = [m for m in out.get("messages", []) if m["severity"] == "error"]
-    assert (status == 422 or errors) and "foo" in json.dumps(out), (status, out)
-    # A snapshot's declarations are in the environment of what imports it.
+    root = s["states"][0]
+    assert root["goals"] == ["⊢ foo = 1"], s
+    unfolded = post(f"/states/{root['id']}/tactic", {"tactic": "unfold foo"})
+    assert unfolded["state"]["goals"] == ["⊢ 1 = 1"], unfolded
+    done = post(f"/states/{root['id']}/tactic", {"tactic": "decide"})
+    assert done["complete"], done
+    # And what a snapshot it imports declares.
     base = create_snapshot("def foo : Nat := 1")
     s = post("/sessions", {"code": f"{base['snapshot']['header']}\n\ntheorem t : foo = 1 := by sorry"})
-    assert warned(s) == [], s
     done = post(f"/states/{s['states'][0]['id']}/tactic", {"tactic": "decide"})
     assert done["complete"], done
     delete_snapshots([base])
-    step("sessions: a state can't use what its code declares before the sorry, and can a snapshot's")
+    step("sessions: a tactic sees what its code declares before the sorry, and a snapshot's")
 
 
 def create_snapshot(code, **extra):
