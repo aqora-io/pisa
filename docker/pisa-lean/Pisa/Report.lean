@@ -1,6 +1,7 @@
 module
 
 public import Lean.Elab.Command
+public import Lean.Meta.Sorry
 public import Lean.Util.CollectAxioms
 public import Pisa.Canon
 
@@ -116,19 +117,35 @@ def reach (env : Environment) (self : Name) (e : Expr) : Array Name × Array Nam
         refs := refs.insert m
   return (refs.toArray.qsort Name.lt, reached.qsort (fun a b => a.toString < b.toString))
 
+/-- `e` with each `sorry` as one marker, the anonymous constant, which no
+declaration can be: `sorryAx α s` is `_ α s`. A `sorry` that Lean labels with
+where it was written, `sorryAx (Unit → α) s label` (or `Name → α`), is `_ α s`
+too, so the same `sorry` reads the same in another module or place; the
+universe level is the type's. Any further arguments stay. -/
+partial def sorries (e : Expr) : Expr :=
+  e.replace fun x => do
+    guard (x.isAppOf ``sorryAx)
+    let args := x.getAppArgs
+    guard (args.size ≥ 2)
+    let (type, rest) :=
+      match (Meta.isLabeledSorry? x).isSome, args[0]! with
+      | true, .forallE _ _ body _ => (body.lowerLooseBVars 1 1, args.extract 3 args.size)
+      | _, type => (type, args.extract 2 args.size)
+    return mkAppN (mkApp2 (.const .anonymous []) (sorries type) args[1]!) (rest.map sorries)
+
 /-- The text of `e`, part of declaration `self` of module `mod`, then of each
 hidden constant it reaches, and its refs. -/
 def text (env : Environment) (mod self : Name) (e : Expr) :
     Except String (String × Array Name) := do
   let (refs, reached) := reach env self e
   let ((), t) ← (do
-      discard <| write (constant mod) e
+      discard <| write (constant mod) (sorries e)
       for m in reached do
         let some ci := env.find? m | continue
         mark s!"H {nameText m}"
-        discard <| write (constant mod) ci.type
+        discard <| write (constant mod) (sorries ci.type)
         if let .defnInfo d := ci then
-          discard <| write (constant mod) d.value
+          discard <| write (constant mod) (sorries d.value)
     : TextM Unit).run {}
   return (t.render, refs)
 

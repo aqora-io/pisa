@@ -277,3 +277,17 @@ fn an_imported_private_cannot_stand_in_for_the_specs() {
     let t = format!("_private.{}.0.t", snapshot::module(&spec.id));
     assert_eq!(changes, [format!("statement: {t} has a different type")]);
 }
+
+#[test]
+#[ignore = "needs elan Lean 4.35.0"]
+fn an_untouched_stubbed_definition_keeps_its_value() {
+    // Lean labels each `sorry` with where it was written.
+    let spec = "def H : Nat := sorry\ntheorem t : H = H := sorry\n";
+    let proved = "def H : Nat := sorry\n\ntheorem t : H = H := rfl\n";
+    assert_eq!(changes(spec, proved), Vec::<String>::new());
+    let filled = "def H : Nat := 0\ntheorem t : H = H := rfl\n";
+    assert_eq!(
+        changes(spec, filled),
+        ["statement: H has a different value"]
+    );
+}
