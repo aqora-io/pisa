@@ -42,11 +42,17 @@ pub(crate) fn version(req: &RebuildSnapshotsRequest) -> Result<String, ApiError>
     Ok(from)
 }
 
+/// How a plan's creates run: each create's time limit and re-check, and
+/// whether the old snapshots that copies replace go once all is done.
+#[derive(Debug, Clone)]
+pub(crate) struct Creates {
+    pub timeout: u64,
+    pub verify: Option<bool>,
+    pub retire: bool,
+}
+
 /// Plans `req` (as a dry run) and runs the plan on `version`, the one
-/// [`version`] found; see [`RebuildSnapshotsResponse`]. The snapshots of the
-/// plan's support items, made so that the items above them could build, are
-/// deleted once every level has run, whether or not they did; those it can't
-/// delete are in `not_deleted`.
+/// [`version`] found; see [`run_plan`].
 pub(crate) async fn run(
     app: &Arc<App>,
     req: &RebuildSnapshotsRequest,
@@ -58,10 +64,29 @@ pub(crate) async fn run(
         labels: req.labels.clone(),
         allow_changes: req.allow_changes,
     };
-    let mut response = app.snapshots.version(version).rebuild_plan(&plan).await?;
+    let response = app.snapshots.version(version).rebuild_plan(&plan).await?;
+    let creates = Creates {
+        timeout: req.timeout,
+        verify: req.verify,
+        retire: req.retire,
+    };
+    Ok(run_plan(app, response, &creates, version).await)
+}
+
+/// Runs a rebuild's or a settle's plan, `response`, on `version`; see
+/// [`RebuildSnapshotsResponse`]. The snapshots of the plan's support items,
+/// made so that the items above them could build, are deleted once every
+/// level has run, whether or not they did; those it can't delete are in
+/// `not_deleted`.
+pub(crate) async fn run_plan(
+    app: &Arc<App>,
+    mut response: RebuildSnapshotsResponse,
+    creates: &Creates,
+    version: &str,
+) -> RebuildSnapshotsResponse {
     let version = Some(version.to_string());
     if !response.ok {
-        return Ok(response);
+        return response;
     }
 
     // The new snapshots that weren't made: what imports one isn't either.
@@ -87,9 +112,9 @@ pub(crate) async fn run(
             let running: Vec<_> = chunk
                 .iter()
                 .map(|item| {
-                    let (app, req, item) = (app.clone(), req.clone(), (*item).clone());
+                    let (app, creates, item) = (app.clone(), creates.clone(), (*item).clone());
                     let version = version.clone();
-                    tokio::spawn(async move { create(&app, &req, version, &item).await })
+                    tokio::spawn(async move { create(&app, &creates, version, &item).await })
                 })
                 .collect();
             for (item, running) in chunk.iter().zip(running) {
@@ -146,13 +171,13 @@ pub(crate) async fn run(
             });
         }
     }
-    if req.retire && response.ok {
+    if creates.retire && response.ok {
         let (retired, left) = retire(app, &response.plan, version).await;
         response.retired = retired;
         response.not_deleted.extend(left);
     }
     response.ok &= response.not_deleted.is_empty();
-    Ok(response)
+    response
 }
 
 /// Whether `item`'s code imports one of `missing`.
@@ -167,15 +192,15 @@ fn builds_on(item: &RebuildItem, missing: &HashSet<String>) -> bool {
 /// worker takes it in time.
 async fn create(
     app: &App,
-    req: &RebuildSnapshotsRequest,
+    creates: &Creates,
     version: Option<String>,
     item: &RebuildItem,
 ) -> Result<CreateSnapshotResponse, Error> {
     let create = CreateSnapshotRequest {
         code: item.code.clone(),
         version,
-        timeout: req.timeout,
-        verify: req.verify,
+        timeout: creates.timeout,
+        verify: creates.verify,
         labels: item.labels.clone(),
         key: Some(item.key.clone()),
         replaces: item.replaces.clone(),

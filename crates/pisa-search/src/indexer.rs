@@ -501,6 +501,11 @@ impl Indexer {
 
     /// Whether module `m` lacks descriptions or vectors it could have.
     fn needs_work(&self, m: &str, module: &Module) -> bool {
+        // A module with no entry, as a refused create keeps its build, waits
+        // for one: search can't find it until then.
+        if !module.has_entries {
+            return false;
+        }
         let model = self.engine.manifest.embedding_model.as_deref();
         module.decls.decls.iter().any(|d| {
             let decl = corpus_decl(m, &module.decls.header, d);

@@ -18,6 +18,7 @@
 //! | `GET /snapshots/{id}` | → [`SnapshotDetail`] |
 //! | `GET /snapshots/{id}/dependents` | `?label=key:value` → [`ListDependentsResponse`] |
 //! | `POST /snapshots/rebuild` | [`RebuildSnapshotsRequest`] → [`RebuildSnapshotsResponse`] |
+//! | `POST /snapshots/settle` | [`SettleRunRequest`] → [`RebuildSnapshotsResponse`] |
 //! | `POST /snapshots/resubmit` | [`ResubmitSnapshotsRequest`] → [`ResubmitSnapshotsResponse`] |
 //! | `GET /snapshots/audit` | `?label=key:value` or `?against=<id>` → [`AuditSnapshotsResponse`] |
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
@@ -49,7 +50,7 @@ use utoipa::{IntoParams, IntoResponses, ToSchema};
 
 use crate::repl;
 use crate::search::Description;
-pub use crate::verify::{Change, Declaration, DeclarationChange, ProofStatus};
+pub use crate::verify::{Change, Declaration, DeclarationChange, Inherited, ProofStatus};
 
 fn default_timeout() -> u64 {
     60
@@ -775,7 +776,10 @@ pub struct CreateSnapshotRequest {
     /// `verify` included, so it can be `verified: false` with no error after
     /// `verify: true`. Creates that keep nothing don't use the key up, and
     /// deleting the snapshot frees it. See
-    /// [`check_key`](crate::labels::check_key) for the rules.
+    /// [`check_key`](crate::labels::check_key) for the rules; keys that
+    /// start with `job:` are the server's, which gives a create without a
+    /// key one of its own, so that a retry of its job after a lost worker
+    /// adds nothing either.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// The snapshot this code replaces, e.g. the skeleton a proof fills in.
@@ -1129,6 +1133,27 @@ pub struct RebuildSnapshotsRequest {
     pub timeout: u64,
 }
 
+/// `POST /snapshots/settle`: rebuilds the heads of the run that the spec
+/// snapshots `against` start whose targets hold only through links
+/// ([`AuditSnapshotsResponse::unsettled`]) onto the heads they are read
+/// through, in one plan, as a rebuild would: each copy replaces its head.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SettleRunRequest {
+    pub against: Vec<String>,
+    /// As the audit's `allow`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow: Vec<String>,
+    /// Only plan.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// As [`CreateSnapshotRequest::verify`], for each create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<bool>,
+    /// As [`CreateSnapshotRequest::timeout`], for each create.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
 /// `POST /snapshots/resubmit`: carries the run of a spec over to the spec
 /// that [amends](CreateSnapshotRequest::amends) it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1439,6 +1464,11 @@ pub struct AuditSnapshotsResponse {
     /// stated, and the spec needs amending.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refutations: Vec<Refutation>,
+    /// With `against`: the heads with a target whose
+    /// [`linked_status`](AuditTarget::linked_status) differs from its
+    /// status, which `POST /snapshots/settle` rebuilds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled: Vec<AuditUnsettled>,
 }
 
 /// A head compared with a spec snapshot it is reached from.
@@ -1701,6 +1731,45 @@ pub struct AuditTarget {
     /// The snapshots that refute it, proving `¬` its statement on the spec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refuted_by: Vec<String>,
+    /// Its status through links, where that differs from `status`: with each
+    /// theorem it inherits axioms through read on the head of that theorem's
+    /// run, as `through` lists. A theorem's proof can be swapped for another
+    /// proof of the same statement, so the target holds once the run is
+    /// settled (`POST /snapshots/settle`), which `status`, `accepted` and
+    /// `clean` then show. It is the kernel's claim: what the settle's
+    /// elaboration sees besides, such as attributes, can still fail it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_status: Option<ProofStatus>,
+    /// The theorems read through links for `linked_status`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub through: Vec<AuditThrough>,
+}
+
+/// A theorem a target inherits axioms through, read on another head: the
+/// snapshot it was taken from and the head of that snapshot's run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditThrough {
+    pub name: String,
+    pub snapshot_id: String,
+    pub head: String,
+}
+
+/// A head whose targets hold only through links, and what settling it swaps.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditUnsettled {
+    pub head: String,
+    /// Each snapshot whose module the head builds on, and the head of its
+    /// run that a settle builds the head on instead.
+    pub swaps: Vec<AuditSwap>,
+    /// Why a settle can't rebuild the head as it is, if it can't.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditSwap {
+    pub snapshot_id: String,
+    pub head: String,
 }
 
 /// A link that let definitions change: `snapshot_id` replaces another

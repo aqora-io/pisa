@@ -238,6 +238,33 @@ describe("amendments and refutations", () => {
   });
 });
 
+describe("status through links", () => {
+  it("reads a theorem through its lemma's run, and settles the run", async () => {
+    const runs = new PisaClient({ url, version: "v", timeout: 30 });
+    const made = (r: { snapshot?: { id: string; header: string } }) => {
+      if (r.snapshot === undefined) throw new Error("not kept");
+      return r.snapshot;
+    };
+    const specL = made(await runs.createSnapshot("import Foo\n\ntheorem ts_l : 1 = 1 := sorry"));
+    const specT = made(await runs.createSnapshot(`${specL.header}\n\ntheorem ts_t : 2 = 2 := sorry`));
+    await runs.createSnapshot(`${specL.header}\n\ntheorem ts_t : 2 = 2 := by have := ts_l; rfl`, {
+      replaces: { snapshot_id: specT.id },
+    });
+    await runs.createSnapshot("import Foo\n\ntheorem ts_l : 1 = 1 := rfl", { replaces: { snapshot_id: specL.id } });
+    const specs = [specL.id, specT.id];
+    const audit = await runs.auditSnapshots({ against: specs });
+    const top = audit.targets?.find((t) => t.name === "ts_t");
+    expect([top?.linked_status, top?.through?.[0]?.name]).toEqual(["proved", "ts_l"]);
+    expect(audit.unsettled).toHaveLength(1);
+
+    expect((await runs.settleRun(specs, { dryRun: true })).ok).toBe(true);
+    const job = await runs.submitSettleRun(specs);
+    expect((await runs.waitJob(job)).ok).toBe(true);
+    expect((await runs.auditSnapshots({ against: specs })).clean).toBe(true);
+    expect((await runs.verifySnapshot(specT.id, { again: true })).checked.length).toBeGreaterThan(0);
+  });
+});
+
 describe("the server", () => {
   it("is healthy, with its worker, and doesn't search", async () => {
     expect(await client.health()).toEqual({ status: "ok", workers: 1, search: null });

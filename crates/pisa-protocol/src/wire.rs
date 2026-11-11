@@ -30,6 +30,8 @@ pub enum Job {
     SnapshotDelete(SnapshotDeleteJob),
     SnapshotVerify(SnapshotVerifyJob),
     SnapshotRebuild(SnapshotRebuildJob),
+    /// The record of a settle, which a server runs.
+    SnapshotSettle(api::SettleRunRequest),
     /// The record of a resubmit, which a server runs.
     SnapshotResubmit(api::ResubmitSnapshotsRequest),
     SnapshotExport(SnapshotExportJob),
@@ -120,6 +122,10 @@ pub struct SnapshotVerifyJob {
     /// Lean's time limit for each module, once their imports are loaded.
     #[serde(default = "default_verify_secs")]
     pub timeout_secs: u64,
+    /// Re-check the modules that are verified already too, so that their
+    /// records are described again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub again: bool,
 }
 
 fn default_verify_secs() -> u64 {

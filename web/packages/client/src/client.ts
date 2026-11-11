@@ -40,6 +40,7 @@ import type {
   SearchResponse,
   Session,
   SessionId,
+  SettleRunRequest,
   Snapshot,
   SnapshotDetail,
   SnapshotId,
@@ -140,6 +141,26 @@ export type CreateSnapshotOptions = RunOptions &
     CreateSnapshotRequest,
     "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "amends" | "refutes" | "detail"
   >;
+
+export interface VerifyOptions extends RequestOptions {
+  /** Seconds Lean may run for each module. */
+  timeout?: number;
+  /** Re-check the modules that are verified already too, which describes
+   *  their records again. */
+  again?: boolean;
+}
+
+/** A settle runs on the version of its spec snapshots. */
+export interface SettleOptions extends RequestOptions {
+  /** Seconds Lean may run for each create. */
+  timeout?: number;
+  /** As the audit's `allow`. */
+  allow?: string[];
+  /** Only plan. */
+  dryRun?: boolean;
+  /** For a run: the kernel re-check for each create. */
+  verify?: boolean;
+}
 
 /** A resubmit runs on the version of its `from` and `to`. */
 export interface ResubmitOptions extends RequestOptions {
@@ -547,13 +568,47 @@ export class PisaClient {
   /** Re-checks the snapshot's module and its imports through the kernel,
    *  with `timeout` seconds for each module once their imports are loaded. A
    *  rejection is in `failure`, not thrown. */
-  verifySnapshot(id: SnapshotId, options: Omit<RunOptions, "version"> = {}): Promise<VerifySnapshotResponse> {
-    return this.call("POST", ["snapshots", id, "verify"], undefined, options, this.timeoutQuery(options));
+  verifySnapshot(id: SnapshotId, options: VerifyOptions = {}): Promise<VerifySnapshotResponse> {
+    return this.call("POST", ["snapshots", id, "verify"], undefined, options, this.verifyQuery(options));
   }
 
   /** `verifySnapshot` as a job. */
-  submitVerifySnapshot(id: SnapshotId, options: Omit<RunOptions, "version"> = {}): Promise<Job<VerifySnapshotResponse>> {
-    return this.submit(["snapshots", id, "verify"], undefined, options, this.timeoutQuery(options));
+  submitVerifySnapshot(id: SnapshotId, options: VerifyOptions = {}): Promise<Job<VerifySnapshotResponse>> {
+    return this.submit(["snapshots", id, "verify"], undefined, options, this.verifyQuery(options));
+  }
+
+  private verifyQuery(options: VerifyOptions): URLSearchParams {
+    const query = this.timeoutQuery(options);
+    if (options.again) query.set("again", "true");
+    return query;
+  }
+
+  /** Settles the run that spec snapshots `against` start: rebuilds each of
+   *  its heads whose targets hold only through links onto the heads they
+   *  are read through, in one plan, as the audit's `unsettled` lists them.
+   *  A head with blockers refuses the plan, with them in `changes`. */
+  settleRun(against: SnapshotId[], options: SettleOptions = {}): Promise<RebuildSnapshotsResponse> {
+    return this.call("POST", ["snapshots", "settle"], this.settleRequest(against, options), options);
+  }
+
+  /** `settleRun` as a job, for a run. A dry run is never one: the server
+   *  answers it at once, so it is refused here unsent. */
+  submitSettleRun(
+    against: SnapshotId[],
+    options: Omit<SettleOptions, "dryRun"> = {},
+  ): Promise<Job<RebuildSnapshotsResponse>> {
+    if ((options as SettleOptions).dryRun) {
+      return Promise.reject(new PisaError("bad_request", "a dry run is answered at once: call settleRun"));
+    }
+    return this.submit(["snapshots", "settle"], this.settleRequest(against, options), options);
+  }
+
+  private settleRequest(against: SnapshotId[], options: SettleOptions): SettleRunRequest {
+    const body: SettleRunRequest = { against, ...this.timeoutOf(options) };
+    if (options.allow !== undefined && options.allow.length > 0) body.allow = options.allow;
+    if (options.dryRun) body.dry_run = true;
+    if (options.verify !== undefined) body.verify = options.verify;
+    return body;
   }
 
   /** Where `job` stands, after waiting up to `wait` seconds for it to

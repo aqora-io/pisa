@@ -204,6 +204,29 @@ async fn a_sweep_clears_what_a_stopped_delete_left() {
     assert!(catalog.module(&k_id).await.is_ok());
 }
 
+/// A build kept with no entry, as a create refused for what it replaces
+/// keeps it, is swept only once it is older than the grace.
+#[tokio::test]
+async fn a_kept_build_outlives_the_sweeps_grace() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::memory().await;
+    let s = snapshots(db.clone(), dir.path());
+    s.mark_store().await.unwrap();
+    let id = snapshot::id("kept");
+    let meta = ModuleMeta {
+        created: build::now(),
+        ..built(&id, b"kept")
+    };
+    upload(&s, &meta, b"kept").await;
+    let catalog = Catalog::new(db, "v".into());
+    catalog.commit_module(&id, &meta, None).await.unwrap();
+    assert_eq!(s.sweep(Duration::from_secs(3600)).await.unwrap(), (0, 0));
+    assert!(has_files(&s, &meta).await);
+    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (1, 0));
+    assert!(!has_files(&s, &meta).await);
+    assert!(catalog.module(&id).await.is_err());
+}
+
 /// A worker on another catalog, an empty one here, finds no record of the
 /// store's files: it leaves them alone, and the store keeps naming the
 /// catalog that wrote them.
@@ -308,7 +331,10 @@ async fn a_verify_of_an_old_build_leaves_the_new_one_unverified() {
         changes: Vec::new(),
     };
     let old = &old.modules[0];
-    assert_eq!(s.before_recheck(old).await.unwrap(), Some(Recheck::Changed));
+    assert_eq!(
+        s.before_recheck(old, false).await.unwrap(),
+        Some(Recheck::Changed)
+    );
     let recorded = s.record_recheck(old, &passed).await.unwrap();
     assert_eq!(recorded, Recheck::Changed);
     assert!(!catalog.module(&id).await.unwrap().verified);
@@ -344,7 +370,10 @@ async fn a_verify_fetches_the_build_it_checks() {
     let catalog = Catalog::new(db, "v".into());
     catalog.commit(&id, &new, None, no_labels()).await.unwrap();
 
-    assert_eq!(s.before_recheck(&new.modules[0]).await.unwrap(), None);
+    assert_eq!(
+        s.before_recheck(&new.modules[0], false).await.unwrap(),
+        None
+    );
     assert_eq!(std::fs::read(s.file(&id, "olean")).unwrap(), b"new");
     assert_eq!(s.cached.lock().unwrap().get(&id), Some(&new.modules[0]));
 }

@@ -249,6 +249,17 @@ on the servers:
 - Set `PISA_ALLOWED_AXIOMS` on the servers wherever the workers set it
   (`allowedAxioms` in the chart sets both). A version that no worker serves
   now answers reads, a 404 or an empty page, where it answered 429.
+- The `pisa` tool now says, of each declaration, which axioms are its own
+  and which theorems of other snapshots it inherits others through. Records
+  made before have neither, so the audit reads nothing through them (see
+  [Through links](#through-links)): for a run in progress,
+  `POST /snapshots/{id}/verify?again=true` on its heads describes them
+  again. Heads that use no other snapshot's lemma need nothing.
+- A create without a `key` gets one of its own, so keys that start with
+  `job:` are refused (see *Retrying a create* in [Snapshots](#snapshots)).
+- A build that a create's link refuses is kept, with no snapshot, for a day;
+  the hourly sweep removes modules only once they are a day old, a module a
+  stopped delete left included.
 
 To the release that runs tactic sessions on Lean Beam:
 - Earlier sessions and their states are gone, and their ids answer 404. The
@@ -294,11 +305,12 @@ pnpm -C web generate
 | `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/settle` | `{against, allow?, dry_run?, verify?, timeout?}` → as `POST /snapshots/rebuild`; async with `Prefer: respond-async`; see [Settling a run](#settling) |
 | `POST /snapshots/resubmit` | `{from, to, dry_run?, labels?, verify?, timeout?}` → `{ok, items: [{snapshot_id, module, key, passes, reasons?, changes?, replacement?, new_snapshot_id?, check?}]}`; async with `Prefer: respond-async`; see [Amending a spec](#amending) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added}], refutations?: [{snapshot_id, spec, target, theorem}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added}], refutations?: [{snapshot_id, spec, target, theorem}], unsettled?: [{head, swaps: [{snapshot_id, head}], blockers?}]}`, each target with `linked_status?` and `through?: [{name, snapshot_id, head}]`; see [Statuses](#statuses), [Auditing a run](#spec-audit) and [Through links](#through-links) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
-| `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60) → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
+| `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting a run](#comparator) |
 | `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, pairs: [{spec, head, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept` |
@@ -317,7 +329,7 @@ takes a comma-separated list of origins, or `*`. It is empty by default.
 
 <a id="async-requests"></a>
 **Async requests.** A check, a session's start, tactic or check, a
-snapshot's create or verify, a rebuild, a resubmit, and a run's acceptance can take minutes: a wait for a worker, loading the
+snapshot's create or verify, a rebuild, a settle, a resubmit, and a run's acceptance can take minutes: a wait for a worker, loading the
 imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
 requests off at 60 s, or over a network that drops, send them with
 `Prefer: respond-async`. The server then answers `202 {id, kind, status:
@@ -593,6 +605,10 @@ in `check.error`), so that a retry is safe:
 - A create that keeps nothing, e.g. when Lean reports errors or a `verify: true`
   re-check fails, doesn't use the key up, so a later create can.
 - Deleting the snapshot frees its key.
+- A create without a key gets one of its own, `job:` and 32 hex digits, so
+  that when its worker is lost after keeping the snapshot, the retry of its
+  job returns that snapshot instead of adding another. Keys that start with
+  `job:` are the server's: a create that sends one is a 400.
 
 <a id="replacing"></a>
 **Replacing a snapshot.** A create can name the snapshot of its version that
@@ -634,12 +650,19 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     changed.
 
   To change a statement on purpose, create the code without `replaces`.
+  The build is kept all the same, with no snapshot: nothing lists or
+  searches it, and creating the same code again, without `replaces` or
+  replacing another snapshot, builds nothing. It goes once it is a day old
+  with no snapshot on it (see [Retention](#retention)). So does a build
+  refused for what it [refutes](#refuting).
 - **Only a head.** A create may replace only a head, a snapshot that nothing
   replaces. Otherwise nothing is built or kept: `check.error` is a `conflict`
   that names what replaces it, and `heads` lists the snapshots to replace
   instead, those nothing replaces that are reached from the replaced one
   through what replaces it, oldest first. A create that loses a race to
-  another during its build is refused the same way. `"fork": true` skips the
+  another during its build is refused the same way, and its build is kept,
+  as for a refused comparison, which the message ends by saying. So is the
+  build of a create whose replaced snapshot was deleted meanwhile. `"fork": true` skips the
   check, for parallel attempts at one target, and a fork is reported by the
   [spec audit](#spec-audit). A key replay comes first and returns its
   snapshot, whatever replaced it since.
@@ -892,6 +915,34 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
     only a reader catches it: so read each hole's value, and prefer
     [existential targets](#existential-targets) where the value isn't the
     result.
+<a id="through-links"></a>
+- **Through links.** A head's records are what its build found. A theorem
+  proved with a lemma of another snapshot, where the lemma was `sorry`,
+  depends on `sorryAx` through it, and still does once another snapshot
+  proves the lemma, until the head is rebuilt onto that proof. So the audit
+  reads such a theorem through the lemma's run: when the run has one head,
+  verified, that proves the lemma with the same statement, and changed no
+  definition there but those that were `sorry`, the theorem depends on what
+  that head's lemma does, recursively. The target's `linked_status` is its
+  status read so, when it differs from `status`, and `through` lists the
+  lemmas it was read through, each `{name, snapshot_id, head}`. A proof can
+  be swapped for any other of the same statement, so this is the kernel's
+  claim; `accepted` and `clean` still rest on `status`, the records, until
+  the run is [settled](#settling). Where a condition fails, or the lemmas
+  justify each other, the lemma counts with the axioms its records name.
+  - **`unsettled`** lists the heads with such a target, each `{head, swaps,
+    blockers?}`: `swaps` are the snapshots whose modules the head builds on,
+    each with the head of its run that a settle builds on instead.
+  - **`blockers`** say why a settle can't rebuild the head as it is: a swap's
+    head that needs settling too, on a run whose spec isn't in `against`
+    (add it); a name a swap brings in that the head declares too; a
+    statement that uses a private name of a swapped module; or a spec
+    statement that uses a definition the swap fills, which `allow` doesn't
+    name.
+  - **Older records.** A head built before builds said which axioms are a
+    declaration's own has nothing to read through:
+    `POST /snapshots/{id}/verify?again=true` describes it again (see
+    [Upgrading](#upgrading)).
 - **Counts.** `summary`, `assumptions` and `not_proved` are those of the
   heads, each standing for its module.
 - **Parameters.** The ids are of one version, which the audit uses; ids of
@@ -1019,14 +1070,19 @@ accepting a run takes both:
   drops the others with `DELETE /snapshots/{id}?with_replacers=true`, on the
   ids [`forks`](#spec-audit) names (see [Retention](#retention)). Every fork
   in the audit is one of these.
-- **Re-checks.** When something below the run changes, such as a helper
-  proved, the leader [rebuilds](#rebuilding) without `retire` while agents
+- **Lemmas.** A target proved with a lemma that another agent is still
+  proving needs no rebuild when that proof lands: the audit reads the target
+  through the lemma's run (see [Through links](#through-links)), and the
+  leader [settles](#settling) the run once, before accepting. Agents go on
+  meanwhile on the heads they hold.
+- **Re-checks.** When something below the run changes, such as a base
+  edited, the leader [rebuilds](#rebuilding) without `retire` while agents
   work. Agents meet the copies as `conflict`s and move onto them. A rebuild
   item that loses a race to an agent's submission fails; send the rebuild
   again and it copies the agent's version. The run doesn't fork, and no
   submission is lost. `retire` would delete versions agents hold, so their
   submissions would answer `not_found` without `heads`.
-- **Accepting.** `POST /snapshots/accept` with the run's spec ids accepts
+- **Accepting.** Once [settled](#settling), `POST /snapshots/accept` with the run's spec ids accepts
   the run when its audit is `clean` (see [Auditing a run](#spec-audit)) and
   comparator, which shares no code with the audit, accepts every pair the
   audit compared (see [Accepting a run](#comparator)), with `allow` each
@@ -1214,6 +1270,43 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   the skeleton again on the new base, then the copy's code replacing it.
 - **Limits.** At most 10,000 items, carrying at most 64 MiB of code in all.
 
+<a id="settling"></a>
+**Settling a run.** `POST /snapshots/settle` rebuilds the heads the audit
+lists in `unsettled` onto the heads they are read through (see
+[Through links](#through-links)), in one plan, after which their targets
+hold from their own records:
+
+```text
+POST /snapshots/settle {"against": ["…~9c0e…", "…~5d1f…"], "dry_run": true}
+  → {"ok": true, "changes": [], "plan": [
+       {"level": 1, "snapshot_id": "…~4b7a…", "module": "PisaSnap.sT…", "new_module": "PisaSnap.sT′…",
+        "new_header": "…", "code": "…", "labels": {…}, "key": "settle:…", "replaces": {…}}, …]}
+```
+
+- **The request.** `{against, allow?, dry_run?, verify?, timeout?}`:
+  `against` and `allow` as for the [audit](#spec-audit), whose `unsettled`
+  the settle plans from, then `verify` and `timeout` for the creates. Only
+  the heads of the runs `against` reaches are rebuilt.
+- **The plan.** Each item copies a head, its imports of each swapped module
+  replaced by the swap's head, as a [rebuild](#rebuilding) copies it, and
+  replaces it, allowing what the swaps changed. A module between a head and
+  a swapped one is a support item; a swapped module is never rebuilt. A
+  swap's head that is itself unsettled is copied first, and the heads that
+  build on it build on its copy. Keys are `settle:<snapshot or module>:<new
+  module>`, so sending the settle again replays what is done.
+- **Refused.** Nothing to settle is an empty plan, `ok: true`. A head with
+  `blockers`, or swaps that would make a cycle, refuse the whole plan:
+  `ok: false`, and `changes` says why, one line each.
+- **Running it.** As a rebuild runs, and answers, with `created`, `failed`
+  and `skipped`; async with `Prefer: respond-async`, a job of kind
+  `rebuild_snapshots`. The kernel's claim covers proofs, not elaboration: a
+  head's tactics can see what a swap brings in besides the lemma, such as
+  `simp` lemmas, instances or notation, and fail. The item then fails with
+  its create's `check`, and the head stays as it was.
+- **Afterwards.** Audit against the same ids: the targets are read from the
+  copies' records, so `status` is what `linked_status` was, and `clean`
+  follows.
+
 **How it works.**
 - **Building.** A module is its code compiled to the module
   `PisaSnap.s<hash>`, where `hash` is a hash of the code, by `pisa build`
@@ -1299,6 +1392,10 @@ chunks, and a retry resumes where the last one stopped. `verified` and
   and not `verified`. Delete its snapshots if you don't want it.
 - `status` and the module's `check` are updated from the re-check, whose axioms
   don't depend on the build being honest.
+- `again=true` re-checks the modules that are verified already too, and
+  records them anew, as for records made before a release that describes
+  more, such as which axioms a declaration has of its own (see
+  [Through links](#through-links)).
 
 Check results don't say whether the snapshots they import are verified: look
 at the snapshot, or verify it, when that matters.
@@ -1328,7 +1425,9 @@ Once an hour one worker of each version sweeps them, a worker that has just
 started included: the modules no snapshot
 is on and no module imports go as a delete would remove them, then the
 files no module's record names, once a day old, as a build uploads its files
-before its record. Files are swept only from a store that names the worker's
+before its record. A module goes only once it is a day old too, as a build
+that a create's link refused is kept with no snapshot for the create that
+follows (see [Replacing](#replacing)). Files are swept only from a store that names the worker's
 own catalog: each version's catalog has a random id, which a worker writes to
 `catalogs/<version>` in the store with its first upload, unless the store
 names one already. A worker on an empty, scratch or other database leaves the

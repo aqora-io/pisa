@@ -1170,3 +1170,81 @@ fn a_theorem_of_a_negation_says_what_it_negates() {
     assert_eq!(refuter["by_not"].negates, Some(spec["t"].type_hash.clone()));
     assert_eq!(spec["t"].negates, None);
 }
+
+/// Each declaration of a verdict or report, by name: `(own_axioms, inherits)`
+/// as `[(name, module)]`.
+type Linked = std::collections::BTreeMap<String, (Vec<String>, Vec<(String, String)>)>;
+
+fn linked(decls: &serde_json::Value) -> Linked {
+    let strings = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    };
+    decls
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            let inherits = d["inherits"].as_array().unwrap().iter().map(|i| {
+                let text = |k: &str| i[k].as_str().unwrap().to_string();
+                (text("name"), text("module"))
+            });
+            let name = d["name"].as_str().unwrap().to_string();
+            (name, (strings(&d["own_axioms"]), inherits.collect()))
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_theorem_proved_by_another_modules_lemma_inherits_its_axioms() {
+    let snapshots = Snapshots::new();
+    let lemmas = "def cost : Nat := sorry\n\ntheorem lemma_l : 1 + 1 = 2 := sorry\n\n\
+                  def sub : {n : Nat // n = 1} := ⟨1, by sorry⟩\n\n\
+                  opaque foo : Nat\n\n@[simp] private theorem foo_eq : foo = 3 := sorry\n\n\
+                  theorem proved : 2 = 2 := rfl\n";
+    let spec = snapshots.build(lemmas);
+    let module = snapshot::module(&spec.id);
+    let head = format!(
+        "import {module}\n\ntheorem by_lemma : 1 + 1 = 2 := lemma_l\n\n\
+         theorem own : 1 = 1 := sorry\n\ntheorem through_def : cost = cost := rfl\n\n\
+         theorem through_sub : sub.val = 1 := sub.property\n\n\
+         theorem by_simp : foo = 3 := by simp\n\ntheorem by_proved : 2 = 2 := proved\n"
+    );
+    let built = snapshots.tool_build(&head);
+    let head_id = snapshot::id(&head);
+    let reported = linked(built.one("PISA_DECLS"));
+    let sorry = |own: &[String]| own.iter().any(|a| a == "sorryAx");
+    let (own, inherits) = &reported["by_lemma"];
+    assert!(!sorry(own), "{own:?}");
+    assert_eq!(inherits, &[("lemma_l".to_string(), module.clone())]);
+    for name in ["own", "through_def", "through_sub"] {
+        let (own, inherits) = &reported[name];
+        assert!(
+            sorry(own) && inherits.is_empty(),
+            "{name}: {own:?} {inherits:?}"
+        );
+    }
+    // A private lemma, reached through `simp`, is inherited by its full name.
+    let (own, inherits) = &reported["by_simp"];
+    assert!(!sorry(own), "{own:?}");
+    assert_eq!(inherits.len(), 1, "{inherits:?}");
+    assert!(inherits[0].0.ends_with(".foo_eq") && inherits[0].1 == module);
+    // A theorem with only the standard axioms isn't inherited.
+    assert_eq!(reported["by_proved"].1, []);
+    // The verifier finds the same, alone and after the lemmas' module in one
+    // chain, where that module's constants have no module index.
+    let alone = snapshots.tool_verify(&[&head_id]);
+    assert_eq!(linked(&alone[0]["declarations"]), reported);
+    let chain = snapshots.tool_verify(&[&spec.id, &head_id]);
+    assert_eq!(linked(&chain[1]["declarations"]), reported);
+    // The lemmas' own module inherits nothing from itself.
+    assert!(
+        linked(&chain[0]["declarations"])
+            .values()
+            .all(|(_, i)| i.is_empty())
+    );
+}

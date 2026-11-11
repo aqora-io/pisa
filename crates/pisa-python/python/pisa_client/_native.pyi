@@ -26,6 +26,12 @@ class Sorry(TypedDict):
 
 ProofStatus = Literal["proved", "conditional", "sorry", "rejected"]
 
+class Inherited(TypedDict):
+    """A theorem of another snapshot module a declaration gets axioms
+    through."""
+    name: str
+    module: str
+
 class Declaration(TypedDict):
     """Without `detail=["declarations"]`, only `name`, `kind`, `status`, and
     the `axioms` outside the worker's allowed ones."""
@@ -43,6 +49,9 @@ class Declaration(TypedDict):
     negates: NotRequired[str]
     """For a theorem of `¬ X`, the hash of `X`: the `type_hash` of a
     declaration that states `X`."""
+    own_axioms: NotRequired[list[str]]
+    """The axioms it gets other than through `inherits`."""
+    inherits: NotRequired[list[Inherited]]
 
 Change = Literal[
     "missing", "kind", "type", "value", "derived", "added_assumption", "assumption", "ambiguous"
@@ -239,6 +248,24 @@ class AuditTarget(TypedDict):
     verified: bool
     accepted: bool
     refuted_by: NotRequired[list[str]]
+    # Its status with each theorem it inherits through read on that theorem's
+    # run's head, where that differs: it holds once the run is settled.
+    linked_status: NotRequired[ProofStatus]
+    through: NotRequired[list[AuditThrough]]
+
+class AuditThrough(TypedDict):
+    name: str
+    snapshot_id: str
+    head: str
+
+class AuditSwap(TypedDict):
+    snapshot_id: str
+    head: str
+
+class AuditUnsettled(TypedDict):
+    head: str
+    swaps: list[AuditSwap]
+    blockers: NotRequired[list[str]]
 
 class AuditLink(TypedDict):
     """A link that let definitions change: the snapshot, its `replaces` as
@@ -293,6 +320,8 @@ class AuditSnapshotsResponse(TypedDict):
     amendments: NotRequired[list[Amendment]]
     # A refuted target makes the run not clean.
     refutations: NotRequired[list[Refutation]]
+    # The heads whose targets hold only through links, for `settle_run`.
+    unsettled: NotRequired[list[AuditUnsettled]]
 
 class PairError(TypedDict):
     kind: Literal["refused", "build_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge"]
@@ -657,12 +686,13 @@ class Client:
         dropped, and what the snapshot replaced is a head again if nothing
         else replaces it. `deleted` lists every snapshot that went, the asked
         one first."""
-    def verify_snapshot(self, id: str) -> VerifySnapshotResponse:
+    def verify_snapshot(self, id: str, *, again: bool = False) -> VerifySnapshotResponse:
         """Re-check a snapshot's module and everything it imports through the
-        kernel, imports first, skipping what already passed, with the
-        client's `timeout` for each module. A module the kernel rejects, or
-        that runs out of time, is reported in `failure` and stays usable.
-        Raises NotFoundError for an unknown or deleted snapshot."""
+        kernel, imports first, skipping what already passed unless `again`,
+        which describes their records again, with the client's `timeout` for
+        each module. A module the kernel rejects, or that runs out of time,
+        is reported in `failure` and stays usable. Raises NotFoundError for
+        an unknown or deleted snapshot."""
     def submit_verify_snapshot(self, id: str) -> Job:
         """Like `verify_snapshot`, as a job."""
     def list_dependents(self, id: str, labels: dict[str, str] | None = None) -> ListDependentsResponse:
@@ -770,6 +800,27 @@ class Client:
         """Like `rebuild_snapshots`, as a job. A dry run isn't one: the
         server answers it at once, which raises a `PisaError` here, of kind
         `internal` and status 200; use `rebuild_snapshots` for one."""
+    def settle_run(
+        self,
+        against: list[str],
+        *,
+        allow: list[str] | None = None,
+        dry_run: bool = False,
+        verify: bool | None = None,
+    ) -> RebuildSnapshotsResponse:
+        """Settle the run that spec snapshots `against` start: rebuild each
+        head whose targets hold only through links onto the heads they are
+        read through, in one plan, as the audit's `unsettled` lists them. A
+        head with blockers refuses the plan, with them in `changes`."""
+    def submit_settle_run(
+        self,
+        against: list[str],
+        *,
+        allow: list[str] | None = None,
+        dry_run: bool = False,
+        verify: bool | None = None,
+    ) -> Job:
+        """Like `settle_run`, as a job; a dry run isn't one."""
     def resubmit_snapshots(
         self,
         from_: str,

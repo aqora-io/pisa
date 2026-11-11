@@ -668,10 +668,46 @@ async fn a_replacement_landing_during_a_build_wins() {
         message.starts_with(&format!("{s} is replaced by {p}; ")),
         "{r}"
     );
-    // The build's files went with the refused commit.
+    assert!(
+        message.ends_with(". The build is kept: the same code created again isn't built again"),
+        "{r}"
+    );
+    // The build is kept with no entry, so nothing lists it, and the same
+    // code created again isn't built again.
     let listed = get(&c, "/snapshots").await;
     assert_eq!(listed["snapshots"].as_array().unwrap().len(), 2, "{listed}");
-    assert_eq!(c.stored_blobs().await, blobs);
+    let kept = c.stored_blobs().await;
+    assert!(kept.len() > blobs.len(), "{kept:?}");
+    let body = json!({"code": slow, "replaces": replacing(&s), "fork": true});
+    let fork = create(&c, body).await;
+    assert_eq!(fork["snapshot"]["status"], "proved", "{fork}");
+    assert_eq!(c.stored_blobs().await, kept);
+}
+
+/// A create refused for what it replaces keeps its build with no entry:
+/// nothing lists it, and the same code created again isn't built again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_replacement_keeps_its_build_for_the_create_that_follows() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    let blobs = c.stored_blobs().await;
+    let retyped = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+    let r = create(&c, json!({"code": retyped, "replaces": replacing(&old)})).await;
+    refused(&r, "statement: t has a different type");
+    let kept = c.stored_blobs().await;
+    assert!(kept.len() > blobs.len(), "{kept:?}");
+    let listed = get(&c, "/snapshots").await;
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 1, "{listed}");
+
+    // Sent again, it is refused the same way, from the kept record.
+    let again = create(&c, json!({"code": retyped, "replaces": replacing(&old)})).await;
+    refused(&again, "statement: t has a different type");
+    assert_eq!(again["check"]["changes"], r["check"]["changes"], "{again}");
+    // Without `replaces`, it is kept, and nothing is built.
+    let plain = create(&c, json!({"code": retyped})).await;
+    assert_eq!(plain["check"]["ok"], true, "{plain}");
+    assert_eq!(plain["snapshot"]["status"], "proved", "{plain}");
+    assert_eq!(c.stored_blobs().await, kept);
 }
 
 #[tokio::test(flavor = "multi_thread")]

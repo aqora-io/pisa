@@ -26,8 +26,8 @@
 use std::io::Write;
 
 use pisa_tests::{
-    as_reported, declarations, declares, exports, find_module, imported_code, imports, is_module,
-    needs, print_message, unknown_identifier,
+    as_reported, declares, exports, find_module, imported_code, imports, is_module,
+    linked_declarations, needs, print_message, unknown_identifier,
 };
 use serde_json::json;
 
@@ -73,7 +73,8 @@ fn verify(modules: &[String]) {
         let verdict = if rejected {
             json!({"module": module, "ok": false, "reason": "kernel re-check: forged declaration"})
         } else {
-            let decls: serde_json::Value = serde_json::from_str(&declarations(&code)).unwrap();
+            let decls: serde_json::Value =
+                serde_json::from_str(&linked_declarations(&code)).unwrap();
             json!({"module": module, "ok": true, "declarations": decls})
         };
         writeln!(out, "PISA_VERIFY {verdict}").unwrap();
@@ -135,7 +136,7 @@ fn build(olean: &str, file: &str) {
     println!("PISA_IMPORTS {}", json!(imports(&code)));
     let reported = as_reported(&code);
     if !is_module(&code) {
-        println!("PISA_DECLS {}", declarations(&reported));
+        println!("PISA_DECLS {}", linked_declarations(&reported));
     }
     println!("PISA_EXPORT {}", exports(&reported));
 }

@@ -287,6 +287,9 @@ impl Reader {
                 accepted = false;
             }
         }
+        let unsettled = self
+            .link(&mut targets, &specs, &heads, &run, allow, &mut records)
+            .await?;
         // A spec copied from a snapshot that is gone, as a retiring rebuild
         // leaves it, can't be shown to state what the original did.
         // Every head keeps its spec's statements, whether or not the spec has
@@ -312,6 +315,7 @@ impl Reader {
         audit.links = links;
         audit.comparisons = comparisons;
         audit.refutations = refutations;
+        audit.unsettled = unsettled;
         let mut amendments: Vec<Amendment> = (self.catalog.amendments_of(&spec_entries).await?)
             .into_iter()
             .map(|(e, a)| self.amendment(&e, a))
@@ -448,6 +452,8 @@ impl Reader {
                         verified: head_meta.verified,
                         accepted,
                         refuted_by: Vec::new(),
+                        linked_status: None,
+                        through: Vec::new(),
                     });
                 }
             }

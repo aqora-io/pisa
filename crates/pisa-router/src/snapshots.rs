@@ -14,7 +14,7 @@ use pisa_protocol::api::{
     CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, Detail, ErrorKind,
     JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, PreferAsync,
     RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
-    ResubmitSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId, Tarball,
+    ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
     UpdateSnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
@@ -85,11 +85,20 @@ fn same_version(version: &mut Option<String>, field: &str, id: &str) -> Result<(
 /// snapshot, which builds it. The snapshot it replaces must be of its
 /// version, and names the version when the request doesn't; only then does
 /// the server's default apply.
+/// What the key the server gives a create without one starts with.
+const JOB_KEY: &str = "job:";
+
 pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Prepared, ApiError> {
     let mut version = req
         .version
         .as_deref()
         .and_then(|v| app.versions.resolve(Some(v)));
+    if req.key.as_deref().is_some_and(|k| k.starts_with(JOB_KEY)) {
+        return Err(ApiError::new(
+            ErrorKind::BadRequest,
+            format!("idempotency keys that start with {JOB_KEY} are the server's own"),
+        ));
+    }
     match &req.holes {
         Some(holes) if holes.is_empty() => {
             return Err(ApiError::new(
@@ -175,7 +184,12 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         timeout_secs: req.timeout,
         verify: req.verify,
         labels: req.labels,
-        key: req.key,
+        // A create without a key gets one of its own, so a retry of its job
+        // after its worker was lost returns what the first attempt kept.
+        key: Some(
+            req.key
+                .unwrap_or_else(|| format!("{JOB_KEY}{}", uuid::Uuid::new_v4().simple())),
+        ),
         replaces: req.replaces,
         fork: req.fork,
         holes: req.holes.unwrap_or_default(),
@@ -796,6 +810,84 @@ pub async fn resubmit(
     accepted(job, JobKind::ResubmitSnapshots, JobStatus::Running)
 }
 
+#[utoipa::path(
+    post, path = "/snapshots/settle", operation_id = "settleRun", tag = "snapshots",
+    summary = "Rebuild a run's heads onto what their targets hold through",
+    description = "Audits the run that the spec snapshots `against` start, under `allow`, and \
+        rebuilds each head in its `unsettled` onto the heads its targets are read through, in \
+        one plan, as a rebuild would: each copy replaces its head, what is between is rebuilt \
+        as support items, and those go once every level has run. Its targets' `status` is then \
+        what their `linked_status` was. A head the audit lists blockers for refuses the plan, \
+        with them in `changes`; nothing to settle is an empty plan. A run can be async; a dry \
+        run answers at once.",
+    params(PreferAsync),
+    request_body = SettleRunRequest,
+    responses((status = 200, description = "The plan, and what the run did", body = RebuildSnapshotsResponse), Accepted, ApiErrors),
+)]
+/// `POST /snapshots/settle`.
+pub async fn settle(
+    State(app): State<Arc<App>>,
+    prefer: Prefer,
+    Body(req): Body<SettleRunRequest>,
+) -> Response {
+    let mut versions: Vec<String> = Vec::new();
+    for id in &req.against {
+        match parse_id(id) {
+            Ok(id) if !versions.contains(&id.version) => versions.push(id.version),
+            Ok(_) => {}
+            Err(e) => return e.into_response(),
+        }
+    }
+    let version = match versions.as_slice() {
+        [version] => version.clone(),
+        [] => {
+            let e = ApiError::new(ErrorKind::BadRequest, "against names no snapshot");
+            return e.into_response();
+        }
+        _ => {
+            let message = format!("against is of several versions: {}", versions.join(", "));
+            return ApiError::new(ErrorKind::BadRequest, message).into_response();
+        }
+    };
+    let plan = match app
+        .snapshots
+        .version(&version)
+        .settle_plan(&req.against, &req.allow)
+        .await
+    {
+        Ok(plan) => plan,
+        Err(e) => return ApiError(e).into_response(),
+    };
+    let creates = rebuild::Creates {
+        timeout: req.timeout,
+        verify: req.verify,
+        retire: false,
+    };
+    if req.dry_run || !plan.ok {
+        return Json(plan).into_response();
+    }
+    if !prefer.respond_async {
+        return Json(rebuild::run_plan(&app, plan, &creates, &version).await).into_response();
+    }
+    let record = Job::SnapshotSettle(req.clone());
+    let held = match app
+        .dispatcher
+        .hold(JobKind::RebuildSnapshots, &record)
+        .await
+    {
+        Ok(held) => held,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let job = held.token.clone();
+    tokio::spawn(async move {
+        let done = rebuild::run_plan(&app, plan, &creates, &version).await;
+        if let Err(e) = held.finish(&JobResult::SnapshotRebuild(Ok(done))).await {
+            tracing::warn!("storing a settle's answer failed: {e}");
+        }
+    });
+    accepted(job, JobKind::RebuildSnapshots, JobStatus::Running)
+}
+
 pub(crate) fn resubmitted(done: JobResult) -> Result<ResubmitSnapshotsResponse, ApiError> {
     match done {
         JobResult::SnapshotResubmit(r) => r.map(|r| *r).map_err(ApiError),
@@ -887,6 +979,9 @@ pub struct VerifyParams {
     /// Lean's time limit in seconds for each module, once their imports are loaded; 60 by default
     #[serde(default = "default_verify_secs")]
     timeout: u64,
+    /// `true` to re-check the modules that are verified already too, which describes their records again; `false` by default
+    #[serde(default)]
+    again: bool,
 }
 
 fn default_verify_secs() -> u64 {
@@ -897,7 +992,9 @@ fn default_verify_secs() -> u64 {
     post, path = "/snapshots/{id}/verify", operation_id = "verifySnapshot", tag = "snapshots",
     summary = "Re-check a snapshot's module with the kernel",
     description = "Re-checks the module and the modules it imports, in one process that loads \
-        their imports once; `failure` says which one failed and why.",
+        their imports once; `failure` says which one failed and why. A module verified already \
+        is skipped unless `again`, which re-checks it and describes its record again, as a \
+        record made before what it now records (`own_axioms`, `inherits`) needs.",
     params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), VerifyParams, PreferAsync),
     responses((status = 200, description = "Whether the module passed", body = VerifySnapshotResponse), Accepted, ApiErrors),
 )]
@@ -919,6 +1016,7 @@ pub async fn verify(
     let job = Job::SnapshotVerify(SnapshotVerifyJob {
         entry: id,
         timeout_secs: params.timeout,
+        again: params.again,
     });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::VerifySnapshot, p).await

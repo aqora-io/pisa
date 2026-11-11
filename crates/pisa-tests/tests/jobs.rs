@@ -7,6 +7,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Cluster, router_config, url_of};
+use pisa_worker::queue::{NewJob, Poll};
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
@@ -290,4 +291,64 @@ async fn unknown_jobs_and_bad_waits_are_errors() {
     let job = accepted(&c, "/check", json!({"code": "#check Nat"}), "check").await;
     let (status, r) = look(&c, &c.url(&format!("/jobs/{job}")), "soon").await;
     assert_eq!((status, &r["error"]["kind"]), (400, &json!("bad_request")));
+}
+
+/// A create that its client gave no key gets one of its own: when its worker
+/// is lost after keeping the snapshot, the job's retry returns that snapshot
+/// rather than adding another.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retried_create_keeps_its_snapshot_once() {
+    let mut c = Cluster::start(&[]).await;
+    let code = "import Foo\n\ntheorem t : 1 = 1 := rfl";
+    let job = accepted(&c, "/snapshots", json!({"code": code}), "create_snapshot").await;
+    // A worker claims it, keeps the snapshot and is lost before it answers:
+    // here a copy of the job does what its attempt did.
+    let version = c.version("v");
+    let candidates = c.queue.candidates(&version, 10).await.unwrap();
+    let ids: Vec<i64> = candidates.iter().map(|j| j.id).collect();
+    let lease = Duration::from_millis(500);
+    let claimed = c.queue.claim("lost", &ids, lease).await.unwrap();
+    let first = claimed[0].job.clone();
+    assert!(
+        first["key"].as_str().unwrap().starts_with("job:"),
+        "{first}"
+    );
+    let copy = NewJob {
+        version: Some(version),
+        priority: 1,
+        header_key: None,
+        header: None,
+        document: None,
+        job: first,
+        max_wait: Duration::from_secs(10),
+        max_attempts: 1,
+    };
+    let copy = c.queue.enqueue(&copy).await.unwrap();
+    c.add_worker(common::worker_config("w0", "v", 1));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let kept = loop {
+        if let Poll::Done(r) = c.queue.poll(copy).await.unwrap() {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "the copy never ran");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(kept["snapshot"]["id"].is_string(), "{kept}");
+
+    // Once the lost worker's lease lapses, the job runs again.
+    let (status, r) = look(&c, &c.url(&format!("/jobs/{job}")), "30").await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["snapshot"]["id"], kept["snapshot"]["id"], "{r}");
+    let listed = c.client.get(c.url("/snapshots")).send().await.unwrap();
+    let listed: Value = listed.json().await.unwrap();
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 1, "{listed}");
+
+    // The server's keys are its own.
+    let body = json!({"code": code, "key": "job:mine"});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
 }

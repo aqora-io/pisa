@@ -66,8 +66,10 @@ pub(crate) struct Planned {
 /// `imports[i]`.
 pub(crate) fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
     let mut waves: Vec<Option<usize>> = vec![None; imports.len()];
-    // Imports always lead down to `from`, so each pass places some.
+    // Imports always lead down to `from`, so each pass places some; a cycle,
+    // which no plan has, would place none.
     while waves.contains(&None) {
+        let before = waves.iter().flatten().count();
         for i in 0..waves.len() {
             if waves[i].is_some() {
                 continue;
@@ -77,8 +79,11 @@ pub(crate) fn waves(imports: &[Vec<usize>]) -> Vec<usize> {
                 waves[i] = Some(1 + known.into_iter().max().unwrap_or(0));
             }
         }
+        if waves.iter().flatten().count() == before {
+            break;
+        }
     }
-    waves.into_iter().flatten().collect()
+    waves.into_iter().map(|w| w.unwrap_or(usize::MAX)).collect()
 }
 
 impl Reader {

@@ -671,50 +671,7 @@ pub(crate) async fn commit(
                 return Ok((e, taken, stored));
             }
             check_replaced(conn, v, entry).await?;
-            // Each import is still the build the module was built on: a
-            // module that another imports can't go, so its own imports can't
-            // have changed either.
-            for parent in &meta.imports {
-                let Some(build): Option<String> = modules::table
-                    .find((v, parent))
-                    .select(modules::build)
-                    .first(conn)
-                    .await
-                    .optional()?
-                else {
-                    return Err(Fail::Api(unknown_module(parent)));
-                };
-                let built_on = meta.modules.iter().find(|x| x.id == *parent);
-                if built_on.map(|x| &x.build) != Some(&build) {
-                    return Err(Fail::Api(Error::new(
-                        ErrorKind::NotFound,
-                        format!(
-                            "{} was deleted and built again while this snapshot was being built",
-                            snapshot::module(parent)
-                        ),
-                    )));
-                }
-            }
-            // Another worker may have just built the same code: keep theirs.
-            let stored = match module_in(conn, v, m).await? {
-                Some(stored) => stored,
-                None => {
-                    write_module(conn, v, m, meta, decls).await?;
-                    for (position, parent) in meta.imports.iter().enumerate() {
-                        diesel::insert_into(module_imports::table)
-                            .values((
-                                module_imports::version.eq(v),
-                                module_imports::module.eq(m),
-                                module_imports::parent.eq(parent),
-                                module_imports::position.eq(position as i32),
-                            ))
-                            .on_conflict_do_nothing()
-                            .execute(conn)
-                            .await?;
-                    }
-                    meta.clone()
-                }
-            };
+            let stored = store_module(conn, v, m, meta, decls).await?;
             let (e, entry_meta) = add(conn, v, m, entry).await?;
             log(conn, v, Some(&e), Some(m)).await?;
             log_replaced(conn, v, entry.replaces.as_ref()).await?;
@@ -723,6 +680,77 @@ pub(crate) async fn commit(
     })
     .await?;
     Ok(added)
+}
+
+/// Stores module `m`'s record `meta`, and `decls`, unless another worker
+/// stored the same code first, whose record it returns. Each import must
+/// still be the build the module was built on: a module that another imports
+/// can't go, so its own imports can't have changed either.
+async fn store_module(
+    conn: &mut Conn,
+    v: &str,
+    m: &str,
+    meta: &ModuleMeta,
+    decls: Option<&Value>,
+) -> Result<ModuleMeta, Fail> {
+    for parent in &meta.imports {
+        let Some(build): Option<String> = modules::table
+            .find((v, parent))
+            .select(modules::build)
+            .first(conn)
+            .await
+            .optional()?
+        else {
+            return Err(Fail::Api(unknown_module(parent)));
+        };
+        let built_on = meta.modules.iter().find(|x| x.id == *parent);
+        if built_on.map(|x| &x.build) != Some(&build) {
+            return Err(Fail::Api(Error::new(
+                ErrorKind::NotFound,
+                format!(
+                    "{} was deleted and built again while this snapshot was being built",
+                    snapshot::module(parent)
+                ),
+            )));
+        }
+    }
+    if let Some(stored) = module_in(conn, v, m).await? {
+        return Ok(stored);
+    }
+    write_module(conn, v, m, meta, decls).await?;
+    for (position, parent) in meta.imports.iter().enumerate() {
+        diesel::insert_into(module_imports::table)
+            .values((
+                module_imports::version.eq(v),
+                module_imports::module.eq(m),
+                module_imports::parent.eq(parent),
+                module_imports::position.eq(position as i32),
+            ))
+            .on_conflict_do_nothing()
+            .execute(conn)
+            .await?;
+    }
+    Ok(meta.clone())
+}
+
+pub(crate) async fn commit_module(
+    db: &Handle,
+    v: &str,
+    m: &str,
+    meta: &ModuleMeta,
+    decls: Option<&Value>,
+) -> Result<ModuleMeta, Error> {
+    let stored = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let stored = store_module(conn, v, m, meta, decls).await?;
+            log(conn, v, None, Some(m)).await?;
+            Ok(stored)
+        })
+    })
+    .await?;
+    Ok(stored)
 }
 
 pub(crate) async fn add_entry(
@@ -1144,6 +1172,7 @@ pub(crate) async fn orphans_after(
     v: &str,
     after: Option<&str>,
     limit: i64,
+    built_by: u64,
 ) -> Result<(Vec<String>, Option<String>), Error> {
     let mut c = conn(db).await?;
     let conn = &mut *c;
@@ -1175,10 +1204,20 @@ pub(crate) async fn orphans_after(
         .map_err(DbError::from)?
         .into_iter()
         .collect();
+    let fresh: HashSet<String> = modules::table
+        .filter(modules::version.eq(v))
+        .filter(modules::id.eq_any(&ids))
+        .filter(modules::created.gt(built_by as i64))
+        .select(modules::id)
+        .load::<String>(conn)
+        .await
+        .map_err(DbError::from)?
+        .into_iter()
+        .collect();
     let next = (ids.len() as i64 == limit).then(|| ids.last().cloned()).flatten();
     let orphans = ids
         .into_iter()
-        .filter(|m| !held.contains(m) && !imported.contains(m))
+        .filter(|m| !held.contains(m) && !imported.contains(m) && !fresh.contains(m))
         .collect();
     Ok((orphans, next))
 }

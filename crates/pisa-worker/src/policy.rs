@@ -347,20 +347,7 @@ impl Policy {
     /// `proved`; only assumptions (`d.assumes`) `conditional`; `sorryAx`,
     /// with or without assumptions, `sorry`; anything else `rejected`.
     pub fn status(&self, d: &ReportedDeclaration) -> ProofStatus {
-        let each = d
-            .axioms
-            .iter()
-            .filter(|a| !self.allowed_axioms.contains(a))
-            .map(|a| {
-                if d.assumes.contains(a) {
-                    ProofStatus::Conditional
-                } else if a == "sorryAx" {
-                    ProofStatus::Sorry
-                } else {
-                    ProofStatus::Rejected
-                }
-            });
-        each.max().unwrap_or(ProofStatus::Proved)
+        ProofStatus::of(&d.axioms, &d.assumes, &self.allowed_axioms)
     }
 }
 

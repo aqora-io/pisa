@@ -29,6 +29,11 @@ impl Run {
         Ok(Run { entries, replacers })
     }
 
+    /// The entries read.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = &String> {
+        self.entries.keys()
+    }
+
     /// Entry `e`, if it is kept.
     pub(crate) fn entry(&self, e: &str) -> Option<&EntryMeta> {
         self.entries.get(e)

@@ -255,6 +255,20 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("settles a run and verifies again", async () => {
+    const { client, sent } = recording((s) =>
+      s.headers["prefer"] ? json({ id: "j", kind: "rebuild_snapshots", status: "queued" }, 202) : json({ ok: true, plan: [] }),
+    );
+    await client.settleRun(["v2~s", "v2~t"], { dryRun: true, allow: ["f"] });
+    await client.submitSettleRun(["v2~s"], { verify: true, timeout: 30 });
+    await client.verifySnapshot("v2~s", { again: true, timeout: 9 });
+    expect(sent.map((s) => [s.url, s.body])).toEqual([
+      ["/api/snapshots/settle", { against: ["v2~s", "v2~t"], allow: ["f"], dry_run: true }],
+      ["/api/snapshots/settle", { against: ["v2~s"], timeout: 30, verify: true }],
+      ["/api/snapshots/v2~s/verify?timeout=9&again=true", undefined],
+    ]);
+  });
+
   it("opens, edits, asks and closes a document", async () => {
     const { client, sent } = recording((s) =>
       s.method === "DELETE" ? new Response(null, { status: 204 }) : json({ id: "d", revision: 1, sorries: [], at: [], results: [] }),
@@ -412,6 +426,8 @@ describe("PisaClient", () => {
     await expect(client.submitRebuildSnapshots("v2~a", "v2~b", { p: "1" }, dry)).rejects.toMatchObject({
       kind: "bad_request",
     });
+    const drySettle = { dryRun: true } as Parameters<typeof client.submitSettleRun>[1];
+    await expect(client.submitSettleRun(["v2~a"], drySettle)).rejects.toMatchObject({ kind: "bad_request" });
     expect(sent).toHaveLength(0);
   });
 

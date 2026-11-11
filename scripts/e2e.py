@@ -444,6 +444,61 @@ def refute_amend_and_resubmit():
     step("amend: a spec amended during a run, its run resubmitted onto it, is clean")
 
 
+def through_links_and_settle():
+    lemma = "theorem e2e_lemma (n : Nat) : n + 0 = n"
+    lemma_spec = create_snapshot(f"{lemma} := sorry", verify=True)
+    header = lemma_spec["snapshot"]["header"]
+    main = "theorem e2e_main (n : Nat) : n + 0 + 0 = n"
+    spec = create_snapshot(f"{header}\n\n{main} := sorry", verify=True)
+    spec_id = spec["snapshot"]["id"]
+    # The target is proved with the lemma while the lemma is still `sorry`,
+    # and the lemma is proved after.
+    head = create_snapshot(f"{header}\n\n{main} := (e2e_lemma (n + 0)).trans (e2e_lemma n)",
+                           replaces={"snapshot_id": spec_id}, verify=True)
+    lemma_head = create_snapshot(f"{lemma} := rfl",
+                                 replaces={"snapshot_id": lemma_spec["snapshot"]["id"]}, verify=True)
+    out = audit_against(spec)
+    [target] = out["targets"]
+    assert target["status"] == "sorry" and target["linked_status"] == "proved", out
+    through = {"name": "e2e_lemma", "snapshot_id": lemma_spec["snapshot"]["id"],
+               "head": lemma_head["snapshot"]["id"]}
+    assert target["through"] == [through] and out["clean"] is False, out
+    assert out["unsettled"] == [{"head": head["snapshot"]["id"], "swaps": [
+        {"snapshot_id": lemma_spec["snapshot"]["id"], "head": lemma_head["snapshot"]["id"]}]}], out
+    step("through links: a target proved with a lemma proved later holds through the lemma's run")
+
+    done = post("/snapshots/settle", {"against": [spec_id], "timeout": 600})
+    assert done["ok"] and len(done["created"]) == 1, done
+    settled = done["created"][0]["new_snapshot_id"]
+    out = audit_against(spec)
+    [target] = out["targets"]
+    assert out["clean"] is True and out["heads"] == [settled], out
+    assert target["status"] == "proved" and "linked_status" not in target, out
+    verdict = post("/snapshots/accept", {"against": [spec_id]})
+    assert verdict["accepted"] and verdict["clean"], verdict
+    step("settle: the head is rebuilt onto the lemma's proof, and the run is clean and accepted")
+
+    # The copy builds on the lemma's head, as this does.
+    retyped = (f"{lemma_head['snapshot']['header']}\n\n"
+               "theorem e2e_main (n : Nat) : n + 0 + 0 + 0 = n := by simp")
+    started = time.time()
+    refused = post("/snapshots", {"code": retyped, "replaces": {"snapshot_id": settled}, "timeout": 600})
+    built = time.time() - started
+    assert "snapshot" not in refused and refused["check"]["ok"] is False, refused
+    assert "statement: e2e_main has a different type" in refused["check"]["reasons"], refused
+    started = time.time()
+    kept = create_snapshot(retyped)
+    again = time.time() - started
+    # The kept build's record, with its build's time: nothing was built.
+    assert kept["check"]["time"] == refused["check"]["time"], (kept, refused)
+    print(f"  refused in {built:.1f}s, created again in {again:.1f}s")
+    for x in [kept["snapshot"]["id"], settled, head["snapshot"]["id"], spec_id,
+              lemma_head["snapshot"]["id"], lemma_spec["snapshot"]["id"]]:
+        status, gone = call("DELETE", f"/snapshots/{x}")
+        assert status == 200, gone
+    step("replaces: a refused build is kept, so creating its code again builds nothing")
+
+
 def built_outside(archive):
     """Unpacks a run's export in a worker container and builds and judges it
     there with the commands its README gives: Lean and Lake only, no pisa."""
@@ -829,6 +884,7 @@ if __name__ == "__main__":
     allow_by_name()
     holes()
     refute_amend_and_resubmit()
+    through_links_and_settle()
     # The export of a project with packages fetches them to build.
     comparator(outside=not args.mathlib and not args.no_failover)
     review()

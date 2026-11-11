@@ -667,6 +667,28 @@ impl Catalog {
         )
     }
 
+    /// Stores module `m`'s record and `decls` with no entry, as [`commit`]
+    /// does, for a build that its create's relation refused: the same code
+    /// created again then finds it kept, and until then nothing lists or
+    /// searches it, and a sweep removes it once it is older than its grace.
+    /// Returns the stored record, another worker's if it stored the module
+    /// first.
+    ///
+    /// [`commit`]: Self::commit
+    pub async fn commit_module(
+        &self,
+        m: &str,
+        meta: &ModuleMeta,
+        decls: Option<&SnapshotDecls>,
+    ) -> Result<ModuleMeta, Error> {
+        to_record(&ModuleBody::of(meta))?;
+        let decls = decls.map(to_record).transpose()?;
+        dispatch!(
+            &self.db,
+            commit_module(&self.version, m, meta, decls.as_ref())
+        )
+    }
+
     /// A new entry on an existing module; `None` if the module is gone. If
     /// `entry`'s key is already on an entry, that one comes back instead,
     /// unchanged, and it may be on another module. The entry `entry`
@@ -819,8 +841,12 @@ impl Catalog {
         &self,
         after: Option<&str>,
         limit: u32,
+        built_by: u64,
     ) -> Result<(Vec<String>, Option<String>), Error> {
-        dispatch!(&self.db, orphans_after(&self.version, after, limit.into()))
+        dispatch!(
+            &self.db,
+            orphans_after(&self.version, after, limit.into(), built_by)
+        )
     }
 
     /// The own build of each of `ids` that has a record, read without the
@@ -2377,27 +2403,42 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(
-                catalog.orphans_after(None, 10).await.unwrap().0,
+                catalog.orphans_after(None, 10, 10).await.unwrap().0,
                 Vec::<String>::new()
             );
             // P's entry goes, but C imports it.
             catalog.remove_entry(&pe).await.unwrap();
             assert_eq!(
-                catalog.orphans_after(None, 10).await.unwrap().0,
+                catalog.orphans_after(None, 10, 10).await.unwrap().0,
                 Vec::<String>::new()
             );
             // C's entry goes with its module, and a delete that stopped there
             // leaves P to nothing.
             catalog.remove_entry(&ce).await.unwrap();
-            assert_eq!(catalog.orphans_after(None, 10).await.unwrap().0, ["p"]);
+            assert_eq!(catalog.orphans_after(None, 10, 10).await.unwrap().0, ["p"]);
             // A page of one module says where to go on.
             assert_eq!(
-                catalog.orphans_after(None, 1).await.unwrap(),
+                catalog.orphans_after(None, 1, 10).await.unwrap(),
                 (vec![], Some("k".into()))
             );
             assert_eq!(
-                catalog.orphans_after(Some("p"), 10).await.unwrap().0,
+                catalog.orphans_after(Some("p"), 10, 10).await.unwrap().0,
                 Vec::<String>::new()
+            );
+            // A module kept with no entry isn't one until it is older than
+            // the cutoff.
+            let kept = ModuleMeta {
+                created: 20,
+                ..meta("f")
+            };
+            let stored = catalog.commit_module("f", &kept, None).await.unwrap();
+            assert_eq!(stored.created, 20);
+            assert!((catalog.entries_on(&["f".into()], &[]).await.unwrap()).is_empty());
+            assert!(catalog.module("f").await.is_ok());
+            assert_eq!(catalog.orphans_after(None, 10, 10).await.unwrap().0, ["p"]);
+            assert_eq!(
+                catalog.orphans_after(None, 10, 20).await.unwrap().0,
+                ["f", "p"]
             );
         }
     }

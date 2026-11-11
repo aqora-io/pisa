@@ -36,6 +36,9 @@ pub(super) fn snapshot_imports(modules: &[String]) -> Result<BTreeSet<String>, E
     Ok(ids)
 }
 
+/// What a refusal's message ends with when the build is kept with no entry.
+pub(super) const KEPT: &str = ". The build is kept: the same code created again isn't built again";
+
 pub(super) fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -281,11 +284,49 @@ impl Snapshots {
             tracing::warn!(module = %id, "the build's declaration export is missing");
         }
         let status = worst_status(&verification.declarations);
+        let verified = kernel && parents.iter().all(|p| p.verified);
+        let record = |result: CheckResult| ModuleMeta {
+            imports: snapshot::imports(&split.header).unwrap_or_default(),
+            modules: modules(&parents, own.clone()),
+            header: header.to_string(),
+            code: job.code.clone(),
+            status,
+            verified,
+            macros,
+            result,
+            created: now(),
+        };
+        let indexed = |meta: &ModuleMeta, exported: Option<Vec<crate::catalog::SnapshotDecl>>| {
+            exported
+                .map(|decls| SnapshotDecls::new(meta, decls))
+                .filter(|d| {
+                    record_fits(d) || {
+                        tracing::warn!(
+                            module = %id,
+                            "declarations too large, or with a NUL character, to index for search"
+                        );
+                        false
+                    }
+                })
+        };
+        // A build refused for how it relates to other snapshots is kept with
+        // no entry, with its own judgement, so the same code created again
+        // costs no build.
+        let keep = |outcome: &CheckOutcome, judged: &Verification| {
+            let mut kept = outcome.clone();
+            kept.verification = Some(judged.clone());
+            let meta = record(kept.into());
+            let search = indexed(&meta, exported.clone());
+            let (own, contents) = (&own, &contents);
+            async move { self.keep(own, contents, &meta, search.as_ref()).await }
+        };
         let replacement = match replacing.zip(swapped.as_ref()) {
             Some((r, swapped)) => match compare(r, &verification.declarations, swapped) {
                 Ok(replacement) => Some(replacement),
                 Err(mut changes) => {
-                    self.unbuild(slot, id);
+                    if !keep(&outcome, &verification).await {
+                        self.unbuild(slot, id);
+                    }
                     let gained: Vec<String> =
                         swapped.gained.iter().map(|(m, _)| m.clone()).collect();
                     let mut now = self.reader.exports_of(&gained).await;
@@ -337,14 +378,15 @@ impl Snapshots {
             }
             None => None,
         };
-        let verified = kernel && parents.iter().all(|p| p.verified);
         let refutes = match &rel.refuting {
             Some(r) => {
                 let decls = &verification.declarations;
                 match refuter(&r.target, &r.spec_module, &needs, verified, decls) {
                     Ok(theorem) => Some(r.record(theorem)),
                     Err(reasons) => {
-                        self.unbuild(slot, id);
+                        if !keep(&outcome, &verification).await {
+                            self.unbuild(slot, id);
+                        }
                         verification.ok = false;
                         verification.reasons.extend(reasons);
                         outcome.verification = Some(verification);
@@ -356,28 +398,8 @@ impl Snapshots {
         };
         outcome.verification = Some(verification);
 
-        let meta = ModuleMeta {
-            imports: snapshot::imports(&split.header).unwrap_or_default(),
-            modules: modules(&parents, own.clone()),
-            header: header.to_string(),
-            code: job.code.clone(),
-            status,
-            verified,
-            macros,
-            result: outcome.clone().into(),
-            created: now(),
-        };
-        let search = exported
-            .map(|decls| SnapshotDecls::new(&meta, decls))
-            .filter(|d| {
-                record_fits(d) || {
-                    tracing::warn!(
-                        module = %id,
-                        "declarations too large, or with a NUL character, to index for search"
-                    );
-                    false
-                }
-            });
+        let meta = record(outcome.clone().into());
+        let search = indexed(&meta, exported);
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
@@ -444,23 +466,59 @@ impl Snapshots {
         self.discard(id);
     }
 
-    /// Uploads a freshly built module's files (`own`, whose files have
-    /// `contents`), then stores its record, and `search` with it, with the new
-    /// entry. Returns the
-    /// stored record and the entry. If another worker stored the module
-    /// first, its record and build are kept, and this build's files go. So do
-    /// they if the entry's key is on an entry of other code, which is
-    /// `bad_request`, with nothing stored, and if the catalog refuses the
-    /// record. Only after an `unavailable` store, which may have stored it,
-    /// do they stay.
-    pub(super) async fn commit(
+    /// Stores a build whose create was refused for how it relates to other
+    /// snapshots, as [`commit`](Self::commit) would, with no entry: the same
+    /// code created again finds it. Returns whether it is kept, confirmed in
+    /// the cache; if not, its files go, unless the store was unavailable.
+    async fn keep(
         &self,
         own: &Module,
         contents: &[Vec<u8>],
         meta: &ModuleMeta,
         search: Option<&SnapshotDecls>,
-        entry: NewEntry,
-    ) -> Result<(ModuleMeta, (String, EntryMeta)), Error> {
+    ) -> bool {
+        match self.upload(own, contents).await {
+            Ok(()) => self.store_kept(own, meta, search).await,
+            Err(e) => {
+                tracing::warn!(module = %own.id, "keeping a refused build failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// [`keep`](Self::keep) once the files are uploaded.
+    async fn store_kept(
+        &self,
+        own: &Module,
+        meta: &ModuleMeta,
+        search: Option<&SnapshotDecls>,
+    ) -> bool {
+        match self.catalog.commit_module(&own.id, meta, search).await {
+            Ok(stored) if stored.modules.last() == Some(own) => {
+                self.confirmed
+                    .lock()
+                    .unwrap()
+                    .insert(own.id.clone(), Instant::now());
+                true
+            }
+            // Another worker kept the same code first.
+            Ok(_) => {
+                self.delete_blobs(own).await;
+                false
+            }
+            Err(e) => {
+                tracing::warn!(module = %own.id, "keeping a refused build failed: {e}");
+                if e.kind != ErrorKind::Unavailable {
+                    self.delete_blobs(own).await;
+                }
+                false
+            }
+        }
+    }
+
+    /// Uploads a freshly built module's files: `own`, whose files have
+    /// `contents`.
+    async fn upload(&self, own: &Module, contents: &[Vec<u8>]) -> Result<(), Error> {
         self.mark_store().await?;
         for (file, bytes) in own.files.iter().zip(contents) {
             let compressed = zstd::encode_all(&bytes[..], 3).map_err(internal)?;
@@ -469,9 +527,40 @@ impl Snapshots {
                 .await
                 .map_err(internal)?;
         }
+        Ok(())
+    }
+
+    /// Uploads a freshly built module's files (`own`, whose files have
+    /// `contents`), then stores its record, and `search` with it, with the new
+    /// entry. Returns the
+    /// stored record and the entry. If another worker stored the module
+    /// first, its record and build are kept, and this build's files go. So do
+    /// they if the entry's key is on an entry of other code, which is
+    /// `bad_request`, with nothing stored, and if the catalog refuses the
+    /// record. Only after an `unavailable` store, which may have stored it,
+    /// do they stay. A `conflict` or `not_found` from the entry's link (the
+    /// replaced snapshot replaced or gone meanwhile) keeps the build with no
+    /// entry, as [`keep`](Self::keep) does.
+    pub(super) async fn commit(
+        &self,
+        own: &Module,
+        contents: &[Vec<u8>],
+        meta: &ModuleMeta,
+        search: Option<&SnapshotDecls>,
+        entry: NewEntry,
+    ) -> Result<(ModuleMeta, (String, EntryMeta)), Error> {
+        self.upload(own, contents).await?;
         let (entry, entry_meta, stored) =
             match self.catalog.commit(&own.id, meta, search, entry).await {
                 Ok(committed) => committed,
+                // The head race lost, or what the entry links to gone: the
+                // build is still good.
+                Err(e)
+                    if matches!(e.kind, ErrorKind::Conflict | ErrorKind::NotFound)
+                        && self.store_kept(own, meta, search).await =>
+                {
+                    return Err(Error::new(e.kind, format!("{}{KEPT}", e.message)));
+                }
                 Err(e) => {
                     if e.kind != ErrorKind::Unavailable {
                         self.delete_blobs(own).await;

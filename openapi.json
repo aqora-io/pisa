@@ -533,6 +533,13 @@
             },
             "type": "array"
           },
+          "unsettled": {
+            "description": "With `against`: the heads with a target whose\n[`linked_status`](AuditTarget::linked_status) differs from its\nstatus, which `POST /snapshots/settle` rebuilds.",
+            "items": {
+              "$ref": "#/components/schemas/AuditUnsettled"
+            },
+            "type": "array"
+          },
           "unverified": {
             "description": "With `against`: the spec snapshots and heads whose records the kernel\nhasn't re-checked, so the audit can't compare them and the run isn't\n`clean`. Verify each with `POST /snapshots/{id}/verify`.",
             "items": {
@@ -587,6 +594,21 @@
         ],
         "type": "object"
       },
+      "AuditSwap": {
+        "properties": {
+          "head": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "head"
+        ],
+        "type": "object"
+      },
       "AuditTarget": {
         "description": "A spec declaration, as a head of the run declares it.",
         "properties": {
@@ -597,6 +619,10 @@
           "head": {
             "description": "The head, reached from `spec`, whose declaration this is.",
             "type": "string"
+          },
+          "linked_status": {
+            "$ref": "#/components/schemas/ProofStatus",
+            "description": "Its status through links, where that differs from `status`: with each\ntheorem it inherits axioms through read on the head of that theorem's\nrun, as `through` lists. A theorem's proof can be swapped for another\nproof of the same statement, so the target holds once the run is\nsettled (`POST /snapshots/settle`), which `status`, `accepted` and\n`clean` then show. It is the kernel's claim: what the settle's\nelaboration sees besides, such as attributes, can still fail it."
           },
           "name": {
             "description": "Its name as the spec snapshot's module declares it, so a private\none's names the spec's module. The head's declaration is the one\nwith the same name, a private one's module left out.",
@@ -617,6 +643,13 @@
             "$ref": "#/components/schemas/ProofStatus",
             "description": "Its status on the head."
           },
+          "through": {
+            "description": "The theorems read through links for `linked_status`.",
+            "items": {
+              "$ref": "#/components/schemas/AuditThrough"
+            },
+            "type": "array"
+          },
           "verified": {
             "description": "The head's module has passed the kernel re-check.",
             "type": "boolean"
@@ -629,6 +662,26 @@
           "status",
           "verified",
           "accepted"
+        ],
+        "type": "object"
+      },
+      "AuditThrough": {
+        "description": "A theorem a target inherits axioms through, read on another head: the\nsnapshot it was taken from and the head of that snapshot's run.",
+        "properties": {
+          "head": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "snapshot_id",
+          "head"
         ],
         "type": "object"
       },
@@ -657,6 +710,33 @@
           "snapshot_id",
           "status",
           "axioms"
+        ],
+        "type": "object"
+      },
+      "AuditUnsettled": {
+        "description": "A head whose targets hold only through links, and what settling it swaps.",
+        "properties": {
+          "blockers": {
+            "description": "Why a settle can't rebuild the head as it is, if it can't.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "head": {
+            "type": "string"
+          },
+          "swaps": {
+            "description": "Each snapshot whose module the head builds on, and the head of its\nrun that a settle builds the head on instead.",
+            "items": {
+              "$ref": "#/components/schemas/AuditSwap"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "head",
+          "swaps"
         ],
         "type": "object"
       },
@@ -900,7 +980,7 @@
             "type": "array"
           },
           "key": {
-            "description": "Makes the create safe to retry: while a snapshot made with this key\nexists, a create with it on the same code returns that snapshot as it\nis, instead of adding another; on other code it is a `bad_request`.\nSuch a replay ignores the request's other fields, `labels` and\n`verify` included, so it can be `verified: false` with no error after\n`verify: true`. Creates that keep nothing don't use the key up, and\ndeleting the snapshot frees it. See\n[`check_key`](crate::labels::check_key) for the rules.",
+            "description": "Makes the create safe to retry: while a snapshot made with this key\nexists, a create with it on the same code returns that snapshot as it\nis, instead of adding another; on other code it is a `bad_request`.\nSuch a replay ignores the request's other fields, `labels` and\n`verify` included, so it can be `verified: false` with no error after\n`verify: true`. Creates that keep nothing don't use the key up, and\ndeleting the snapshot frees it. See\n[`check_key`](crate::labels::check_key) for the rules; keys that\nstart with `job:` are the server's, which gives a create without a\nkey one of its own, so that a retry of its job after a lost worker\nadds nothing either.",
             "type": "string"
           },
           "labels": {
@@ -1000,6 +1080,13 @@
             "description": "Made by Lean on demand, such as an equation lemma: code with the same\nstatements needn't have it.",
             "type": "boolean"
           },
+          "inherits": {
+            "description": "The theorems of other snapshot modules through which it gets axioms\nbeyond Lean's standard three. A theorem's proof can be swapped for\nanother proof of the same statement, so an audit reads an inherited\n`sorry` through the run that proves the theorem.",
+            "items": {
+              "$ref": "#/components/schemas/Inherited"
+            },
+            "type": "array"
+          },
           "kind": {
             "type": "string"
           },
@@ -1009,6 +1096,13 @@
           "negates": {
             "description": "For a theorem of `¬ X` (or `X → False`), the SHA-256 of `X`'s\ncanonical text with every name written whole: the `type_hash` of a\ndeclaration that states `X` and mentions no private name, from any\nmodule.",
             "type": "string"
+          },
+          "own_axioms": {
+            "description": "The axioms it gets other than through `inherits`: from its own proof,\nthe definitions it uses, Lean and Mathlib. Absent in records made\nbefore it was recorded, and in a check's report.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "parent": {
             "description": "The inductive type it is made from, when it is one of the\ndeclarations Lean makes for one: a constructor, the recursor,\n`casesOn`, `noConfusion`, `injEq`, `sizeOf_spec`, a projection and\nthe like. A change to it is a change to that type.",
@@ -1652,6 +1746,23 @@
           "flags",
           "score",
           "text"
+        ],
+        "type": "object"
+      },
+      "Inherited": {
+        "description": "A theorem of another snapshot module that a declaration gets axioms\nthrough.",
+        "properties": {
+          "module": {
+            "description": "Its module, `PisaSnap.s…`.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "module"
         ],
         "type": "object"
       },
@@ -2765,6 +2876,42 @@
           "id",
           "states",
           "messages"
+        ],
+        "type": "object"
+      },
+      "SettleRunRequest": {
+        "description": "`POST /snapshots/settle`: rebuilds the heads of the run that the spec\nsnapshots `against` start whose targets hold only through links\n([`AuditSnapshotsResponse::unsettled`]) onto the heads they are read\nthrough, in one plan, as a rebuild would: each copy replaces its head.",
+        "properties": {
+          "against": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allow": {
+            "description": "As the audit's `allow`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "dry_run": {
+            "description": "Only plan.",
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "As [`CreateSnapshotRequest::timeout`], for each create.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verify": {
+            "description": "As [`CreateSnapshotRequest::verify`], for each create.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "against"
         ],
         "type": "object"
       },
@@ -5665,6 +5812,133 @@
         ]
       }
     },
+    "/snapshots/settle": {
+      "post": {
+        "description": "Audits the run that the spec snapshots `against` start, under `allow`, and rebuilds each head in its `unsettled` onto the heads its targets are read through, in one plan, as a rebuild would: each copy replaces its head, what is between is rebuilt as support items, and those go once every level has run. Its targets' `status` is then what their `linked_status` was. A head the audit lists blockers for refuses the plan, with them in `changes`; nothing to settle is an empty plan. A run can be async; a dry run answers at once.",
+        "operationId": "settleRun",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettleRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RebuildSnapshotsResponse"
+                }
+              }
+            },
+            "description": "The plan, and what the run did"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{id}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Rebuild a run's heads onto what their targets hold through",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
     "/snapshots/{id}": {
       "delete": {
         "description": "Its module goes too once no snapshot or other module refers to it: `removed` lists the modules that went. The snapshots that replace it replace what it replaced instead, with the two links composed. With `with_replacers=true` it deletes those snapshots as well, and the ones that replace them, and splices nothing: a whole branch of a run goes, and what the snapshot replaced is a head again if nothing else replaces it. `deleted` lists the snapshots that went, the asked one first.",
@@ -6074,7 +6348,7 @@
     },
     "/snapshots/{id}/verify": {
       "post": {
-        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why.",
+        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again, as a record made before what it now records (`own_axioms`, `inherits`) needs.",
         "operationId": "verifySnapshot",
         "parameters": [
           {
@@ -6095,6 +6369,15 @@
               "format": "int64",
               "minimum": 0,
               "type": "integer"
+            }
+          },
+          {
+            "description": "`true` to re-check the modules that are verified already too, which describes their records again; `false` by default",
+            "in": "query",
+            "name": "again",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           },
           {

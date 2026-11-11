@@ -27,6 +27,7 @@ use pisa_protocol::verify::{
 use pisa_protocol::wire::SnapshotRebuildJob;
 
 mod audit;
+mod links;
 pub use audit::{AuditedRun, RunPair};
 pub mod compare;
 pub mod plan;
@@ -35,6 +36,7 @@ mod records;
 mod resubmit;
 pub mod review;
 mod run;
+mod settle;
 #[cfg(test)]
 mod tests;
 

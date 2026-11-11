@@ -76,16 +76,18 @@ pub(super) fn verified_declarations(verdict: Verdict) -> Result<Vec<ReportedDecl
 impl Snapshots {
     /// Re-checks an entry's module and everything it imports through the
     /// kernel, with `per_module` for each module once their imports are
-    /// loaded, and records each module that passes.
+    /// loaded, and records each module that passes; `again` re-checks those
+    /// that are verified already too, which describes them again.
     pub async fn verify(
         &self,
         pool: &Arc<Pool>,
         entry: &str,
         per_module: Duration,
+        again: bool,
     ) -> Result<VerifySnapshotResponse, Error> {
         let entry = self.parse(entry)?;
         let id = self.catalog.entry(&entry).await?.module;
-        let (checked, failure) = self.verify_chain(pool, &[id], per_module).await?;
+        let (checked, failure) = self.verify_chain(pool, &[id], per_module, again).await?;
         // As the entry and its module are now.
         let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
@@ -112,6 +114,7 @@ impl Snapshots {
         pool: &Arc<Pool>,
         ids: &[String],
         per_module: Duration,
+        again: bool,
     ) -> Result<(Vec<String>, Option<VerifyFailure>), Error> {
         let mut modules: Vec<Module> = Vec::new();
         for id in ids {
@@ -125,7 +128,7 @@ impl Snapshots {
         // Those this run re-checks, as far as the first built again.
         let mut todo = Vec::new();
         for module in modules {
-            match self.before_recheck(&module).await? {
+            match self.before_recheck(&module, again).await? {
                 // Whatever imports it was built again too, or is gone.
                 Some(Recheck::Changed) => break,
                 Some(_) => {}
@@ -184,17 +187,21 @@ impl Snapshots {
     }
 
     /// Gets a re-check of a module build ready: `Changed` if the module's
-    /// record names another build now, `AlreadyVerified` if this build is,
-    /// else `None` once the local files, which the verifier reads, are this
-    /// build's. They are fetched for a verified build too, as the next
-    /// modules of the chain import it.
-    pub(super) async fn before_recheck(&self, module: &Module) -> Result<Option<Recheck>, Error> {
+    /// record names another build now, `AlreadyVerified` if this build is
+    /// and it isn't to be checked `again`, else `None` once the local files,
+    /// which the verifier reads, are this build's. They are fetched for a
+    /// verified build too, as the next modules of the chain import it.
+    pub(super) async fn before_recheck(
+        &self,
+        module: &Module,
+        again: bool,
+    ) -> Result<Option<Recheck>, Error> {
         let meta = self.catalog.module(&module.id).await?;
         if meta.modules.last().map(|own| &own.build) != Some(&module.build) {
             return Ok(Some(Recheck::Changed));
         }
         self.fetch(module).await?;
-        Ok(meta.verified.then_some(Recheck::AlreadyVerified))
+        Ok((meta.verified && !again).then_some(Recheck::AlreadyVerified))
     }
 
     /// Records that a module build passed the re-check, with what it found.

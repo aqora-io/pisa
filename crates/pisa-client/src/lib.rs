@@ -57,15 +57,16 @@ use serde::de::DeserializeOwned;
 pub use pisa_protocol::api::{
     self, AcceptPair, AcceptResponse, Allow, Amendment, Amends, ApplyTacticResponse, AtPosition,
     AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditReview, AuditSnapshotsResponse,
-    AuditSummary, AuditTarget, AuditUnproved, Change, CheckResult, CreateSnapshotResponse,
-    Declaration, DeclarationChange, DeleteSnapshotResponse, Detail, Document, DocumentGoals,
-    DocumentProbes, ErrorKind, Export, GoalsAt, GoalsMode, Health, HealthStatus, JobKind,
-    JobStatus, LeftOut, LeftOutReason, LinePos, ListDependentsResponse, ListSnapshotsResponse,
-    Message, PairError, PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated,
-    RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse,
-    Refutation, Refutes, Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse,
-    ReviewDeclaration, ReviewOrigin, Session, Severity, Snapshot, SnapshotDetail, Sorry, State,
-    TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
+    AuditSummary, AuditSwap, AuditTarget, AuditThrough, AuditUnproved, AuditUnsettled, Change,
+    CheckResult, CreateSnapshotResponse, Declaration, DeclarationChange, DeleteSnapshotResponse,
+    Detail, Document, DocumentGoals, DocumentProbes, ErrorKind, Export, GoalsAt, GoalsMode, Health,
+    HealthStatus, Inherited, JobKind, JobStatus, LeftOut, LeftOutReason, LinePos,
+    ListDependentsResponse, ListSnapshotsResponse, Message, PairError, PairErrorKind, Pos, ProbeAt,
+    ProbeResult, ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced,
+    RebuildSkipped, RebuildSnapshotsResponse, Refutation, Refutes, Replacement, Replaces,
+    ResubmitItem, ResubmitSnapshotsResponse, ReviewDeclaration, ReviewOrigin, Session, Severity,
+    Snapshot, SnapshotDetail, Sorry, State, TacticInfo, TermInfo, VerifyFailure,
+    VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
@@ -224,6 +225,18 @@ pub struct RebuildOptions {
     /// Once every item is created, delete the old snapshots whose copies
     /// replace them, from the top down. `from` stays.
     pub retire: bool,
+    /// The kernel re-check for each create; see
+    /// [`CreateSnapshotOptions::verify`].
+    pub verify: Option<bool>,
+}
+
+/// Options for [`Client::settle_run`].
+#[derive(Debug, Clone, Default)]
+pub struct SettleOptions {
+    /// As the audit's `allow`.
+    pub allow: Vec<String>,
+    /// Only plan.
+    pub dry_run: bool,
     /// The kernel re-check for each create; see
     /// [`CreateSnapshotOptions::verify`].
     pub verify: Option<bool>,
@@ -673,6 +686,16 @@ impl Client {
         self.endpoint.post_url(self.verify_url(id)?).await
     }
 
+    /// Like [`Client::verify_snapshot`], but re-checks the modules that are
+    /// verified already too, which describes their records again: what a
+    /// record made before `own_axioms` and `inherits` were recorded needs to
+    /// be read through links.
+    pub async fn verify_snapshot_again(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
+        let mut url = self.verify_url(id)?;
+        url.query_pairs_mut().append_pair("again", "true");
+        self.endpoint.post_url(url).await
+    }
+
     /// Like [`Client::verify_snapshot`], as a job.
     pub async fn submit_verify_snapshot(
         &self,
@@ -876,6 +899,59 @@ impl Client {
         self.endpoint
             .submit(self.endpoint.url("snapshots/resubmit")?, Some(&req))
             .await
+    }
+
+    /// Settles the run that spec snapshots `against` start: rebuilds each of
+    /// its heads whose targets hold only through links onto the heads they
+    /// are read through, in one plan, as the audit's `unsettled` lists them
+    /// (under `opts.allow`). A head with blockers refuses the plan, with them
+    /// in `changes`. [`submit_settle_run`](Self::submit_settle_run) runs it
+    /// as a job.
+    pub async fn settle_run<I, S>(
+        &self,
+        against: I,
+        opts: &SettleOptions,
+    ) -> Result<RebuildSnapshotsResponse, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let req = self.settle_request(against, opts);
+        self.post("snapshots/settle", &req).await
+    }
+
+    /// Like [`Client::settle_run`], as a job; a dry run isn't one, as for
+    /// [`submit_rebuild_snapshots`](Self::submit_rebuild_snapshots).
+    pub async fn submit_settle_run<I, S>(
+        &self,
+        against: I,
+        opts: &SettleOptions,
+    ) -> Result<Job<RebuildSnapshotsResponse>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let req = self.settle_request(against, opts);
+        self.endpoint
+            .submit(self.endpoint.url("snapshots/settle")?, Some(&req))
+            .await
+    }
+
+    fn settle_request<I, S>(&self, against: I, opts: &SettleOptions) -> api::SettleRunRequest
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        api::SettleRunRequest {
+            against: against
+                .into_iter()
+                .map(|s| s.as_ref().to_string())
+                .collect(),
+            allow: opts.allow.clone(),
+            dry_run: opts.dry_run,
+            verify: opts.verify,
+            timeout: self.timeout,
+        }
     }
 
     fn resubmit_request(

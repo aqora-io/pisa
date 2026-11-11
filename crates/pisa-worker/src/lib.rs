@@ -230,10 +230,17 @@ pub(crate) async fn run_job(
         }
         Job::SnapshotVerify(j) => {
             let per_module = Duration::from_secs(j.timeout_secs);
-            JobResult::SnapshotVerified(pool.snapshots().verify(pool, &j.entry, per_module).await)
+            JobResult::SnapshotVerified(
+                pool.snapshots()
+                    .verify(pool, &j.entry, per_module, j.again)
+                    .await,
+            )
         }
         Job::SnapshotRebuild(_) => JobResult::Failed {
             error: "a rebuild is planned and run by a server".into(),
+        },
+        Job::SnapshotSettle(_) => JobResult::Failed {
+            error: "a settle is planned and run by a server".into(),
         },
         Job::SnapshotResubmit(_) => JobResult::Failed {
             error: "a resubmit is planned and run by a server".into(),

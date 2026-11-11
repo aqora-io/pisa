@@ -285,8 +285,16 @@ impl Snapshots {
                         .error
                         .as_ref()
                         .is_some_and(|e| e.kind == ErrorKind::Conflict)
-                    && let Ok(Some((error, heads))) = self.reader.replaced_by(&r.entry).await
+                    && let Ok(Some((mut error, heads))) = self.reader.replaced_by(&r.entry).await
                 {
+                    if done
+                        .check
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.message.ends_with(build::KEPT))
+                    {
+                        error.message.push_str(build::KEPT);
+                    }
                     done.check.error = Some(error);
                     done.heads = heads;
                 }
@@ -345,7 +353,7 @@ impl Snapshots {
         if job.verify == Some(true) {
             let imports = snapshot::imports(&split.header).unwrap_or_default();
             let per_module = Duration::from_secs(job.timeout_secs);
-            let error = match self.verify_chain(pool, &imports, per_module).await {
+            let error = match self.verify_chain(pool, &imports, per_module, false).await {
                 Ok((_, Some(failure))) => Some(failure_error(&failure)),
                 Ok((_, None)) => None,
                 Err(e) => Some(e),
@@ -400,7 +408,7 @@ impl Snapshots {
             let verified = async {
                 let ids = [id.to_string()];
                 let per_module = Duration::from_secs(job.timeout_secs);
-                let (_, failure) = self.verify_chain(pool, &ids, per_module).await?;
+                let (_, failure) = self.verify_chain(pool, &ids, per_module, false).await?;
                 Ok::<_, Error>((self.catalog.module(id).await?, failure))
             };
             match verified.await {

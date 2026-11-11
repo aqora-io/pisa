@@ -96,7 +96,8 @@ def run (modules : Array Name) : IO UInt32 := do
     let ctx : Core.Context := { fileName := "", fileMap := default, maxHeartbeats := 0 }
     let env := Environment.ofKernelEnv kenv
     let described ←
-      (describeAll m data.constNames (fromKernel := true)).toIO ctx { env } |>.toBaseIO
+      (describeAll m data.constNames (fromKernel := true) declaredBy).toIO ctx { env }
+        |>.toBaseIO
     let (decls, _) ← match described with
       | .ok d => pure d
       | .error e => return ← failed s!"describing `{m}`: {e}"

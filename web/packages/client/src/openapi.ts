@@ -416,6 +416,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots/settle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rebuild a run's heads onto what their targets hold through
+         * @description Audits the run that the spec snapshots `against` start, under `allow`, and rebuilds each head in its `unsettled` onto the heads its targets are read through, in one plan, as a rebuild would: each copy replaces its head, what is between is rebuilt as support items, and those go once every level has run. Its targets' `status` is then what their `linked_status` was. A head the audit lists blockers for refuses the plan, with them in `changes`; nothing to settle is an empty plan. A run can be async; a dry run answers at once.
+         */
+        post: operations["settleRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots/{id}": {
         parameters: {
             query?: never;
@@ -472,7 +492,7 @@ export interface paths {
         put?: never;
         /**
          * Re-check a snapshot's module with the kernel
-         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why.
+         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again, as a record made before what it now records (`own_axioms`, `inherits`) needs.
          */
         post: operations["verifySnapshot"];
         delete?: never;
@@ -885,6 +905,12 @@ export interface components {
              */
             targets?: components["schemas"]["AuditTarget"][];
             /**
+             * @description With `against`: the heads with a target whose
+             *     [`linked_status`](AuditTarget::linked_status) differs from its
+             *     status, which `POST /snapshots/settle` rebuilds.
+             */
+            unsettled?: components["schemas"]["AuditUnsettled"][];
+            /**
              * @description With `against`: the spec snapshots and heads whose records the kernel
              *     hasn't re-checked, so the audit can't compare them and the run isn't
              *     `clean`. Verify each with `POST /snapshots/{id}/verify`.
@@ -911,6 +937,10 @@ export interface components {
              */
             unverified_modules: number;
         };
+        AuditSwap: {
+            head: string;
+            snapshot_id: string;
+        };
         /** @description A spec declaration, as a head of the run declares it. */
         AuditTarget: {
             /**
@@ -925,6 +955,16 @@ export interface components {
             /** @description The head, reached from `spec`, whose declaration this is. */
             head: string;
             /**
+             * @description Its status through links, where that differs from `status`: with each
+             *     theorem it inherits axioms through read on the head of that theorem's
+             *     run, as `through` lists. A theorem's proof can be swapped for another
+             *     proof of the same statement, so the target holds once the run is
+             *     settled (`POST /snapshots/settle`), which `status`, `accepted` and
+             *     `clean` then show. It is the kernel's claim: what the settle's
+             *     elaboration sees besides, such as attributes, can still fail it.
+             */
+            linked_status?: components["schemas"]["ProofStatus"];
+            /**
              * @description Its name as the spec snapshot's module declares it, so a private
              *     one's names the spec's module. The head's declaration is the one
              *     with the same name, a private one's module left out.
@@ -936,8 +976,19 @@ export interface components {
             spec: string;
             /** @description Its status on the head. */
             status: components["schemas"]["ProofStatus"];
+            /** @description The theorems read through links for `linked_status`. */
+            through?: components["schemas"]["AuditThrough"][];
             /** @description The head's module has passed the kernel re-check. */
             verified: boolean;
+        };
+        /**
+         * @description A theorem a target inherits axioms through, read on another head: the
+         *     snapshot it was taken from and the head of that snapshot's run.
+         */
+        AuditThrough: {
+            head: string;
+            name: string;
+            snapshot_id: string;
         };
         AuditUnproved: {
             /** @description Its axioms outside the allowed list. */
@@ -946,6 +997,17 @@ export interface components {
             /** @description A snapshot with the labels, or a head, whose module declares it. */
             snapshot_id: string;
             status: components["schemas"]["ProofStatus"];
+        };
+        /** @description A head whose targets hold only through links, and what settling it swaps. */
+        AuditUnsettled: {
+            /** @description Why a settle can't rebuild the head as it is, if it can't. */
+            blockers?: string[];
+            head: string;
+            /**
+             * @description Each snapshot whose module the head builds on, and the head of its
+             *     run that a settle builds the head on instead.
+             */
+            swaps: components["schemas"]["AuditSwap"][];
         };
         /**
          * @description How a declaration of the original code changed, or what else keeps new
@@ -1088,7 +1150,10 @@ export interface components {
              *     `verify` included, so it can be `verified: false` with no error after
              *     `verify: true`. Creates that keep nothing don't use the key up, and
              *     deleting the snapshot frees it. See
-             *     [`check_key`](crate::labels::check_key) for the rules.
+             *     [`check_key`](crate::labels::check_key) for the rules; keys that
+             *     start with `job:` are the server's, which gives a create without a
+             *     key one of its own, so that a retry of its job after a lost worker
+             *     adds nothing either.
              */
             key?: string;
             /**
@@ -1213,6 +1278,13 @@ export interface components {
              *     statements needn't have it.
              */
             generated?: boolean;
+            /**
+             * @description The theorems of other snapshot modules through which it gets axioms
+             *     beyond Lean's standard three. A theorem's proof can be swapped for
+             *     another proof of the same statement, so an audit reads an inherited
+             *     `sorry` through the run that proves the theorem.
+             */
+            inherits?: components["schemas"]["Inherited"][];
             kind: string;
             name: string;
             /**
@@ -1222,6 +1294,12 @@ export interface components {
              *     module.
              */
             negates?: string;
+            /**
+             * @description The axioms it gets other than through `inherits`: from its own proof,
+             *     the definitions it uses, Lean and Mathlib. Absent in records made
+             *     before it was recorded, and in a check's report.
+             */
+            own_axioms?: string[];
             /**
              * @description The inductive type it is made from, when it is one of the
              *     declarations Lean makes for one: a constructor, the recursor,
@@ -1553,6 +1631,15 @@ export interface components {
              *     module imports passed the kernel re-check.
              */
             verified?: boolean;
+        };
+        /**
+         * @description A theorem of another snapshot module that a declaration gets axioms
+         *     through.
+         */
+        Inherited: {
+            /** @description Its module, `PisaSnap.s…`. */
+            module: string;
+            name: string;
         };
         /** @description An async request, as `/jobs/{id}` reports it until it is done. */
         Job: {
@@ -2187,6 +2274,26 @@ export interface components {
             /** @description One per `sorry`, in source order. */
             states: components["schemas"]["State"][];
         };
+        /**
+         * @description `POST /snapshots/settle`: rebuilds the heads of the run that the spec
+         *     snapshots `against` start whose targets hold only through links
+         *     ([`AuditSnapshotsResponse::unsettled`]) onto the heads they are read
+         *     through, in one plan, as a rebuild would: each copy replaces its head.
+         */
+        SettleRunRequest: {
+            against: string[];
+            /** @description As the audit's `allow`. */
+            allow?: string[];
+            /** @description Only plan. */
+            dry_run?: boolean;
+            /**
+             * Format: int64
+             * @description As [`CreateSnapshotRequest::timeout`], for each create.
+             */
+            timeout?: number;
+            /** @description As [`CreateSnapshotRequest::verify`], for each create. */
+            verify?: boolean;
+        };
         /** @enum {string} */
         Severity: "trace" | "info" | "warning" | "error";
         /**
@@ -2408,8 +2515,11 @@ export type AuditLink = components['schemas']['AuditLink'];
 export type AuditReview = components['schemas']['AuditReview'];
 export type AuditSnapshotsResponse = components['schemas']['AuditSnapshotsResponse'];
 export type AuditSummary = components['schemas']['AuditSummary'];
+export type AuditSwap = components['schemas']['AuditSwap'];
 export type AuditTarget = components['schemas']['AuditTarget'];
+export type AuditThrough = components['schemas']['AuditThrough'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
+export type AuditUnsettled = components['schemas']['AuditUnsettled'];
 export type Change = components['schemas']['Change'];
 export type CheckBatchItem = components['schemas']['CheckBatchItem'];
 export type CheckBatchRequest = components['schemas']['CheckBatchRequest'];
@@ -2442,6 +2552,7 @@ export type GoalsMode = components['schemas']['GoalsMode'];
 export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
 export type Hit = components['schemas']['Hit'];
+export type Inherited = components['schemas']['Inherited'];
 export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
@@ -2485,6 +2596,7 @@ export type SearchHealth = components['schemas']['SearchHealth'];
 export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];
 export type Session = components['schemas']['Session'];
+export type SettleRunRequest = components['schemas']['SettleRunRequest'];
 export type Severity = components['schemas']['Severity'];
 export type Snapshot = components['schemas']['Snapshot'];
 export type SnapshotDetail = components['schemas']['SnapshotDetail'];
@@ -4581,6 +4693,109 @@ export interface operations {
             };
         };
     };
+    settleRun: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{id}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SettleRunRequest"];
+            };
+        };
+        responses: {
+            /** @description The plan, and what the run did */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RebuildSnapshotsResponse"];
+                };
+            };
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{id}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     getSnapshot: {
         parameters: {
             query?: {
@@ -4931,6 +5146,8 @@ export interface operations {
             query?: {
                 /** @description Lean's time limit in seconds for each module, once their imports are loaded; 60 by default */
                 timeout?: number;
+                /** @description `true` to re-check the modules that are verified already too, which describes their records again; `false` by default */
+                again?: boolean;
             };
             header?: {
                 /**

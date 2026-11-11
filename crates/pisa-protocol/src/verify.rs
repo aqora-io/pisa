@@ -70,6 +70,26 @@ pub struct Declaration {
     /// module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negates: Option<String>,
+    /// The axioms it gets other than through `inherits`: from its own proof,
+    /// the definitions it uses, Lean and Mathlib. Absent in records made
+    /// before it was recorded, and in a check's report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_axioms: Option<Vec<String>>,
+    /// The theorems of other snapshot modules through which it gets axioms
+    /// beyond Lean's standard three. A theorem's proof can be swapped for
+    /// another proof of the same statement, so an audit reads an inherited
+    /// `sorry` through the run that proves the theorem.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherits: Vec<Inherited>,
+}
+
+/// A theorem of another snapshot module that a declaration gets axioms
+/// through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Inherited {
+    pub name: String,
+    /// Its module, `PisaSnap.s…`.
+    pub module: String,
 }
 
 impl Serialize for Declaration {
@@ -106,6 +126,12 @@ impl Serialize for Declaration {
         if full && let Some(negates) = &self.negates {
             m.serialize_entry("negates", negates)?;
         }
+        if full && let Some(own_axioms) = &self.own_axioms {
+            m.serialize_entry("own_axioms", own_axioms)?;
+        }
+        if full && !self.inherits.is_empty() {
+            m.serialize_entry("inherits", &self.inherits)?;
+        }
         m.end()
     }
 }
@@ -131,6 +157,8 @@ impl Declaration {
             generated: false,
             parent: None,
             negates: None,
+            own_axioms: None,
+            inherits: Vec::new(),
         }
     }
 }
@@ -157,6 +185,10 @@ pub struct DescribedDeclaration {
     /// For a theorem of `¬ X`, the canonical text of `X`, every name whole.
     #[serde(default)]
     pub negates: Option<String>,
+    #[serde(default)]
+    pub own_axioms: Option<Vec<String>>,
+    #[serde(default)]
+    pub inherits: Vec<Inherited>,
 }
 
 /// The SHA-256 of `text`, as hex: what a declaration's hashes are.
@@ -170,6 +202,8 @@ impl From<DescribedDeclaration> for ReportedDeclaration {
             type_hash: digest(&d.type_text),
             value_hash: d.value_text.as_deref().map(digest),
             negates: d.negates.as_deref().map(digest),
+            own_axioms: d.own_axioms,
+            inherits: d.inherits,
             name: d.name,
             kind: d.kind,
             axioms: d.axioms,
@@ -198,6 +232,8 @@ pub struct ReportedDeclaration {
     pub generated: bool,
     pub parent: Option<String>,
     pub negates: Option<String>,
+    pub own_axioms: Option<Vec<String>>,
+    pub inherits: Vec<Inherited>,
 }
 
 impl ReportedDeclaration {
@@ -216,6 +252,8 @@ impl ReportedDeclaration {
             generated: self.generated,
             parent: self.parent,
             negates: self.negates,
+            own_axioms: self.own_axioms,
+            inherits: self.inherits,
         }
     }
 }
@@ -239,6 +277,25 @@ pub enum ProofStatus {
     /// Any other, such as the one `native_decide` declares, or
     /// `Lean.trustCompiler`.
     Rejected,
+}
+
+impl ProofStatus {
+    /// What `axioms` make a declaration whose assumptions are `assumes`:
+    /// besides the `allowed` ones, none is `proved`; only assumptions
+    /// `conditional`; `sorryAx`, with or without assumptions, `sorry`;
+    /// anything else `rejected`.
+    pub fn of(axioms: &[String], assumes: &[String], allowed: &[String]) -> ProofStatus {
+        let each = axioms.iter().filter(|a| !allowed.contains(a)).map(|a| {
+            if assumes.contains(a) {
+                ProofStatus::Conditional
+            } else if a == "sorryAx" {
+                ProofStatus::Sorry
+            } else {
+                ProofStatus::Rejected
+            }
+        });
+        each.max().unwrap_or(ProofStatus::Proved)
+    }
 }
 
 /// `name` as it is across modules: a private name without the module it was
@@ -487,6 +544,44 @@ mod tests {
         // Absent, it isn't written.
         let json = serde_json::to_value(decl("t", "T", None)).unwrap();
         assert!(json.get("negates").is_none(), "{json}");
+    }
+
+    #[test]
+    fn own_axioms_and_inherits_are_written_in_full_only() {
+        let described: DescribedDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "t", "kind": "theorem", "axioms": ["sorryAx"], "assumes": [],
+            "type": "T", "value": null, "type_refs": [], "value_refs": [],
+            "own_axioms": [], "inherits": [{"name": "l", "module": "PisaSnap.sx"}]}))
+        .unwrap();
+        let d = ReportedDeclaration::from(described).with_status(ProofStatus::Sorry);
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["own_axioms"], serde_json::json!([]));
+        assert_eq!(
+            json["inherits"],
+            serde_json::json!([{"name": "l", "module": "PisaSnap.sx"}])
+        );
+        assert_eq!(serde_json::from_value::<Declaration>(json).unwrap(), d);
+        let summary = serde_json::to_value(d.summarised(&[])).unwrap();
+        assert!(summary.get("own_axioms").is_none() && summary.get("inherits").is_none());
+        // A record from before has neither.
+        let json = serde_json::to_value(decl("t", "T", None)).unwrap();
+        assert!(json.get("own_axioms").is_none() && json.get("inherits").is_none());
+    }
+
+    #[test]
+    fn a_status_is_the_worst_of_what_the_axioms_make_it() {
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let allowed = names(&["propext"]);
+        let of = |axioms: &[&str], assumes: &[&str]| {
+            ProofStatus::of(&names(axioms), &names(assumes), &allowed)
+        };
+        assert_eq!(of(&["propext"], &[]), ProofStatus::Proved);
+        assert_eq!(of(&["h"], &["h"]), ProofStatus::Conditional);
+        assert_eq!(of(&["h", "sorryAx"], &["h"]), ProofStatus::Sorry);
+        assert_eq!(
+            of(&["sorryAx", "Lean.ofReduceBool"], &[]),
+            ProofStatus::Rejected
+        );
     }
 
     #[test]

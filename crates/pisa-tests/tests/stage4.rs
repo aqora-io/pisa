@@ -1376,7 +1376,8 @@ async fn verify_rejects_unknown_snapshots_and_other_modules() {
     assert_eq!(status, 400);
 }
 
-/// A worker that lives less than the sweep's interval still sweeps.
+/// A worker that lives less than the sweep's interval still sweeps, what is
+/// older than the sweep's grace.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_worker_sweeps_what_a_stopped_delete_left_as_it_starts() {
     let mut c = Cluster::start(&[]).await;
@@ -1400,14 +1401,44 @@ async fn a_worker_sweeps_what_a_stopped_delete_left_as_it_starts() {
         .entry;
     catalog.remove_entry(&kid_entry).await.unwrap();
     assert!(catalog.module(parent_id).await.is_ok());
+    // A module that was left to nothing long ago, as a build kept with no
+    // entry is.
+    let old_id = pisa_protocol::snapshot::id("an old build");
+    let mut old = catalog.module(parent_id).await.unwrap();
+    old.modules = vec![pisa_worker::catalog::Module {
+        id: old_id.clone(),
+        build: "b".into(),
+        files: Vec::new(),
+    }];
+    old.created = 0;
+    catalog.commit_module(&old_id, &old, None).await.unwrap();
 
     stop.send(()).unwrap();
     c.wait_for_workers(0).await;
     c.add_worker(common::worker_config("w0", "v", 1));
     let swept = tokio::time::timeout(Duration::from_secs(10), async {
-        while catalog.module(parent_id).await.is_ok() {
+        while catalog.module(&old_id).await.is_ok() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     });
-    assert!(swept.await.is_ok(), "the parent's module is still there");
+    assert!(swept.await.is_ok(), "the old module is still there");
+    // The parent goes once it is older than the sweep's grace.
+    assert!(catalog.module(parent_id).await.is_ok());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn verify_again_describes_a_verified_chain_again() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let base = create(&c, "import Foo\ntheorem base_again : 1 = 1 := rfl").await;
+    let header = base["snapshot"]["header"].as_str().unwrap().to_string();
+    let top = create(&c, &format!("{header}\ntheorem top_again : 2 = 2 := rfl")).await;
+    assert_eq!(top["snapshot"]["verified"], true, "{top}");
+    // Verified already: nothing to re-check.
+    assert_eq!(verify(&c, &top).await["checked"], json!([]));
+    let path = format!("/snapshots/{}/verify?again=true", entry(&top));
+    let (status, r) = request(&c, reqwest::Method::POST, &path).await;
+    assert_eq!(status, 200, "{r}");
+    let modules = [&base, &top].map(|s| s["snapshot"]["module"].clone());
+    assert_eq!(r["checked"], json!(modules), "{r}");
+    assert_eq!(r["snapshot"]["verified"], true);
 }

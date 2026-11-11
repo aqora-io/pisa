@@ -97,6 +97,50 @@ pub fn imported_code(code: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// The theorems of the snapshot modules `code` imports, directly or not,
+/// that use `sorry`, each with its module: those of a module whose text says
+/// `sorry`, and those whose line names one of these.
+pub fn sorried_imports(code: &str) -> std::collections::HashMap<String, String> {
+    fn visit(
+        code: &str,
+        seen: &mut HashSet<String>,
+        out: &mut std::collections::HashMap<String, String>,
+    ) {
+        for module in imports(code)
+            .into_iter()
+            .filter(|m| m.starts_with("PisaSnap."))
+        {
+            if !seen.insert(module.to_string()) {
+                continue;
+            }
+            let Some(file) = find_module(module) else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            if is_module(&text) && !file.with_extension("olean.private").exists() {
+                continue;
+            }
+            visit(&text, seen, out);
+            let visible = visible(&text);
+            for line in visible.lines() {
+                let Some((name, false)) = declared(line) else {
+                    continue;
+                };
+                let theorem = line.split_whitespace().any(|w| w == "theorem");
+                let names_one = names_in(line).iter().any(|n| out.contains_key(*n));
+                if theorem && (text.contains("sorry") || names_one) {
+                    out.insert(name.to_string(), module.to_string());
+                }
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    visit(code, &mut HashSet::new(), &mut out);
+    out
+}
+
 /// Prints a Lean message as `lean --json` does, on `line` of the input.
 pub fn print_message(line: usize, severity: &str, data: &str) {
     let message = json!({
@@ -231,7 +275,23 @@ pub fn as_reported(code: &str) -> String {
 }
 
 pub fn declarations(code: &str) -> String {
+    declarations_with(code, false)
+}
+
+/// [`declarations`], as the build and the verifier describe them: with each
+/// declaration's `own_axioms` and the imported theorems it `inherits`
+/// `sorry` through, those its line names among [`sorried_imports`].
+pub fn linked_declarations(code: &str) -> String {
+    declarations_with(code, true)
+}
+
+fn declarations_with(code: &str, linked: bool) -> String {
     let imported = imported_code(code).unwrap_or_default();
+    let sorried = if linked {
+        sorried_imports(code)
+    } else {
+        Default::default()
+    };
     let axioms_of = |code: &str| -> Vec<String> {
         code.lines()
             .filter_map(|l| {
@@ -333,9 +393,30 @@ pub fn declarations(code: &str) -> String {
                     let x = (x.strip_prefix('(').and_then(|x| x.strip_suffix(')'))).unwrap_or(x);
                     format!(": {}", x.trim())
                 });
-            json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes, "type": statement,
-                   "value": value_text, "type_refs": refs(&statement), "value_refs": value_refs,
-                   "parent": parent, "negates": negates})
+            let mut decl = json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes,
+                   "type": statement, "value": value_text, "type_refs": refs(&statement),
+                   "value_refs": value_refs, "parent": parent, "negates": negates});
+            if linked {
+                let mut inherits: Vec<(&str, &String)> = names_in(&statement)
+                    .into_iter()
+                    .chain(names_in(&value))
+                    .filter_map(|n| sorried.get_key_value(n).map(|(k, m)| (k.as_str(), m)))
+                    .filter(|_| kind == "theorem")
+                    .collect();
+                inherits.sort();
+                inherits.dedup();
+                decl["own_axioms"] = json!(axioms);
+                if !inherits.is_empty() && !axioms.iter().any(|a| a == "sorryAx") {
+                    let mut all = axioms.clone();
+                    all.push("sorryAx".into());
+                    decl["axioms"] = json!(all);
+                }
+                decl["inherits"] = inherits
+                    .iter()
+                    .map(|(n, m)| json!({"name": n, "module": m}))
+                    .collect();
+            }
+            decl
         })
         .collect();
     Value::Array(decls).to_string()

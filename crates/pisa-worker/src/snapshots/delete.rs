@@ -58,14 +58,21 @@ impl Snapshots {
     /// snapshot is on and no module imports, as a delete removes them, then
     /// the files in the store that no module's record names, once they are
     /// older than `grace`, as a build uploads its files before its record.
+    /// A module is only cleared once it too is older than `grace`, as a build
+    /// whose create was refused is kept for the create that follows.
     /// Returns how many modules and files went.
     pub async fn sweep(&self, grace: Duration) -> Result<(usize, usize), Error> {
+        let built_by = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .saturating_sub(grace)
+            .as_secs();
         let mut modules = 0;
         let mut after: Option<String> = None;
         loop {
             let (orphans, next) = self
                 .catalog
-                .orphans_after(after.as_deref(), SWEEP_PAGE)
+                .orphans_after(after.as_deref(), SWEEP_PAGE, built_by)
                 .await?;
             for id in orphans {
                 if let Some(meta) = self.catalog.cleanup(&id).await? {

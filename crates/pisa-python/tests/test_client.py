@@ -540,3 +540,21 @@ def test_amend_resubmit_and_refute(url):
     assert job["kind"] == "resubmit_snapshots"
     done = client.wait_job(job)
     assert done["ok"] and "new_snapshot_id" in done["items"][0], done
+
+
+def test_status_through_links_and_settle(url):
+    client = Client(url, timeout=30)
+    spec_l = client.create_snapshot("import Foo\n\ntheorem py_l : 1 = 1 := sorry")["snapshot"]
+    spec_t = client.create_snapshot(spec_l["header"] + "\n\ntheorem py_t : 2 = 2 := sorry")["snapshot"]
+    client.create_snapshot(spec_l["header"] + "\n\ntheorem py_t : 2 = 2 := by have := py_l; rfl",
+                           replaces={"snapshot_id": spec_t["id"]})
+    client.create_snapshot("import Foo\n\ntheorem py_l : 1 = 1 := rfl", replaces={"snapshot_id": spec_l["id"]})
+    specs = [spec_l["id"], spec_t["id"]]
+    audit = client.audit_snapshots(against=specs)
+    top = {t["name"]: t for t in audit["targets"]}["py_t"]
+    assert top["linked_status"] == "proved" and top["through"][0]["name"] == "py_l", audit
+    assert client.settle_run(specs, dry_run=True)["ok"]
+    job = client.submit_settle_run(specs)
+    assert client.wait_job(job)["ok"]
+    assert client.audit_snapshots(against=specs)["clean"]
+    assert client.verify_snapshot(spec_t["id"], again=True)["checked"]

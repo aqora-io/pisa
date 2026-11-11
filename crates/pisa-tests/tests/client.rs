@@ -10,7 +10,7 @@ use pisa_client::{
     AcceptOptions, Allow, Amends, AuditOptions, CheckOptions, Client, CreateSnapshotOptions,
     DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions, HealthStatus, Job, JobKind,
     JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt, ProofStatus, RebuildOptions,
-    Refutes, Replaces, ResubmitOptions,
+    Refutes, Replaces, ResubmitOptions, SettleOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -913,4 +913,68 @@ async fn client_amends_a_spec_resubmits_its_run_and_refutes_a_target() {
         again.items[0].new_snapshot_id,
         done.items[0].new_snapshot_id
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_reads_a_run_through_links_and_settles_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let made = |r: pisa_client::CreateSnapshotResponse| r.snapshot.expect("kept");
+    let replacing = |s: &pisa_client::Snapshot| CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: s.id.clone(),
+            allow: None,
+        }),
+        ..Default::default()
+    };
+    let spec_l = made(
+        client
+            .create_snapshot("import Foo\n\ntheorem rs_l : 1 = 1 := sorry")
+            .await
+            .unwrap(),
+    );
+    let code = format!("{}\n\ntheorem rs_t : 2 = 2 := sorry", spec_l.header);
+    let spec_t = made(client.create_snapshot(&code).await.unwrap());
+    let code = format!(
+        "{}\n\ntheorem rs_t : 2 = 2 := by have := rs_l; rfl",
+        spec_l.header
+    );
+    client
+        .create_snapshot_with(&code, &replacing(&spec_t))
+        .await
+        .unwrap();
+    let code = "import Foo\n\ntheorem rs_l : 1 = 1 := rfl";
+    client
+        .create_snapshot_with(code, &replacing(&spec_l))
+        .await
+        .unwrap();
+    let specs = [&spec_l.id, &spec_t.id];
+    let audit = client
+        .audit_snapshots_against_with(specs, &AuditOptions::default())
+        .await
+        .unwrap();
+    let t = audit.targets.iter().find(|t| t.name == "rs_t").unwrap();
+    assert_eq!(t.linked_status, Some(ProofStatus::Proved), "{audit:?}");
+    assert_eq!(t.through[0].name, "rs_l");
+    assert_eq!(audit.unsettled.len(), 1);
+
+    let dry = SettleOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let plan = client.settle_run(specs, &dry).await.unwrap();
+    assert!(plan.ok && plan.plan.len() == 1, "{plan:?}");
+    let job = client
+        .submit_settle_run(specs, &SettleOptions::default())
+        .await
+        .unwrap();
+    assert!(client.wait_job(&job).await.unwrap().ok);
+    let audit = client
+        .audit_snapshots_against_with(specs, &AuditOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(audit.clean, Some(true), "{audit:?}");
+
+    let again = client.verify_snapshot_again(&spec_t.id).await.unwrap();
+    assert!(!again.checked.is_empty(), "{again:?}");
 }

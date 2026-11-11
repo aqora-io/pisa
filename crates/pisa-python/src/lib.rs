@@ -396,8 +396,19 @@ impl Client {
         })
     }
 
-    fn verify_snapshot<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
-        call(py, async move { self.inner.verify_snapshot(&id).await })
+    #[pyo3(signature = (id, *, again = false))]
+    fn verify_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        again: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            match again {
+                true => self.inner.verify_snapshot_again(&id).await,
+                false => self.inner.verify_snapshot(&id).await,
+            }
+        })
     }
 
     fn submit_verify_snapshot<'py>(
@@ -623,6 +634,45 @@ impl Client {
                 .submit_rebuild_snapshots(&from_, &to, &labels, &opts)
                 .await?;
             Ok(queued(job))
+        })
+    }
+
+    #[pyo3(signature = (against, *, allow = None, dry_run = false, verify = None))]
+    fn settle_run<'py>(
+        &self,
+        py: Python<'py>,
+        against: Vec<String>,
+        allow: Option<Vec<String>>,
+        dry_run: bool,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::SettleOptions {
+            allow: allow.unwrap_or_default(),
+            dry_run,
+            verify,
+        };
+        call(
+            py,
+            async move { self.inner.settle_run(&against, &opts).await },
+        )
+    }
+
+    #[pyo3(signature = (against, *, allow = None, dry_run = false, verify = None))]
+    fn submit_settle_run<'py>(
+        &self,
+        py: Python<'py>,
+        against: Vec<String>,
+        allow: Option<Vec<String>>,
+        dry_run: bool,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::SettleOptions {
+            allow: allow.unwrap_or_default(),
+            dry_run,
+            verify,
+        };
+        call(py, async move {
+            Ok(queued(self.inner.submit_settle_run(&against, &opts).await?))
         })
     }
 

@@ -692,6 +692,8 @@ mod tests {
             generated: false,
             parent: None,
             negates: None,
+            own_axioms: None,
+            inherits: Vec::new(),
         }
     }
 
