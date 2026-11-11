@@ -1496,6 +1496,13 @@
           "at": {
             "$ref": "#/components/schemas/ProbeAt"
           },
+          "budget": {
+            "description": "Seconds for all the candidates together, 300 unless given, at most\n[`MAX_PROBE_BUDGET`]: each runs within what is left of it, and those\nit doesn't reach are a `timeout`.",
+            "format": "int64",
+            "maximum": 3600,
+            "minimum": 0,
+            "type": "integer"
+          },
           "candidates": {
             "description": "1 to [`MAX_CANDIDATES`] tactics.",
             "items": {
@@ -4181,7 +4188,7 @@
     },
     "/documents/{id}/probes": {
       "post": {
-        "description": "Runs each candidate at a `sorry` of the document, or a position in its body, in turn and each within the time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.",
+        "description": "Runs each candidate at a `sorry` of the document, or a position in its body, in turn and each within the time limit and what is left of the request's budget, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run, in a new Lean Beam if it restarts. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.",
         "operationId": "probeDocument",
         "parameters": [
           {

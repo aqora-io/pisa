@@ -727,6 +727,19 @@ pub struct DocumentProbesRequest {
     /// Lean's time limit in seconds, for each candidate.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+    /// Seconds for all the candidates together, 300 unless given, at most
+    /// [`MAX_PROBE_BUDGET`]: each runs within what is left of it, and those
+    /// it doesn't reach are a `timeout`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(maximum = 3600)]
+    pub budget: Option<u64>,
+}
+
+/// The longest a probe request may run, in seconds.
+pub const MAX_PROBE_BUDGET: u64 = 3600;
+
+pub fn default_probe_budget() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

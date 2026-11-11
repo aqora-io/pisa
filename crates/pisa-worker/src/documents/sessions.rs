@@ -165,12 +165,9 @@ impl Documents {
         let mut doc = self.lock(session).await;
         let reopened = match self.ready(&mut doc, session, None).await {
             Ok(reopened) => reopened,
-            Err(e) => {
-                return Err(match e.kind {
-                    ErrorKind::NotFound => unknown(),
-                    _ => e,
-                });
-            }
+            // The session's document is gone; a reopen's own error stands.
+            Err(e) if e == not_found(&self.version, session) => return Err(unknown()),
+            Err(e) => return Err(e),
         };
         // Replays take the time limit the session's start took, as its
         // reopen does.
@@ -181,9 +178,10 @@ impl Documents {
                 match self.start_of(&mut doc, session, state, row.clone()).await {
                     Ok(from) => from,
                     Err(Stop::Beam(e)) => {
-                        return Err(self.fail(&mut doc, session, e, replay).await);
+                        let e = self.fail(&mut doc, session, e, replay).await;
+                        return Err(after_reopen(e, reopened));
                     }
-                    Err(Stop::Error(e)) => return Err(e),
+                    Err(Stop::Error(e)) => return Err(after_reopen(e, reopened)),
                 };
             let budget = Budget::new(j.timeout_secs);
             match self.step(&doc, session, &from, &j.tactic, budget).await {
@@ -198,7 +196,10 @@ impl Documents {
                     self.forget(&mut doc, session, state).await;
                     retried = true;
                 }
-                Err(e) => return Err(self.fail(&mut doc, session, e, budget).await),
+                Err(e) => {
+                    let e = self.fail(&mut doc, session, e, budget).await;
+                    return Err(after_reopen(e, reopened));
+                }
             }
         };
         if !r.success {
@@ -240,7 +241,7 @@ impl Documents {
             },
             complete,
             messages,
-            reopened,
+            reopened: reopened.is_some(),
             replayed,
         })
     }
@@ -289,20 +290,32 @@ impl Documents {
         if replayed > 0 {
             tracing::info!(session, id, replayed, "replaying a state's steps");
         }
+        // A replay that fails lets go of the handles it made on the way.
+        let mut made = Vec::new();
         for (state, row) in chain.into_iter().rev() {
             let tactic = row.tactic.unwrap_or_default();
-            let r = self
+            let stop = match self
                 .step(doc, session, &from, &tactic, Budget::new(timeout))
                 .await
-                .map_err(Stop::Beam)?;
-            let Some(handle) = r.next_handle.clone().filter(|_| r.success) else {
-                return Err(Stop::Error(Error::new(
-                    ErrorKind::Internal,
-                    format!("replaying `{tactic}` failed: {}", errors(&r)),
-                )));
+            {
+                Ok(r) => match r.next_handle.clone().filter(|_| r.success) {
+                    Some(handle) => {
+                        self.keep(doc, session, &state, handle.clone(), at).await;
+                        made.push(state);
+                        from = From::Handle(handle);
+                        continue;
+                    }
+                    None => Stop::Error(Error::new(
+                        ErrorKind::Internal,
+                        format!("replaying `{tactic}` failed: {}", errors(&r)),
+                    )),
+                },
+                Err(e) => Stop::Beam(e),
             };
-            self.keep(doc, session, &state, handle.clone(), at).await;
-            from = From::Handle(handle);
+            for state in &made {
+                self.forget(doc, session, state).await;
+            }
+            return Err(stop);
         }
         Ok((from, at, replayed))
     }

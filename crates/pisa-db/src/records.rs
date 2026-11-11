@@ -110,6 +110,12 @@ impl Records {
         dispatch!(&self.db, hold_document(&self.version, id, holder, now))
     }
 
+    /// Records that `holder` no longer has document `id` open, unless
+    /// another worker holds it by now, so that any worker may open it.
+    pub async fn release_document(&self, id: &str, holder: &str) -> Result<(), DbError> {
+        dispatch!(&self.db, release_document(&self.version, id, holder))
+    }
+
     /// Deletes document `id`; returns whether it was there.
     pub async fn delete_document(&self, id: &str) -> Result<bool, DbError> {
         dispatch!(&self.db, delete_document(&self.version, id))
@@ -164,6 +170,11 @@ mod tests {
             assert_eq!(r.document("d").await.unwrap(), Some(row("b", 2, "w2", 90)));
             assert!(r.hold_document("d", "w3", 13).await.unwrap());
             assert_eq!(r.document("d").await.unwrap(), Some(row("b", 2, "w3", 90)));
+            // Only its holder lets it go.
+            r.release_document("d", "w2").await.unwrap();
+            assert_eq!(r.document("d").await.unwrap(), Some(row("b", 2, "w3", 90)));
+            r.release_document("d", "w3").await.unwrap();
+            assert_eq!(r.document("d").await.unwrap().unwrap().holder, None);
 
             assert!(r.delete_document("d").await.unwrap());
             assert!(!r.delete_document("d").await.unwrap());

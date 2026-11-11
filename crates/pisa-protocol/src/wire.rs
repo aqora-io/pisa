@@ -258,6 +258,9 @@ pub struct DocumentProbeJob {
     pub at: api::ProbeAt,
     pub candidates: Vec<String>,
     pub timeout_secs: u64,
+    /// For all the candidates; from a server before budgets, the default.
+    #[serde(default = "api::default_probe_budget")]
+    pub budget_secs: u64,
 }
 
 /// `DELETE /documents/{id}`.
@@ -392,6 +395,7 @@ mod tests {
             at: api::ProbeAt::Sorry { sorry: 0 },
             candidates: vec!["rfl".into()],
             timeout_secs: 5,
+            budget_secs: 60,
         });
         let value = serde_json::to_value(&job).unwrap();
         assert_eq!(value["kind"], "document_probe");

@@ -12,7 +12,7 @@ use pisa_db::queue::LIVE;
 use pisa_protocol::api::{
     ApiErrors, Document, DocumentGoals, DocumentGoalsRequest, DocumentId, DocumentProbes,
     DocumentProbesRequest, EditDocumentRequest, ErrorKind, ErrorResponse, LinePos, MAX_AT,
-    MAX_CANDIDATES, OpenDocumentRequest, ProbeAt,
+    MAX_CANDIDATES, MAX_PROBE_BUDGET, OpenDocumentRequest, ProbeAt, default_probe_budget,
 };
 use pisa_protocol::wire::{
     DocumentEditJob, DocumentGoalsJob, DocumentJob, DocumentOpenJob, DocumentProbeJob, Job,
@@ -184,8 +184,9 @@ pub async fn goals(
     post, path = "/documents/{id}/probes", operation_id = "probeDocument", tag = "documents",
     summary = "Try candidate tactics at a position",
     description = "Runs each candidate at a `sorry` of the document, or a position in its body, \
-        in turn and each within the time limit, on the document as it is: nothing a candidate \
-        does stays. The policy refuses a candidate as it refuses code, and the others still run. \
+        in turn and each within the time limit and what is left of the request's budget, on the \
+        document as it is: nothing a candidate does stays. The policy refuses a candidate as it \
+        refuses code, and the others still run, in a new Lean Beam if it restarts. \
         `closed` is no verdict: Lean Beam checks neither termination nor what a tactic \
         elaborated to.",
     params(("id" = String, Path, description = "A document's id")),
@@ -211,12 +212,19 @@ pub async fn probe(
     if let ProbeAt::Pos(at) = req.at {
         positions(&[at])?;
     }
+    let budget = req.budget.unwrap_or_else(default_probe_budget);
+    if budget > MAX_PROBE_BUDGET {
+        return Err(bad_request(format!(
+            "`budget` is {budget}s; it takes at most {MAX_PROBE_BUDGET}"
+        )));
+    }
     let job = Job::DocumentProbe(DocumentProbeJob {
         document: id.id.clone(),
         revision: req.revision,
         at: req.at,
         candidates: req.candidates,
         timeout_secs: req.timeout,
+        budget_secs: budget,
     });
     match submit(&app, Some(id.version), id.id, job).await? {
         JobResult::DocumentProbes(r) => r.map(Json).map_err(ApiError),

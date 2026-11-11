@@ -339,7 +339,7 @@ pnpm -C web generate
 | `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
-| `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}]}` |
+| `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened}` |
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
@@ -446,7 +446,14 @@ tactics at a `sorry`:
     counts a blank or comment line right after a proof as in it.
 - `/documents/{id}/probes` runs 1 to 64 candidates at one place: a `sorry`
   (`{sorry: n}`, an index into `sorries`), or a position in the body.
-  - Each runs on the document as it is, in turn, with `timeout` seconds of its own.
+  - Each runs on the document as it is, in turn, with `timeout` seconds of
+    its own, within what is left of the request's `budget` (300 s unless
+    given, at most 3,600). Those it doesn't reach are a `timeout` that says
+    the budget ran out.
+  - When Lean Beam restarts during the request, after three timeouts in a
+    row or a failure, the document reopens in the new process and the rest
+    run there, with `reopened: true`. The candidate Beam failed on has its
+    error. If the document can't reopen, the rest have that error.
   - The policy refuses a candidate as it refuses code, in its `error`, and
     the others still run. A candidate Lean Beam fails to run has an
     `unavailable` error, which isn't Lean's answer.
@@ -465,7 +472,8 @@ tactics at a `sorry`:
   document was closed to make room or its Lean Beam restarted, has the
   `timeout` of the open or last edit, not the request's, and the request's
   own `timeout` starts after it. Goals and probes then answer
-  `reopened: true`.
+  `reopened: true`, and an error after it says the document was opened
+  again first. A reopen that fails says it was opening the document again.
 - A document no live worker holds, as a new one, opens on the Beam worker
   with the fewest documents open per Beam slot: the others leave it to that
   worker for up to two seconds. A Lean Beam process that times out three
@@ -479,7 +487,8 @@ tactics at a `sorry`:
     tactic sessions.
   - `PISA_BEAM_DOCUMENTS` (default 4): the documents each keeps open. To
     open another, it closes the least recently used one that no job holds,
-    and logs it at `info`. Opens at once count each other's place.
+    and logs it at `info`. The worker then no longer holds that one, whose
+    next job opens it on the Beam worker with room. Opens at once count each other's place.
   - `PISA_BEAM_MEMORY_MAX_MB` (default 0, none): each one's memory limit.
     Out of memory, the kernel stops the whole process (`memory.oom.group`),
     and the request answers `out_of_memory`.
@@ -513,7 +522,9 @@ proofs one tactic at a time, as a tree of states:
   tactics from the nearest state it keeps, or from the `sorry`, reopening
   the document first if it isn't open there. Each replayed tactic has the
   `timeout` the session's start had. The answer says how many tactics it
-  `replayed`, and whether it `reopened` the document.
+  `replayed`, and whether it `reopened` the document; an error says so too.
+  A replay that fails keeps none of the states it made on the way, so the
+  next try replays from where this one started.
 - `DELETE /documents/{id}` closes a session, and its states then answer 404.
   A session expires `PISA_STATE_TTL_SECS` after it starts.
 - Only workers with Beam slots serve sessions. Without one, `/sessions` and

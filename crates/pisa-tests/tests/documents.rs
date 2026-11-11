@@ -95,6 +95,7 @@ async fn probe(
         at,
         candidates: candidates.iter().map(|s| s.to_string()).collect(),
         timeout_secs: 10,
+        budget_secs: 300,
     });
     match run(c, document, job).await {
         JobResult::DocumentProbes(Ok(p)) => p,
@@ -229,6 +230,7 @@ async fn each_probe_candidate_has_its_own_time_limit() {
         at: ProbeAt::Sorry { sorry: 0 },
         candidates: vec!["SLEEP 3000".into(), "rfl".into()],
         timeout_secs: 1,
+        budget_secs: 300,
     });
     let JobResult::DocumentProbes(Ok(p)) = run(&c, &id, job).await else {
         panic!("not probed");
@@ -257,6 +259,7 @@ async fn three_timeouts_in_a_row_restart_lean_beam() {
             at: ProbeAt::Sorry { sorry: 0 },
             candidates,
             timeout_secs: 1,
+            budget_secs: 300,
         })
     };
     // Two, then an answer: the count starts again.
@@ -270,6 +273,92 @@ async fn three_timeouts_in_a_row_restart_lean_beam() {
     let g = goals(&c, &id, None, &[(4, None)]).await.unwrap();
     assert!(g.reopened);
     assert_eq!(g.at[0].goals, ["⊢ sorry"]);
+}
+
+/// A probe of `candidates` at the first `sorry` of `document`, each with
+/// `timeout` and all of them with `budget` seconds.
+fn probes(document: &str, candidates: &[&str], timeout: u64, budget: u64) -> Job {
+    Job::DocumentProbe(DocumentProbeJob {
+        document: document.into(),
+        revision: None,
+        at: ProbeAt::Sorry { sorry: 0 },
+        candidates: candidates.iter().map(|s| s.to_string()).collect(),
+        timeout_secs: timeout,
+        budget_secs: budget,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_request_goes_on_after_lean_beam_restarts() {
+    let c = beam_cluster().await;
+    let id = new_id();
+    open(&c, &id, CODE).await;
+    // The third timeout in a row restarts Beam: the document opens again in
+    // the new one, and the rest of the candidates run there.
+    let slow = "SLEEP 3000";
+    let job = probes(&id, &["rfl", slow, slow, slow, "trivial"], 1, 300);
+    let JobResult::DocumentProbes(Ok(p)) = run(&c, &id, job).await else {
+        panic!("not probed")
+    };
+    let r = &p.results;
+    assert!(r[0].closed, "{:?}", r[0]);
+    for timed_out in &r[1..4] {
+        let kind = timed_out.error.as_ref().map(|e| e.kind);
+        assert_eq!(kind, Some(ErrorKind::Timeout), "{timed_out:?}");
+    }
+    assert!(r[4].closed, "{:?}", r[4]);
+    assert!(p.reopened);
+    // A candidate that Beam dies on is answered as a crash, and the others
+    // still run.
+    let job = probes(&id, &["rfl", "CRASH", "trivial"], 10, 300);
+    let JobResult::DocumentProbes(Ok(p)) = run(&c, &id, job).await else {
+        panic!("not probed")
+    };
+    let r = &p.results;
+    assert!(r[0].closed && r[2].closed, "{r:?}");
+    assert_eq!(r[1].error.as_ref().map(|e| e.kind), Some(ErrorKind::Crash));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_candidate_after_a_reopen_has_its_whole_limit() {
+    let c = beam_cluster().await;
+    let id = new_id();
+    // Each sync of it takes a second and a half; its open had ten.
+    open(&c, &id, &CODE.replace("\n\n", "\n-- SLOW_SYNC 1500\n")).await;
+    // The third timeout restarts Beam, and the document opens again for the
+    // last candidate, taking longer than a candidate's limit, which starts
+    // after it.
+    let slow = "SLEEP 3000";
+    let job = probes(&id, &[slow, slow, slow, "trivial"], 1, 300);
+    let JobResult::DocumentProbes(Ok(p)) = run(&c, &id, job).await else {
+        panic!("not probed")
+    };
+    assert!(p.reopened);
+    assert!(p.results[3].closed, "{:?}", p.results[3]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_probe_request_has_a_budget_for_all_its_candidates() {
+    let c = beam_cluster().await;
+    let id = new_id();
+    open(&c, &id, CODE).await;
+    let job = probes(&id, &["SLEEP 3000", "rfl"], 10, 1);
+    let JobResult::DocumentProbes(Ok(p)) = run(&c, &id, job).await else {
+        panic!("not probed")
+    };
+    let r = &p.results;
+    assert_eq!(
+        r[0].error.as_ref().map(|e| e.kind),
+        Some(ErrorKind::Timeout)
+    );
+    let ran_out = r[1].error.as_ref().unwrap();
+    assert_eq!(ran_out.kind, ErrorKind::Timeout);
+    assert!(ran_out.message.contains("budget ran out"), "{ran_out:?}");
+    // The API takes at most an hour.
+    let path = format!("/documents/{}~{id}/probes", c.version("v"));
+    let body = json!({"at": {"sorry": 0}, "candidates": ["rfl"], "budget": 3601});
+    let (status, e) = c.post(&path, body).await;
+    assert_eq!(status, 400, "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -338,6 +427,75 @@ async fn a_document_reopens_on_another_worker_when_its_holder_is_gone() {
     let g = goals(&c, &id, Some(1), &[(4, None)]).await.unwrap();
     assert_eq!(g.at[0].goals, ["⊢ sorry"]);
     assert_eq!(holder(&c, &id).await.as_deref(), Some("b"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_document_closed_to_make_room_reopens_where_there_is_room() {
+    let one_each = |name: &str| {
+        let mut cfg = beam_worker_config(name, "v", 1);
+        cfg.beam_documents = 1;
+        cfg
+    };
+    let mut c = Cluster::start_with(common::router_config(), &[("a", "v", 1)], |cfg| {
+        one_each(cfg.worker_id.as_deref().unwrap())
+    })
+    .await;
+    let (first, second) = (new_id(), new_id());
+    open(&c, &first, CODE).await;
+    // `a` has room for one: it closes the first to open the second, and
+    // no longer holds the first.
+    open(&c, &second, CODE).await;
+    assert_eq!(holder(&c, &first).await, None);
+    assert_eq!(holder(&c, &second).await.as_deref(), Some("a"));
+    // So it opens again on the worker with room, not where it was.
+    c.add_worker(one_each("b"));
+    c.wait_for_workers(2).await;
+    let g = goals(&c, &first, None, &[(4, None)]).await.unwrap();
+    assert!(g.reopened);
+    assert_eq!(holder(&c, &first).await.as_deref(), Some("b"));
+    assert_eq!(holder(&c, &second).await.as_deref(), Some("a"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_error_after_a_reopen_says_the_document_opened_again() {
+    let mut c = beam_cluster().await;
+    let id = new_id();
+    open(&c, &id, &format!("{CODE}  FAIL_GOALS\n")).await;
+    let e = goals(&c, &id, None, &[(5, None)]).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Unavailable);
+    assert!(!e.message.contains("opened again"), "{e:?}");
+    c.kill_worker(0).await;
+    c.add_worker(beam_worker_config("w0", "v", 1));
+    c.wait_for_workers(1).await;
+    let e = goals(&c, &id, None, &[(5, None)]).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Unavailable);
+    assert!(e.message.contains("opened again"), "{e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_that_fails_says_so() {
+    let mut c = beam_cluster().await;
+    let (status, s) = c
+        .post("/snapshots", json!({"code": "theorem s : 1 = 1 := rfl"}))
+        .await;
+    assert_eq!(status, 200, "{s}");
+    let module = s["snapshot"]["module"].as_str().unwrap();
+    let id = new_id();
+    open(
+        &c,
+        &id,
+        &CODE.replace("import Foo", &format!("import {module}")),
+    )
+    .await;
+    let snapshot = s["snapshot"]["id"].as_str().unwrap();
+    let path = format!("/snapshots/{snapshot}");
+    assert_eq!(c.request(Method::DELETE, &path, None).await.0, 200);
+    c.kill_worker(0).await;
+    c.add_worker(beam_worker_config("w0", "v", 1));
+    c.wait_for_workers(1).await;
+    // The code imports a snapshot that is gone, so it can't open again.
+    let e = goals(&c, &id, None, &[(4, None)]).await.unwrap_err();
+    assert!(e.message.contains("opening the document again"), "{e:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

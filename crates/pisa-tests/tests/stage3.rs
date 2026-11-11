@@ -155,6 +155,55 @@ async fn sessions_resume_on_another_worker_by_replaying_their_steps() {
     );
 }
 
+/// A replay that fails partway lets go of the handles it made on the way,
+/// and the error says the document was opened again for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_replay_keeps_no_handles_and_says_it_reopened() {
+    let mut c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    let s = start(&c, CODE).await;
+    let step = tactic(&c, &s["states"][0]["id"], "simp").await;
+    // FLAKY fails once in each Lean Beam process: here, and in the next.
+    let flaky = tactic(&c, &step["state"]["id"], "intro FLAKY").await;
+    let state = &flaky["state"]["id"];
+    c.add_worker(common::beam_worker_config("w1", "v", 1));
+    c.wait_for_workers(2).await;
+    c.kill_worker(0).await;
+    // The other worker opens the document again and replays simp, then
+    // intro FLAKY, which fails.
+    let (status, failed) = try_tactic(&c, state, "rfl").await;
+    assert_eq!(status, 503, "{failed}");
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(message.contains("opened again"), "{message}");
+    // simp's handle went with the failure, so both replay.
+    let done = tactic(&c, state, "rfl").await;
+    assert_eq!(
+        (&done["reopened"], &done["replayed"]),
+        (&json!(false), &json!(2))
+    );
+}
+
+/// A session whose document can't open again says so, rather than that its
+/// state expired.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_cant_open_again_says_why() {
+    let mut c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    let (status, snap) = c
+        .post("/snapshots", json!({"code": "theorem s : 1 = 1 := rfl"}))
+        .await;
+    assert_eq!(status, 200, "{snap}");
+    let module = snap["snapshot"]["module"].as_str().unwrap();
+    let s = start(&c, &CODE.replace("import Foo", &format!("import {module}"))).await;
+    let path = format!("/snapshots/{}", snap["snapshot"]["id"].as_str().unwrap());
+    assert_eq!(c.request(reqwest::Method::DELETE, &path, None).await.0, 200);
+    c.add_worker(common::beam_worker_config("w1", "v", 1));
+    c.wait_for_workers(2).await;
+    c.kill_worker(0).await;
+    let (status, failed) = try_tactic(&c, &s["states"][0]["id"], "simp").await;
+    assert_eq!(status, 404, "{failed}");
+    let message = failed["error"]["message"].as_str().unwrap();
+    assert!(message.contains("opening the document again"), "{message}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn beams_own_failure_replays_the_state_once_and_isnt_leans_answer() {
     let c = Cluster::start_beam(&[("w0", "v", 1)]).await;

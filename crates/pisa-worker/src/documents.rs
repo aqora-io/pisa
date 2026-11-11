@@ -133,6 +133,23 @@ impl Budget {
     fn left(&self) -> Duration {
         self.until.saturating_duration_since(Instant::now())
     }
+
+    /// A limit of `secs`, cut to what is left of this one; `None` once
+    /// nothing is.
+    fn within(&self, secs: u64) -> Option<Budget> {
+        let left = self.left();
+        if left.is_zero() {
+            return None;
+        }
+        let own = Budget::new(secs);
+        Some(match own.until <= self.until {
+            true => own,
+            false => Budget {
+                until: self.until,
+                secs: left.as_secs_f64().ceil() as u64,
+            },
+        })
+    }
 }
 
 impl Documents {
@@ -336,13 +353,14 @@ impl Documents {
     /// `revision` if that is given), and records this worker as its holder.
     /// Opening it again takes the time limit its open took, not the
     /// request's, so that a short request doesn't time out on every try;
-    /// returns whether it was opened again.
+    /// returns why it was opened again, if it was. An open that fails says
+    /// it was opening the document again.
     async fn ready(
         &self,
         doc: &mut Option<Open>,
         id: &str,
         revision: Option<u64>,
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<&'static str>, Error> {
         let row = self.row(id, revision).await?;
         let why = match doc.as_ref() {
             None => Some("it isn't open here"),
@@ -353,7 +371,14 @@ impl Documents {
         if let Some(why) = why {
             tracing::info!(document = id, why, "opening a document again");
             let budget = Budget::new(row.timeout);
-            self.load(doc, id, &row.code, row.revision, budget).await?;
+            let loaded = self.load(doc, id, &row.code, row.revision, budget).await;
+            loaded.map_err(|e| {
+                let message = format!(
+                    "opening the document again, as {why}, failed: {}",
+                    e.message
+                );
+                Error::new(e.kind, message)
+            })?;
         }
         if !self.records.hold_document(id, &self.me, now_secs()).await? {
             self.unload(doc, id).await;
@@ -362,7 +387,7 @@ impl Documents {
         if let Some(open) = doc.as_mut() {
             open.used = Instant::now();
         }
-        Ok(why.is_some())
+        Ok(why)
     }
 
     /// Opens `code` as `doc` at `revision` within `budget`, which replays
@@ -485,6 +510,10 @@ impl Documents {
             self.unload(&mut guard, &old).await;
             // No job waits on it: each document has at most one job here.
             self.docs.lock().unwrap().remove(&old);
+            // Its next job opens it on whichever worker has room.
+            if let Err(e) = self.records.release_document(&old, &self.me).await {
+                tracing::warn!(document = old, "releasing a closed document failed: {e}");
+            }
         }
         slot
     }
@@ -631,17 +660,20 @@ impl Documents {
             Ok(at) => Ok(api::DocumentGoals {
                 revision,
                 at,
-                reopened,
+                reopened: reopened.is_some(),
             }),
-            Err(e) => Err(self.fail(&mut doc, id, e, budget).await),
+            Err(e) => Err(after_reopen(
+                self.fail(&mut doc, id, e, budget).await,
+                reopened,
+            )),
         }
     }
 
     async fn probe(&self, j: DocumentProbeJob) -> Result<api::DocumentProbes, Error> {
         let id = &j.document;
         let mut doc = self.lock(id).await;
-        let reopened = self.ready(&mut doc, id, j.revision).await?;
-        let budget = Budget::new(j.timeout_secs);
+        let mut reopened = self.ready(&mut doc, id, j.revision).await?.is_some();
+        let budget = Budget::new(j.budget_secs);
         let open = doc.as_ref().unwrap();
         let lsp = match j.at {
             ProbeAt::Sorry { sorry } => match open.sorries.get(sorry) {
@@ -662,51 +694,75 @@ impl Documents {
                 }
             },
         };
-        let file = file(id);
-        // Each candidate has the whole limit, so that one that loops doesn't
-        // hide whether the next works.
-        let ran = async {
-            let mut results = Vec::new();
-            for candidate in &j.candidates {
-                if let Err(e) = self.scan(candidate, 0) {
-                    results.push(refused(e));
-                    continue;
-                }
-                let limit = Budget::new(j.timeout_secs);
-                let doc = self.slots[open.slot].workspace.doc(&file);
-                let run = open
-                    .beam
-                    .run_at(doc, open.version, lsp, candidate, limit.left())
-                    .await;
-                results.push(match run {
-                    Ok(r) => {
-                        self.answered(open.slot);
-                        open.map.probe_result(candidate, r, lsp)
-                    }
-                    Err(BeamError::Timeout) => {
-                        self.timed_out(open.slot, &open.beam).await;
-                        refused(Error::timeout(limit.secs))
-                    }
-                    Err(BeamError::Tool { message, .. }) => refused(Error::new(
-                        ErrorKind::Unavailable,
-                        format!("Lean Beam failed to run it: {message}"),
-                    )),
-                    Err(e) => return Err(e),
-                });
-            }
-            Ok(results)
-        }
-        .await;
         let (revision, pos) = (open.revision, open.map.to_code(lsp));
-        match ran {
-            Ok(results) => Ok(api::DocumentProbes {
-                revision,
-                pos,
-                results,
-                reopened,
-            }),
-            Err(e) => Err(self.fail(&mut doc, id, e, budget).await),
+        let file = file(id);
+        // Each candidate has the whole limit, within what is left of the
+        // request's budget, so that one that loops doesn't hide whether the
+        // next works.
+        let mut results = Vec::new();
+        for (i, candidate) in j.candidates.iter().enumerate() {
+            if let Err(e) = self.scan(candidate, 0) {
+                results.push(refused(e));
+                continue;
+            }
+            let ran_out = || {
+                let ran_out = "the request's budget ran out before it ran";
+                refused(Error::new(ErrorKind::Timeout, ran_out))
+            };
+            if budget.left().is_zero() {
+                results.push(ran_out());
+                continue;
+            }
+            // Beam restarted, after timeouts in a row or a failure: the rest
+            // run in the new process, or answer why they can't.
+            let current = match doc.as_ref() {
+                Some(open) => self.is_current(open).await,
+                None => false,
+            };
+            if !current {
+                match self.ready(&mut doc, id, Some(revision)).await {
+                    Ok(_) => reopened = true,
+                    Err(e) => {
+                        let rest = j.candidates.len() - i;
+                        results.extend(std::iter::repeat_n(refused(e), rest));
+                        break;
+                    }
+                }
+            }
+            // The candidate's limit starts once the document is open.
+            let Some(limit) = budget.within(j.timeout_secs) else {
+                results.push(ran_out());
+                continue;
+            };
+            let open = doc.as_ref().unwrap();
+            let in_slot = self.slots[open.slot].workspace.doc(&file);
+            let run = open
+                .beam
+                .run_at(in_slot, open.version, lsp, candidate, limit.left())
+                .await;
+            results.push(match run {
+                Ok(r) => {
+                    self.answered(open.slot);
+                    open.map.probe_result(candidate, r, lsp)
+                }
+                Err(BeamError::Timeout) => {
+                    self.timed_out(open.slot, &open.beam).await;
+                    refused(Error::timeout(limit.secs))
+                }
+                Err(BeamError::Tool { message, .. }) => refused(Error::new(
+                    ErrorKind::Unavailable,
+                    format!("Lean Beam failed to run it: {message}"),
+                )),
+                // Busy, or the process died on it.
+                Err(e) => refused(self.fail(&mut doc, id, e, limit).await),
+            });
         }
+        Ok(api::DocumentProbes {
+            revision,
+            pos,
+            results,
+            reopened,
+        })
     }
 
     async fn close(&self, j: DocumentJob) -> Result<(), Error> {
@@ -826,6 +882,20 @@ fn file(id: &str) -> String {
 fn render(goals: &[Goal]) -> String {
     let goals: Vec<String> = goals.iter().map(pisa_beam::goal::render).collect();
     goals.join("\n\n")
+}
+
+/// `e`, saying the document was opened again first, as `why`, if it was.
+fn after_reopen(e: Error, why: Option<&str>) -> Error {
+    match why {
+        Some(why) => Error::new(
+            e.kind,
+            format!(
+                "{} (the document was opened again first, as {why})",
+                e.message
+            ),
+        ),
+        None => e,
+    }
 }
 
 fn refused(error: Error) -> ProbeResult {

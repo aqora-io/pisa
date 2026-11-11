@@ -21,7 +21,8 @@
 //! warning and a `todo` item, and the goal at a position is the rest of that
 //! line, so tests can tell where a position landed. Where the rest is blank,
 //! there is no proof, which Beam answers with an `invalidParams` error; where
-//! it is `-- done`, a finished proof, with no goals.
+//! it is `-- done`, a finished proof, with no goals; where it is
+//! `FAIL_GOALS`, Beam's own failure.
 //! Probe messages have no range, as Beam's don't. Otherwise the answers are
 //! fixed.
 
@@ -316,6 +317,9 @@ fn document_call(
             let rest = rest_of_line(&doc, line, character);
             if rest.starts_with("-- done") {
                 return tool_ok(json!({"goals": []}));
+            }
+            if rest.starts_with("FAIL_GOALS") {
+                return tool_err("internalError", "fake failure on goals");
             }
             if rest.is_empty() {
                 return tool_err(

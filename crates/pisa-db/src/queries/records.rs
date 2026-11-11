@@ -210,6 +210,26 @@ pub(crate) async fn hold_document(
     .await
 }
 
+pub(crate) async fn release_document(
+    db: &Handle,
+    v: &str,
+    id: &str,
+    holder: &str,
+) -> Result<(), DbError> {
+    retry(|| async {
+        diesel::update(
+            documents::table
+                .find((v, id))
+                .filter(documents::holder.eq(holder)),
+        )
+        .set(documents::holder.eq(None::<String>))
+        .execute(&mut *conn(db).await?)
+        .await?;
+        Ok(())
+    })
+    .await
+}
+
 pub(crate) async fn delete_document(db: &Handle, v: &str, id: &str) -> Result<bool, DbError> {
     retry(|| async {
         let n = diesel::delete(documents::table.find((v, id)))
