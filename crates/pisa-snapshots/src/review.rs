@@ -17,9 +17,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use pisa_protocol::api::{AuditComparison, AuditReview, Error, ReviewDeclaration, ReviewOrigin};
 use pisa_protocol::verify::{Declaration, normalised};
 
-use pisa_db::catalog::{Catalog, ModuleMeta, SnapshotDecl};
+use pisa_db::catalog::{ModuleRecord, SnapshotDecl};
 
-use crate::Reader;
+use crate::{Reader, Records};
 
 /// Whether the walk follows a declaration's value: a definition's, and an
 /// inductive type's, whose "value" is its constructors and recursor.
@@ -72,51 +72,65 @@ pub async fn review(
     allow: &[String],
 ) -> Result<Vec<AuditReview>, Error> {
     let catalog = snapshots.catalog();
-    let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
+    let mut metas = Records::default();
     let mut exports: HashMap<String, HashMap<String, SnapshotDecl>> = HashMap::new();
     let mut snapshot_ids: HashMap<String, Option<String>> = HashMap::new();
     let mut out = Vec::new();
     for compared in comparisons {
         let spec = catalog.entry(&snapshots.parse(&compared.spec)?).await?;
         let head = catalog.entry(&snapshots.parse(&compared.head)?).await?;
+        metas.load(catalog, [&spec.module, &head.module]).await?;
+        let spec_meta = metas.kept(catalog, &spec.module).await?.clone();
+        let head_meta = metas.kept(catalog, &head.module).await?.clone();
+        // What the head builds on, itself last.
+        let below = metas.closure(catalog, &head.module).await?;
         let mut modules = vec![spec.module.clone()];
-        let head_meta = record(&mut metas, catalog, &head.module).await?;
-        modules.extend(head_meta.modules.iter().map(|m| m.id.clone()));
+        modules.extend(below.iter().cloned());
+        metas.load(catalog, &modules).await?;
         for m in &modules {
-            record(&mut metas, catalog, m).await?;
-            if !exports.contains_key(m) {
-                let decls = catalog.decls(m).await?.map(|d| d.decls).unwrap_or_default();
-                let by_name = decls.into_iter().map(|d| (d.name.clone(), d)).collect();
-                exports.insert(m.clone(), by_name);
-            }
+            metas.kept(catalog, m).await?;
+        }
+        let unread: Vec<String> = modules
+            .iter()
+            .filter(|m| !exports.contains_key(*m))
+            .cloned()
+            .collect();
+        let mut read = catalog.decls_of(&unread).await?;
+        for m in unread {
+            let decls = read.remove(&m).map(|d| d.decls).unwrap_or_default();
+            let by_name = decls.into_iter().map(|d| (d.name.clone(), d)).collect();
+            exports.insert(m, by_name);
         }
         // Each declaration of the head and what it builds on, by name, with
         // its module.
         let mut records: HashMap<String, Declaration> = HashMap::new();
         let mut module_of: HashMap<String, &str> = HashMap::new();
-        for m in head_meta.modules.iter().map(|m| &m.id) {
-            for d in &metas[m].result.declarations {
+        for m in &below {
+            let Some(meta) = metas.held(m) else {
+                continue;
+            };
+            for d in &meta.result.declarations {
                 records.insert(d.name.clone(), d.clone());
                 module_of.insert(d.name.clone(), m);
             }
         }
         // The spec's declarations, as the head names them: a private one's
         // name carries its module.
-        let spec_names: HashSet<String> = metas[&spec.module]
+        let spec_names: HashSet<String> = spec_meta
             .result
             .declarations
             .iter()
             .filter(|d| !d.generated)
             .map(|d| normalised(&d.name).into_owned())
             .collect();
-        let mut start: Vec<String> = metas[&head.module]
+        let mut start: Vec<String> = head_meta
             .result
             .declarations
             .iter()
             .filter(|d| spec_names.contains(normalised(&d.name).as_ref()))
             .map(|d| d.name.clone())
             .collect();
-        start.sort_by_key(|n| spec_order(&metas[&spec.module], n));
+        start.sort_by_key(|n| spec_order(&spec_meta, n));
         let holes: HashSet<String> = spec
             .holes
             .iter()
@@ -124,6 +138,27 @@ pub async fn review(
             .map(|h| normalised(h).into_owned())
             .collect();
         let reached = closure(&start, &records);
+        // The snapshot that stands for each module below the head that the
+        // walk reaches.
+        let mut unnamed: Vec<String> = reached
+            .iter()
+            .map(|name| module_of[name])
+            .filter(|m| *m != head.module && !snapshot_ids.contains_key(*m))
+            .map(str::to_string)
+            .collect();
+        unnamed.sort();
+        unnamed.dedup();
+        if !unnamed.is_empty() {
+            // Oldest first, so each module's first is its oldest.
+            for (e, entry_meta) in catalog.entries_on(&unnamed, &[]).await? {
+                snapshot_ids
+                    .entry(entry_meta.module)
+                    .or_insert_with(|| Some(snapshots.id(&e)));
+            }
+            for m in unnamed {
+                snapshot_ids.entry(m).or_insert(None);
+            }
+        }
         let mut declarations = Vec::new();
         let mut library = Vec::new();
         for name in &reached {
@@ -138,14 +173,7 @@ pub async fn review(
                 ReviewOrigin::Head
             };
             let snapshot_id = match origin {
-                ReviewOrigin::Snapshot => {
-                    if !snapshot_ids.contains_key(m) {
-                        let on = catalog.entries_on(&[m.to_string()], &[]).await?;
-                        let id = on.first().map(|(e, _)| snapshots.id(e));
-                        snapshot_ids.insert(m.to_string(), id);
-                    }
-                    snapshot_ids[m].clone()
-                }
+                ReviewOrigin::Snapshot => snapshot_ids[m].clone(),
                 _ => None,
             };
             let hole = holes.contains(normalised(name).as_ref());
@@ -173,20 +201,15 @@ pub async fn review(
         }
         // The spec's, then the head's, then those below by module, each in
         // the order the walk reached them.
+        let position: HashMap<&str, usize> = below
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.as_str(), i))
+            .collect();
         let rank = |d: &ReviewDeclaration| match d.origin {
             ReviewOrigin::Spec => (0, 0),
             ReviewOrigin::Head => (1, 0),
-            ReviewOrigin::Snapshot => {
-                let m = module_of[&d.name];
-                (
-                    2,
-                    head_meta
-                        .modules
-                        .iter()
-                        .position(|x| x.id == m)
-                        .unwrap_or(0),
-                )
-            }
+            ReviewOrigin::Snapshot => (2, position.get(module_of[&d.name]).copied().unwrap_or(0)),
         };
         declarations.sort_by_key(rank);
         library.sort();
@@ -202,26 +225,13 @@ pub async fn review(
 
 /// Where `name` comes in the spec module's declarations, by the name
 /// without a private one's module.
-fn spec_order(spec: &ModuleMeta, name: &str) -> usize {
+fn spec_order(spec: &ModuleRecord, name: &str) -> usize {
     let name = normalised(name);
     let declarations = &spec.result.declarations;
     declarations
         .iter()
         .position(|d| normalised(&d.name) == name)
         .unwrap_or(declarations.len())
-}
-
-async fn record(
-    metas: &mut HashMap<String, ModuleMeta>,
-    catalog: &Catalog,
-    m: &str,
-) -> Result<ModuleMeta, Error> {
-    if let Some(meta) = metas.get(m) {
-        return Ok(meta.clone());
-    }
-    let meta = catalog.module(m).await?;
-    metas.insert(m.to_string(), meta.clone());
-    Ok(meta)
 }
 
 #[cfg(test)]

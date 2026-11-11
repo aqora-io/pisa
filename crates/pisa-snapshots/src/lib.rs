@@ -29,6 +29,7 @@ mod audit;
 pub mod compare;
 pub mod plan;
 mod read;
+mod records;
 pub mod review;
 mod run;
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod tests;
 
 use compare::*;
 use plan::*;
+use records::Records;
 use run::Run;
 
 /// Reads the snapshot catalog of one version.

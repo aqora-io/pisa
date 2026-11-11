@@ -109,6 +109,22 @@ impl ModuleMeta {
     }
 }
 
+/// A module's record without the builds of what it needs, as the reads of
+/// the catalog take many at a time ([`Catalog::records`]): what it builds on
+/// comes from [`Catalog::import_graph`], shared among them.
+#[derive(Debug, Clone)]
+pub struct ModuleRecord {
+    /// Ids of the modules it imports, in the header's order.
+    pub imports: Vec<String>,
+    pub header: String,
+    pub code: String,
+    pub status: ProofStatus,
+    pub verified: bool,
+    pub macros: bool,
+    pub result: CheckResult,
+    pub created: u64,
+}
+
 /// A module's status as its column holds it.
 pub(crate) fn status_text(status: ProofStatus) -> Result<String, Fail> {
     match serde_json::to_value(status)? {
@@ -122,8 +138,9 @@ pub(crate) fn status_of(text: &str) -> Result<ProofStatus, Fail> {
 }
 
 /// The modules `root` needs, each after what it imports and `root` last, as
-/// the header orders imports: `imports` has each module's imports in order.
-pub(crate) fn closure_order(root: &str, imports: &HashMap<String, Vec<String>>) -> Vec<String> {
+/// the header orders imports: `imports` has each module's imports in order,
+/// as [`Catalog::import_graph`] reads them.
+pub fn closure_order(root: &str, imports: &HashMap<String, Vec<String>>) -> Vec<String> {
     fn visit(
         m: &str,
         imports: &HashMap<String, Vec<String>>,
@@ -554,6 +571,19 @@ impl Catalog {
         dispatch!(&self.db, summaries(&self.version, ms))
     }
 
+    /// The records of each of `ms` that is kept, by id, without the builds
+    /// of what they need: a few queries, whatever their number.
+    pub async fn records(&self, ms: &[String]) -> Result<HashMap<String, ModuleRecord>, Error> {
+        dispatch!(&self.db, records(&self.version, ms))
+    }
+
+    /// The imports of each module that one of `ms` needs, `ms` among them,
+    /// in the header's order: one query, whatever their number.
+    /// [`closure_order`] orders a module's closure from them.
+    pub async fn import_graph(&self, ms: &[String]) -> Result<HashMap<String, Vec<String>>, Error> {
+        dispatch!(&self.db, import_graph(&self.version, ms))
+    }
+
     /// Rewrites module `m`'s record with `f` if the module's own build is
     /// still `build`. `None` if it isn't, because the module was deleted and
     /// built again: the record is then left alone.
@@ -807,6 +837,12 @@ impl Catalog {
     /// Module `m`'s declarations for search, if it is kept and has them.
     pub async fn decls(&self, m: &str) -> Result<Option<SnapshotDecls>, Error> {
         dispatch!(&self.db, decls(&self.version, m))
+    }
+
+    /// The declarations for search of each of `ms` that is kept and has
+    /// them, by id: a few queries, whatever their number.
+    pub async fn decls_of(&self, ms: &[String]) -> Result<HashMap<String, SnapshotDecls>, Error> {
+        dispatch!(&self.db, decls_of(&self.version, ms))
     }
 
     /// The search service's records for module `m`'s declarations, by name.
@@ -1422,6 +1458,24 @@ mod tests {
             assert_eq!(summaries.len(), 2);
             assert_eq!(summaries["c"].imports, ["b", "a"]);
             assert_eq!(summaries["d"], d.summary());
+
+            // Many records at once, and what they build on from one graph.
+            let wanted = ["c".to_string(), "d".to_string(), "gone".to_string()];
+            let records = catalog.records(&wanted).await.unwrap();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records["d"].imports, ["a", "c"]);
+            assert_eq!(
+                (
+                    &records["d"].header,
+                    &records["d"].code,
+                    records["d"].status
+                ),
+                (&d.header, &d.code, d.status)
+            );
+            let graph = catalog.import_graph(&wanted).await.unwrap();
+            assert_eq!(closure_order("d", &graph), ["a", "b", "c", "d"]);
+            assert_eq!(closure_order("c", &graph), ["b", "a", "c"]);
+            assert!(catalog.import_graph(&[]).await.unwrap().is_empty());
         }
     }
 

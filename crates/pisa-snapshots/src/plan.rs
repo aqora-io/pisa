@@ -242,10 +242,19 @@ impl Reader {
         let mut through: HashMap<String, Vec<String>> =
             HashMap::from([(old.clone(), needs.clone())]);
         let mut planned: Vec<Planned> = Vec::new();
-        // The records the plan reads, each once.
-        let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
+        // The records the plan reads, each once: those it copies and what
+        // they import, and what they build on, before it starts.
+        let mut records = Records::default();
+        records.load(&self.catalog, &order).await?;
+        let imports: Vec<String> = order
+            .iter()
+            .filter_map(|m| records.held(m))
+            .flat_map(|r| r.imports.iter().cloned())
+            .collect();
+        records.load(&self.catalog, &imports).await?;
+        records.load_closures(&self.catalog, &order).await?;
         for m in order {
-            let meta = self.module_cached(&m, &mut metas).await?.clone();
+            let meta = records.kept(&self.catalog, &m).await?.clone();
             let code = snapshot::rewrite_imports(&meta.code, &renamed);
             let id = snapshot::id(&code);
             let header = snapshot::next_header(&split_header(&code).header, &id);
@@ -255,13 +264,15 @@ impl Reader {
             // The plan rebuilds what is below first, so an import not seen yet
             // is one it leaves.
             let mut needs_now: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
             for i in &meta.imports {
                 if !through.contains_key(i) {
-                    let kept = self.module_cached(i, &mut metas).await?;
-                    through.insert(i.clone(), ids(&kept.modules).cloned().collect());
+                    records.kept(&self.catalog, i).await?;
+                    let kept = records.closure(&self.catalog, i).await?;
+                    through.insert(i.clone(), kept);
                 }
                 for n in &through[i] {
-                    if !needs_now.contains(n) {
+                    if seen.insert(n.clone()) {
                         needs_now.push(n.clone());
                     }
                 }
@@ -297,8 +308,12 @@ impl Reader {
                 });
                 continue;
             };
-            let needs_before: Vec<String> =
-                ids(&meta.modules).filter(|n| **n != m).cloned().collect();
+            let needs_before: Vec<String> = records
+                .closure(&self.catalog, &m)
+                .await?
+                .into_iter()
+                .filter(|n| *n != m)
+                .collect();
             for (e, entry_meta) in entries {
                 // The comparison the copy's create will run, the copy taken to
                 // declare what its original does, under an `allow` of every
@@ -315,7 +330,7 @@ impl Reader {
                     holes: entry_meta.holes.clone(),
                 };
                 let swapped = self
-                    .predicted_swap(&copied, &needs_now, &id, &originals, &mut metas)
+                    .predicted_swap(&copied, &needs_now, &id, &originals, &mut records)
                     .await?;
                 let definitions: Vec<String> = allowable(&copied, &swapped)
                     .map(|d| d.name.clone())

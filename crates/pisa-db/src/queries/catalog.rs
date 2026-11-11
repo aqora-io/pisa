@@ -15,7 +15,7 @@ use pisa_protocol::snapshot;
 use serde_json::Value;
 
 use crate::catalog::{
-    EntryMeta, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleSummary,
+    EntryMeta, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleRecord, ModuleSummary,
     NewEntry, SnapshotDecls, allow_column, closure_order, entry_from_row, now_micros, splice,
     status_of, status_text, to_record, unknown_entry, unknown_module,
 };
@@ -128,26 +128,39 @@ const MODULE: (
     modules::created,
 );
 
-/// The modules `m` needs, its own last, each after what it imports, by the
-/// imports of what it imports: one query for the imports, and one for the
-/// modules' builds.
-async fn closure_in(conn: &mut Conn, v: &str, m: &str) -> Result<Vec<Module>, Fail> {
+/// The imports of each module that one of `ms` needs, in the header's
+/// order: one query.
+async fn import_graph_in(
+    conn: &mut Conn,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, Vec<String>>, Fail> {
+    if ms.is_empty() {
+        return Ok(HashMap::new());
+    }
     let edges: Vec<Edge> = diesel::sql_query(CLOSURE_SQL)
         .bind::<diesel::sql_types::Text, _>(v)
-        .bind::<diesel::sql_types::Text, _>(m)
+        .bind::<diesel::sql_types::Text, _>(serde_json::to_string(ms)?)
         .load(conn)
         .await?;
     let mut imports: HashMap<String, Vec<(i32, String)>> = HashMap::new();
     for e in edges {
         imports.entry(e.module).or_default().push((e.position, e.parent));
     }
-    let imports: HashMap<String, Vec<String>> = imports
+    Ok(imports
         .into_iter()
         .map(|(module, mut parents)| {
             parents.sort();
             (module, parents.into_iter().map(|(_, p)| p).collect())
         })
-        .collect();
+        .collect())
+}
+
+/// The modules `m` needs, its own last, each after what it imports, by the
+/// imports of what it imports: one query for the imports, and one for the
+/// modules' builds.
+async fn closure_in(conn: &mut Conn, v: &str, m: &str) -> Result<Vec<Module>, Fail> {
+    let imports = import_graph_in(conn, v, &[m.to_string()]).await?;
     let order = closure_order(m, &imports);
     let mut builds: HashMap<String, Module> = HashMap::new();
     for chunk in order.chunks(REPLACED_CHUNK) {
@@ -218,6 +231,40 @@ async fn module_in(conn: &mut Conn, v: &str, m: &str) -> Result<Option<ModuleMet
         result: body.result,
         created: created as u64,
     }))
+}
+
+/// The records of each of `ms` that is kept, without the builds of what
+/// they need.
+async fn records_in(
+    conn: &mut Conn,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, ModuleRecord>, Fail> {
+    let mut imports = imports_in(conn, v, ms).await?;
+    let mut found = HashMap::new();
+    for chunk in ms.chunks(REPLACED_CHUNK) {
+        let rows = modules::table
+            .filter(modules::version.eq(v))
+            .filter(modules::id.eq_any(chunk))
+            .select((MODULE, modules::meta))
+            .load::<(ModuleRow, Value)>(conn)
+            .await?;
+        for ((id, _, _, header, status, verified, created), body) in rows {
+            let body: ModuleBody = serde_json::from_value(body)?;
+            let record = ModuleRecord {
+                imports: imports.remove(&id).unwrap_or_default(),
+                header,
+                code: body.code,
+                status: status_of(&status)?,
+                verified,
+                macros: body.macros,
+                result: body.result,
+                created: created as u64,
+            };
+            found.insert(id, record);
+        }
+    }
+    Ok(found)
 }
 
 /// What a listing shows of each of `ms` that is kept.
@@ -485,6 +532,24 @@ pub(crate) async fn summaries(
 ) -> Result<HashMap<String, ModuleSummary>, Error> {
     let mut c = conn(db).await?;
     Ok(summaries_in(&mut c, v, ms).await?)
+}
+
+pub(crate) async fn records(
+    db: &Handle,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, ModuleRecord>, Error> {
+    let mut c = conn(db).await?;
+    Ok(records_in(&mut c, v, ms).await?)
+}
+
+pub(crate) async fn import_graph(
+    db: &Handle,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, Vec<String>>, Error> {
+    let mut c = conn(db).await?;
+    Ok(import_graph_in(&mut c, v, ms).await?)
 }
 
 pub(crate) async fn update_module(
@@ -1207,6 +1272,31 @@ pub(crate) async fn decls(db: &Handle, v: &str, m: &str) -> Result<Option<Snapsh
         .map(serde_json::from_value)
         .transpose()
         .map_err(Fail::from)?)
+}
+
+pub(crate) async fn decls_of(
+    db: &Handle,
+    v: &str,
+    ms: &[String],
+) -> Result<HashMap<String, SnapshotDecls>, Error> {
+    let mut c = conn(db).await?;
+    let mut found = HashMap::new();
+    for chunk in ms.chunks(REPLACED_CHUNK) {
+        let rows = modules::table
+            .filter(modules::version.eq(v))
+            .filter(modules::id.eq_any(chunk))
+            .filter(modules::decls.is_not_null())
+            .select((modules::id, modules::decls))
+            .load::<(String, Option<Value>)>(&mut *c)
+            .await
+            .map_err(DbError::from)?;
+        for (id, decls) in rows {
+            if let Some(decls) = decls {
+                found.insert(id, serde_json::from_value(decls).map_err(Fail::from)?);
+            }
+        }
+    }
+    Ok(found)
 }
 
 pub(crate) async fn described(

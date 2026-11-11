@@ -113,8 +113,9 @@ pub(crate) mod pg {
 
     /// The imports among the modules a module needs: `$2` and what it
     /// imports, through `module_imports`, of version `$1`.
+    /// The imports of every module the modules in the JSON array `$2` need.
     const CLOSURE_SQL: &str = "WITH RECURSIVE closure (module) AS (
-            SELECT $2 UNION SELECT i.parent FROM module_imports i
+            SELECT jsonb_array_elements_text($2::jsonb) UNION SELECT i.parent FROM module_imports i
             JOIN closure c ON i.module = c.module WHERE i.version = $1)
         SELECT i.module, i.parent, i.position FROM module_imports i
         JOIN closure c ON i.module = c.module WHERE i.version = $1";
@@ -206,8 +207,9 @@ pub(crate) mod sqlite {
     }
 
     /// As PostgreSQL's, with SQLite's numbered parameters.
+    /// The imports of every module the modules in the JSON array `?2` need.
     const CLOSURE_SQL: &str = "WITH RECURSIVE closure (module) AS (
-            SELECT ?2 UNION SELECT i.parent FROM module_imports i
+            SELECT value FROM json_each(?2) UNION SELECT i.parent FROM module_imports i
             JOIN closure c ON i.module = c.module WHERE i.version = ?1)
         SELECT i.module, i.parent, i.position FROM module_imports i
         JOIN closure c ON i.module = c.module WHERE i.version = ?1";

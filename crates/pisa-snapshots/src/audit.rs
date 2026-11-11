@@ -62,7 +62,7 @@ impl Reader {
                 None => break,
             }
         }
-        self.count(&entries, &mut HashMap::new()).await
+        self.count(&entries, &mut Records::default()).await
     }
 
     /// The audit of a run against its spec, the entries `against` names:
@@ -159,21 +159,26 @@ impl Reader {
             reached.push(ends);
         }
 
-        let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
-        let modules = specs.iter().map(|(_, m)| &m.module);
-        for m in modules.chain(heads.iter().map(|(_, m)| m)) {
-            self.cached(m, &mut metas).await?;
-        }
+        let mut records = Records::default();
+        let spec_modules: Vec<&String> = specs.iter().map(|(_, m)| &m.module).collect();
+        let modules = spec_modules.iter().copied();
+        records
+            .load(&self.catalog, modules.chain(heads.iter().map(|(_, m)| m)))
+            .await?;
         // What the spec permits: the axioms its modules, and what they build
         // on, declare.
         let mut permitted = Permitted::default();
+        records
+            .load_closures(&self.catalog, spec_modules.iter().copied())
+            .await?;
         for (_, spec_meta) in &specs {
-            let Some(meta) = metas.get(&spec_meta.module) else {
+            if records.held(&spec_meta.module).is_none() {
                 continue;
-            };
-            let closure: Vec<String> = ids(&meta.modules).cloned().collect();
+            }
+            let closure = records.closure(&self.catalog, &spec_meta.module).await?;
+            records.load(&self.catalog, &closure).await?;
             for m in &closure {
-                let Some(meta) = self.cached(m, &mut metas).await? else {
+                let Some(meta) = records.held(m) else {
                     continue;
                 };
                 let axioms = meta
@@ -196,7 +201,7 @@ impl Reader {
             for head in ends {
                 let head_module = module_of[head];
                 let compared = self
-                    .rederive(&spec_meta.module, head_module, &allowed, &mut metas)
+                    .rederive(&spec_meta.module, head_module, &allowed, &mut records)
                     .await?;
                 let (changes, replacement) = match compared {
                     Some(Ok(r)) => (Vec::new(), Some(r)),
@@ -213,7 +218,7 @@ impl Reader {
             }
         }
         let (targets, accepted) =
-            self.targets(&specs, &reached, &heads, &metas, &permitted, &comparisons);
+            self.targets(&specs, &reached, &heads, &records, &permitted, &comparisons);
         // A spec copied from a snapshot that is gone, as a retiring rebuild
         // leaves it, can't be shown to state what the original did.
         // Every head keeps its spec's statements, whether or not the spec has
@@ -226,7 +231,7 @@ impl Reader {
         for (e, m) in &heads {
             entries.entry(m.clone()).or_insert_with(|| e.clone());
         }
-        let mut audit = self.count(&entries, &mut metas).await?;
+        let mut audit = self.count(&entries, &mut records).await?;
         for a in &mut audit.assumptions {
             let on_a_head = heads.iter().any(|(_, m)| permitted.permits(&a.name, m));
             a.in_spec = Some(on_a_head);
@@ -251,12 +256,13 @@ impl Reader {
         spec: &String,
         head: &str,
         allowed: &[String],
-        metas: &mut HashMap<String, ModuleMeta>,
+        records: &mut Records,
     ) -> Result<Option<Result<Replacement, Vec<DeclarationChange>>>, Error> {
-        let (Some(spec_meta), Some(head_meta)) = (
-            self.cached(spec, metas).await?.cloned(),
-            self.cached(head, metas).await?.cloned(),
-        ) else {
+        let head = head.to_string();
+        records.load(&self.catalog, [spec, &head]).await?;
+        let (Some(spec_meta), Some(head_meta)) =
+            (records.held(spec).cloned(), records.held(&head).cloned())
+        else {
             return Ok(None);
         };
         if !spec_meta.verified || !head_meta.verified {
@@ -272,15 +278,17 @@ impl Reader {
             entry: spec.clone(),
             module: spec.clone(),
             declarations: spec_meta.result.declarations,
-            needs: ids(&spec_meta.modules)
-                .filter(|m| *m != spec)
-                .cloned()
+            needs: records
+                .closure(&self.catalog, spec)
+                .await?
+                .into_iter()
+                .filter(|m| m != spec)
                 .collect(),
             holes: Vec::new(),
         };
-        let needs: Vec<String> = ids(&head_meta.modules).cloned().collect();
+        let needs = records.closure(&self.catalog, &head).await?;
         let swapped = match self
-            .predicted_swap(&replacing, &needs, head, &HashMap::new(), metas)
+            .predicted_swap(&replacing, &needs, &head, &HashMap::new(), records)
             .await
         {
             Ok(swapped) => swapped,
@@ -289,7 +297,7 @@ impl Reader {
         };
         let mut compared = compare(&replacing, &head_meta.result.declarations, &swapped);
         if let Err(changes) = &mut compared {
-            let mut new = vec![head.to_string()];
+            let mut new = vec![head.clone()];
             new.extend(swapped.gained.iter().map(|(m, _)| m.clone()));
             let now = self.exports_of(&new).await;
             self.sign(changes, &replacing, &swapped, &now).await;
@@ -302,13 +310,13 @@ impl Reader {
     /// generated, on each head that spec reaches (`reached`), with whether
     /// every one is accepted there under the assumptions `permitted` (see
     /// [`AuditSnapshotsResponse::clean`]). `heads` holds each head's module,
-    /// and `metas` the module records.
+    /// and `records` the module records.
     pub(crate) fn targets(
         &self,
         specs: &[(String, EntryMeta)],
         reached: &[Vec<String>],
         heads: &[(String, String)],
-        metas: &HashMap<String, ModuleMeta>,
+        records: &Records,
         permitted: &Permitted,
         comparisons: &[AuditComparison],
     ) -> (Vec<AuditTarget>, bool) {
@@ -318,7 +326,7 @@ impl Reader {
         for ((spec, spec_meta), ends) in specs.iter().zip(reached) {
             // A record deleted during the audit can't be judged, so isn't
             // accepted; nor below.
-            let Some(meta) = metas.get(&spec_meta.module) else {
+            let Some(meta) = records.held(&spec_meta.module) else {
                 all_accepted = false;
                 continue;
             };
@@ -326,7 +334,7 @@ impl Reader {
             for d in declared.filter(|d| !d.generated && d.kind != "axiom") {
                 let name = normalised(&d.name);
                 for head in ends {
-                    let Some(head_meta) = metas.get(module_of[head]) else {
+                    let Some(head_meta) = records.held(module_of[head]) else {
                         all_accepted = false;
                         continue;
                     };
@@ -393,21 +401,19 @@ impl Reader {
 
     /// An audit's counts over the modules of `entries`, each with the entry
     /// that stands for it: their declarations by status, the assumptions
-    /// they use, and what isn't proved. `metas` holds the module records
+    /// they use, and what isn't proved. `records` holds the module records
     /// read so far, and gains those read here.
     pub(crate) async fn count(
         &self,
         entries: &BTreeMap<String, String>,
-        metas: &mut HashMap<String, ModuleMeta>,
+        records: &mut Records,
     ) -> Result<AuditSnapshotsResponse, Error> {
         let mut audit = AuditSnapshotsResponse::default();
         let mut used_by: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        // Each assumption is declared among the entries' modules or what
-        // they build on.
-        let mut closure: BTreeSet<String> = BTreeSet::new();
+        records.load(&self.catalog, entries.keys()).await?;
         for (m, entry) in entries {
             // Its entries were deleted since they were found.
-            let Some(meta) = self.cached(m, metas).await? else {
+            let Some(meta) = records.held(m) else {
                 continue;
             };
             audit.summary.unverified_modules += u64::from(!meta.verified);
@@ -442,8 +448,18 @@ impl Reader {
                     });
                 }
             }
-            closure.extend(ids(&meta.modules).cloned());
         }
+        // Each assumption is declared among the entries' modules or what
+        // they build on.
+        let kept: Vec<String> = entries
+            .keys()
+            .filter(|m| records.held(m).is_some())
+            .cloned()
+            .collect();
+        let closure = match used_by.is_empty() {
+            true => BTreeSet::new(),
+            false => records.below(&self.catalog, &kept).await?,
+        };
         for (name, mut users) in used_by {
             users.sort();
             users.dedup();
@@ -455,8 +471,8 @@ impl Reader {
                 used_by: users,
                 in_spec: None,
             };
-            if let Some(m) = self.declaring(&assumption.name, &closure, metas).await? {
-                assumption.verified = metas[&m].verified;
+            if let Some(m) = self.declaring(&assumption.name, &closure, records).await? {
+                assumption.verified = records.held(&m).is_some_and(|r| r.verified);
                 let exported = self
                     .catalog
                     .decls(&m)
@@ -483,45 +499,17 @@ impl Reader {
         Ok(audit)
     }
 
-    /// Module `m`'s record, from `metas` or read into it; `None` if it is
-    /// gone.
-    pub(crate) async fn cached<'a>(
-        &self,
-        m: &str,
-        metas: &'a mut HashMap<String, ModuleMeta>,
-    ) -> Result<Option<&'a ModuleMeta>, Error> {
-        if !metas.contains_key(m) {
-            match self.catalog.module(m).await {
-                Ok(meta) => metas.insert(m.to_string(), meta),
-                Err(e) if e.kind == ErrorKind::NotFound => return Ok(None),
-                Err(e) => return Err(e),
-            };
-        }
-        Ok(metas.get(m))
-    }
-
-    /// [`cached`](Self::cached) for a module that must be kept: `not_found`
-    /// if it is gone, as [`Catalog::module`] has it.
-    pub(crate) async fn module_cached<'a>(
-        &self,
-        m: &str,
-        metas: &'a mut HashMap<String, ModuleMeta>,
-    ) -> Result<&'a ModuleMeta, Error> {
-        self.cached(m, metas)
-            .await?
-            .ok_or_else(|| unknown_module(m))
-    }
-
     /// The module among `modules` that declares the axiom `name`, loading
-    /// the records `metas` doesn't hold yet.
+    /// the records `records` doesn't hold yet.
     pub(crate) async fn declaring(
         &self,
         name: &str,
         modules: &BTreeSet<String>,
-        metas: &mut HashMap<String, ModuleMeta>,
+        records: &mut Records,
     ) -> Result<Option<String>, Error> {
+        records.load(&self.catalog, modules).await?;
         for m in modules {
-            let Some(meta) = self.cached(m, metas).await? else {
+            let Some(meta) = records.held(m) else {
                 continue;
             };
             let declares = |d: &Declaration| d.kind == "axiom" && d.name == name;

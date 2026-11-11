@@ -34,9 +34,17 @@ impl Reader {
         if holes.is_empty() {
             return Ok(None);
         }
+        let closure: Vec<String> = closure
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .cloned()
+            .collect();
+        let mut records = self.catalog.records(&closure).await?;
         let mut below = Vec::new();
-        for m in closure.iter().collect::<BTreeSet<_>>() {
-            below.extend(self.catalog.module(m).await?.result.declarations);
+        for m in &closure {
+            let record = records.remove(m).ok_or_else(|| unknown_module(m))?;
+            below.extend(record.result.declarations);
         }
         let names: HashSet<_> = declarations
             .iter()
@@ -95,43 +103,48 @@ impl Reader {
         needs: &[String],
         own: &str,
     ) -> Result<Swapped, Error> {
-        self.predicted_swap(replacing, needs, own, &HashMap::new(), &mut HashMap::new())
-            .await
+        self.predicted_swap(
+            replacing,
+            needs,
+            own,
+            &HashMap::new(),
+            &mut Records::default(),
+        )
+        .await
     }
 
     /// [`swapped`](Self::swapped) for a replacement that builds on modules
     /// not made yet: each module `originals` maps is taken to declare what
-    /// the module it maps to does. The records it reads are kept in `metas`.
+    /// the module it maps to does. The records it reads are kept in
+    /// `records`.
     pub(crate) async fn predicted_swap(
         &self,
         replacing: &Replacing,
         needs: &[String],
         own: &str,
         originals: &HashMap<String, String>,
-        metas: &mut HashMap<String, ModuleMeta>,
+        records: &mut Records,
     ) -> Result<Swapped, Error> {
+        let (now, before): (HashSet<&String>, HashSet<&String>) =
+            (needs.iter().collect(), replacing.needs.iter().collect());
         let lost: Vec<&String> = replacing
             .needs
             .iter()
-            .filter(|m| !needs.contains(m))
+            .filter(|m| !now.contains(m))
             .collect();
-        let gained = needs
+        let gained: Vec<&String> = needs
             .iter()
-            .filter(|m| *m != own && !replacing.needs.contains(m));
+            .filter(|m| *m != own && !before.contains(m))
+            .collect();
+        let read = |m: &String| originals.get(m).unwrap_or(m).clone();
+        let reads: Vec<String> = lost.iter().chain(&gained).map(|m| read(m)).collect();
+        records.load(&self.catalog, &reads).await?;
         let mut swapped = Swapped::default();
-        for (side, modules) in [
-            (&mut swapped.lost, lost),
-            (&mut swapped.gained, gained.collect()),
-        ] {
+        for (side, modules) in [(&mut swapped.lost, lost), (&mut swapped.gained, gained)] {
             for m in modules {
-                let read = originals.get(m).unwrap_or(m);
-                let decls = self
-                    .module_cached(read, metas)
-                    .await?
-                    .result
-                    .declarations
-                    .clone();
-                side.push((m.clone(), decls));
+                let read = read(m);
+                let record = records.held(&read).ok_or_else(|| unknown_module(&read))?;
+                side.push((m.clone(), record.result.declarations.clone()));
             }
         }
         Ok(swapped)

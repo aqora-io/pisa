@@ -1,5 +1,6 @@
 use super::*;
 use crate::audit::Permitted;
+use pisa_db::catalog::ModuleRecord;
 use pisa_protocol::api::CheckResult;
 use pisa_protocol::verify::ReportedDeclaration;
 
@@ -481,25 +482,6 @@ fn affected_theorems_use_a_changed_definition_directly_or_through_others() {
     assert!(affected("nothing").is_empty());
 }
 
-/// A module's record with nothing but a build.
-fn module_meta(id: &str) -> ModuleMeta {
-    ModuleMeta {
-        imports: Vec::new(),
-        modules: vec![Module {
-            id: id.into(),
-            build: "b".into(),
-            files: Vec::new(),
-        }],
-        header: String::new(),
-        code: String::new(),
-        status: ProofStatus::Proved,
-        verified: false,
-        macros: false,
-        result: CheckResult::default(),
-        created: 0,
-    }
-}
-
 /// A spec snapshot's module and its head's, as an audit judges them,
 /// with one record or the other gone, as when a snapshot is deleted
 /// during the audit: what can't be judged isn't accepted.
@@ -516,13 +498,18 @@ async fn an_audit_target_without_its_records_is_not_accepted() {
         holes: Vec::new(),
     };
     // Each module declares `t`, proved and verified.
-    let module = |m: &str| ModuleMeta {
+    let module = |_: &str| ModuleRecord {
+        imports: Vec::new(),
+        header: String::new(),
+        code: String::new(),
+        status: ProofStatus::Proved,
         verified: true,
+        macros: false,
         result: CheckResult {
             declarations: vec![decl("t", "1", None, &[])],
             ..Default::default()
         },
-        ..module_meta(m)
+        created: 0,
     };
     let specs = [("spec".to_string(), entry("s"))];
     let reached = [vec!["head".to_string()]];
