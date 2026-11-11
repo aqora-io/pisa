@@ -995,6 +995,11 @@ export interface components {
              *     (see [`AuditAssumption::in_spec`]), and nothing refutes it.
              */
             accepted: boolean;
+            /**
+             * @description It is refuted, and yet `proved` or `conditional` on the head: the
+             *     spec's assumptions contradict each other.
+             */
+            contradicted?: boolean;
             /** @description The head, reached from `spec`, whose declaration this is. */
             head: string;
             /**
@@ -1013,7 +1018,10 @@ export interface components {
              *     with the same name, a private one's module left out.
              */
             name: string;
-            /** @description The snapshots that refute it, proving `¬` its statement on the spec. */
+            /**
+             * @description The snapshots that refute it, proving `¬` its statement on the spec,
+             *     or on a spec the spec amends that states it the same.
+             */
             refuted_by?: string[];
             /** @description The spec snapshot that declares it. */
             spec: string;
@@ -1278,6 +1286,12 @@ export interface components {
              *     [`refutes`](CreateSnapshotRequest::refutes), if it refutes one.
              */
             refutation?: components["schemas"]["Refutation"];
+            /**
+             * @description For a snapshot that replaces another, the refutations of its run's
+             *     targets, as an audit against the run's spec lists them: a target
+             *     refuted is false, and no head can be accepted on it.
+             */
+            refutations?: components["schemas"]["Refutation"][];
             /**
              * @description What the replacement changed, if the request named a snapshot it
              *     replaces and the code was kept. Absent on a key replay, which doesn't
@@ -2115,6 +2129,11 @@ export interface components {
         };
         /** @description A snapshot's refutation of a spec's target, as its create checked it. */
         Refutation: {
+            /**
+             * @description The refuting snapshot was deleted since: the record of what its
+             *     create checked stays.
+             */
+            gone?: boolean;
             /** @description The refuting snapshot. */
             snapshot_id: string;
             /** @description The spec, which may be deleted since. */

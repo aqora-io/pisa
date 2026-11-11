@@ -912,6 +912,10 @@ pub struct Refutation {
     /// The refuting snapshot's theorem, which proves `¬` the target's
     /// statement.
     pub theorem: String,
+    /// The refuting snapshot was deleted since: the record of what its
+    /// create checked stays.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub gone: bool,
 }
 
 /// The most characters an amendment's [`reason`](Amends::reason) has.
@@ -1090,6 +1094,11 @@ pub struct CreateSnapshotResponse {
     /// [`refutes`](CreateSnapshotRequest::refutes), if it refutes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refutation: Option<Refutation>,
+    /// For a snapshot that replaces another, the refutations of its run's
+    /// targets, as an audit against the run's spec lists them: a target
+    /// refuted is false, and no head can be accepted on it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refutations: Vec<Refutation>,
 }
 
 /// `GET /snapshots/{id}`: a snapshot with its module's code, check and
@@ -1830,9 +1839,14 @@ pub struct AuditTarget {
     /// target is `proved`, or `conditional` on assumptions the spec permits
     /// (see [`AuditAssumption::in_spec`]), and nothing refutes it.
     pub accepted: bool,
-    /// The snapshots that refute it, proving `¬` its statement on the spec.
+    /// The snapshots that refute it, proving `¬` its statement on the spec,
+    /// or on a spec the spec amends that states it the same.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refuted_by: Vec<String>,
+    /// It is refuted, and yet `proved` or `conditional` on the head: the
+    /// spec's assumptions contradict each other.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub contradicted: bool,
     /// Its status through links, where that differs from `status`: with each
     /// theorem it inherits axioms through read on the head of that theorem's
     /// run, as `through` lists. A theorem's proof can be swapped for another

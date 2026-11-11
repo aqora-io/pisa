@@ -557,7 +557,7 @@ fn a_target_is_refutable_if_no_other_module_or_head_could_state_it_otherwise() {
     };
     let decls = [cost.clone(), t, w, p, made];
     let holes = vec!["cost".to_string()];
-    assert_eq!(refutable(&decls, &holes, "w").unwrap().name, "w");
+    assert_eq!(refutable(&decls, &[], &holes, "w").unwrap().name, "w");
     for (target, says) in [
         ("cost", "isn't a theorem"),
         ("nope", "isn't a theorem"),
@@ -565,11 +565,20 @@ fn a_target_is_refutable_if_no_other_module_or_head_could_state_it_otherwise() {
         ("p", "private name"),
         ("t", "uses the spec's holes"),
     ] {
-        let e = refutable(&decls, &holes, target).unwrap_err();
+        let e = refutable(&decls, &[], &holes, target).unwrap_err();
         assert!(e.message.contains(says), "{target}: {}", e.message);
     }
     // Without holes, `t` is a target like any.
-    assert!(refutable(&decls, &[], "t").is_ok());
+    assert!(refutable(&decls, &[], &[], "t").is_ok());
+    // A hole of a module the spec builds on, reached through a definition
+    // there.
+    let base = decl("base", "N", Some("7"), &[]);
+    let wrapped = using(decl("wrapped", "N", Some("base"), &[]), &[], &["base"]);
+    let v = using(decl("v", "V", None, &[]), &["wrapped"], &[]);
+    let closure = [base, wrapped];
+    let holes = vec!["base".to_string()];
+    let e = refutable(std::slice::from_ref(&v), &closure, &holes, "v").unwrap_err();
+    assert!(e.message.contains("uses the spec's holes"), "{}", e.message);
 }
 
 #[test]

@@ -533,6 +533,7 @@ async fn add(
                 refutations::spec.eq(&r.spec),
                 refutations::target.eq(&r.target),
                 refutations::theorem.eq(&r.theorem),
+                refutations::target_hash.eq(&r.target_hash),
             ))
             .execute(conn)
             .await?;
@@ -1525,17 +1526,19 @@ pub(crate) async fn refutations_of(
             refutations::spec,
             refutations::target,
             refutations::theorem,
+            refutations::target_hash,
         ))
-        .load::<(String, String, String, String)>(&mut *conn(db).await?)
+        .load::<(String, String, String, String, Option<String>)>(&mut *conn(db).await?)
         .await
         .map_err(DbError::from)?;
     Ok(rows
         .into_iter()
-        .map(|(entry, spec, target, theorem)| {
+        .map(|(entry, spec, target, theorem, target_hash)| {
             let refutation = Refutation {
                 spec,
                 target,
                 theorem,
+                target_hash,
             };
             (entry, refutation)
         })

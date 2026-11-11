@@ -187,6 +187,8 @@ class Refutation(TypedDict):
     spec: str
     target: str
     theorem: str
+    # The refuting snapshot was deleted since; the record stays.
+    gone: NotRequired[bool]
 
 class CreateSnapshotResponse(TypedDict):
     snapshot: NotRequired[Snapshot]
@@ -197,6 +199,8 @@ class CreateSnapshotResponse(TypedDict):
     unverified: NotRequired[VerifyFailure]
     amendment: NotRequired[Amendment]
     refutation: NotRequired[Refutation]
+    # A create into a run: the refutations of the run's targets.
+    refutations: NotRequired[list[Refutation]]
 
 class Description(TypedDict):
     title: str
@@ -261,6 +265,8 @@ class AuditTarget(TypedDict):
     verified: bool
     accepted: bool
     refuted_by: NotRequired[list[str]]
+    # Refuted, and yet proved on the head.
+    contradicted: NotRequired[bool]
     # Its status with each theorem it inherits through read on that theorem's
     # run's head, where that differs: it holds once the run is settled.
     linked_status: NotRequired[ProofStatus]

@@ -191,6 +191,109 @@ impl Reader {
         Ok((current != spec).then_some(current))
     }
 
+    /// The refutations of the targets of spec `spec`, each with the name of
+    /// the theorem of `spec` it refutes: those recorded against `spec`, and
+    /// those recorded against a spec it amends, directly or not, of a target
+    /// that `spec` still means the same: a theorem of `spec` states it the
+    /// same, by the hash of the statement, reaches no definition that an
+    /// amendment on the way changed, and uses none of `spec`'s holes. Those
+    /// whose refuting snapshot is deleted are `gone`.
+    pub async fn refutations_against(
+        &self,
+        spec: &str,
+    ) -> Result<Vec<(String, Refutation)>, Error> {
+        // The specs it amends, back to the first, each with the names that
+        // the amendments from `spec` back to it changed.
+        let mut specs = vec![(spec.to_string(), HashSet::new())];
+        loop {
+            let (at, changed) = specs.last().unwrap().clone();
+            let amendment = (self
+                .catalog
+                .amendments_of(std::slice::from_ref(&at))
+                .await?)
+                .into_iter()
+                .find(|(e, _)| *e == at)
+                .map(|(_, a)| a);
+            match amendment {
+                Some(a) if !specs.iter().any(|(s, _)| *s == a.amends) => {
+                    let mut changed = changed;
+                    changed.extend(a.changes.into_iter().map(|c| c.name));
+                    specs.push((a.amends, changed));
+                }
+                _ => break,
+            }
+        }
+        let changed_since: HashMap<String, HashSet<String>> = specs.into_iter().collect();
+        let specs: Vec<String> = changed_since.keys().cloned().collect();
+        let recorded: Vec<_> = (self.catalog.refutations_of(&specs).await?)
+            .into_iter()
+            .filter(|(_, r)| specs.contains(&r.spec))
+            .collect();
+        if recorded.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `spec`'s declarations, those of what it imports, and its holes.
+        let (declarations, closure, holes) = match self.catalog.find_entry(spec).await? {
+            Some(e) => {
+                let meta = self.catalog.module(&e.module).await?;
+                let imported: Vec<String> = (meta.modules.iter())
+                    .map(|m| m.id.clone())
+                    .filter(|m| *m != e.module)
+                    .collect();
+                let records = self.catalog.records(&imported).await?;
+                let closure: Vec<Declaration> = (records.into_values())
+                    .flat_map(|r| r.result.declarations)
+                    .collect();
+                (meta.result.declarations, closure, e.holes)
+            }
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        let mut found = Vec::new();
+        for (e, r) in recorded {
+            let target = match (r.spec == spec, &r.target_hash) {
+                (true, _) => Some(r.target.clone()),
+                (false, Some(hash)) => declarations
+                    .iter()
+                    .find(|d| d.kind == "theorem" && !d.generated && d.type_hash == *hash)
+                    .filter(|d| {
+                        let changed = &changed_since[&r.spec];
+                        let all = declarations.iter().chain(&closure);
+                        let (_, reaching) = uses(changed, all);
+                        !changed.contains(&d.name)
+                            && !reaching.contains(&d.name)
+                            && refutable(&declarations, &closure, &holes, &d.name).is_ok()
+                    })
+                    .map(|d| d.name.clone()),
+                (false, None) => None,
+            };
+            let Some(target) = target else { continue };
+            let gone = self.catalog.find_entry(&e).await?.is_none();
+            found.push((
+                target,
+                Refutation {
+                    gone,
+                    ..self.refutation(&e, r)
+                },
+            ));
+        }
+        Ok(found)
+    }
+
+    /// The refutations of the targets of the spec the run `entry` is on
+    /// starts from (see [`refutations_against`](Self::refutations_against)),
+    /// in order.
+    pub async fn refutations_of_run(&self, entry: &str) -> Result<Vec<Refutation>, Error> {
+        let root = self.run_root(entry).await?;
+        let mut found: Vec<Refutation> = (self.refutations_against(&root).await?)
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        found.sort_by(|a, b| {
+            (&a.spec, &a.target, &a.snapshot_id).cmp(&(&b.spec, &b.target, &b.snapshot_id))
+        });
+        Ok(found)
+    }
+
     /// The spec the run `entry` is on starts from: `entry`, or what its
     /// chain of replacements leads back to, which may be deleted since.
     async fn run_root(&self, entry: &str) -> Result<String, Error> {

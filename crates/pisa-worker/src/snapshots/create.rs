@@ -43,6 +43,7 @@ impl Refuting {
             spec: self.spec.clone(),
             target: self.target.name.clone(),
             theorem,
+            target_hash: Some(self.target.type_hash.clone()),
         }
     }
 }
@@ -113,6 +114,7 @@ impl Snapshots {
             unverified: None,
             amendment: None,
             refutation: None,
+            refutations: Vec::new(),
         }
     }
 
@@ -130,6 +132,7 @@ impl Snapshots {
             unverified: None,
             amendment: None,
             refutation: None,
+            refutations: Vec::new(),
         }
     }
 
@@ -143,6 +146,7 @@ impl Snapshots {
     /// that, a key replay too.
     pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> CreateSnapshotResponse {
         let (amends, refutes) = (job.amends.is_some(), job.refutes.is_some());
+        let replaces = job.replaces.is_some();
         let mut done = self.create_checked(pool, job).await;
         if refutes && let Some(s) = &done.snapshot {
             let entry = self.reader.parse(&s.id).unwrap_or_default();
@@ -157,6 +161,14 @@ impl Snapshots {
                         .map(|(e, r)| self.reader.refutation(&e, r));
                 }
                 Err(e) => tracing::warn!(entry, "reading the refutation back failed: {e}"),
+            }
+        }
+        // A create into a run hears of its refutations.
+        if replaces && let Some(s) = &done.snapshot {
+            let entry = self.reader.parse(&s.id).unwrap_or_default();
+            match self.reader.refutations_of_run(&entry).await {
+                Ok(found) => done.refutations = found,
+                Err(e) => tracing::warn!(entry, "reading the run's refutations failed: {e}"),
             }
         }
         if amends && let Some(s) = &done.snapshot {
@@ -191,6 +203,7 @@ impl Snapshots {
             unverified: None,
             amendment: None,
             refutation: None,
+            refutations: Vec::new(),
         };
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
@@ -594,7 +607,18 @@ impl Snapshots {
         let spec = self.reader.parse(&r.snapshot_id)?;
         let entry = self.catalog.entry(&spec).await?;
         let meta = self.catalog.module(&entry.module).await?;
-        let target = refutable(&meta.result.declarations, &entry.holes, &r.target)?.clone();
+        // A hole may be a definition of a module the spec imports, or be
+        // reached through one.
+        let imported: Vec<String> = ids(&meta.modules)
+            .filter(|m| **m != entry.module)
+            .cloned()
+            .collect();
+        let records = self.catalog.records(&imported).await?;
+        let closure: Vec<Declaration> = (records.into_values())
+            .flat_map(|r| r.result.declarations)
+            .collect();
+        let decls = &meta.result.declarations;
+        let target = refutable(decls, &closure, &entry.holes, &r.target)?.clone();
         Ok(Refuting {
             spec,
             spec_module: entry.module,

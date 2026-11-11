@@ -87,6 +87,7 @@ diesel::table! {
         spec -> Text,
         target -> Text,
         theorem -> Text,
+        target_hash -> Nullable<Text>,
     }
 }
 

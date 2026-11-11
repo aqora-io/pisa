@@ -404,13 +404,16 @@ fn refusal(message: String) -> Error {
     Error::new(ErrorKind::BadRequest, message)
 }
 
-/// The target of a spec, whose module declares `declarations` and which has
-/// `holes`, that a refutation names, if it can be refuted: a theorem the spec
-/// states, not one Lean made, whose statement mentions no private name, which
-/// no other module can state, and none of the spec's holes, which a head may
-/// fill. Names are matched as [`normalised`].
+/// The target of a spec, whose module declares `declarations`, whose
+/// imported snapshot modules declare `closure`, and which has `holes`, that a
+/// refutation names, if it can be refuted: a theorem the spec states, not one
+/// Lean made, whose statement mentions no private name, which no other module
+/// can state, and none of the spec's holes, which a head may fill, through
+/// definitions of the spec's or of what it imports. Names are matched as
+/// [`normalised`].
 pub fn refutable<'a>(
     declarations: &'a [Declaration],
+    closure: &[Declaration],
     holes: &[String],
     target: &str,
 ) -> Result<&'a Declaration, Error> {
@@ -429,7 +432,7 @@ pub fn refutable<'a>(
         )));
     }
     let holes: HashSet<String> = holes.iter().cloned().collect();
-    let (_, theorems) = uses(&holes, declarations);
+    let (_, theorems) = uses(&holes, declarations.iter().chain(closure));
     if theorems.contains(&found.name) {
         return Err(refusal(format!(
             "{target} uses the spec's holes, which a head may fill: amend the spec to state \

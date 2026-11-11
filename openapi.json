@@ -674,6 +674,10 @@
             "description": "What a clean run needs of it: the spec snapshot's module and the\nhead's are verified, so that both records come from the kernel\nre-check rather than from a build's report; the head keeps the spec's\nstatements (see [`AuditSnapshotsResponse::comparisons`]); and the\ntarget is `proved`, or `conditional` on assumptions the spec permits\n(see [`AuditAssumption::in_spec`]), and nothing refutes it.",
             "type": "boolean"
           },
+          "contradicted": {
+            "description": "It is refuted, and yet `proved` or `conditional` on the head: the\nspec's assumptions contradict each other.",
+            "type": "boolean"
+          },
           "head": {
             "description": "The head, reached from `spec`, whose declaration this is.",
             "type": "string"
@@ -687,7 +691,7 @@
             "type": "string"
           },
           "refuted_by": {
-            "description": "The snapshots that refute it, proving `¬` its statement on the spec.",
+            "description": "The snapshots that refute it, proving `¬` its statement on the spec,\nor on a spec the spec amends that states it the same.",
             "items": {
               "type": "string"
             },
@@ -1099,6 +1103,13 @@
           "refutation": {
             "$ref": "#/components/schemas/Refutation",
             "description": "What the snapshot's create checked of the target it\n[`refutes`](CreateSnapshotRequest::refutes), if it refutes one."
+          },
+          "refutations": {
+            "description": "For a snapshot that replaces another, the refutations of its run's\ntargets, as an audit against the run's spec lists them: a target\nrefuted is false, and no head can be accepted on it.",
+            "items": {
+              "$ref": "#/components/schemas/Refutation"
+            },
+            "type": "array"
           },
           "replacement": {
             "$ref": "#/components/schemas/Replacement",
@@ -2556,6 +2567,10 @@
       "Refutation": {
         "description": "A snapshot's refutation of a spec's target, as its create checked it.",
         "properties": {
+          "gone": {
+            "description": "The refuting snapshot was deleted since: the record of what its\ncreate checked stays.",
+            "type": "boolean"
+          },
           "snapshot_id": {
             "description": "The refuting snapshot.",
             "type": "string"

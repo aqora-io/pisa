@@ -73,12 +73,98 @@ async fn a_proved_negation_on_the_spec_refutes_its_target() {
     assert_eq!(first["refutation"]["theorem"], "r");
     delete(&c, &id(&first)).await;
 
-    // The record goes with the refuter, and outlives the spec.
-    let bare = by.split_once('~').unwrap().1.to_string();
-    delete(&c, &spec).await;
-    assert_eq!(refutations(&c).await, [bare]);
+    // The record outlives the refuter, which the audit says is gone, and
+    // the spec.
+    let audit = get(&c, &format!("/snapshots/audit?against={spec}")).await;
+    let gone: Vec<(Value, Value)> = (audit["refutations"].as_array().unwrap().iter())
+        .map(|r| (r["snapshot_id"].clone(), r["gone"].clone()))
+        .collect();
+    assert!(gone.contains(&(json!(id(&first)), json!(true))), "{audit}");
+    assert!(gone.contains(&(json!(by), Value::Null)), "{audit}");
+    assert_eq!(audit["clean"], false);
+    let bare = |id: &str| id.split_once('~').unwrap().1.to_string();
+    let mut kept = vec![bare(&by), bare(&id(&first))];
+    kept.sort();
     delete(&c, &by).await;
-    assert!(refutations(&c).await.is_empty());
+    delete(&c, &spec).await;
+    let mut stored = refutations(&c).await;
+    stored.sort();
+    assert_eq!(stored, kept);
+}
+
+/// `GET path`, which must answer 200.
+async fn get(c: &Cluster, path: &str) -> Value {
+    let r = c.client.get(c.url(path)).send().await.unwrap();
+    assert_eq!(r.status(), 200, "{path}");
+    r.json().await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_hears_of_its_refutations_and_keeps_them_through_an_amendment() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec_r = create(&c, json!({"code": SPEC})).await;
+    let spec = id(&spec_r);
+    let refuted = |by: &str, spec: &str| json!({"snapshot_id": by, "spec": spec, "target": "t", "theorem": "r"});
+    // A head that states `easy` as `easy`.
+    let attempt = |replaced: &str, easy: &str| {
+        let head =
+            format!("import Foo\n\ntheorem t : 1 = 2 := sorry\ntheorem easy : {easy} := rfl");
+        json!({"code": head, "replaces": {"snapshot_id": replaced}, "fork": true})
+    };
+    // A create into a run that nothing refutes says nothing.
+    let r = create(&c, attempt(&spec, "1 = 1")).await;
+    assert!(r.get("refutations").is_none(), "{r}");
+    let code = on(&spec_r, "theorem r : ¬ (1 = 2) := by decide");
+    let by = id(&create(&c, json!({"code": code, "refutes": refutes(&spec, "t")})).await);
+    // One that replaces into a refuted run is told.
+    let r = create(&c, attempt(&spec, "1 = 1")).await;
+    assert_eq!(r["refutations"], json!([refuted(&by, &spec)]), "{r}");
+
+    // An amendment that keeps t's statement keeps its refutation.
+    let kept = "import Foo\n\ntheorem t : 1 = 2 := sorry\ntheorem easy : 2 = 2 := sorry";
+    let amends = |spec: &str| json!({"snapshot_id": spec, "reason": "easy was wrong"});
+    let amended = id(&create(&c, json!({"code": kept, "amends": amends(&spec)})).await);
+    let audit = get(&c, &format!("/snapshots/audit?against={amended}")).await;
+    assert_eq!(
+        audit["refutations"],
+        json!([refuted(&by, &spec)]),
+        "{audit}"
+    );
+    let targets = audit["targets"].as_array().unwrap();
+    let t = targets.iter().find(|t| t["name"] == "t").unwrap();
+    assert_eq!(t["refuted_by"], json!([by]), "{audit}");
+    assert_eq!(audit["clean"], false);
+    let r = create(&c, attempt(&amended, "2 = 2")).await;
+    assert_eq!(r["refutations"], json!([refuted(&by, &spec)]), "{r}");
+    // One that changes it doesn't.
+    let changed = "import Foo\n\ntheorem t : 1 = 3 := sorry\ntheorem easy : 2 = 2 := sorry";
+    let fixed = id(&create(&c, json!({"code": changed, "amends": amends(&amended)})).await);
+    let audit = get(&c, &format!("/snapshots/audit?against={fixed}")).await;
+    assert!(audit.get("refutations").is_none(), "{audit}");
+}
+
+/// An amendment that changes what the target means, through a definition
+/// its statement uses, or that makes it use a hole, leaves the refutation
+/// behind, though the statement reads the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_amendment_that_changes_what_the_target_uses_leaves_its_refutation() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef cost : Nat := 7\ntheorem bound : cost ≤ 5 := sorry";
+    let spec_r = create(&c, json!({"code": spec})).await;
+    let code = on(&spec_r, "theorem r : ¬ (cost ≤ 5) := by decide");
+    let body = json!({"code": code, "refutes": refutes(&id(&spec_r), "bound")});
+    create(&c, body).await;
+    let amends = |code: &str, holes: Value| {
+        let amends = json!({"snapshot_id": id(&spec_r), "reason": "cost was wrong"});
+        json!({"code": code, "amends": amends, "holes": holes})
+    };
+    let cheaper = "import Foo\n\ndef cost : Nat := 3\ntheorem bound : cost ≤ 5 := sorry";
+    let holed = "import Foo\n\ndef cost : Nat := sorry\ntheorem bound : cost ≤ 5 := sorry";
+    for body in [amends(cheaper, Value::Null), amends(holed, json!(["cost"]))] {
+        let amended = id(&create(&c, body).await);
+        let audit = get(&c, &format!("/snapshots/audit?against={amended}")).await;
+        assert!(audit.get("refutations").is_none(), "{audit}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -117,6 +203,19 @@ async fn what_doesnt_prove_the_negation_on_the_spec_is_refused() {
     let r = create(&c, body).await;
     let message = r["check"]["error"]["message"].as_str().unwrap();
     assert!(message.contains("uses the spec's holes"), "{r}");
+    // A hole reached through a definition of a snapshot the spec builds on.
+    let helper = "import Foo\n\ndef base : Nat := 7\ndef wrapped : Nat := base";
+    let helper_r = create(&c, json!({"code": helper})).await;
+    let through = on(&helper_r, "theorem w : wrapped = 2 := sorry");
+    let through_r = create(&c, json!({"code": through, "holes": ["base"]})).await;
+    let code = on(&through_r, "theorem r : ¬ (wrapped = 2) := by decide");
+    let body = json!({"code": code, "refutes": refutes(&id(&through_r), "w")});
+    let r = create(&c, body).await;
+    let message = r["check"]["error"]["message"].as_str();
+    assert!(
+        message.is_some_and(|m| m.contains("uses the spec's holes")),
+        "{r}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -200,4 +299,7 @@ async fn a_refuted_target_isnt_accepted_and_the_run_isnt_clean() {
     );
     assert_eq!(target("easy")["accepted"], true);
     assert!(target("easy").get("refuted_by").is_none());
+    // The head proves what is refuted: the spec's assumptions contradict.
+    assert_eq!(target("t")["contradicted"], true, "{after}");
+    assert!(target("easy").get("contradicted").is_none());
 }

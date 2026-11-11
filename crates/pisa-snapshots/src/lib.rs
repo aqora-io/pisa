@@ -148,6 +148,7 @@ impl Reader {
             spec: self.id(&r.spec),
             target: r.target,
             theorem: r.theorem,
+            gone: false,
         }
     }
 

@@ -369,6 +369,9 @@ pub struct Refutation {
     /// The refuting snapshot's theorem, which proves the negation of the
     /// target's statement.
     pub theorem: String,
+    /// The hash of the target's statement; none in records made before it
+    /// was kept.
+    pub target_hash: Option<String>,
 }
 
 /// What a new entry is given.
@@ -2318,9 +2321,10 @@ mod tests {
     }
 
     /// A refutation is stored with the entry that makes it, which needs the
-    /// spec still there; it goes with that entry, and outlives the spec.
+    /// spec still there; it outlives both, as the record that the target is
+    /// false.
     #[tokio::test]
-    async fn a_refutation_goes_with_the_snapshot_that_makes_it() {
+    async fn a_refutation_outlives_the_snapshot_that_makes_it() {
         for catalog in catalogs().await {
             let (spec, _, _) = catalog
                 .commit("x", &meta("x"), None, no_labels())
@@ -2330,6 +2334,7 @@ mod tests {
                 spec: spec.clone(),
                 target: "t".into(),
                 theorem: "r".into(),
+                target_hash: Some("h".into()),
             };
             let refuting = |r: &Refutation| NewEntry {
                 refutes: Some(r.clone()),
@@ -2370,13 +2375,7 @@ mod tests {
                 made
             );
             catalog.remove_entry(&by).await.unwrap();
-            assert!(
-                catalog
-                    .refutations_of(&[by, spec])
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            assert_eq!(catalog.refutations_of(&[by, spec]).await.unwrap(), made);
         }
     }
 

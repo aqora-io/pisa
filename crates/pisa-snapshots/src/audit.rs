@@ -267,23 +267,28 @@ impl Reader {
         }
         let (mut targets, mut accepted) =
             self.targets(&specs, &reached, &heads, &records, &permitted, &comparisons);
-        // A target that a snapshot refutes on its spec isn't accepted.
+        // A target that a snapshot refutes, on its spec or on a spec that
+        // states it the same and that its spec amends, isn't accepted.
         let spec_entries: Vec<String> = specs.iter().map(|(e, _)| e.clone()).collect();
-        let mut refutations: Vec<Refutation> = (self.catalog.refutations_of(&spec_entries).await?)
-            .into_iter()
-            .filter(|(_, r)| spec_entries.contains(&r.spec))
-            .map(|(e, r)| self.refutation(&e, r))
-            .collect();
+        let mut refuting: Vec<(String, String, Refutation)> = Vec::new();
+        for spec in &spec_entries {
+            for (target, r) in self.refutations_against(spec).await? {
+                refuting.push((self.id(spec), target, r));
+            }
+        }
+        let mut refutations: Vec<Refutation> = refuting.iter().map(|(_, _, r)| r.clone()).collect();
         refutations.sort_by(|a, b| {
             (&a.spec, &a.target, &a.snapshot_id).cmp(&(&b.spec, &b.target, &b.snapshot_id))
         });
+        refutations.dedup();
         for t in &mut targets {
-            t.refuted_by = (refutations.iter())
-                .filter(|r| r.spec == t.spec && r.target == t.name)
-                .map(|r| r.snapshot_id.clone())
+            t.refuted_by = (refuting.iter())
+                .filter(|(spec, target, _)| *spec == t.spec && *target == t.name)
+                .map(|(_, _, r)| r.snapshot_id.clone())
                 .collect();
             if !t.refuted_by.is_empty() {
                 t.accepted = false;
+                t.contradicted = matches!(t.status, ProofStatus::Proved | ProofStatus::Conditional);
                 accepted = false;
             }
         }
@@ -469,6 +474,7 @@ impl Reader {
                         refuted_by: Vec::new(),
                         linked_status: None,
                         through: Vec::new(),
+                        contradicted: false,
                     });
                 }
             }
