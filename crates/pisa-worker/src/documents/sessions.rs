@@ -100,7 +100,7 @@ impl Documents {
         let open = doc.as_ref().unwrap();
         let stored = async {
             self.records
-                .put_document(id, &j.code, &self.me, now)
+                .put_document(id, &j.code, j.timeout_secs, &self.me, now)
                 .await?;
             let meta = serde_json::to_value(&meta).unwrap_or_default();
             self.records.put_session(id, now, &meta).await?;
@@ -162,23 +162,44 @@ impl Documents {
             .await?
             .filter(|r| &r.session == session)
             .ok_or_else(unknown)?;
-        let budget = Budget::new(j.timeout_secs);
         let mut doc = self.lock(session).await;
-        if let Err(e) = self.ready(&mut doc, session, None, budget).await {
-            return Err(match e.kind {
-                ErrorKind::NotFound => unknown(),
-                _ => e,
-            });
-        }
-        let (from, at) = match self.start_of(&mut doc, session, state, row, budget).await {
-            Ok(from) => from,
-            Err(Stop::Beam(e)) => return Err(self.fail(&mut doc, session, e, budget).await),
-            Err(Stop::Error(e)) => return Err(e),
+        let reopened = match self.ready(&mut doc, session, None).await {
+            Ok(reopened) => reopened,
+            Err(e) => {
+                return Err(match e.kind {
+                    ErrorKind::NotFound => unknown(),
+                    _ => e,
+                });
+            }
         };
-        let ran = self.step(&doc, session, &from, &j.tactic, budget).await;
-        let r = match ran {
-            Ok(r) => r,
-            Err(e) => return Err(self.fail(&mut doc, session, e, budget).await),
+        // Replays take the time limit the session's start took, as its
+        // reopen does.
+        let replay = Budget::new(doc.as_ref().map_or(j.timeout_secs, |o| o.timeout));
+        let mut retried = false;
+        let (r, at, replayed) = loop {
+            let (from, at, replayed) =
+                match self.start_of(&mut doc, session, state, row.clone()).await {
+                    Ok(from) => from,
+                    Err(Stop::Beam(e)) => {
+                        return Err(self.fail(&mut doc, session, e, replay).await);
+                    }
+                    Err(Stop::Error(e)) => return Err(e),
+                };
+            let budget = Budget::new(j.timeout_secs);
+            match self.step(&doc, session, &from, &j.tactic, budget).await {
+                Ok(r) => {
+                    self.answered(doc.as_ref().unwrap().slot);
+                    break (r, at, replayed);
+                }
+                // Lean's answer is a result, so this is Beam's own failure,
+                // perhaps of the handle: replay the state once without it.
+                Err(BeamError::Tool { message, .. }) if !retried => {
+                    tracing::info!(session, state, "Lean Beam failed on a step: {message}");
+                    self.forget(&mut doc, session, state).await;
+                    retried = true;
+                }
+                Err(e) => return Err(self.fail(&mut doc, session, e, budget).await),
+            }
         };
         if !r.success {
             return Err(Error::new(ErrorKind::Lean, errors(&r)));
@@ -194,13 +215,17 @@ impl Documents {
         if let Some(handle) = r.next_handle.clone() {
             self.keep(&mut doc, session, &child, handle, at).await;
         }
-        let open = doc.as_ref().unwrap();
         let goals: Vec<String> = r
             .proof_state
             .iter()
             .flat_map(|s| &s.goals)
             .map(pisa_beam::goal::render)
             .collect();
+        // A `sorry` anywhere on the way leaves the proof unfinished, as
+        // `have h : P := sorry` and then `exact h` does.
+        let complete =
+            goals.is_empty() && !says_sorry(&j.tactic) && !self.sorry_on_the_way(state).await?;
+        let open = doc.as_ref().unwrap();
         let messages = r
             .messages
             .iter()
@@ -213,22 +238,25 @@ impl Documents {
                 pos: None,
                 end_pos: None,
             },
-            complete: goals.is_empty() && !says_sorry(&j.tactic),
+            complete,
             messages,
+            reopened,
+            replayed,
         })
     }
 
-    /// Where state `id` (`row`) continues from in `doc`, and its `sorry`'s
-    /// position: the `sorry` itself, or a handle on the state, which the
-    /// chain is replayed for from the nearest state with one if need be.
+    /// Where state `id` (`row`) continues from in `doc`, its `sorry`'s
+    /// position and the steps replayed: the `sorry` itself, or a handle on
+    /// the state, which the chain is replayed for from the nearest state with
+    /// one if need be, each step within the time limit the document's open
+    /// took.
     async fn start_of(
         &self,
         doc: &mut Option<Open>,
         session: &str,
         id: &str,
         row: StateRow,
-        budget: Budget,
-    ) -> Result<(From, LspPos), Stop> {
+    ) -> Result<(From, LspPos, u32), Stop> {
         let gone = || {
             Stop::Error(Error::new(
                 ErrorKind::NotFound,
@@ -257,10 +285,14 @@ impl Documents {
             (None, None) => return Err(gone()),
         };
         // Replay each step below it, from the top down.
+        let (timeout, replayed) = (open.timeout, chain.len() as u32);
+        if replayed > 0 {
+            tracing::info!(session, id, replayed, "replaying a state's steps");
+        }
         for (state, row) in chain.into_iter().rev() {
             let tactic = row.tactic.unwrap_or_default();
             let r = self
-                .step(doc, session, &from, &tactic, budget)
+                .step(doc, session, &from, &tactic, Budget::new(timeout))
                 .await
                 .map_err(Stop::Beam)?;
             let Some(handle) = r.next_handle.clone().filter(|_| r.success) else {
@@ -272,7 +304,24 @@ impl Documents {
             self.keep(doc, session, &state, handle.clone(), at).await;
             from = From::Handle(handle);
         }
-        Ok((from, at))
+        Ok((from, at, replayed))
+    }
+
+    /// Whether a tactic on the way from its `sorry` to state `id` says
+    /// `sorry` or `admit`. One that expired on the way can't be read, so the
+    /// way counts as unfinished.
+    async fn sorry_on_the_way(&self, id: &str) -> Result<bool, Error> {
+        let mut next = Some(id.to_string());
+        while let Some(id) = next {
+            let Some(row) = self.records.state(&id).await? else {
+                return Ok(true);
+            };
+            if row.tactic.as_deref().is_some_and(says_sorry) {
+                return Ok(true);
+            }
+            next = row.parent;
+        }
+        Ok(false)
     }
 
     /// Runs `text` from `from` on `session`'s open document, keeping its
@@ -295,6 +344,18 @@ impl Documents {
                     .await
             }
             From::Handle(handle) => open.beam.run_with(d, handle, text, budget.left()).await,
+        }
+    }
+
+    /// Lets go of the handle on state `state` of `session`'s open document,
+    /// so that the state replays when it is next asked for.
+    async fn forget(&self, doc: &mut Option<Open>, session: &str, state: &str) {
+        let Some(open) = doc.as_mut() else { return };
+        if let Some((handle, _)) = open.handles.remove(state) {
+            open.kept.retain(|s| s != state);
+            let path = file(session);
+            let d = self.slots[open.slot].workspace.doc(&path);
+            let _ = open.beam.release(d, &handle, CLOSE_TIMEOUT).await;
         }
     }
 

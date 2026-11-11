@@ -130,6 +130,20 @@ pub fn declares(imported: &str, local: &str, name: &str) -> bool {
         || local.lines().filter_map(declared).any(|(n, _)| n == name)
 }
 
+/// Lean's error for an unmet `needs NAME` on `line`, with Lean's note on
+/// `autoImplicit` after `needs NAME binder`, as where a binder would bind
+/// the name were the option on.
+pub fn unknown_identifier(line: &str, name: &str) -> String {
+    let mut text = format!("Unknown identifier `{name}`");
+    if line.split_whitespace().nth(2) == Some("binder") {
+        text.push_str(&format!(
+            "\n\nNote: It is not possible to treat `{name}` as an implicitly bound variable \
+             here because the `autoImplicit` option is set to `false`."
+        ));
+    }
+    text
+}
+
 /// The names `needs` lines of `code` ask for, with their line numbers.
 pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
     code.lines().enumerate().filter_map(|(i, l)| {

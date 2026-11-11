@@ -184,8 +184,8 @@ pub async fn goals(
     post, path = "/documents/{id}/probes", operation_id = "probeDocument", tag = "documents",
     summary = "Try candidate tactics at a position",
     description = "Runs each candidate at a `sorry` of the document, or a position in its body, \
-        in turn and within one time limit, on the document as it is: nothing a candidate does \
-        stays. The policy refuses a candidate as it refuses code, and the others still run. \
+        in turn and each within the time limit, on the document as it is: nothing a candidate \
+        does stays. The policy refuses a candidate as it refuses code, and the others still run. \
         `closed` is no verdict: Lean Beam checks neither termination nor what a tactic \
         elaborated to.",
     params(("id" = String, Path, description = "A document's id")),

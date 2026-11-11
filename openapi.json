@@ -193,7 +193,7 @@
       "ApplyTacticResponse": {
         "properties": {
           "complete": {
-            "description": "No goals remain for this state's `sorry`, and the tactic doesn't say\n`sorry` or `admit`. This says nothing about the rest of the proof;\ncheck the assembled proof with the session check.",
+            "description": "No goals remain for this state's `sorry`, and no tactic on the way\nfrom it says `sorry` or `admit`. This says nothing about the rest of\nthe proof; check the assembled proof with the session check.",
             "type": "boolean"
           },
           "messages": {
@@ -201,6 +201,16 @@
               "$ref": "#/components/schemas/Message"
             },
             "type": "array"
+          },
+          "reopened": {
+            "description": "The session's document wasn't open where this ran, as for document\ngoals.",
+            "type": "boolean"
+          },
+          "replayed": {
+            "description": "The steps replayed to reach the state, each within the time limit\nthe session's start took, where no handle on it was kept: after a\nreopen, or once the state's handle was let go.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "state": {
             "$ref": "#/components/schemas/State",
@@ -210,7 +220,9 @@
         "required": [
           "state",
           "complete",
-          "messages"
+          "messages",
+          "reopened",
+          "replayed"
         ],
         "type": "object"
       },
@@ -1150,6 +1162,10 @@
             },
             "type": "array"
           },
+          "reopened": {
+            "description": "The document wasn't open where this ran, as after it was closed to\nmake room, its Lean Beam restarted or its worker went: it was opened\nagain first, within the time limit its open took, not this request's.",
+            "type": "boolean"
+          },
           "revision": {
             "format": "int64",
             "minimum": 0,
@@ -1158,7 +1174,8 @@
         },
         "required": [
           "revision",
-          "at"
+          "at",
+          "reopened"
         ],
         "type": "object"
       },
@@ -1199,6 +1216,10 @@
             "$ref": "#/components/schemas/Pos",
             "description": "Where the candidates ran."
           },
+          "reopened": {
+            "description": "As for goals.",
+            "type": "boolean"
+          },
           "results": {
             "description": "One per candidate, in order.",
             "items": {
@@ -1215,7 +1236,8 @@
         "required": [
           "revision",
           "pos",
-          "results"
+          "results",
+          "reopened"
         ],
         "type": "object"
       },
@@ -1239,7 +1261,7 @@
             "type": "integer"
           },
           "timeout": {
-            "description": "Lean's time limit in seconds, for all of them.",
+            "description": "Lean's time limit in seconds, for each candidate.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -1395,6 +1417,14 @@
             },
             "type": "array"
           },
+          "in_proof": {
+            "description": "Whether Lean has a proof there. Outside one there are no goals; in\none, no goals means the proof is finished there, as after its last\ntactic with `mode: \"after\"`. Lean counts a blank or comment line\nright after a proof as in it.",
+            "type": "boolean"
+          },
+          "line": {
+            "description": "The text of its line, so that a position off by a line shows.",
+            "type": "string"
+          },
           "pos": {
             "$ref": "#/components/schemas/Pos",
             "description": "The position, its column filled in."
@@ -1402,6 +1432,8 @@
         },
         "required": [
           "pos",
+          "line",
+          "in_proof",
           "goals"
         ],
         "type": "object"
@@ -3600,7 +3632,7 @@
     },
     "/documents/{id}/probes": {
       "post": {
-        "description": "Runs each candidate at a `sorry` of the document, or a position in its body, in turn and within one time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.",
+        "description": "Runs each candidate at a `sorry` of the document, or a position in its body, in turn and each within the time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.",
         "operationId": "probeDocument",
         "parameters": [
           {
@@ -5792,7 +5824,7 @@
     },
     "/states/{id}/tactic": {
       "post": {
-        "description": "Returns the new state. Earlier states stay valid, so a session is a tree, and the same tactic on the same state gives the same state. A tactic that fails is a 422 `lean`, with Lean's errors in its message. A worker that doesn't hold the session's document replays the steps from the `sorry`, in milliseconds each.",
+        "description": "Returns the new state. Earlier states stay valid, so a session is a tree, and the same tactic on the same state gives the same state. A tactic that fails is a 422 `lean`, with Lean's errors in its message. When Lean Beam itself fails, the state is replayed and the tactic run once more, and a second failure is a 503 `unavailable`. A worker that doesn't hold the session's document replays the steps from the `sorry`, in milliseconds each.",
         "operationId": "applyTactic",
         "parameters": [
           {

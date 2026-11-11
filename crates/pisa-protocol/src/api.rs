@@ -528,13 +528,24 @@ pub struct ApplyTacticRequest {
 pub struct ApplyTacticResponse {
     /// The new state. Earlier states stay valid, so a session is a tree.
     pub state: State,
-    /// No goals remain for this state's `sorry`, and the tactic doesn't say
-    /// `sorry` or `admit`. This says nothing about the rest of the proof;
-    /// check the assembled proof with the session check.
+    /// No goals remain for this state's `sorry`, and no tactic on the way
+    /// from it says `sorry` or `admit`. This says nothing about the rest of
+    /// the proof; check the assembled proof with the session check.
     pub complete: bool,
     #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
+    /// The session's document wasn't open where this ran, as for document
+    /// goals.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub reopened: bool,
+    /// The steps replayed to reach the state, each within the time limit
+    /// the session's start took, where no handle on it was kept: after a
+    /// reopen, or once the state's handle was let go.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub replayed: u32,
 }
 
 /// `POST /sessions/{id}/check`: re-checks completed code from scratch
@@ -636,12 +647,29 @@ pub struct DocumentGoals {
     pub revision: u64,
     /// One per position asked about, in order.
     pub at: Vec<GoalsAt>,
+    /// The document wasn't open where this ran, as after it was closed to
+    /// make room, its Lean Beam restarted or its worker went: it was opened
+    /// again first, within the time limit its open took, not this request's.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub reopened: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct GoalsAt {
     /// The position, its column filled in.
     pub pos: Pos,
+    /// The text of its line, so that a position off by a line shows.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub line: String,
+    /// Whether Lean has a proof there. Outside one there are no goals; in
+    /// one, no goals means the proof is finished there, as after its last
+    /// tactic with `mode: "after"`. Lean counts a blank or comment line
+    /// right after a proof as in it.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub in_proof: bool,
     /// The goals there, as Lean prints them: none in the imports or outside
     /// a proof.
     #[schema(required = true)]
@@ -668,7 +696,7 @@ pub struct DocumentProbesRequest {
     pub at: ProbeAt,
     /// 1 to [`MAX_CANDIDATES`] tactics.
     pub candidates: Vec<String>,
-    /// Lean's time limit in seconds, for all of them.
+    /// Lean's time limit in seconds, for each candidate.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
 }
@@ -680,6 +708,10 @@ pub struct DocumentProbes {
     pub pos: Pos,
     /// One per candidate, in order.
     pub results: Vec<ProbeResult>,
+    /// As for goals.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub reopened: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

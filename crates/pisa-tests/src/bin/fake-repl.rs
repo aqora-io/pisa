@@ -5,7 +5,8 @@
 //! - `error_here` gives an error message on that line
 //! - `sorry` gives a warning and a sorry with a fresh proof state
 //! - `SLEEP <ms>` sleeps before answering; `CRASH` exits
-//! - `needs NAME` errors unless `NAME` is declared (see `pisa_tests`)
+//! - `needs NAME` errors unless `NAME` is declared (see `pisa_tests`), with
+//!   Lean's note on `autoImplicit` after `needs NAME binder`
 //! - with `infotree: "original"`, every indented line is a tactic that
 //!   closes `⊢ goal <line>`, inside one `by` node
 //! - with `infotree: "full"`, the same in a command node, and under each
@@ -25,7 +26,7 @@
 
 use std::io::{BufRead, Write};
 
-use pisa_tests::{as_reported, declarations, declares, imported_code, needs};
+use pisa_tests::{as_reported, declarations, declares, imported_code, needs, unknown_identifier};
 use serde_json::{Value, json};
 
 struct State {
@@ -207,7 +208,8 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
     let local = format!("{}\n{cmd}", prev.local);
     for (n, name) in needs(cmd) {
         if !declares(&prev.imported, &local, name) {
-            messages.push(message(n, "error", &format!("Unknown identifier `{name}`")));
+            let line = cmd.lines().nth(n - 1).unwrap_or_default();
+            messages.push(message(n, "error", &unknown_identifier(line, name)));
         }
     }
     s.envs.push(Env {

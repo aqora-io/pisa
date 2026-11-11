@@ -139,7 +139,7 @@ export interface paths {
         put?: never;
         /**
          * Try candidate tactics at a position
-         * @description Runs each candidate at a `sorry` of the document, or a position in its body, in turn and within one time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.
+         * @description Runs each candidate at a `sorry` of the document, or a position in its body, in turn and each within the time limit, on the document as it is: nothing a candidate does stays. The policy refuses a candidate as it refuses code, and the others still run. `closed` is no verdict: Lean Beam checks neither termination nor what a tactic elaborated to.
          */
         post: operations["probeDocument"];
         delete?: never;
@@ -472,7 +472,7 @@ export interface paths {
         put?: never;
         /**
          * Apply a tactic to a state
-         * @description Returns the new state. Earlier states stay valid, so a session is a tree, and the same tactic on the same state gives the same state. A tactic that fails is a 422 `lean`, with Lean's errors in its message. A worker that doesn't hold the session's document replays the steps from the `sorry`, in milliseconds each.
+         * @description Returns the new state. Earlier states stay valid, so a session is a tree, and the same tactic on the same state gives the same state. A tactic that fails is a 422 `lean`, with Lean's errors in its message. When Lean Beam itself fails, the state is replayed and the tactic run once more, and a second failure is a 503 `unavailable`. A worker that doesn't hold the session's document replays the steps from the `sorry`, in milliseconds each.
          */
         post: operations["applyTactic"];
         delete?: never;
@@ -603,12 +603,24 @@ export interface components {
         };
         ApplyTacticResponse: {
             /**
-             * @description No goals remain for this state's `sorry`, and the tactic doesn't say
-             *     `sorry` or `admit`. This says nothing about the rest of the proof;
-             *     check the assembled proof with the session check.
+             * @description No goals remain for this state's `sorry`, and no tactic on the way
+             *     from it says `sorry` or `admit`. This says nothing about the rest of
+             *     the proof; check the assembled proof with the session check.
              */
             complete: boolean;
             messages: components["schemas"]["Message"][];
+            /**
+             * @description The session's document wasn't open where this ran, as for document
+             *     goals.
+             */
+            reopened: boolean;
+            /**
+             * Format: int32
+             * @description The steps replayed to reach the state, each within the time limit
+             *     the session's start took, where no handle on it was kept: after a
+             *     reopen, or once the state's handle was let go.
+             */
+            replayed: number;
             /** @description The new state. Earlier states stay valid, so a session is a tree. */
             state: components["schemas"]["State"];
         };
@@ -1244,6 +1256,12 @@ export interface components {
         DocumentGoals: {
             /** @description One per position asked about, in order. */
             at: components["schemas"]["GoalsAt"][];
+            /**
+             * @description The document wasn't open where this ran, as after it was closed to
+             *     make room, its Lean Beam restarted or its worker went: it was opened
+             *     again first, within the time limit its open took, not this request's.
+             */
+            reopened: boolean;
             /** Format: int64 */
             revision: number;
         };
@@ -1268,6 +1286,8 @@ export interface components {
         DocumentProbes: {
             /** @description Where the candidates ran. */
             pos: components["schemas"]["Pos"];
+            /** @description As for goals. */
+            reopened: boolean;
             /** @description One per candidate, in order. */
             results: components["schemas"]["ProbeResult"][];
             /** Format: int64 */
@@ -1288,7 +1308,7 @@ export interface components {
             revision?: number;
             /**
              * Format: int64
-             * @description Lean's time limit in seconds, for all of them.
+             * @description Lean's time limit in seconds, for each candidate.
              */
             timeout?: number;
         };
@@ -1353,6 +1373,15 @@ export interface components {
              *     a proof.
              */
             goals: string[];
+            /**
+             * @description Whether Lean has a proof there. Outside one there are no goals; in
+             *     one, no goals means the proof is finished there, as after its last
+             *     tactic with `mode: "after"`. Lean counts a blank or comment line
+             *     right after a proof as in it.
+             */
+            in_proof: boolean;
+            /** @description The text of its line, so that a position off by a line shows. */
+            line: string;
             /** @description The position, its column filled in. */
             pos: components["schemas"]["Pos"];
         };

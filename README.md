@@ -405,11 +405,16 @@ tactics at a `sorry`:
   bullet, and the answer gives the column it used. There are no goals in the
   imports or outside a proof. `mode: "after"` gives the goals after the
   tactic at the position.
+  - Each answer gives the text of the `line` it was asked at, and
+    `in_proof`: no goals with `in_proof: true` is a finished proof, and with
+    `false` a position outside any proof, as a line off by one can be. Lean
+    counts a blank or comment line right after a proof as in it.
 - `/documents/{id}/probes` runs 1 to 64 candidates at one place: a `sorry`
   (`{sorry: n}`, an index into `sorries`), or a position in the body.
-  - Each runs on the document as it is, in turn, within one `timeout`.
+  - Each runs on the document as it is, in turn, with `timeout` seconds of its own.
   - The policy refuses a candidate as it refuses code, in its `error`, and
-    the others still run.
+    the others still run. A candidate Lean Beam fails to run has an
+    `unavailable` error, which isn't Lean's answer.
   - `closed` means the candidate ran without errors, left no goals, and
     doesn't say `sorry` or `admit`. It is no verdict: Lean Beam checks
     neither termination nor what a tactic elaborated to. Check the finished
@@ -421,7 +426,16 @@ tactics at a `sorry`:
   `PISA_STATE_TTL_SECS` (a day in Compose and the chart).
 - A document's jobs run one at a time, on the worker that holds it open,
   while that worker is live. If it goes, another reopens the stored code,
-  which takes as long as elaborating it.
+  which takes as long as elaborating it. A reopen, there or after the
+  document was closed to make room or its Lean Beam restarted, has the
+  `timeout` of the open or last edit, not the request's, and the request's
+  own `timeout` starts after it. Goals and probes then answer
+  `reopened: true`.
+- A document no live worker holds, as a new one, opens on the Beam worker
+  with the fewest documents open per Beam slot: the others leave it to that
+  worker for up to two seconds. A Lean Beam process that times out three
+  times in a row is restarted, as what timed out may still run in it, and
+  its documents reopen.
 - Only workers with Beam slots serve documents. Without one, the endpoints
   answer 503 `unavailable`; a 429 means no Beam worker took the job in time.
   The worker settings:
@@ -429,8 +443,11 @@ tactics at a `sorry`:
     slots, each in a sandbox and cgroup of its own. They serve documents and
     tactic sessions.
   - `PISA_BEAM_DOCUMENTS` (default 4): the documents each keeps open. To
-    open another, it closes the least recently used one that no job holds.
+    open another, it closes the least recently used one that no job holds,
+    and logs it at `info`. Opens at once count each other's place.
   - `PISA_BEAM_MEMORY_MAX_MB` (default 0, none): each one's memory limit.
+    Out of memory, the kernel stops the whole process (`memory.oom.group`),
+    and the request answers `out_of_memory`.
   - `PISA_BEAM_BIN`: `lean-beam-mcp`, by default the one in Lean's
     toolchain.
 
@@ -444,11 +461,13 @@ proofs one tactic at a time, as a tree of states:
 - `POST /states/{id}/tactic` runs a tactic on a state, in the context of the
   session's code, so it sees what the code declares before the `sorry`.
   - It answers the new state, which can be continued; a tactic that fails is
-    a 422 `lean`, with Lean's errors in its message.
+    a 422 `lean`, with Lean's errors in its message. Lean Beam failing on
+    its own is not Lean's answer: the state is replayed and the tactic run
+    once more, and a second failure is a 503 `unavailable`.
   - A state stays valid after others are made from it, so a client can try
     alternatives from one state.
-  - `complete` means no goals are left and the tactic doesn't say `sorry` or
-    `admit`. As with probes, it is no verdict.
+  - `complete` means no goals are left and no tactic on the way from the
+    `sorry` says `sorry` or `admit`. As with probes, it is no verdict.
 - A state's id is `<version>~<session>~<state>`, where `<state>` names what
   the state is: the same tactic on the same state gives the same id.
 - `POST /sessions/{id}/check` checks the assembled proof from scratch, as
@@ -457,7 +476,9 @@ proofs one tactic at a time, as a tree of states:
 - The worker that holds the session's document keeps the last 256 states it
   made. Another worker, or this one for an older state, replays the state's
   tactics from the nearest state it keeps, or from the `sorry`, reopening
-  the document first if it isn't open there.
+  the document first if it isn't open there. Each replayed tactic has the
+  `timeout` the session's start had. The answer says how many tactics it
+  `replayed`, and whether it `reopened` the document.
 - `DELETE /documents/{id}` closes a session, and its states then answer 404.
   A session expires `PISA_STATE_TTL_SECS` after it starts.
 - Only workers with Beam slots serve sessions. Without one, `/sessions` and
@@ -1680,12 +1701,16 @@ A check is `ok` only when all of these hold:
 - The code elaborated without errors.
 - Every new declaration depends only on `propext`, `Classical.choice` and
   `Quot.sound`. This rejects `sorry`, `admit`, `native_decide` and new axioms.
-- The code contains no metaprogramming: `#eval`, `run_cmd`, `elab`,
+- The code contains no metaprogramming: `#eval`, `#eval!` and `#guard`
+  (which evaluates its term as `#eval` does), `run_cmd`, `elab`,
   elaborator attributes, `unsafe`, `implemented_by`, simprocs, attributes
   that install code to run later (`@[init]`, `@[tactic]`, delaborators,
   `norm_num` and `positivity` extensions) and similar. Attributes are refused
   where they are applied, in `@[…]` and `attribute […]`, so `extern` or
   `init` can still name a variable, and a name in `«»` is never a command.
+  A command's word is refused even as a field, as in `(c).initialize`: when
+  Lean recovers from a parse error before it, it runs the command there.
+  Write such a name `«initialize»`, as the refusal's hint says.
 - Any `set_option` changes only an allowlisted option: resource limits
   (`maxHeartbeats`, `maxSynthPendingDepth` and similar), `diagnostics`,
   `quotPrecheck*`, `linter.*`, `pp.*`, `trace.*`, and `backward.*`, which
@@ -1704,9 +1729,11 @@ snapshot builds alike, so a name that isn't bound in a statement is an error
 rather than a new implicit argument. Code can turn it back on with
 `set_option autoImplicit true`, alone or with `in`, because it is an allowlisted
 option. Code written for a library that turns it on, as Physlib does, meets
-"Unknown identifier `d`" here: when code that doesn't set the option has
-such an error (or an unknown universe level), a check's or a snapshot build's
-`messages` add an `info` hint at it, naming the option.
+"Unknown identifier `d`" here, with Lean's note that the option would have
+bound `d`. When code that doesn't set the option has such an error (or an
+unknown universe level), a check's or a snapshot build's `messages` add an
+`info` hint at it, naming the option. An unknown name the option wouldn't
+bind, such as a misspelt lemma in a proof, gets no hint.
 
 The axiom report is a `run_cmd` call into the `Pisa` library
 (`docker/pisa-lean`, built into the worker image at `PISA_LEAN_LIB`), so

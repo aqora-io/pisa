@@ -75,9 +75,15 @@ async fn session_is_a_tree_of_states_with_a_final_check() {
         failed,
         json!({"error": {"kind": "lean", "message": "fake: tactic failed"}})
     );
-    // A sorry closes nothing.
+    // A sorry closes nothing, nor does a tactic after one.
     let admitted = tactic(&c, &root["id"], "rfl -- sorry").await;
     assert_eq!(admitted["complete"], false);
+    let assumed = tactic(&c, &root["id"], "have h : True := sorry").await;
+    assert_eq!(assumed["complete"], false);
+    let used = tactic(&c, &assumed["state"]["id"], "exact h").await;
+    let closed = tactic(&c, &used["state"]["id"], "rfl").await;
+    assert_eq!(closed["state"]["goals"], json!([]));
+    assert_eq!(closed["complete"], false, "{closed}");
 
     let session = &s["id"];
     let ok = check(&c, session, "import Foo\ntheorem t : 1 = 1 := by rfl").await;
@@ -119,6 +125,10 @@ async fn sessions_resume_on_another_worker_by_replaying_their_steps() {
     let s = start(&c, CODE).await;
     let root = &s["states"][0]["id"];
     let step = tactic(&c, root, "simp").await;
+    assert_eq!(
+        (&step["reopened"], &step["replayed"]),
+        (&json!(false), &json!(0))
+    );
     let deeper = tactic(&c, &step["state"]["id"], "intro").await;
 
     // Bring up a second worker and kill the first, which held the document
@@ -133,8 +143,38 @@ async fn sessions_resume_on_another_worker_by_replaying_their_steps() {
         next["state"]["goals"],
         json!(["⊢ True after simp after intro after ring"])
     );
+    assert_eq!(
+        (&next["reopened"], &next["replayed"]),
+        (&json!(true), &json!(2))
+    );
     let branch = tactic(&c, root, "intro").await;
     assert_eq!(branch["state"]["goals"], json!(["⊢ True after intro"]));
+    assert_eq!(
+        (&branch["reopened"], &branch["replayed"]),
+        (&json!(false), &json!(0))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn beams_own_failure_replays_the_state_once_and_isnt_leans_answer() {
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    let s = start(&c, CODE).await;
+    let step = tactic(&c, &s["states"][0]["id"], "simp").await;
+    let state = &step["state"]["id"];
+    // Beam fails once: the state replays without its handle, and the step
+    // runs.
+    let flaky = tactic(&c, state, "intro FLAKY").await;
+    assert_eq!(
+        flaky["state"]["goals"],
+        json!(["⊢ True after simp after intro FLAKY"])
+    );
+    assert_eq!(flaky["replayed"], 1);
+    // Beam fails each time: Lean said nothing, so it isn't a 422.
+    let (status, failed) = try_tactic(&c, state, "FAIL").await;
+    assert_eq!(status, 503, "{failed}");
+    assert_eq!(failed["error"]["kind"], "unavailable");
+    // The session goes on.
+    assert_eq!(tactic(&c, state, "rfl").await["complete"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]

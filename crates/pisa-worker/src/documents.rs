@@ -18,6 +18,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -53,6 +54,10 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long closing a document gets.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timeouts in a row after which a slot's Lean Beam is restarted, as what
+/// timed out may still be running in it.
+const RESTART_AFTER_TIMEOUTS: u32 = 3;
+
 /// The toolchain of a workspace without a project. Deployments have a
 /// project, whose toolchain workspaces take; this is for tests, on a fake
 /// Beam.
@@ -78,6 +83,8 @@ struct BeamSlot {
     id: usize,
     workspace: Workspace,
     beam: tokio::sync::Mutex<Option<Running>>,
+    /// Requests to it that timed out since one last answered.
+    timeouts: AtomicU32,
 }
 
 #[derive(Clone)]
@@ -93,6 +100,8 @@ struct Open {
     /// The process it is open in: a slot's next process doesn't have it.
     beam: Arc<Beam>,
     revision: u64,
+    /// The time limit its open took, which replays take too.
+    timeout: u64,
     /// Beam's version of the file.
     version: u64,
     map: CodeMap,
@@ -154,6 +163,7 @@ impl Documents {
                 id,
                 workspace,
                 beam: tokio::sync::Mutex::new(None),
+                timeouts: AtomicU32::new(0),
             });
         }
         let documents = Documents {
@@ -178,6 +188,11 @@ impl Documents {
 
     pub fn beam_slots(&self) -> usize {
         self.slots.len()
+    }
+
+    /// How many documents are open here, or being opened.
+    pub fn open_count(&self) -> usize {
+        self.placed.lock().unwrap().len()
     }
 
     /// How many jobs on documents may run at once: one per document a slot
@@ -215,15 +230,45 @@ impl Documents {
             .is_some_and(|r| Arc::ptr_eq(&r.beam, &open.beam) && r.beam.is_alive())
     }
 
+    /// Slot `slot`'s process answered.
+    fn answered(&self, slot: usize) {
+        self.slots[slot].timeouts.store(0, Ordering::Release);
+    }
+
+    /// Slot `slot`'s process `beam` didn't answer in time. After
+    /// [`RESTART_AFTER_TIMEOUTS`] in a row it is stopped, and the slot starts
+    /// a new one when next asked, which its documents reopen in.
+    async fn timed_out(&self, slot: usize, beam: &Arc<Beam>) {
+        let s = &self.slots[slot];
+        if s.timeouts.fetch_add(1, Ordering::AcqRel) + 1 < RESTART_AFTER_TIMEOUTS {
+            return;
+        }
+        s.timeouts.store(0, Ordering::Release);
+        if let Some(r) = s.beam.lock().await.take_if(|r| Arc::ptr_eq(&r.beam, beam)) {
+            tracing::warn!(
+                slot = s.id,
+                "restarting Lean Beam after {RESTART_AFTER_TIMEOUTS} timeouts in a row"
+            );
+            r.beam.kill().await;
+        }
+    }
+
     /// The error for `e` from slot `slot`'s process `beam`. A process that
     /// failed is stopped, so that its documents reopen in a new one.
     async fn failure(&self, slot: usize, beam: &Arc<Beam>, e: BeamError, budget: Budget) -> Error {
         match e {
-            BeamError::Timeout => Error::timeout(budget.secs),
+            BeamError::Timeout => {
+                self.timed_out(slot, beam).await;
+                Error::timeout(budget.secs)
+            }
             BeamError::Busy(m) => {
                 Error::new(ErrorKind::Unavailable, format!("Lean Beam is busy: {m}"))
             }
-            BeamError::Tool { message, .. } => Error::new(ErrorKind::Lean, message),
+            // Lean's own answer comes back as a result; an error is Beam's.
+            BeamError::Tool { message, .. } => Error::new(
+                ErrorKind::Unavailable,
+                format!("Lean Beam failed: {message}"),
+            ),
             BeamError::Exited { .. } | BeamError::Dead | BeamError::Io(_) => {
                 let s = &self.slots[slot];
                 let mut oom = false;
@@ -289,19 +334,25 @@ impl Documents {
 
     /// Makes `doc` open here at its stored revision (which must be
     /// `revision` if that is given), and records this worker as its holder.
+    /// Opening it again takes the time limit its open took, not the
+    /// request's, so that a short request doesn't time out on every try;
+    /// returns whether it was opened again.
     async fn ready(
         &self,
         doc: &mut Option<Open>,
         id: &str,
         revision: Option<u64>,
-        budget: Budget,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let row = self.row(id, revision).await?;
-        let current = match doc.as_ref() {
-            Some(open) => open.revision == row.revision && self.is_current(open).await,
-            None => false,
+        let why = match doc.as_ref() {
+            None => Some("it isn't open here"),
+            Some(open) if open.revision != row.revision => Some("it was edited elsewhere"),
+            Some(open) if !self.is_current(open).await => Some("its Lean Beam restarted"),
+            Some(_) => None,
         };
-        if !current {
+        if let Some(why) = why {
+            tracing::info!(document = id, why, "opening a document again");
+            let budget = Budget::new(row.timeout);
             self.load(doc, id, &row.code, row.revision, budget).await?;
         }
         if !self.records.hold_document(id, &self.me, now_secs()).await? {
@@ -311,11 +362,11 @@ impl Documents {
         if let Some(open) = doc.as_mut() {
             open.used = Instant::now();
         }
-        Ok(())
+        Ok(why.is_some())
     }
 
-    /// Opens `code` as `doc` at `revision`: in the slot it is open in, or
-    /// in the least full slot.
+    /// Opens `code` as `doc` at `revision` within `budget`, which replays
+    /// take too: in the slot it is open in, or in the least full slot.
     async fn load(
         &self,
         doc: &mut Option<Open>,
@@ -326,12 +377,12 @@ impl Documents {
     ) -> Result<(), Error> {
         let split = split_header(code);
         self.pool.snapshots().ensure(&split.header, None).await?;
-        let map = CodeMap::new(&split);
+        let map = CodeMap::new(code, &split);
         let slot = match doc.as_ref() {
             Some(open) if self.is_current(open).await => open.slot,
             _ => {
                 self.unload(doc, id).await;
-                self.place().await
+                self.place(id).await
             }
         };
         let beam = self.beam(slot).await?.beam;
@@ -345,10 +396,12 @@ impl Documents {
         })?;
         match sync(&beam, ws.doc(&path), &map, budget).await {
             Ok((version, messages, sorries)) => {
+                self.answered(slot);
                 *doc = Some(Open {
                     slot,
                     beam,
                     revision,
+                    timeout: budget.secs,
                     version,
                     map,
                     messages,
@@ -384,24 +437,33 @@ impl Documents {
         self.placed.lock().unwrap().remove(id);
     }
 
-    /// The slot with the fewest documents open, after closing its least
-    /// recently used idle one if it is full.
-    async fn place(&self) -> usize {
-        let mut counts = vec![0; self.slots.len()];
-        for slot in self.placed.lock().unwrap().values() {
-            counts[*slot] += 1;
-        }
-        let slot = (0..counts.len()).min_by_key(|s| counts[*s]).unwrap_or(0);
-        if counts[slot] < self.per_slot {
+    /// The slot with the fewest documents open, which document `id` takes a
+    /// place in before it opens, so that opens at once count each other,
+    /// after closing the slot's least recently used idle one if it is full.
+    /// An open that fails gives the place back ([`load`](Self::load)).
+    async fn place(&self, id: &str) -> usize {
+        let (slot, in_slot) = {
+            let mut placed = self.placed.lock().unwrap();
+            let mut counts = vec![0; self.slots.len()];
+            for (doc, slot) in placed.iter() {
+                if doc != id {
+                    counts[*slot] += 1;
+                }
+            }
+            let slot = (0..counts.len()).min_by_key(|s| counts[*s]).unwrap_or(0);
+            placed.insert(id.to_string(), slot);
+            let in_slot: Vec<String> = (placed.iter())
+                .filter(|(doc, s)| **s == slot && *doc != id)
+                .map(|(doc, _)| doc.clone())
+                .collect();
+            (slot, in_slot)
+        };
+        if in_slot.len() < self.per_slot {
             return slot;
         }
-        let in_slot: Vec<String> = (self.placed.lock().unwrap().iter())
-            .filter(|(_, s)| **s == slot)
-            .map(|(id, _)| id.clone())
-            .collect();
         let mut oldest: Option<(Instant, String, OwnedMutexGuard<Option<Open>>)> = None;
-        for id in in_slot {
-            let Some(entry) = self.docs.lock().unwrap().get(&id).cloned() else {
+        for other in in_slot {
+            let Some(entry) = self.docs.lock().unwrap().get(&other).cloned() else {
                 continue;
             };
             let Ok(guard) = entry.try_lock_owned() else {
@@ -411,18 +473,18 @@ impl Documents {
                 continue;
             };
             if oldest.as_ref().is_none_or(|(u, ..)| used < *u) {
-                oldest = Some((used, id, guard));
+                oldest = Some((used, other, guard));
             }
         }
-        if let Some((_, id, mut guard)) = oldest {
-            tracing::debug!(
-                document = id,
+        if let Some((_, old, mut guard)) = oldest {
+            tracing::info!(
+                document = old,
                 slot,
-                "closing the least recently used document"
+                "closing the least recently used document to open another"
             );
-            self.unload(&mut guard, &id).await;
+            self.unload(&mut guard, &old).await;
             // No job waits on it: each document has at most one job here.
-            self.docs.lock().unwrap().remove(&id);
+            self.docs.lock().unwrap().remove(&old);
         }
         slot
     }
@@ -460,7 +522,7 @@ impl Documents {
         self.load(&mut doc, &j.document, &j.code, 1, budget).await?;
         let stored = self
             .records
-            .put_document(&j.document, &j.code, &self.me, now_secs())
+            .put_document(&j.document, &j.code, j.timeout_secs, &self.me, now_secs())
             .await;
         if let Err(e) = stored {
             self.unload(&mut doc, &j.document).await;
@@ -487,7 +549,14 @@ impl Documents {
             .await?;
         let stored = self
             .records
-            .edit_document(id, &j.code, j.revision, &self.me, now_secs())
+            .edit_document(
+                id,
+                &j.code,
+                j.timeout_secs,
+                j.revision,
+                &self.me,
+                now_secs(),
+            )
             .await;
         match stored {
             Ok(Some(_)) => Ok(self.describe(id, doc.as_ref().unwrap())),
@@ -506,10 +575,10 @@ impl Documents {
     }
 
     async fn goals(&self, j: DocumentGoalsJob) -> Result<api::DocumentGoals, Error> {
-        let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
         let mut doc = self.lock(id).await;
-        self.ready(&mut doc, id, j.revision, budget).await?;
+        let reopened = self.ready(&mut doc, id, j.revision).await?;
+        let budget = Budget::new(j.timeout_secs);
         let open = doc.as_ref().unwrap();
         let mut at = Vec::new();
         for p in &j.at {
@@ -524,7 +593,7 @@ impl Documents {
         let asked = async {
             let mut out = Vec::new();
             for (pos, lsp) in at {
-                let goals = match lsp {
+                let (in_proof, goals) = match lsp {
                     Some(lsp) => {
                         let doc = self.slots[open.slot].workspace.doc(&file);
                         let asked = open
@@ -532,33 +601,47 @@ impl Documents {
                             .goals(doc, open.version, lsp, mode, budget.left())
                             .await;
                         match asked {
-                            Ok(goals) => goals.iter().map(pisa_beam::goal::render).collect(),
-                            // Beam's answer where Lean has no goals.
+                            // None, after a proof's last tactic.
+                            Ok(goals) => {
+                                self.answered(open.slot);
+                                (true, goals.iter().map(pisa_beam::goal::render).collect())
+                            }
+                            // Beam's answer where Lean has no proof.
                             Err(BeamError::Tool { code, .. }) if code == "invalidParams" => {
-                                Vec::new()
+                                (false, Vec::new())
                             }
                             Err(e) => return Err(e),
                         }
                     }
-                    None => Vec::new(),
+                    None => (false, Vec::new()),
                 };
-                out.push(api::GoalsAt { pos, goals });
+                let line = open.map.line(pos.line).to_string();
+                out.push(api::GoalsAt {
+                    pos,
+                    line,
+                    in_proof,
+                    goals,
+                });
             }
             Ok::<_, BeamError>(out)
         }
         .await;
         let revision = open.revision;
         match asked {
-            Ok(at) => Ok(api::DocumentGoals { revision, at }),
+            Ok(at) => Ok(api::DocumentGoals {
+                revision,
+                at,
+                reopened,
+            }),
             Err(e) => Err(self.fail(&mut doc, id, e, budget).await),
         }
     }
 
     async fn probe(&self, j: DocumentProbeJob) -> Result<api::DocumentProbes, Error> {
-        let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
         let mut doc = self.lock(id).await;
-        self.ready(&mut doc, id, j.revision, budget).await?;
+        let reopened = self.ready(&mut doc, id, j.revision).await?;
+        let budget = Budget::new(j.timeout_secs);
         let open = doc.as_ref().unwrap();
         let lsp = match j.at {
             ProbeAt::Sorry { sorry } => match open.sorries.get(sorry) {
@@ -580,6 +663,8 @@ impl Documents {
             },
         };
         let file = file(id);
+        // Each candidate has the whole limit, so that one that loops doesn't
+        // hide whether the next works.
         let ran = async {
             let mut results = Vec::new();
             for candidate in &j.candidates {
@@ -587,21 +672,25 @@ impl Documents {
                     results.push(refused(e));
                     continue;
                 }
-                if budget.left().is_zero() {
-                    results.push(refused(Error::timeout(budget.secs)));
-                    continue;
-                }
+                let limit = Budget::new(j.timeout_secs);
                 let doc = self.slots[open.slot].workspace.doc(&file);
                 let run = open
                     .beam
-                    .run_at(doc, open.version, lsp, candidate, budget.left())
+                    .run_at(doc, open.version, lsp, candidate, limit.left())
                     .await;
                 results.push(match run {
-                    Ok(r) => open.map.probe_result(candidate, r, lsp),
-                    Err(BeamError::Timeout) => refused(Error::timeout(budget.secs)),
-                    Err(BeamError::Tool { message, .. }) => {
-                        refused(Error::new(ErrorKind::Lean, message))
+                    Ok(r) => {
+                        self.answered(open.slot);
+                        open.map.probe_result(candidate, r, lsp)
                     }
+                    Err(BeamError::Timeout) => {
+                        self.timed_out(open.slot, &open.beam).await;
+                        refused(Error::timeout(limit.secs))
+                    }
+                    Err(BeamError::Tool { message, .. }) => refused(Error::new(
+                        ErrorKind::Unavailable,
+                        format!("Lean Beam failed to run it: {message}"),
+                    )),
                     Err(e) => return Err(e),
                 });
             }
@@ -614,6 +703,7 @@ impl Documents {
                 revision,
                 pos,
                 results,
+                reopened,
             }),
             Err(e) => Err(self.fail(&mut doc, id, e, budget).await),
         }
@@ -786,6 +876,8 @@ pub(crate) fn now_secs() -> u64 {
 #[derive(Debug, Clone)]
 pub struct CodeMap {
     text: String,
+    /// The code's lines before its body, as they are in the code.
+    header: String,
     /// Lines of the code before its body.
     header_lines: u64,
     /// Lines of the file before the body.
@@ -795,11 +887,14 @@ pub struct CodeMap {
 }
 
 impl CodeMap {
-    pub fn new(split: &Split) -> CodeMap {
+    /// The map of `code`, split as `split`.
+    pub fn new(code: &str, split: &Split) -> CodeMap {
         let header = header_command(&split.header);
         let offset = header.split('\n').count() as u32;
+        let lines: Vec<&str> = code.split('\n').collect();
         CodeMap {
             text: format!("{header}\n{}", split.body),
+            header: lines[..(split.header_lines as usize).min(lines.len())].join("\n"),
             header_lines: split.header_lines,
             offset,
             lines: split.header_lines + split.body.split('\n').count() as u64,
@@ -821,6 +916,18 @@ impl CodeMap {
         self.text
             .split('\n')
             .nth(self.offset as usize + n as usize - 1)
+    }
+
+    /// Code line `line`'s text: empty past the code's end.
+    pub fn line(&self, line: u64) -> &str {
+        let Some(n) = line.checked_sub(1) else {
+            return "";
+        };
+        match line <= self.header_lines {
+            true => self.header.split('\n').nth(n as usize),
+            false => self.body_line(line),
+        }
+        .unwrap_or_default()
     }
 
     /// `at`, its column the one given or the line's first tactic.
@@ -934,7 +1041,7 @@ mod tests {
     use super::*;
 
     fn map(code: &str) -> CodeMap {
-        CodeMap::new(&split_header(code))
+        CodeMap::new(code, &split_header(code))
     }
 
     fn pos(line: u64, column: u64) -> Pos {
@@ -964,6 +1071,21 @@ mod tests {
         let past = m.to_lsp(pos(7, 0)).unwrap_err();
         assert_eq!(past.kind, ErrorKind::BadRequest);
         assert!(m.to_lsp(pos(0, 0)).is_err());
+        // Each line's text, the header's as the code has it.
+        let lines: Vec<&str> = (0..=7).map(|n| m.line(n)).collect();
+        assert_eq!(
+            lines,
+            [
+                "",
+                "import Mathlib",
+                "-- c",
+                "import Foo",
+                "",
+                "theorem t : 𝓝 = 𝓝 := by",
+                "  sorry",
+                ""
+            ]
+        );
     }
 
     #[test]

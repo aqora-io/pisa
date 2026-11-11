@@ -8,7 +8,8 @@
 //!
 //! Jobs on open documents go to workers with Beam slots ([`pick_documents`]),
 //! one at a time per document, and wait for the worker holding the document
-//! while it is live.
+//! while it is live. One that no live worker holds, as an open, waits a
+//! moment ([`PLACE`]) for a worker with fewer documents open per Beam slot.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -30,6 +31,10 @@ use crate::{prewarm, run_job};
 /// for. Long enough for it to hear of the job and claim it; short enough
 /// that a stale registry costs little.
 pub const PREFER: Duration = Duration::from_millis(500);
+
+/// How long a job on a document that no live worker holds is left to a Beam
+/// worker with fewer documents open per Beam slot, which opens it there.
+pub const PLACE: Duration = Duration::from_secs(2);
 
 /// How many of the oldest open jobs a worker picks from.
 const CANDIDATES: usize = 64;
@@ -94,23 +99,34 @@ pub fn pick(
 /// Picks up to `free` of the jobs on documents `candidates` for worker `me` to
 /// claim: one per document, none on a document a job of `running` here
 /// works on, and none on a document that another live worker serving
-/// documents holds, which is the only one to run its jobs.
+/// documents holds, which is the only one to run its jobs. A job on a
+/// document no live worker holds is left for [`PLACE`] to a worker with
+/// fewer documents open per Beam slot than this one, as the registry has
+/// them.
 pub fn pick_documents(
     me: &str,
     free: usize,
     candidates: &[Candidate],
     peers: &[Peer],
     running: &HashSet<String>,
-) -> Vec<i64> {
-    let serving: HashSet<&str> = peers
+    now: i64,
+) -> Picked {
+    let serving: Vec<&Peer> = peers
         .iter()
         .filter(|p| p.name != me && !p.draining && p.beam_slots > 0)
-        .map(|p| p.name.as_str())
         .collect();
+    // Load as documents per Beam slot, compared without dividing.
+    let (open, slots) = peers
+        .iter()
+        .find(|p| p.name == me)
+        .map_or((0, 1), |p| (p.documents_open, p.beam_slots.max(1)));
+    let lighter = serving.iter().any(|p| {
+        u64::from(p.documents_open) * u64::from(slots) < u64::from(open) * u64::from(p.beam_slots)
+    });
     let mut seen = HashSet::new();
-    let mut ids = Vec::new();
+    let mut picked = Picked::default();
     for c in candidates {
-        if ids.len() >= free {
+        if picked.ids.len() >= free {
             break;
         }
         let Some(document) = c.document.as_deref() else {
@@ -119,12 +135,20 @@ pub fn pick_documents(
         if running.contains(document) || !seen.insert(document) {
             continue;
         }
-        if c.affinity.as_deref().is_some_and(|h| serving.contains(h)) {
+        if c.affinity
+            .as_deref()
+            .is_some_and(|h| serving.iter().any(|p| p.name == h))
+        {
             continue;
         }
-        ids.push(c.id);
+        let released = c.enqueued_micros + PLACE.as_micros() as i64;
+        if lighter && now < released {
+            picked.release_at = Some(picked.release_at.map_or(released, |r| r.min(released)));
+            continue;
+        }
+        picked.ids.push(c.id);
     }
-    ids
+    picked
 }
 
 fn now_micros() -> i64 {
@@ -162,6 +186,8 @@ struct Shared {
     warm: watch::Receiver<BTreeMap<usize, String>>,
     /// The warm header keys last written to the registry.
     published: Mutex<Vec<String>>,
+    /// The count of open documents last written to the registry.
+    published_open: Mutex<Option<u32>>,
 }
 
 impl Shared {
@@ -182,6 +208,23 @@ impl Shared {
         match self.queue.set_warm(&self.me, &keys).await {
             Ok(()) => *published = keys,
             Err(e) => tracing::warn!("publishing warm headers failed: {e}"),
+        }
+    }
+
+    /// Writes the documents open here to the registry if their count
+    /// changed, for [`pick_documents`] elsewhere.
+    async fn publish_open(&self) {
+        let Some(documents) = &self.documents else {
+            return;
+        };
+        let mut published = self.published_open.lock().await;
+        let open = documents.open_count() as u32;
+        if *published == Some(open) {
+            return;
+        }
+        match self.queue.set_documents_open(&self.me, open).await {
+            Ok(()) => *published = Some(open),
+            Err(e) => tracing::warn!("publishing the documents open failed: {e}"),
         }
     }
 
@@ -214,9 +257,12 @@ impl Shared {
                 }
             }
         };
-        // A header the job warmed is published first, so the client's next
-        // request can find this worker.
+        // A header the job warmed, or a document it opened, is published
+        // first, so that the client's next request can find this worker.
         self.publish_warm().await;
+        if document.is_some() {
+            self.publish_open().await;
+        }
         let result = serde_json::to_value(&result).unwrap_or_else(
             |e| serde_json::json!({"kind": "failed", "error": format!("encoding the result: {e}")}),
         );
@@ -269,6 +315,7 @@ impl Claims {
             finished: Notify::new(),
             warm: self.warm,
             published: Mutex::new(Vec::new()),
+            published_open: Mutex::new(None),
         });
         shared.serve(drain, drain_timeout).await
     }
@@ -322,6 +369,7 @@ impl Shared {
                         Ok(()) = warm.changed() => {}
                     }
                     shared.publish_warm().await;
+                    shared.publish_open().await;
                 }
             })
         });
@@ -404,16 +452,23 @@ impl Shared {
         }
         let peers = self.queue.registry(&self.version, LIVE).await?;
         let warm: HashSet<String> = self.warm_keys().into_iter().collect();
-        let picked = pick(&self.me, free, &warm, &candidates, &peers, now_micros());
+        let now = now_micros();
+        let picked = pick(&self.me, free, &warm, &candidates, &peers, now);
         let running = self.on_documents.lock().unwrap().clone();
-        let mut ids = picked.ids.clone();
-        ids.extend(pick_documents(
+        let placed = pick_documents(
             &self.me,
             free_documents,
             &on_documents,
             &peers,
             &running,
-        ));
+            now,
+        );
+        let mut ids = picked.ids.clone();
+        ids.extend(&placed.ids);
+        let release_at = match (picked.release_at, placed.release_at) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let claimed = self.queue.claim(&self.me, &ids, self.lease).await?;
         let lost = claimed.len() < ids.len();
         for c in claimed {
@@ -430,9 +485,7 @@ impl Shared {
         Ok(if lost {
             Round::Contended
         } else {
-            Round::Settled {
-                release_at: picked.release_at,
-            }
+            Round::Settled { release_at }
         })
     }
 }
@@ -491,6 +544,7 @@ mod tests {
             warm: warm.iter().map(|k| k.to_string()).collect(),
             draining: false,
             beam_slots: 0,
+            documents_open: 0,
         }
     }
 
@@ -555,33 +609,97 @@ mod tests {
         let none = HashSet::new();
         let jobs = [on(1, "d", Some("w")), on(2, "e", None)];
         let peers = [beam("w")];
-        assert_eq!(pick_documents("me", 4, &jobs, &peers, &none), [2]);
-        assert_eq!(pick_documents("w", 4, &jobs, &peers, &none), [1, 2]);
+        assert_eq!(pick_documents("me", 4, &jobs, &peers, &none, NOW).ids, [2]);
+        assert_eq!(
+            pick_documents("w", 4, &jobs, &peers, &none, NOW).ids,
+            [1, 2]
+        );
         // However long it has waited: only the holder has the document open.
         let old = [Candidate {
             enqueued_micros: NOW - 60_000_000,
             ..on(1, "d", Some("w"))
         }];
-        assert!(pick_documents("me", 4, &old, &peers, &none).is_empty());
+        assert!(
+            pick_documents("me", 4, &old, &peers, &none, NOW)
+                .ids
+                .is_empty()
+        );
 
         // A holder that is gone, draining or without Beam is no home.
-        assert_eq!(pick_documents("me", 4, &jobs, &[], &none), [1, 2]);
+        assert_eq!(pick_documents("me", 4, &jobs, &[], &none, NOW).ids, [1, 2]);
         let mut draining = beam("w");
         draining.draining = true;
-        assert_eq!(pick_documents("me", 4, &jobs, &[draining], &none), [1, 2]);
+        assert_eq!(
+            pick_documents("me", 4, &jobs, &[draining], &none, NOW).ids,
+            [1, 2]
+        );
         let no_beam = [peer("w", 1, 0, &[])];
-        assert_eq!(pick_documents("me", 4, &jobs, &no_beam, &none), [1, 2]);
+        assert_eq!(
+            pick_documents("me", 4, &jobs, &no_beam, &none, NOW).ids,
+            [1, 2]
+        );
     }
 
     #[test]
     fn one_job_per_document_runs_at_a_time() {
         let jobs = [on(1, "d", None), on(2, "d", None), on(3, "e", None)];
         let none = HashSet::new();
-        assert_eq!(pick_documents("me", 4, &jobs, &[], &none), [1, 3]);
+        assert_eq!(pick_documents("me", 4, &jobs, &[], &none, NOW).ids, [1, 3]);
         let running = keys(&["d"]);
-        assert_eq!(pick_documents("me", 4, &jobs, &[], &running), [3]);
-        assert_eq!(pick_documents("me", 1, &jobs, &[], &none), [1]);
-        assert!(pick_documents("me", 0, &jobs, &[], &none).is_empty());
+        assert_eq!(pick_documents("me", 4, &jobs, &[], &running, NOW).ids, [3]);
+        assert_eq!(pick_documents("me", 1, &jobs, &[], &none, NOW).ids, [1]);
+        assert!(
+            pick_documents("me", 0, &jobs, &[], &none, NOW)
+                .ids
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unheld_document_waits_a_moment_for_a_worker_with_fewer_open() {
+        let none = HashSet::new();
+        let with = |name: &str, beam_slots, documents_open| Peer {
+            beam_slots,
+            documents_open,
+            ..beam(name)
+        };
+        let jobs = [on(1, "d", None), on(2, "e", Some("gone"))];
+        // `me` has 2 open on 1 slot; `w` has 1 on 1.
+        let peers = [with("me", 1, 2), with("w", 1, 1)];
+        let picked = pick_documents("me", 4, &jobs, &peers, &none, NOW);
+        assert!(picked.ids.is_empty());
+        assert_eq!(picked.release_at, Some(NOW + PLACE.as_micros() as i64));
+        // `w` takes them, as does `me` once they have waited.
+        assert_eq!(
+            pick_documents("w", 4, &jobs, &peers, &none, NOW).ids,
+            [1, 2]
+        );
+        let later = NOW + PLACE.as_micros() as i64;
+        assert_eq!(
+            pick_documents("me", 4, &jobs, &peers, &none, later).ids,
+            [1, 2]
+        );
+        // Per Beam slot: 2 open on 2 slots is lighter than 2 on 1, and as
+        // light as 1 on 1, which doesn't wait.
+        let peers = [with("me", 1, 2), with("w", 2, 2)];
+        assert!(
+            pick_documents("me", 4, &jobs, &peers, &none, NOW)
+                .ids
+                .is_empty()
+        );
+        let peers = [with("me", 1, 1), with("w", 2, 2)];
+        assert_eq!(
+            pick_documents("me", 4, &jobs, &peers, &none, NOW).ids,
+            [1, 2]
+        );
+        // A draining worker is no home.
+        let mut draining = with("w", 1, 0);
+        draining.draining = true;
+        let peers = [with("me", 1, 2), draining];
+        assert_eq!(
+            pick_documents("me", 4, &jobs, &peers, &none, NOW).ids,
+            [1, 2]
+        );
     }
 
     #[test]

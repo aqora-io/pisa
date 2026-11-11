@@ -122,6 +122,7 @@ diesel::table! {
         revision -> BigInt,
         holder -> Nullable<Text>,
         updated -> BigInt,
+        timeout -> BigInt,
     }
 }
 
@@ -160,6 +161,7 @@ diesel::table! {
         draining -> Bool,
         seen_micros -> BigInt,
         beam_slots -> Integer,
+        documents_open -> Integer,
     }
 }
 

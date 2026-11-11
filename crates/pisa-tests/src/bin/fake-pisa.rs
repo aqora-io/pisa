@@ -27,7 +27,7 @@ use std::io::Write;
 
 use pisa_tests::{
     as_reported, declarations, declares, exports, find_module, imported_code, imports, is_module,
-    needs, print_message,
+    needs, print_message, unknown_identifier,
 };
 use serde_json::json;
 
@@ -118,7 +118,8 @@ fn build(olean: &str, file: &str) {
     for (n, name) in needs(&code) {
         if !declares(&imported, &code, name) {
             failed = true;
-            print_message(n, "error", &format!("Unknown identifier `{name}`"));
+            let line = code.lines().nth(n - 1).unwrap_or_default();
+            print_message(n, "error", &unknown_identifier(line, name));
         }
     }
     if failed {

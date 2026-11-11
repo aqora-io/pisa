@@ -88,8 +88,10 @@ pub(crate) fn started(done: JobResult) -> Result<Session, ApiError> {
     summary = "Apply a tactic to a state",
     description = "Returns the new state. Earlier states stay valid, so a session is a tree, and \
         the same tactic on the same state gives the same state. A tactic that fails is a 422 \
-        `lean`, with Lean's errors in its message. A worker that doesn't hold the session's \
-        document replays the steps from the `sorry`, in milliseconds each.",
+        `lean`, with Lean's errors in its message. When Lean Beam itself fails, the state is \
+        replayed and the tactic run once more, and a second failure is a 503 `unavailable`. A \
+        worker that doesn't hold the session's document replays the steps from the `sorry`, in \
+        milliseconds each.",
     params(("id" = String, Path, description = "A state's id, from a session or an earlier tactic"), PreferAsync),
     request_body = ApplyTacticRequest,
     responses((status = 200, description = "The new state", body = ApplyTacticResponse), Accepted, ApiErrors),

@@ -12,7 +12,7 @@ use pisa_protocol::wire::{
     DocumentEditJob, DocumentGoalsJob, DocumentJob, DocumentOpenJob, DocumentProbeJob, Job,
     JobResult,
 };
-use pisa_worker::queue::{NewJob, Poll};
+use pisa_worker::queue::{LIVE, NewJob, Poll};
 use pisa_worker::records::Records;
 use reqwest::Method;
 use serde_json::json;
@@ -102,6 +102,17 @@ async fn probe(
     }
 }
 
+/// The documents each live worker has open, as the registry has them.
+async fn documents_open(c: &Cluster) -> Vec<(String, u32)> {
+    let peers = c.queue.registry(&c.version("v"), LIVE).await.unwrap();
+    let mut open: Vec<_> = peers
+        .into_iter()
+        .map(|p| (p.name, p.documents_open))
+        .collect();
+    open.sort();
+    open
+}
+
 async fn holder(c: &Cluster, document: &str) -> Option<String> {
     let records = Records::new(c.db.clone(), c.version("v"));
     records.document(document).await.unwrap()?.holder
@@ -148,6 +159,30 @@ async fn goals_and_probes_land_where_the_code_says() {
             (pos(2, 0), vec![]),
         ]
     );
+    // Each says the line it was asked at, and whether it is in a proof.
+    let lines: Vec<_> = g.at.iter().map(|a| (a.line.as_str(), a.in_proof)).collect();
+    assert_eq!(
+        lines,
+        [
+            ("theorem t : 𝓝 = 𝓝 := by", true),
+            ("  sorry", true),
+            ("import Foo", false),
+            ("", false)
+        ]
+    );
+    // A finished proof has no goals, but is a proof.
+    let done = new_id();
+    open(
+        &c,
+        &done,
+        "import Foo\n\ntheorem u : 1 = 1 := by\n  rfl -- done\n",
+    )
+    .await;
+    let g = goals(&c, &done, None, &[(4, Some(6))]).await.unwrap();
+    assert_eq!(
+        (g.at[0].in_proof, g.at[0].goals.len(), g.at[0].line.as_str()),
+        (true, 0, "  rfl -- done")
+    );
     let past = goals(&c, &id, None, &[(9, None)]).await.unwrap_err();
     assert_eq!(past.kind, ErrorKind::BadRequest);
 
@@ -155,7 +190,7 @@ async fn goals_and_probes_land_where_the_code_says() {
         &c,
         &id,
         ProbeAt::Sorry { sorry: 0 },
-        &["rfl", "omega", "#eval 1", "rfl -- sorry"],
+        &["rfl", "omega", "#eval 1", "rfl -- sorry", "FAIL"],
     )
     .await;
     assert_eq!(p.pos, pos(4, 2));
@@ -165,6 +200,8 @@ async fn goals_and_probes_land_where_the_code_says() {
     assert_eq!(r[1].messages[0].pos, pos(4, 2));
     assert_eq!(r[2].error.as_ref().unwrap().kind, ErrorKind::Policy);
     assert!(r[3].ok && !r[3].closed, "a sorry closes nothing");
+    // Beam's own failure, which isn't Lean's answer.
+    assert_eq!(r[4].error.as_ref().unwrap().kind, ErrorKind::Unavailable);
     let at_line = probe(
         &c,
         &id,
@@ -176,6 +213,63 @@ async fn goals_and_probes_land_where_the_code_says() {
     )
     .await;
     assert_eq!(at_line.pos, pos(4, 2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_probe_candidate_has_its_own_time_limit() {
+    let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await;
+    let id = new_id();
+    open(&c, &id, CODE).await;
+    let job = Job::DocumentProbe(DocumentProbeJob {
+        document: id.clone(),
+        revision: None,
+        at: ProbeAt::Sorry { sorry: 0 },
+        candidates: vec!["SLEEP 3000".into(), "rfl".into()],
+        timeout_secs: 1,
+    });
+    let JobResult::DocumentProbes(Ok(p)) = run(&c, &id, job).await else {
+        panic!("not probed");
+    };
+    let r = &p.results;
+    assert_eq!(
+        r[0].error.as_ref().map(|e| e.kind),
+        Some(ErrorKind::Timeout)
+    );
+    // The first used up its second; the next still ran.
+    assert!(r[1].ok && r[1].closed, "{:?}", r[1]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn three_timeouts_in_a_row_restart_lean_beam() {
+    let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await;
+    let id = new_id();
+    open(&c, &id, CODE).await;
+    let probe = |candidates: Vec<String>| {
+        Job::DocumentProbe(DocumentProbeJob {
+            document: id.clone(),
+            revision: None,
+            at: ProbeAt::Sorry { sorry: 0 },
+            candidates,
+            timeout_secs: 1,
+        })
+    };
+    // Two, then an answer: the count starts again.
+    let slow = || "SLEEP 3000".to_string();
+    run(&c, &id, probe(vec![slow(), slow(), "rfl".into()])).await;
+    let g = goals(&c, &id, None, &[(4, None)]).await.unwrap();
+    assert!(!g.reopened);
+    // Three in a row: what timed out may still run, so Beam restarts, and
+    // the document opens again in the new one.
+    run(&c, &id, probe(vec![slow(), slow(), slow()])).await;
+    let g = goals(&c, &id, None, &[(4, None)]).await.unwrap();
+    assert!(g.reopened);
+    assert_eq!(g.at[0].goals, ["⊢ sorry"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -265,6 +359,45 @@ async fn a_restarted_holder_reopens_its_documents() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_takes_the_time_its_open_took_and_says_so() {
+    let mut c = Cluster::start_with(common::router_config(), &[("a", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await;
+    let id = new_id();
+    // Each sync of it takes a second and a half; its open had ten.
+    let code = CODE.replace("\n\n", "\n-- SLOW_SYNC 1500\n");
+    open(&c, &id, &code).await;
+    let quick = |line| {
+        Job::DocumentGoals(DocumentGoalsJob {
+            document: id.clone(),
+            revision: None,
+            at: vec![LinePos { line, column: None }],
+            mode: GoalsMode::Before,
+            timeout_secs: 1,
+        })
+    };
+    let JobResult::DocumentGoals(Ok(g)) = run(&c, &id, quick(4)).await else {
+        panic!("no goals")
+    };
+    assert!(!g.reopened);
+
+    c.kill_worker(0).await;
+    c.add_worker(beam_worker_config("a", "v", 1));
+    c.wait_for_workers(1).await;
+    // The reopen takes longer than the request's second, within the open's.
+    let JobResult::DocumentGoals(Ok(g)) = run(&c, &id, quick(4)).await else {
+        panic!("the reopen took the request's time")
+    };
+    assert!(g.reopened);
+    assert_eq!(g.at[0].goals, ["⊢ sorry"]);
+    let JobResult::DocumentGoals(Ok(g)) = run(&c, &id, quick(4)).await else {
+        panic!("no goals")
+    };
+    assert!(!g.reopened);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_holder_that_shuts_down_hands_its_documents_over() {
     let mut c = Cluster::start(&[]).await;
     let drain = c.add_drainable_worker(beam_worker_config("a", "v", 1));
@@ -296,6 +429,51 @@ async fn a_worker_without_beam_takes_no_job_on_a_document() {
         }
     ));
     assert_eq!(c.queue.give_up(job).await.unwrap(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opens_go_where_fewest_documents_are_open() {
+    let mut c = Cluster::start_with(common::router_config(), &[("a", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await;
+    c.add_worker(beam_worker_config("b", "v", 1));
+    c.wait_for_workers(2).await;
+    let ids: Vec<String> = (0..4).map(|_| new_id()).collect();
+    let mut holders = Vec::new();
+    for id in &ids {
+        open(&c, id, CODE).await;
+        holders.push(holder(&c, id).await.unwrap());
+    }
+    // Each open after the first goes to the worker with fewer open, or to
+    // either when they have as many.
+    assert_ne!(holders[0], holders[1], "{holders:?}");
+    assert_ne!(holders[2], holders[3], "{holders:?}");
+    assert_eq!(
+        documents_open(&c).await,
+        [("a".to_string(), 2), ("b".to_string(), 2)]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opens_at_once_keep_to_the_slots_cap() {
+    let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
+        pisa_worker::WorkerConfig {
+            beam_documents: 2,
+            ..beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+        }
+    })
+    .await;
+    open(&c, &new_id(), CODE).await;
+    // Two more at once, each slow to open: the second counts the first's
+    // place, and closes the idle one.
+    let slow = CODE.replace("\n\n", "\n-- SLOW_SYNC 500\n");
+    let opens = (0..2).map(|_| {
+        let (c, slow, id) = (&c, &slow, new_id());
+        async move { open(c, &id, slow).await }
+    });
+    futures::future::join_all(opens).await;
+    assert_eq!(documents_open(&c).await, [("w0".to_string(), 2)]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

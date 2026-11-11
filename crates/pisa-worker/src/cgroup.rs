@@ -4,7 +4,8 @@
 //! among them, into `<root>/agent` (cgroup v2 forbids processes in a cgroup
 //! that has controllers enabled for its children), enables the memory and
 //! pids controllers, and puts each REPL in `<root>/repl-<slot>`. A child joins its cgroup between fork and exec, so
-//! everything it starts is limited too.
+//! everything it starts is limited too. A Lean Beam slot's processes are
+//! killed together when they run out of memory (`memory.oom.group`).
 
 use std::ffi::CString;
 use std::io;
@@ -68,6 +69,12 @@ impl Cgroups {
         std::fs::write(dir.join("memory.max"), limit(memory_max))?;
         // Without swap, memory.max is a hard ceiling. Absent when swap accounting is off.
         let _ = std::fs::write(dir.join("memory.swap.max"), "0");
+        // Lean Beam runs a server and workers: running out of memory stops
+        // them all, so the slot starts afresh and says why, rather than going
+        // on without the worker the kernel chose.
+        if matches!(self.beam, Some((first, _)) if slot >= first) {
+            std::fs::write(dir.join("memory.oom.group"), "1")?;
+        }
         std::fs::write(dir.join("pids.max"), limit(self.pids_max))?;
         let procs = CString::new(dir.join("cgroup.procs").as_os_str().as_bytes())?;
         // SAFETY: only async-signal-safe calls (open, write, close) between fork and exec.

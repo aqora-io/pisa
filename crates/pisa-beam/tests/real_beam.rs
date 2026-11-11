@@ -207,3 +207,33 @@ async fn sorries_and_goals_below_a_header() {
     let probe = beam.run_at(doc, sync.version, at, "rfl", T).await.unwrap();
     assert!(probe.success, "{:?}", probe.messages);
 }
+
+#[tokio::test]
+#[ignore = "needs elan and the Pisa library's toolchain"]
+async fn goals_tell_a_finished_proof_from_no_proof() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
+    let text = "def f (n : Nat) : Nat := n + 1\n\n\
+                theorem a (n : Nat) : f n = n + 1 := by\n  unfold f\n  rfl\n";
+    ws.write("Docs/G.lean", text).unwrap();
+    let doc = ws.doc("Docs/G.lean");
+    let beam = beam(&ws, None).await;
+    let version = beam.sync(doc, true, T).await.unwrap().version;
+    let at = |line, character| LspPos { line, character };
+    let goals = |pos, mode| beam.goals(doc, version, pos, mode, T);
+    // Outside a proof Beam answers an error, which pisa reads as no proof.
+    for pos in [at(0, 0), at(1, 0), at(2, 0)] {
+        match goals(pos, Mode::Before).await {
+            Err(pisa_beam::BeamError::Tool { code, message, .. }) => {
+                assert_eq!(code, "invalidParams");
+                assert!(message.contains("no proof goals"), "{message}");
+            }
+            other => panic!("{pos:?}: {other:?}"),
+        }
+    }
+    // Mid-proof there are goals; after the last tactic there are none, but
+    // no error either.
+    let mid = goals(at(4, 2), Mode::Before).await.unwrap();
+    assert_eq!(pisa_beam::goal::render(&mid[0]), "n : Nat\n⊢ n + 1 = n + 1");
+    assert!(goals(at(4, 2), Mode::After).await.unwrap().is_empty());
+}

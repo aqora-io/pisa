@@ -125,12 +125,24 @@ async fn an_unknown_name_hints_that_auto_implicit_is_off() {
         });
         hinted.map(|m| m["pos"].clone()).collect()
     };
-    let r = check(&c, "import Foo\nneeds d").await;
+    // Where Lean notes that the option would have bound the name.
+    let r = check(&c, "import Foo\nneeds d binder").await;
     assert_eq!(hints(&r), [json!({"line": 2, "column": 0})], "{r}");
-    let r = check(&c, "import Foo\nset_option autoImplicit false\nneeds d").await;
+    let r = check(
+        &c,
+        "import Foo\nset_option autoImplicit false\nneeds d binder",
+    )
+    .await;
+    assert_eq!(hints(&r), Vec::<Value>::new(), "{r}");
+    // Not for a name it wouldn't bind, as a misspelt lemma.
+    let r = check(&c, "import Foo\nneeds foo_bar").await;
+    assert_eq!(r["ok"], false, "{r}");
     assert_eq!(hints(&r), Vec::<Value>::new(), "{r}");
     let (_, r) = c
-        .post("/snapshots", json!({"code": "import Foo\n\nneeds d"}))
+        .post(
+            "/snapshots",
+            json!({"code": "import Foo\n\nneeds d binder"}),
+        )
         .await;
     assert_eq!(hints(&r["check"]), [json!({"line": 3, "column": 0})], "{r}");
 }

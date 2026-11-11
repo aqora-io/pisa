@@ -11,9 +11,12 @@ use pisa_protocol::verify::{DescribedDeclaration, ProofStatus, ReportedDeclarati
 
 use crate::catalog::SnapshotDecl;
 
-/// Commands and attributes that run or install metaprograms.
+/// Commands and attributes that run or install metaprograms. `#guard`
+/// runs its term as `#eval` does.
 const FORBIDDEN: &[&str] = &[
     "#eval",
+    "#eval!",
+    "#guard",
     "run_cmd",
     "run_elab",
     "run_meta",
@@ -208,9 +211,23 @@ impl Policy {
                      allowed only in snapshots, which re-check what it expands into through the \
                      kernel: put it in one with POST /snapshots and import that"
                         .to_string()
-                } else {
+                } else if t.after_dot {
+                    // `(c).run_cmd …` is a field where it parses, but Lean
+                    // runs it as the command when it recovers from an error
+                    // before it, which the scan can't see.
+                    format!(
+                        "`{text}` is refused even right after a `.`: it is a field there when the \
+                         code before it parses, but Lean runs it as the command when it recovers \
+                         from an error before it. Write the field as `«{text}»`"
+                    )
+                } else if text.starts_with('#') {
                     format!(
                         "`{text}` runs a metaprogram or unsafe code, which is refused before the code runs"
+                    )
+                } else {
+                    format!(
+                        "`{text}` runs a metaprogram or unsafe code, which is refused before the code \
+                         runs. If it is a name, write it as `«{text}»`"
                     )
                 };
                 add(format!("forbidden: {text}"), t, hint);
@@ -409,12 +426,14 @@ pub fn parse_declarations(json: serde_json::Value) -> Option<Vec<ReportedDeclara
     Some(decls)
 }
 
-/// A token of Lean source: its text, where it starts (in characters), and
-/// whether it is a name in `«»`, which no command or keyword can be.
+/// A token of Lean source: its text, where it starts (in characters),
+/// whether it is a name in `«»`, which no command or keyword can be, and
+/// whether a `.` comes right before it.
 struct Token {
     text: String,
     at: usize,
     quoted: bool,
+    after_dot: bool,
 }
 
 /// Splits Lean source into identifier-like tokens, with the brackets,
@@ -450,12 +469,13 @@ fn tokens(src: &str) -> Vec<Token> {
             }
             self.text.push(c);
         }
-        fn flush(&mut self, out: &mut Vec<Token>) {
+        fn flush(&mut self, out: &mut Vec<Token>, chars: &[char]) {
             if !self.text.is_empty() {
                 out.push(Token {
                     text: std::mem::take(&mut self.text),
                     at: self.at,
                     quoted: self.quoted,
+                    after_dot: self.at > 0 && chars[self.at - 1] == '.',
                 });
             }
             self.quoted = false;
@@ -495,12 +515,12 @@ fn tokens(src: &str) -> Vec<Token> {
             is_id_rest(c) || c == '.' && next.is_some_and(|n| is_id_first(n) || n == '«')
         };
         if c == '-' && next == Some('-') {
-            cur.flush(&mut out);
+            cur.flush(&mut out, &chars);
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
         } else if c == '/' && next == Some('-') {
-            cur.flush(&mut out);
+            cur.flush(&mut out, &chars);
             let mut nested = 0;
             while i < chars.len() {
                 match (chars[i], chars.get(i + 1).copied()) {
@@ -521,7 +541,7 @@ fn tokens(src: &str) -> Vec<Token> {
         } else if c == '"' {
             // `s!"…"` and the like interpolate `{…}`.
             let interpolated = cur.text.ends_with('!');
-            cur.flush(&mut out);
+            cur.flush(&mut out, &chars);
             i += 1;
             if interpolated {
                 inside.push(Inside::Interpolated);
@@ -543,7 +563,7 @@ fn tokens(src: &str) -> Vec<Token> {
         } else if c == '«' {
             // Only a dot carries a name on into `«»`.
             if !cur.text.ends_with('.') {
-                cur.flush(&mut out);
+                cur.flush(&mut out, &chars);
             }
             if cur.text.is_empty() {
                 cur.at = i;
@@ -557,10 +577,10 @@ fn tokens(src: &str) -> Vec<Token> {
             i += 1;
             // The name goes on only through a dot.
             if chars.get(i) != Some(&'.') {
-                cur.flush(&mut out);
+                cur.flush(&mut out, &chars);
             }
         } else if c == '#' {
-            cur.flush(&mut out);
+            cur.flush(&mut out, &chars);
             cur.push(c, i);
             i += 1;
         } else if name_goes_on {
@@ -572,10 +592,11 @@ fn tokens(src: &str) -> Vec<Token> {
                 text: chars[i..end].iter().collect(),
                 at: i,
                 quoted: false,
+                after_dot: false,
             });
             i = end;
         } else {
-            cur.flush(&mut out);
+            cur.flush(&mut out, &chars);
             match c {
                 '{' => *braces += 1,
                 '}' if *braces == 0 && depth > 1 => {
@@ -586,13 +607,14 @@ fn tokens(src: &str) -> Vec<Token> {
                     text: c.to_string(),
                     at: i,
                     quoted: false,
+                    after_dot: false,
                 }),
                 _ => {}
             }
             i += 1;
         }
     }
-    cur.flush(&mut out);
+    cur.flush(&mut out, &chars);
     out
 }
 
@@ -601,12 +623,13 @@ fn is_id_first(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_' || is_letter_like(c)
 }
 
-/// Whether Lean goes on with a name at `c` (`isIdRest`).
+/// Whether Lean goes on with a name at `c` (`isIdRest`): subscript digits
+/// and letters (`isSubScriptAlnum`), but not `₊₋₌₍₎`.
 fn is_id_rest(c: char) -> bool {
     c.is_ascii_alphanumeric()
         || matches!(c, '_' | '\'' | '!' | '?')
         || is_letter_like(c)
-        || matches!(c as u32, 0x2080..=0x209c | 0x1d62..=0x1d6a | 0x2c7c)
+        || matches!(c as u32, 0x2080..=0x2089 | 0x2090..=0x209c | 0x1d62..=0x1d6a | 0x2c7c)
 }
 
 /// Lean's `isLetterLike`: Greek but λ, Π and Σ, Coptic, letter-like
@@ -621,9 +644,9 @@ fn is_letter_like(c: char) -> bool {
 
 /// The end of the number at `i`, where Lean starts its next token: digits
 /// with `_` between them, in base 2, 8 or 16 after `0b`, `0o` or `0x`, else
-/// decimal with an optional `.` and fraction and an exponent. Past an `e`
-/// with no digits Lean errs; what follows may still run, so the number ends
-/// after it.
+/// decimal with an optional `.` and fraction and an exponent. At an `e`
+/// with no digits after it Lean errs, and goes on from the `e`, which runs
+/// `elab` in `2elab`: the number ends before it.
 fn number_end(chars: &[char], i: usize) -> usize {
     let at = |k: usize| chars.get(k).copied();
     let digits = |mut k: usize, digit: fn(&char) -> bool| {
@@ -648,11 +671,13 @@ fn number_end(chars: &[char], i: usize) -> usize {
         k = digits(k + 1, char::is_ascii_digit);
     }
     if matches!(at(k), Some('e' | 'E')) {
-        k += 1;
-        if matches!(at(k), Some('+' | '-')) {
-            k += 1;
+        let mut e = k + 1;
+        if matches!(at(e), Some('+' | '-')) {
+            e += 1;
         }
-        k = digits(k, char::is_ascii_digit);
+        if at(e).is_some_and(|c| c.is_ascii_digit()) {
+            k = digits(e, char::is_ascii_digit);
+        }
     }
     k
 }
@@ -745,19 +770,19 @@ fn attributes(tokens: &[Token]) -> impl Iterator<Item = &Token> {
     names.into_iter()
 }
 
-/// A hint at the first error in `messages` that `autoImplicit` being off may
-/// cause, unless `body` sets the option itself: an unknown identifier or
-/// universe level, which code written for a library that turns the option on
-/// (Physlib does) meets here, or Lean's own note on the option.
+/// A hint at the first error in `messages` that `autoImplicit` being off
+/// causes, unless `body` sets the option itself, which code written for a
+/// library that turns the option on (Physlib does) meets here: an unknown
+/// identifier that Lean notes the option would have bound, or an unknown
+/// universe level. An unknown name elsewhere, such as a misspelt lemma in a
+/// proof, gets none, as the option wouldn't bind it.
 pub fn auto_implicit_hint(body: &str, messages: &[Message]) -> Option<Message> {
     if tokens(body).iter().any(|t| t.text == "autoImplicit") {
         return None;
     }
     let cause = messages.iter().find(|m| {
         m.severity == Severity::Error
-            && (m.data.starts_with("Unknown identifier")
-                || m.data.starts_with("unknown universe level")
-                || m.data.contains("`autoImplicit`"))
+            && (m.data.starts_with("unknown universe level") || m.data.contains("`autoImplicit`"))
     })?;
     let name = cause
         .data
@@ -951,7 +976,11 @@ mod tests {
             data: data.into(),
         };
         let code = "theorem t (x : Fin d) : x = x := rfl";
-        let hint = auto_implicit_hint(code, &[error("Unknown identifier `d`")]).unwrap();
+        // Lean's message where a binder would bind `d`.
+        let unbound = "Unknown identifier `d`\n\nNote: It is not possible to treat `d` as an \
+                       implicitly bound variable here because the `autoImplicit` option is set \
+                       to `false`.";
+        let hint = auto_implicit_hint(code, &[error(unbound)]).unwrap();
         assert_eq!(
             (hint.severity, hint.pos.line, hint.pos.column),
             (Severity::Info, 2, 12)
@@ -966,10 +995,14 @@ mod tests {
         let universe = auto_implicit_hint(code, &[error("unknown universe level `u`")]).unwrap();
         assert!(universe.data.contains("`universe u`"), "{}", universe.data);
         assert!(!universe.data.contains("`{u}`"), "{}", universe.data);
-        // Not if the code sets the option itself, nor for other errors.
+        // Not if the code sets the option itself, nor for other errors, nor
+        // for a name the option wouldn't bind, as a misspelt lemma in a proof.
         let set = format!("set_option autoImplicit false\n{code}");
-        assert!(auto_implicit_hint(&set, &[error("Unknown identifier `d`")]).is_none());
+        assert!(auto_implicit_hint(&set, &[error(unbound)]).is_none());
         assert!(auto_implicit_hint(code, &[error("Type mismatch")]).is_none());
+        let typo = "example : True := by exact foo_bar";
+        let unknown = error("Unknown identifier `foo_bar`");
+        assert!(auto_implicit_hint(typo, &[unknown]).is_none());
     }
 
     #[test]
@@ -983,6 +1016,44 @@ mod tests {
         ] {
             assert!(p.scan(code, false).is_empty(), "{code}");
         }
+    }
+
+    #[test]
+    fn a_forbidden_word_after_a_dot_is_refused_and_says_how_to_name_it() {
+        let p = policy();
+        // Fields where the code before parses, but after a parse error Lean
+        // recovers at the word and runs the command: on 4.36.0-rc2,
+        // `example := ( : ).run_cmd Lean.logInfo "x"` logs `x`.
+        for code in [
+            "example : Nat := (c).initialize",
+            "example : Nat := c |>.initialize",
+            "example : Nat := p.1.initialize",
+            "example := ( : ).run_cmd Lean.logInfo \"x\"",
+        ] {
+            let found = p.findings(code, false);
+            assert_eq!(found.len(), 1, "{code}");
+            assert!(found[0].hint.contains("right after a `.`"), "{code}");
+            assert!(found[0].hint.contains('«'), "{}", found[0].hint);
+        }
+        // Quoted, a field passes; a name that goes on through a dot is one.
+        for code in [
+            "example : Nat := (c).«initialize»",
+            "example : Nat := c |>.«initialize»",
+            "example : Nat := p.1.«initialize»",
+            "example : Nat := c.initialize",
+        ] {
+            assert!(p.scan(code, false).is_empty(), "{code}");
+        }
+        // A forbidden word as a name says how to write it, and `#eval`,
+        // which can't be a name, doesn't.
+        let named = p.findings("def initialize : Nat := 1", false);
+        assert!(
+            named[0].hint.contains("`«initialize»`"),
+            "{}",
+            named[0].hint
+        );
+        let eval = p.findings("#eval 1", false);
+        assert!(!eval[0].hint.contains('«'), "{}", eval[0].hint);
     }
 
     #[test]
@@ -1155,6 +1226,23 @@ mod tests {
                 "forbidden: init",
             ),
             ("run_cmd«Lean».logInfo \"x\"", "forbidden: run_cmd"),
+            // Lean goes on from an exponent's `e` that has no digits, and
+            // runs `elab` (4.36.0-rc2).
+            (
+                "def n := 2elab \"x\" : term => return Lean.mkNatLit 1",
+                "forbidden: elab",
+            ),
+            (
+                "def n := 2.elab \"x\" : term => return Lean.mkNatLit 1",
+                "forbidden: elab",
+            ),
+            // `₊` ends a name, as Lean has no subscript punctuation in one.
+            (
+                "def n := x₊run_cmd Lean.logInfo \"x\"",
+                "forbidden: run_cmd",
+            ),
+            ("#eval! 1", "forbidden: #eval!"),
+            ("def f : Bool := true\n#guard f", "forbidden: #guard"),
         ] {
             assert_eq!(p.scan(code, false), [reason], "{code}");
         }
@@ -1175,6 +1263,8 @@ mod tests {
             "foo_run_cmd",
             "h.run_cmd",
             "x1run_cmd",
+            "x₁run_cmd",
+            "xᵢrun_cmd",
         ] {
             let code = format!("def {name} : Nat := 1");
             assert!(p.scan(&code, false).is_empty(), "{code}");

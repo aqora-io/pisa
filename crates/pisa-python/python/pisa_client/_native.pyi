@@ -102,6 +102,12 @@ class ApplyTacticResponse(TypedDict):
     state: State
     complete: bool
     messages: list[Message]
+    reopened: bool
+    """The session's document was opened again first, as after its worker
+    went."""
+    replayed: int
+    """The tactics replayed to reach the state, where no handle on it was
+    kept."""
 
 class Allow(TypedDict):
     """The definitions whose value a replacement may change."""
@@ -294,11 +300,18 @@ class Document(TypedDict):
 
 class GoalsAt(TypedDict):
     pos: Pos
+    line: str
+    """The text of the line asked at."""
+    in_proof: bool
+    """No goals and `in_proof` is a finished proof; no goals outside a proof
+    is no proof at all."""
     goals: list[str]
 
 class DocumentGoals(TypedDict):
     revision: int
     at: list[GoalsAt]
+    reopened: bool
+    """The document was opened again first, within its open's time limit."""
 
 class ProbeResult(TypedDict):
     ok: bool
@@ -311,6 +324,7 @@ class DocumentProbes(TypedDict):
     revision: int
     pos: Pos
     results: list[ProbeResult]
+    reopened: bool
 
 class RebuildItem(TypedDict):
     """An item without `snapshot_id` is a support item: it has no labels and

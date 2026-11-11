@@ -532,18 +532,20 @@ pub(crate) async fn registry(
             workers::warm,
             workers::draining,
             workers::beam_slots,
+            workers::documents_open,
         ))
-        .load::<(String, i32, Value, bool, i32)>(&mut *c)
+        .load::<(String, i32, Value, bool, i32, i32)>(&mut *c)
         .await?;
     Ok(rows
         .into_iter()
-        .map(|(name, slots, warm, draining, beam_slots)| Peer {
+        .map(|(name, slots, warm, draining, beam_slots, open)| Peer {
             busy: busy.get(&name).copied().unwrap_or(0) as u32,
             name,
             slots: slots as u32,
             warm: serde_json::from_value(warm).unwrap_or_default(),
             draining,
             beam_slots: beam_slots as u32,
+            documents_open: open as u32,
         })
         .collect())
 }
@@ -687,6 +689,22 @@ pub(crate) async fn set_warm(
     retry(|| async {
         diesel::update(workers::table.find((q, worker)))
             .set(workers::warm.eq(&warm))
+            .execute(&mut *conn(db).await?)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn set_documents_open(
+    db: &Handle,
+    q: &str,
+    worker: &str,
+    open: u32,
+) -> Result<(), DbError> {
+    retry(|| async {
+        diesel::update(workers::table.find((q, worker)))
+            .set(workers::documents_open.eq(open as i32))
             .execute(&mut *conn(db).await?)
             .await?;
         Ok(())

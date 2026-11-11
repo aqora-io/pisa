@@ -102,6 +102,7 @@ pub(crate) async fn put_document(
     v: &str,
     id: &str,
     code: &str,
+    timeout: u64,
     holder: &str,
     now: u64,
 ) -> Result<(), DbError> {
@@ -114,6 +115,7 @@ pub(crate) async fn put_document(
                 documents::revision.eq(1i64),
                 documents::holder.eq(holder),
                 documents::updated.eq(now as i64),
+                documents::timeout.eq(timeout as i64),
             ))
             .on_conflict((documents::version, documents::id))
             .do_update()
@@ -122,6 +124,7 @@ pub(crate) async fn put_document(
                 documents::revision.eq(1i64),
                 documents::holder.eq(holder),
                 documents::updated.eq(now as i64),
+                documents::timeout.eq(timeout as i64),
             ))
             .execute(&mut *conn(db).await?)
             .await?;
@@ -137,22 +140,30 @@ pub(crate) async fn document(
 ) -> Result<Option<DocumentRow>, DbError> {
     let row = documents::table
         .find((v, id))
-        .select((documents::code, documents::revision, documents::holder))
-        .first::<(String, i64, Option<String>)>(&mut *conn(db).await?)
+        .select((
+            documents::code,
+            documents::revision,
+            documents::holder,
+            documents::timeout,
+        ))
+        .first::<(String, i64, Option<String>, i64)>(&mut *conn(db).await?)
         .await
         .optional()?;
-    Ok(row.map(|(code, revision, holder)| DocumentRow {
+    Ok(row.map(|(code, revision, holder, timeout)| DocumentRow {
         code,
         revision: revision as u64,
         holder,
+        timeout: timeout as u64,
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn edit_document(
     db: &Handle,
     v: &str,
     id: &str,
     code: &str,
+    timeout: u64,
     revision: u64,
     holder: &str,
     now: u64,
@@ -168,6 +179,7 @@ pub(crate) async fn edit_document(
             documents::revision.eq(documents::revision + 1),
             documents::holder.eq(holder),
             documents::updated.eq(now as i64),
+            documents::timeout.eq(timeout as i64),
         ))
         .returning(documents::revision)
         .get_result::<i64>(&mut *conn(db).await?)

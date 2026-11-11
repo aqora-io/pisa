@@ -3,9 +3,11 @@
 //! strict as Beam's, and behaviour scripted by markers in a probe's `text`:
 //!
 //! - `SLEEP <ms>`: answer after a delay (requests run concurrently);
+//! - `SLOW_SYNC <ms>` in a document: its syncs answer after a delay;
 //! - `BUSY`: refuse without running, as Beam does when full;
 //! - `STALE`: a document-version mismatch;
 //! - `FAIL`: a tool error;
+//! - `FLAKY`: a tool error the first time the text comes, not after;
 //! - `CRASH`: exit with a message on stderr;
 //! - `rfl` or `trivial`: the tactic closes the goal; `fail` or `omega`: it
 //!   fails; anything else leaves the goal `<goal> after <text>`.
@@ -18,7 +20,8 @@
 //! and `sync` give it a new version when its text changed, each `sorry` is a
 //! warning and a `todo` item, and the goal at a position is the rest of that
 //! line, so tests can tell where a position landed. Where the rest is blank,
-//! there are no goals, which Beam answers with an `invalidParams` error.
+//! there is no proof, which Beam answers with an `invalidParams` error; where
+//! it is `-- done`, a finished proof, with no goals.
 //! Probe messages have no range, as Beam's don't. Otherwise the answers are
 //! fixed.
 
@@ -34,6 +37,8 @@ use serde_json::{Map, Value, json};
 static HANDLES: AtomicU64 = AtomicU64::new(0);
 /// The goal each handle holds, by its raw value; none once it is closed.
 static GOALS: LazyLock<Mutex<HashMap<String, Option<String>>>> = LazyLock::new(Mutex::default);
+/// The `FLAKY` texts that have failed once.
+static FLAKED: LazyLock<Mutex<std::collections::HashSet<String>>> = LazyLock::new(Mutex::default);
 /// Each document's text and version, by path.
 static DOCS: LazyLock<Mutex<HashMap<PathBuf, (String, u64)>>> = LazyLock::new(Mutex::default);
 
@@ -131,12 +136,7 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
         }
     }
     let text = args.get("text").and_then(Value::as_str).unwrap_or_default();
-    if let Some(ms) = text
-        .split_whitespace()
-        .skip_while(|w| *w != "SLEEP")
-        .nth(1)
-        .and_then(|ms| ms.parse().ok())
-    {
+    if let Some(ms) = delay(text, "SLEEP") {
         std::thread::sleep(Duration::from_millis(ms));
     }
     if text.contains("CRASH") {
@@ -154,7 +154,18 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
     if text.contains("FAIL") {
         return tool_err("invalidParams", "fake failure");
     }
+    if text.contains("FLAKY") && FLAKED.lock().unwrap().insert(text.to_string()) {
+        return tool_err("internalError", "fake failure, once");
+    }
     if let Some(path) = document(&args) {
+        if name == "lean_sync"
+            && let Some(ms) = delay(
+                &std::fs::read_to_string(&path).unwrap_or_default(),
+                "SLOW_SYNC",
+            )
+        {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         return document_call(name, &path, &args, text);
     }
     match name {
@@ -225,6 +236,14 @@ fn probe(name: &str, text: &str, args: &Map<String, Value>) -> Value {
 }
 
 /// The document a call names, if it exists on disk.
+/// The milliseconds after `marker` in `text`.
+fn delay(text: &str, marker: &str) -> Option<u64> {
+    text.split_whitespace()
+        .skip_while(|w| *w != marker)
+        .nth(1)
+        .and_then(|ms| ms.parse().ok())
+}
+
 fn document(args: &Map<String, Value>) -> Option<PathBuf> {
     let root = args.get("workspace")?.get("root")?.as_str()?;
     let path = Path::new(root).join(args.get("path")?.as_str()?);
@@ -295,6 +314,9 @@ fn document_call(
             let line = args["line"].as_u64().unwrap_or_default() as usize;
             let character = args["character"].as_u64().unwrap_or_default() as usize;
             let rest = rest_of_line(&doc, line, character);
+            if rest.starts_with("-- done") {
+                return tool_ok(json!({"goals": []}));
+            }
             if rest.is_empty() {
                 return tool_err(
                     "invalidParams",

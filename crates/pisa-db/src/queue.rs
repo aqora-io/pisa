@@ -125,6 +125,8 @@ pub struct Peer {
     pub draining: bool,
     /// The Lean Beam processes it runs for documents.
     pub beam_slots: u32,
+    /// The documents it has open on them.
+    pub documents_open: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -302,6 +304,11 @@ impl Queue {
 
     pub async fn set_warm(&self, worker: &str, warm: &[String]) -> Result<(), DbError> {
         dispatch!(&self.db, set_warm(&self.name, worker, warm))
+    }
+
+    /// Records that `worker` has `open` documents open on Lean Beam.
+    pub async fn set_documents_open(&self, worker: &str, open: u32) -> Result<(), DbError> {
+        dispatch!(&self.db, set_documents_open(&self.name, worker, open))
     }
 
     /// Tells the other workers that `worker` takes no more jobs.
@@ -629,7 +636,7 @@ mod tests {
             let records = Records::new(q.db().clone(), "v".into());
             let id = uuid::Uuid::new_v4().simple().to_string();
             records
-                .put_document(&id, "theorem t : True := trivial", "w1", 0)
+                .put_document(&id, "theorem t : True := trivial", 60, "w1", 0)
                 .await
                 .unwrap();
             q.enqueue(&document_job(&id)).await.unwrap();
@@ -674,6 +681,7 @@ mod tests {
             let on_doc = q.enqueue(&document_job("d")).await.unwrap();
             q.claim("w1", &[id, on_doc], LEASE).await.unwrap();
             q.set_warm("w2", &["k".into()]).await.unwrap();
+            q.set_documents_open("w1", 3).await.unwrap();
             q.set_draining("w2").await.unwrap();
             let mut peers = q.registry("v", LEASE).await.unwrap();
             peers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -687,6 +695,7 @@ mod tests {
                         warm: Vec::new(),
                         draining: false,
                         beam_slots: 1,
+                        documents_open: 3,
                     },
                     Peer {
                         name: "w2".into(),
@@ -695,6 +704,7 @@ mod tests {
                         warm: vec!["k".into()],
                         draining: true,
                         beam_slots: 0,
+                        documents_open: 0,
                     },
                 ]
             );

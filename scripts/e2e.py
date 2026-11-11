@@ -274,8 +274,14 @@ def auto_implicit():
     def names_foo(messages):
         return any(m["severity"] == "error" and "foo" in m["text"] for m in messages)
 
+    def hinted(messages):
+        return any(m["severity"] == "info" and "autoImplicit" in m["text"] for m in messages)
+
     r = check(unbound)
-    assert not r["ok"] and names_foo(r["messages"]), r
+    assert not r["ok"] and names_foo(r["messages"]) and hinted(r["messages"]), r
+    # A misspelt lemma in a proof is no name the option would bind.
+    r = check("example : True := by exact foo_bar")
+    assert not r["ok"] and not hinted(r["messages"]), r
     r = post("/snapshots", {"code": unbound, "timeout": 600})
     assert "snapshot" not in r and names_foo(r["check"]["messages"]), r
     assert check(opted_in)["ok"]
