@@ -20,7 +20,9 @@ use crate::catalog::{
     status_of, status_text, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
-use crate::schema::{changes, described, entries, leases, links, module_imports, modules};
+use crate::schema::{
+    catalogs, changes, described, entries, leases, links, module_imports, modules,
+};
 
 const ENTRY: (
     entries::id,
@@ -1216,6 +1218,32 @@ pub(crate) async fn changes(
             change: crate::catalog::Change { entry, module },
         })
         .collect())
+}
+
+pub(crate) async fn identity(db: &Handle, v: &str) -> Result<String, Error> {
+    let id = retry(|| async {
+        let mut c = conn(db).await?;
+        let made = uuid::Uuid::new_v4().simple().to_string();
+        diesel::insert_into(catalogs::table)
+            .values((
+                catalogs::version.eq(v),
+                catalogs::id.eq(&made),
+                catalogs::created_micros.eq(now_micros() as i64),
+            ))
+            .on_conflict(catalogs::version)
+            .do_nothing()
+            .execute(&mut *c)
+            .await?;
+        Ok::<_, DbError>(
+            catalogs::table
+                .find(v)
+                .select(catalogs::id)
+                .first::<String>(&mut *c)
+                .await?,
+        )
+    })
+    .await?;
+    Ok(id)
 }
 
 pub(crate) async fn take_lease(

@@ -64,6 +64,8 @@ worker:
   # bubblewrap sandbox per Lean process ("bwrap" or "none"). bwrap and cgroup
   # limits need a privileged container in this example.
   sandbox: bwrap
+  # A worker that can't set up its cgroups doesn't start; false runs Lean
+  # without per-process limits.
   cgroups: true
   # memory.max per Lean process (MiB); also sizes the pod's memory limit.
   memoryMaxMb: 8000

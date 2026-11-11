@@ -64,6 +64,7 @@ pub struct WorkerConfig {
     pub work_dir: Option<PathBuf>,
     /// A delegated cgroup v2 directory. Each Lean process gets its own child
     /// cgroup with the limits below. Without it, only RSS polling applies.
+    /// Set, the worker doesn't start if it can't set the cgroups up.
     #[arg(long, env = "PISA_CGROUP_ROOT")]
     pub cgroup_root: Option<PathBuf>,
     /// memory.max per Lean process, in MiB (0 for no limit).

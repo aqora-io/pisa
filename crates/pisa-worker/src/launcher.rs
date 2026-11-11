@@ -233,13 +233,17 @@ impl Launcher {
                 let pids = (cfg.pids_max > 0).then_some(cfg.pids_max);
                 let beam =
                     (cfg.beam_memory_max_mb > 0).then_some(cfg.beam_memory_max_mb * 1024 * 1024);
-                match Cgroups::init(root, memory, pids) {
-                    Ok(c) => Some(c.with_beam(cfg.slots(), beam)),
-                    Err(e) => {
-                        tracing::warn!(root = %root.display(), "cgroups unavailable, running without per-process limits: {e}");
-                        None
-                    }
-                }
+                // Asked for, the limits hold or the worker doesn't start:
+                // without them, Lean would run with no memory or process
+                // limit and an out-of-memory kill would read as a crash.
+                let c = Cgroups::init(root, memory, pids).with_context(|| {
+                    format!(
+                        "setting up cgroups in {} (PISA_CGROUP_ROOT; unset it to run without \
+                         per-process limits)",
+                        root.display()
+                    )
+                })?;
+                Some(c.with_beam(cfg.slots(), beam))
             }
         };
         Ok(Launcher {

@@ -412,6 +412,7 @@ impl Snapshots {
         search: Option<&SnapshotDecls>,
         entry: NewEntry,
     ) -> Result<(ModuleMeta, (String, EntryMeta)), Error> {
+        self.mark_store().await?;
         for (file, bytes) in own.files.iter().zip(contents) {
             let compressed = zstd::encode_all(&bytes[..], 3).map_err(internal)?;
             self.store

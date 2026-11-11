@@ -424,3 +424,20 @@ async fn draining_worker_finishes_its_jobs_and_exits() {
     let later = later.await.unwrap();
     assert!(later.get("error").is_none(), "{later}");
 }
+
+/// A worker asked for cgroups that it can't set up doesn't start, rather
+/// than run Lean with no memory or process limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worker_without_its_cgroups_doesnt_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = common::worker_config("w0", "v", 1);
+    cfg.work_dir = Some(dir.path().join("work"));
+    // A directory, but not a cgroup.
+    cfg.cgroup_root = Some(dir.path().join("cgroup"));
+    std::fs::create_dir_all(dir.path().join("cgroup")).unwrap();
+    let store = std::sync::Arc::new(object_store::memory::InMemory::new());
+    let db = pisa_worker::db::Db::memory().await;
+    let started = pisa_worker::run_with_stores(cfg, store, db, async {}).await;
+    let e = started.expect_err("the worker started without its cgroups");
+    assert!(format!("{e:#}").contains("PISA_CGROUP_ROOT"), "{e:#}");
+}

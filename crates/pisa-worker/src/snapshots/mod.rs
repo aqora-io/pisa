@@ -7,6 +7,9 @@
 //! to retry.
 //!
 //! Object storage, per pool version:
+//! - `catalogs/<version>`: the id of the catalog whose modules the store
+//!   holds, written with a worker's first upload. A worker sweeps only the
+//!   files of a store that names its own catalog.
 //! - `snapshots/<version>/<id>.<build>.<ext>.zst`: the module's files,
 //!   zstd-compressed: its `.olean`, and for module-system code also
 //!   `.olean.server`, `.olean.private`, `.ir` and `.ir.sig`. `build` is random
@@ -31,11 +34,12 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 use pisa_protocol::api::{
     CheckResult, CreateSnapshotResponse, DeleteSnapshotResponse, Error, ErrorKind, Replacement,
     Snapshot, VerifyFailure, VerifySnapshotResponse,
@@ -88,6 +92,9 @@ pub struct Snapshots {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// What reads the catalog: snapshots, audits, rebuild plans.
     reader: Reader,
+    /// Whether the store's marker names this catalog, as this worker wrote
+    /// or read it.
+    marked: AtomicBool,
 }
 
 fn internal(e: impl std::fmt::Display) -> Error {
@@ -129,6 +136,7 @@ impl Snapshots {
             cached: Mutex::default(),
             confirmed: Mutex::default(),
             locks: Mutex::default(),
+            marked: AtomicBool::new(false),
         }
     }
 

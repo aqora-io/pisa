@@ -68,6 +68,14 @@ diesel::table! {
 }
 
 diesel::table! {
+    catalogs (version) {
+        version -> Text,
+        id -> Text,
+        created_micros -> BigInt,
+    }
+}
+
+diesel::table! {
     leases (version, name) {
         version -> Text,
         name -> Text,

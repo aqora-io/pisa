@@ -212,6 +212,15 @@ on the servers:
   themselves.
 - The worker image builds the `pisa` tool beside the `Pisa` library, and
   `PISA_TOOL` (`/opt/pisa/.lake/build/bin/pisa`) replaces `PISA_VERIFIER`.
+- A worker with `PISA_CGROUP_ROOT` set (the chart's `worker.cgroups`) that
+  can't set up its cgroups doesn't start, where it used to warn and run Lean
+  with no memory or process limit. On a node without a delegated cgroup v2
+  tree, set `worker.cgroups: false`, or leave the variable unset, to run
+  without those limits on purpose.
+- The store's files of a version are swept only once the store names its
+  catalog, which the first create after the upgrade does. Run that first
+  create against the database the store belongs to: a store marked by another
+  database's worker is never swept by this one's.
 - The worker image's entrypoint is `tini -- pisa-worker`. A deployment that
   sets its own command keeps an init as PID 1: without one, the sandboxes
   the worker kills stay as zombies in their slots' cgroups until Lean can't
@@ -1167,7 +1176,12 @@ Once an hour one worker of each version sweeps them, a worker that has just
 started included: the modules no snapshot
 is on and no module imports go as a delete would remove them, then the
 files no module's record names, once a day old, as a build uploads its files
-before its record.
+before its record. Files are swept only from a store that names the worker's
+own catalog: each version's catalog has a random id, which a worker writes to
+`catalogs/<version>` in the store with its first upload, unless the store
+names one already. A worker on an empty, scratch or other database leaves the
+store's files alone and logs an error, and so does a sweep that would delete
+most of them (16 or more).
 
 **Trust.** A snapshot that isn't `verified` has the same guarantee as a
 `/check`: the policy scan and an axiom report from the process that imported

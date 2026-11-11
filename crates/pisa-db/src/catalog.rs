@@ -821,6 +821,13 @@ impl Catalog {
         )
     }
 
+    /// This version's catalog's id: random, made the first time it is asked
+    /// for, and the same from then on. The object store's marker repeats it,
+    /// so that a worker sweeps only a store its own catalog wrote.
+    pub async fn identity(&self) -> Result<String, Error> {
+        dispatch!(&self.db, identity(&self.version))
+    }
+
     /// Takes or renews lease `name` for `owner` for `ttl`, unless another
     /// owner holds it; returns when it ends if `owner` holds it now.
     pub async fn take_lease(
@@ -1914,6 +1921,19 @@ mod tests {
             // An ended lease goes to whoever asks.
             catalog.take_lease("l", "a", Duration::ZERO).await.unwrap();
             assert!(catalog.take_lease("l", "b", ttl).await.unwrap().is_some());
+        }
+    }
+
+    /// A version's catalog keeps the id it was first given, and another
+    /// version's has its own.
+    #[tokio::test]
+    async fn a_catalog_keeps_one_id() {
+        for catalog in catalogs().await {
+            let id = catalog.identity().await.unwrap();
+            assert_eq!(id.len(), 32);
+            assert_eq!(catalog.identity().await.unwrap(), id);
+            let other = Catalog::new(catalog.db.clone(), format!("{}-other", catalog.version));
+            assert_ne!(other.identity().await.unwrap(), id);
         }
     }
 

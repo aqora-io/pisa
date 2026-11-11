@@ -4,8 +4,12 @@ use pisa_protocol::verify::ProofStatus;
 
 /// A worker's snapshots over `db`, with its local cache in `dir`.
 fn snapshots(db: Db, dir: &Path) -> Arc<Snapshots> {
+    snapshots_on(Arc::new(InMemory::new()), db, dir)
+}
+
+/// [`snapshots`] on `store`.
+fn snapshots_on(store: Arc<dyn ObjectStore>, db: Db, dir: &Path) -> Arc<Snapshots> {
     std::fs::create_dir_all(dir.join(snapshot::ROOT)).unwrap();
-    let store = Arc::new(InMemory::new());
     let policy = Policy {
         allowed_axioms: crate::policy::DEFAULT_AXIOMS
             .split(',')
@@ -67,9 +71,10 @@ fn keyed(key: &str) -> NewEntry {
 }
 
 /// Every row of version `v`, except the change log's, which outlive what
-/// they describe.
+/// they describe, and the catalog's id, which isn't what anything stored.
 async fn rows(db: &Db) -> Vec<Vec<String>> {
-    db.rows("v").await.unwrap()
+    let rows = db.rows("v").await.unwrap();
+    rows.into_iter().filter(|r| r[0] != "catalogs").collect()
 }
 
 async fn upload(s: &Snapshots, meta: &ModuleMeta, content: &[u8]) {
@@ -182,6 +187,8 @@ async fn a_sweep_clears_what_a_stopped_delete_left() {
     catalog.remove_entry(&ce).await.unwrap();
     let stray = own(&built(&k_id, b"an old build"));
     put(stray.clone()).await;
+    // As a worker does with its first upload.
+    s.mark_store().await.unwrap();
 
     // Files are kept for their grace, as a build uploads them first.
     let (modules, files) = s.sweep(Duration::from_secs(3600)).await.unwrap();
@@ -193,6 +200,87 @@ async fn a_sweep_clears_what_a_stopped_delete_left() {
     assert!(stored(own(&k)).await);
     assert!(catalog.module(&p_id).await.is_err());
     assert!(catalog.module(&k_id).await.is_ok());
+}
+
+/// A worker on another catalog, an empty one here, finds no record of the
+/// store's files: it leaves them alone, and the store keeps naming the
+/// catalog that wrote them.
+#[tokio::test]
+async fn a_sweep_leaves_another_catalogs_store_alone() {
+    let (dir, other_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let db = Db::memory().await;
+    let s = snapshots_on(store.clone(), db.clone(), dir.path());
+    let other = snapshots_on(store, Db::memory().await, other_dir.path());
+    let id = snapshot::id("m");
+    let meta = built(&id, b"m");
+    s.mark_store().await.unwrap();
+    upload(&s, &meta, b"m").await;
+    Catalog::new(db, "v".into())
+        .commit(&id, &meta, None, no_labels())
+        .await
+        .unwrap();
+
+    other.mark_store().await.unwrap();
+    assert_eq!(other.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    assert!(has_files(&s, &meta).await);
+    let ours = s.catalog.identity().await.unwrap();
+    assert_eq!(other.store_catalog().await.unwrap(), Some(ours));
+    // Its own catalog's worker still sweeps it.
+    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    assert!(has_files(&s, &meta).await);
+}
+
+/// A store that names no catalog yet, as one an earlier release wrote,
+/// isn't swept until a worker's upload marks it.
+#[tokio::test]
+async fn an_unmarked_store_isnt_swept() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = snapshots(Db::memory().await, dir.path());
+    let stray = built(&snapshot::id("gone"), b"gone");
+    upload(&s, &stray, b"gone").await;
+    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    assert!(has_files(&s, &stray).await);
+    s.mark_store().await.unwrap();
+    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 1));
+    assert!(!has_files(&s, &stray).await);
+}
+
+/// A sweep that would delete most of the store's files stops: a catalog
+/// that has lost its records looks like that.
+#[tokio::test]
+async fn a_sweep_stops_when_most_files_have_no_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Db::memory().await;
+    let s = snapshots(db.clone(), dir.path());
+    s.mark_store().await.unwrap();
+    let catalog = Catalog::new(db, "v".into());
+    let kept = built(&snapshot::id("kept"), b"kept");
+    upload(&s, &kept, b"kept").await;
+    catalog
+        .commit(&kept.modules[0].id, &kept, None, no_labels())
+        .await
+        .unwrap();
+    let strays: Vec<ModuleMeta> = (0..delete::SWEEP_GUARD)
+        .map(|i| built(&snapshot::id(&format!("stray {i}")), b"x"))
+        .collect();
+    for stray in &strays {
+        upload(&s, stray, b"x").await;
+    }
+    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    for stray in &strays {
+        assert!(has_files(&s, stray).await);
+    }
+    // Fewer than the guard go.
+    s.store
+        .delete(&s.blob(&strays[0].modules[0], "olean"))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.sweep(Duration::ZERO).await.unwrap(),
+        (0, delete::SWEEP_GUARD - 1)
+    );
+    assert!(has_files(&s, &kept).await);
 }
 
 /// A re-check that passes on a module's old build. Meanwhile the module

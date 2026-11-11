@@ -81,8 +81,28 @@ impl Snapshots {
     }
 
     /// Deletes the files of module builds that no record names, older than
-    /// `grace`; returns how many.
+    /// `grace`; returns how many. Only in a store whose marker names this
+    /// catalog, and not when most of the files would go: a catalog that
+    /// isn't the store's has no record of its files.
     async fn sweep_files(&self, grace: Duration) -> Result<usize, Error> {
+        let ours = self.catalog.identity().await?;
+        match self.store_catalog().await? {
+            None => {
+                tracing::info!(
+                    "the store names no catalog for this version yet, so its files aren't swept"
+                );
+                return Ok(0);
+            }
+            Some(theirs) if theirs != ours => {
+                tracing::error!(
+                    store = %theirs,
+                    catalog = %ours,
+                    "the store's snapshot files are another catalog's: not sweeping them"
+                );
+                return Ok(0);
+            }
+            Some(_) => {}
+        }
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -112,11 +132,22 @@ impl Snapshots {
         for page in ids.chunks(SWEEP_PAGE as usize) {
             builds.extend(self.catalog.own_builds(page).await?);
         }
+        let listed = old.len();
+        let unrecorded: Vec<ObjectPath> = old
+            .into_iter()
+            .filter(|(_, id, build)| builds.get(id) != Some(build))
+            .map(|(location, ..)| location)
+            .collect();
+        if unrecorded.len() >= SWEEP_GUARD && unrecorded.len() * 2 > listed {
+            tracing::error!(
+                unrecorded = unrecorded.len(),
+                listed,
+                "most of the store's snapshot files have no record: not sweeping them"
+            );
+            return Ok(0);
+        }
         let mut deleted = 0;
-        for (location, id, build) in old {
-            if builds.get(&id) == Some(&build) {
-                continue;
-            }
+        for location in unrecorded {
             match self.store.delete(&location).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => deleted += 1,
                 Err(e) => {
@@ -130,3 +161,65 @@ impl Snapshots {
 
 /// The modules the sweep looks at per query.
 const SWEEP_PAGE: u32 = 500;
+
+/// The fewest files with no record that, as most of the store's, stop a
+/// sweep.
+pub(super) const SWEEP_GUARD: usize = 16;
+
+impl Snapshots {
+    /// Where the store names the catalog whose modules it holds.
+    fn marker(&self) -> ObjectPath {
+        ObjectPath::from(format!("catalogs/{}", self.version))
+    }
+
+    /// The catalog the store's marker names, if it has one.
+    pub(super) async fn store_catalog(&self) -> Result<Option<String>, Error> {
+        match self.store.get(&self.marker()).await {
+            Ok(got) => {
+                let bytes = got.bytes().await.map_err(internal)?;
+                Ok(Some(String::from_utf8_lossy(&bytes).trim().to_string()))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(internal(e)),
+        }
+    }
+
+    /// Makes the store's marker name this catalog, unless it names one
+    /// already: once per worker, before its first upload. A store that
+    /// another catalog's worker marked first keeps its marker, and this
+    /// worker's sweeps leave its files alone.
+    pub(super) async fn mark_store(&self) -> Result<(), Error> {
+        if self.marked.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let ours = self.catalog.identity().await?;
+        let payload = PutPayload::from(ours.clone().into_bytes());
+        let put = self
+            .store
+            .put_opts(&self.marker(), payload.clone(), PutMode::Create.into())
+            .await;
+        match put {
+            Ok(_) | Err(object_store::Error::AlreadyExists { .. }) => {}
+            // A store without conditional writes: read, then write.
+            Err(object_store::Error::NotImplemented { .. }) => {
+                if self.store_catalog().await?.is_none() {
+                    self.store
+                        .put(&self.marker(), payload)
+                        .await
+                        .map_err(internal)?;
+                }
+            }
+            Err(e) => return Err(internal(e)),
+        }
+        let theirs = self.store_catalog().await?;
+        if theirs.as_deref() != Some(ours.as_str()) {
+            tracing::warn!(
+                store = ?theirs,
+                catalog = %ours,
+                "the store's snapshot files are another catalog's: this worker won't sweep them"
+            );
+        }
+        self.marked.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}

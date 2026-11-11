@@ -296,10 +296,13 @@ impl Cluster {
 
     /// Every row of `version` (as [`Cluster::version`] maps it), as its
     /// table and key, except the change log's, which outlive what they
-    /// describe, and the workers' leases, which aren't what anything stored.
+    /// describe, and the workers' leases and the catalog's id, which aren't
+    /// what anything stored.
     pub async fn stored_rows(&self, version: &str) -> Vec<Vec<String>> {
         let rows = self.db.rows(&self.version(version)).await.unwrap();
-        rows.into_iter().filter(|r| r[0] != "leases").collect()
+        rows.into_iter()
+            .filter(|r| r[0] != "leases" && r[0] != "catalogs")
+            .collect()
     }
 }
 
