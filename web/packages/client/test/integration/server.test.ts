@@ -126,6 +126,55 @@ describe("snapshots", () => {
   });
 });
 
+describe("documents", () => {
+  it("opens, asks, edits and closes a document", async () => {
+    const docs = new PisaClient({ url, version: "v", timeout: 10 });
+    const code = "import Foo\n\ntheorem t : 𝓝 = 𝓝 := by\n  sorry\n";
+    const d = await docs.openDocument(code);
+    expect([d.revision, d.sorries.length]).toEqual([1, 1]);
+    const goals = await docs.documentGoals(d.id, [{ line: 4 }]);
+    expect(goals.at[0]?.goals).toEqual(["⊢ sorry"]);
+    const probes = await docs.probeDocument(d.id, { sorry: 0 }, ["rfl", "omega"]);
+    expect([probes.results[0]?.closed, probes.results[1]?.ok]).toEqual([true, false]);
+
+    const edited = await docs.editDocument(d.id, 1, code.replace("sorry", "rfl"));
+    expect([edited.revision, edited.sorries]).toEqual([2, []]);
+    const stale = await docs.documentGoals(d.id, [{ line: 4 }], { revision: 1 }).catch((e: unknown) => e);
+    expect(isPisaError(stale, "conflict")).toBe(true);
+
+    await docs.closeDocument(d.id);
+    const closed = await docs.documentGoals(d.id, [{ line: 4 }]).catch((e: unknown) => e);
+    expect(isPisaError(closed, "not_found")).toBe(true);
+  });
+});
+
+describe("runs", () => {
+  it("reviews, exports and accepts a run against its spec", async () => {
+    const runs = new PisaClient({ url, version: "v", timeout: 30 });
+    const made = await runs.createSnapshot("import Foo\ndef ts_cost : Nat := sorry\ntheorem ts_c : ts_cost = ts_cost := sorry", {
+      holes: ["ts_cost"],
+    });
+    const spec = made.snapshot?.id ?? "";
+    const head = await runs.createSnapshot("import Foo\ndef ts_cost : Nat := 3\ntheorem ts_c : ts_cost = ts_cost := rfl", {
+      replaces: { snapshot_id: spec },
+    });
+
+    const audit = await runs.auditSnapshots({ against: [spec], review: true });
+    const cost = audit.review?.[0]?.declarations.find((d) => d.name === "ts_cost");
+    expect([cost?.hole, cost?.value]).toEqual([true, "3"]);
+
+    const tarball = new Uint8Array(await runs.exportRun([spec]));
+    expect([tarball[0], tarball[1]]).toEqual([0x1f, 0x8b]);
+
+    const accepted = await runs.acceptRun([spec]);
+    expect(accepted).toMatchObject({ accepted: true, clean: true, heads: [head.snapshot?.id] });
+    expect((await runs.getAcceptance(accepted.id)).pairs).toEqual(accepted.pairs);
+    const job = await runs.submitAcceptRun([spec], { paranoid: false });
+    expect(job.kind).toBe("accept_run");
+    expect((await runs.waitJob(job)).accepted).toBe(true);
+  });
+});
+
 describe("the server", () => {
   it("is healthy, with its worker, and doesn't search", async () => {
     expect(await client.health()).toEqual({ status: "ok", workers: 1, search: null });

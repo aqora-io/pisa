@@ -48,6 +48,8 @@ def url(db):
          "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean",
          # Snapshots are built and re-checked by the `pisa` tool, here its stand-in.
          "--tool", BIN / "fake-pisa",
+         # Runs are accepted with `lake comparator`, here a stand-in.
+         "--lake", BIN / "fake-lake",
          # Sessions run on Lean Beam, here its stand-in.
          "--beam-slots", "1", "--beam-bin", BIN / "fake-beam"],
         env=env,
@@ -437,6 +439,45 @@ def test_audit_allowing(url):
                            replaces=replaces, verify=True)
     assert client.audit_snapshots(against=[spec["id"]])["clean"] is False
     assert client.audit_snapshots(against=[spec["id"]], allow=["py_f"])["clean"] is True
+
+
+def test_documents(url):
+    client = Client(url, timeout=10)
+    code = "import Foo\n\ntheorem t : 𝓝 = 𝓝 := by\n  sorry\n"
+    document = client.open_document(code)
+    assert document["revision"] == 1 and len(document["sorries"]) == 1
+    goals = client.document_goals(document["id"], [{"line": 4}])
+    assert goals["at"][0]["goals"] == ["⊢ sorry"]
+    probes = client.probe_document(document["id"], {"sorry": 0}, ["rfl", "omega"])
+    assert probes["results"][0]["closed"] and not probes["results"][1]["ok"]
+    edited = client.edit_document(document["id"], 1, code.replace("sorry", "rfl"))
+    assert edited["revision"] == 2 and edited["sorries"] == []
+    assert client.close_document(document["id"]) is None
+    with pytest.raises(NotFoundError):
+        client.document_goals(document["id"], [{"line": 4}])
+    with pytest.raises(ValueError):
+        client.document_goals(document["id"], [{"line": 4}], mode="during")
+
+
+def test_review_export_and_accept(url):
+    client = Client(url, timeout=30)
+    spec = client.create_snapshot("import Foo\ndef py_cost : Nat := sorry\ntheorem py_c : py_cost = py_cost := sorry",
+                                  holes=["py_cost"])["snapshot"]
+    head = client.create_snapshot("import Foo\ndef py_cost : Nat := 3\ntheorem py_c : py_cost = py_cost := rfl",
+                                  replaces={"snapshot_id": spec["id"]})["snapshot"]
+    audit = client.audit_snapshots(against=[spec["id"]], review=True)
+    cost = {d["name"]: d for d in audit["review"][0]["declarations"]}["py_cost"]
+    assert cost["hole"] and cost["value"] == "3", cost
+    with pytest.raises(ValueError):
+        client.audit_snapshots(review=True)
+
+    assert client.export_run([spec["id"]])[:2] == b"\x1f\x8b"
+
+    accepted = client.accept_run([spec["id"]])
+    assert accepted["accepted"] and accepted["clean"] and accepted["heads"] == [head["id"]], accepted
+    assert client.get_acceptance(accepted["id"])["pairs"] == accepted["pairs"]
+    job = client.submit_accept_run([spec["id"]], paranoid=False)
+    assert job["kind"] == "accept_run" and client.wait_job(job)["accepted"]
 
 
 def test_snapshot_labels(url):

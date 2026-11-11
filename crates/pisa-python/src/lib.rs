@@ -12,7 +12,7 @@ use std::time::Duration;
 use pisa_client::{Error, Job, JobPoll, JobStatus, api};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -400,13 +400,14 @@ impl Client {
         )
     }
 
-    #[pyo3(signature = (labels = None, *, against = None, allow = None))]
+    #[pyo3(signature = (labels = None, *, against = None, allow = None, review = false))]
     fn audit_snapshots<'py>(
         &self,
         py: Python<'py>,
         labels: Option<BTreeMap<String, String>>,
         against: Option<Vec<String>>,
         allow: Option<Vec<String>>,
+        review: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = labels.unwrap_or_default();
         let allow = allow.unwrap_or_default();
@@ -415,14 +416,136 @@ impl Client {
                 "labels and against don't combine: audit a project by its labels, or a run against its spec",
             )),
             Some(against) => call(py, async move {
-                let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
-                self.inner.audit_snapshots_against(&against, &allow).await
+                let opts = pisa_client::AuditOptions { allow, review };
+                self.inner
+                    .audit_snapshots_against_with(&against, &opts)
+                    .await
             }),
-            None if !allow.is_empty() => Err(PyValueError::new_err(
-                "allow is for an audit against a spec: it names the definitions a run's heads may change",
+            None if !allow.is_empty() || review => Err(PyValueError::new_err(
+                "allow and review are for an audit against a spec: name its spec snapshots in against",
             )),
             None => call(py, async move { self.inner.audit_snapshots(&labels).await }),
         }
+    }
+
+    /// The run's export, a tar.gz, as bytes.
+    #[pyo3(signature = (against, *, allow = None))]
+    fn export_run<'py>(
+        &self,
+        py: Python<'py>,
+        against: Vec<String>,
+        allow: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let allow = allow.unwrap_or_default();
+        let result = py.detach(|| {
+            runtime().block_on(async {
+                let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
+                self.inner.export_run(&against, &allow).await
+            })
+        });
+        match result {
+            Ok(bytes) => Ok(PyBytes::new(py, &bytes)),
+            Err(e) => Err(to_py_err(py, e)),
+        }
+    }
+
+    #[pyo3(signature = (against, *, allow = None, paranoid = true))]
+    fn accept_run<'py>(
+        &self,
+        py: Python<'py>,
+        against: Vec<String>,
+        allow: Option<Vec<String>>,
+        paranoid: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::AcceptOptions {
+            allow: allow.unwrap_or_default(),
+            paranoid,
+        };
+        call(
+            py,
+            async move { self.inner.accept_run(&against, &opts).await },
+        )
+    }
+
+    #[pyo3(signature = (against, *, allow = None, paranoid = true))]
+    fn submit_accept_run<'py>(
+        &self,
+        py: Python<'py>,
+        against: Vec<String>,
+        allow: Option<Vec<String>>,
+        paranoid: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::AcceptOptions {
+            allow: allow.unwrap_or_default(),
+            paranoid,
+        };
+        call(py, async move {
+            Ok(queued(self.inner.submit_accept_run(&against, &opts).await?))
+        })
+    }
+
+    fn get_acceptance<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.get_acceptance(&id).await })
+    }
+
+    fn open_document<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.open_document(&code).await })
+    }
+
+    fn edit_document<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        revision: u64,
+        code: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move {
+            self.inner.edit_document(&id, revision, &code).await
+        })
+    }
+
+    fn close_document<'py>(&self, py: Python<'py>, id: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.close_document(&id).await })
+    }
+
+    /// `at` is a list of `{"line": n}` or `{"line": n, "column": m}`.
+    #[pyo3(signature = (id, at, *, revision = None, mode = "before"))]
+    fn document_goals<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        at: &Bound<'py, PyAny>,
+        revision: Option<u64>,
+        mode: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let at: Vec<pisa_client::LinePos> = serde_json::from_value(from_py(at)?)
+            .map_err(|e| PyValueError::new_err(format!("at: {e}")))?;
+        let mode = serde_json::from_value(Value::String(mode.to_string()))
+            .map_err(|_| PyValueError::new_err("mode is \"before\" or \"after\""))?;
+        let opts = pisa_client::GoalsOptions { revision, mode };
+        call(py, async move {
+            self.inner.document_goals(&id, &at, &opts).await
+        })
+    }
+
+    /// `at` is `{"sorry": i}` or a position as for [`Client::document_goals`].
+    #[pyo3(signature = (id, at, candidates, *, revision = None))]
+    fn probe_document<'py>(
+        &self,
+        py: Python<'py>,
+        id: String,
+        at: &Bound<'py, PyAny>,
+        candidates: Vec<String>,
+        revision: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let at: pisa_client::ProbeAt = serde_json::from_value(from_py(at)?)
+            .map_err(|e| PyValueError::new_err(format!("at: {e}")))?;
+        call(py, async move {
+            let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
+            self.inner
+                .probe_document(&id, at, &candidates, revision)
+                .await
+        })
     }
 
     #[pyo3(signature = (from_, to, labels, *, dry_run = false, allow_changes = false, retire = false, verify = None))]

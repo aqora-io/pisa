@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    Allow, CheckOptions, Client, CreateSnapshotOptions, DeleteSnapshotOptions, Detail, Error,
-    ErrorKind, HealthStatus, Job, JobKind, JobPoll, JobStatus, ListSnapshotsResponse, Pos,
-    ProofStatus, RebuildOptions, Replaces,
+    AcceptOptions, Allow, AuditOptions, CheckOptions, Client, CreateSnapshotOptions,
+    DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions, HealthStatus, Job, JobKind,
+    JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt, ProofStatus, RebuildOptions,
+    Replaces,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -726,4 +727,112 @@ async fn client_submits_and_waits_for_jobs() {
         JobStatus::Cancelled
     );
     assert!(client.wait_job(&resumed).await.unwrap().ok);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_opens_asks_edits_and_closes_a_document() {
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/"))
+        .unwrap()
+        .with_version("v")
+        .with_timeout(10);
+    let code = "import Foo\n\ntheorem t : 𝓝 = 𝓝 := by\n  sorry\n";
+    let d = client.open_document(code).await.unwrap();
+    assert_eq!((d.revision, d.sorries.len()), (1, 1), "{d:?}");
+    let line = |line| LinePos { line, column: None };
+    let goals = client
+        .document_goals(&d.id, &[line(4)], &GoalsOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(goals.at[0].goals, ["⊢ sorry"]);
+    let probes = client
+        .probe_document(&d.id, ProbeAt::Sorry { sorry: 0 }, &["rfl", "omega"], None)
+        .await
+        .unwrap();
+    assert!(
+        probes.results[0].closed && !probes.results[1].ok,
+        "{probes:?}"
+    );
+
+    let edited = client
+        .edit_document(&d.id, 1, &code.replace("sorry", "rfl"))
+        .await
+        .unwrap();
+    assert_eq!((edited.revision, edited.sorries.len()), (2, 0));
+    // A stale revision is a conflict.
+    let stale = GoalsOptions {
+        revision: Some(1),
+        ..Default::default()
+    };
+    let e = client
+        .document_goals(&d.id, &[line(4)], &stale)
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), Some(ErrorKind::Conflict));
+
+    client.close_document(&d.id).await.unwrap();
+    let e = client
+        .document_goals(&d.id, &[line(4)], &GoalsOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind(), Some(ErrorKind::NotFound));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_reviews_exports_and_accepts_a_run() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let opts = CreateSnapshotOptions {
+        holes: vec!["f".into()],
+        ..Default::default()
+    };
+    let code = "import Foo\ndef f : Nat := sorry\ntheorem t : f = f := sorry";
+    let spec = client.create_snapshot_with(code, &opts).await.unwrap();
+    let spec = spec.snapshot.unwrap();
+    let opts = CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: spec.id.clone(),
+            allow: None,
+        }),
+        ..Default::default()
+    };
+    let code = "import Foo\ndef f : Nat := 2\ntheorem t : f = f := rfl";
+    let head = client.create_snapshot_with(code, &opts).await.unwrap();
+    let head = head.snapshot.unwrap();
+
+    let review = AuditOptions {
+        review: true,
+        ..Default::default()
+    };
+    let audit = client
+        .audit_snapshots_against_with([&spec.id], &review)
+        .await
+        .unwrap();
+    let f = audit.review[0]
+        .declarations
+        .iter()
+        .find(|d| d.name == "f")
+        .unwrap();
+    assert_eq!((f.hole, f.value.as_deref()), (true, Some("2")));
+
+    let tarball = client.export_run([&spec.id], &[]).await.unwrap();
+    assert_eq!(&tarball[..2], [0x1f, 0x8b], "a gzip");
+
+    let accepted = client
+        .accept_run([&spec.id], &AcceptOptions::default())
+        .await
+        .unwrap();
+    assert!(accepted.accepted && accepted.clean, "{accepted:?}");
+    assert_eq!(accepted.heads, std::slice::from_ref(&head.id));
+    let stored = client.get_acceptance(&accepted.id).await.unwrap();
+    assert_eq!(stored.pairs, accepted.pairs);
+    let job = client
+        .submit_accept_run([&spec.id], &AcceptOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(job.kind, JobKind::AcceptRun);
+    assert!(client.wait_job(&job).await.unwrap().accepted);
+    let none: [&str; 0] = [];
+    let e = client.accept_run(none, &AcceptOptions::default()).await;
+    assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
 }

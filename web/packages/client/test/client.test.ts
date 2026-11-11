@@ -179,6 +179,57 @@ describe("PisaClient", () => {
     expect(sent[0]?.url).toBe("/api/snapshots/audit?against=v2%7Es0&allow=f&allow=_private.h");
   });
 
+  it("asks an audit against a spec for its review list, and refuses one for labels", async () => {
+    const { client, sent } = recording(() => json({ summary: {}, assumptions: [], not_proved: [], clean: true, review: [] }));
+    await client.auditSnapshots({ against: ["v2~s0"], review: true });
+    expect(sent[0]?.url).toBe("/api/snapshots/audit?against=v2%7Es0&review=true");
+    await expect(client.auditSnapshots({ labels: { run: "a" }, review: true })).rejects.toMatchObject({ kind: "bad_request" });
+    expect(sent).toHaveLength(1);
+  });
+
+  it("downloads a run's export as bytes, and throws the server's error", async () => {
+    let reply = new Response(new Uint8Array([0x1f, 0x8b, 8]), { headers: { "content-type": "application/gzip" } });
+    const { client, sent } = recording(() => reply);
+    const bytes = await client.exportRun(["v2~s0"], { allow: ["f"] });
+    expect([...new Uint8Array(bytes)]).toEqual([0x1f, 0x8b, 8]);
+    expect(sent[0]?.url).toBe("/api/snapshots/export?against=v2%7Es0&allow=f");
+    reply = json({ error: { kind: "not_found", message: "no snapshot v2~s0" } }, 404);
+    expect(await client.exportRun(["v2~s0"]).catch((e: unknown) => e)).toMatchObject({ kind: "not_found", status: 404 });
+  });
+
+  it("accepts a run, at once or as a job, and reads an acceptance back", async () => {
+    const accepted = { id: "v2~a", accepted: true, clean: true, pairs: [] };
+    const { client, sent } = recording((s) =>
+      s.headers["prefer"] ? json({ id: "j", kind: "accept_run", status: "queued" }, 202) : json(accepted),
+    );
+    expect((await client.acceptRun(["v2~s0"])).accepted).toBe(true);
+    await client.submitAcceptRun(["v2~s0"], { allow: ["f"], paranoid: false }, { timeout: 60 });
+    await client.getAcceptance("v2~a");
+    expect(sent.map((s) => [s.method, s.url, s.body])).toEqual([
+      ["POST", "/api/snapshots/accept", { against: ["v2~s0"] }],
+      ["POST", "/api/snapshots/accept", { against: ["v2~s0"], allow: ["f"], paranoid: false, timeout: 60 }],
+      ["GET", "/api/snapshots/accept/v2~a", undefined],
+    ]);
+  });
+
+  it("opens, edits, asks and closes a document", async () => {
+    const { client, sent } = recording((s) =>
+      s.method === "DELETE" ? new Response(null, { status: 204 }) : json({ id: "d", revision: 1, sorries: [], at: [], results: [] }),
+    );
+    await client.openDocument("theorem t : True := by sorry", { timeout: 9 });
+    await client.editDocument("d", 1, "theorem t : True := trivial");
+    await client.documentGoals("d", [{ line: 2 }], { revision: 2, mode: "after" });
+    await client.probeDocument("d", { sorry: 0 }, ["rfl", "simp"], { revision: 2 });
+    expect(await client.closeDocument("d")).toBeUndefined();
+    expect(sent.map((s) => [s.method, s.url, s.body])).toEqual([
+      ["POST", "/api/documents", { code: "theorem t : True := by sorry", version: "v1", timeout: 9 }],
+      ["PATCH", "/api/documents/d", { code: "theorem t : True := trivial", revision: 1 }],
+      ["POST", "/api/documents/d/goals", { at: [{ line: 2 }], revision: 2, mode: "after" }],
+      ["POST", "/api/documents/d/probes", { at: { sorry: 0 }, candidates: ["rfl", "simp"], revision: 2 }],
+      ["DELETE", "/api/documents/d", undefined],
+    ]);
+  });
+
   it("reads a plan's links, each to the snapshot its item copies, and the runs it left out", async () => {
     const proof: RebuildItem = {
       level: 1,

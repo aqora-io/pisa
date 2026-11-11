@@ -55,14 +55,16 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    self, Allow, ApplyTacticResponse, AtPosition, AuditAssumption, AuditComparison, AuditFork,
-    AuditLink, AuditSnapshotsResponse, AuditSummary, AuditTarget, AuditUnproved, Change,
-    CheckResult, CreateSnapshotResponse, Declaration, DeclarationChange, DeleteSnapshotResponse,
-    Detail, ErrorKind, Export, Health, HealthStatus, JobKind, JobStatus, ListDependentsResponse,
-    ListSnapshotsResponse, Message, Pos, ProofStatus, RebuildCreated, RebuildFailed, RebuildItem,
-    RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse, Replacement, Replaces, Session,
-    Severity, Snapshot, SnapshotDetail, Sorry, State, TacticInfo, TermInfo, VerifyFailure,
-    VerifySnapshotResponse,
+    self, AcceptPair, AcceptResponse, Allow, ApplyTacticResponse, AtPosition, AuditAssumption,
+    AuditComparison, AuditFork, AuditLink, AuditReview, AuditSnapshotsResponse, AuditSummary,
+    AuditTarget, AuditUnproved, Change, CheckResult, CreateSnapshotResponse, Declaration,
+    DeclarationChange, DeleteSnapshotResponse, Detail, Document, DocumentGoals, DocumentProbes,
+    ErrorKind, Export, GoalsAt, GoalsMode, Health, HealthStatus, JobKind, JobStatus, LeftOut,
+    LeftOutReason, LinePos, ListDependentsResponse, ListSnapshotsResponse, Message, PairError,
+    PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated, RebuildFailed,
+    RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse, Replacement, Replaces,
+    ReviewDeclaration, ReviewOrigin, Session, Severity, Snapshot, SnapshotDetail, Sorry, State,
+    TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
@@ -160,6 +162,44 @@ pub struct DeleteSnapshotOptions {
     /// through others, and splice nothing: a whole branch of a run goes. What
     /// the snapshot replaced is a head again if nothing else replaces it.
     pub with_replacers: bool,
+}
+
+/// Options for [`Client::audit_snapshots_against_with`].
+#[derive(Debug, Clone, Default)]
+pub struct AuditOptions {
+    /// Definitions the heads may change besides the spec's holes.
+    pub allow: Vec<String>,
+    /// Also list, for each spec snapshot and head, what a reviewer reads:
+    /// [`AuditSnapshotsResponse::review`].
+    pub review: bool,
+}
+
+/// Options for [`Client::accept_run`].
+#[derive(Debug, Clone)]
+pub struct AcceptOptions {
+    /// Definitions the heads may change besides the spec's holes, as for the
+    /// audit.
+    pub allow: Vec<String>,
+    /// Also run the external kernels Lean bundles (true by default).
+    pub paranoid: bool,
+}
+
+impl Default for AcceptOptions {
+    fn default() -> Self {
+        AcceptOptions {
+            allow: Vec::new(),
+            paranoid: true,
+        }
+    }
+}
+
+/// Options for [`Client::document_goals`].
+#[derive(Debug, Clone, Default)]
+pub struct GoalsOptions {
+    /// Answer only if the document is at this revision, else a `conflict`.
+    pub revision: Option<u64>,
+    /// The goals before the tactic at each position (the default), or after.
+    pub mode: GoalsMode,
 }
 
 /// Options for [`Client::rebuild_snapshots`].
@@ -260,6 +300,18 @@ impl Endpoint {
         Ok(server_error(r).await?.json().await?)
     }
 
+    /// A DELETE whose success has no body, such as a 204.
+    async fn delete_empty(&self, url: Url) -> Result<(), Error> {
+        server_error(self.http.delete(url).send().await?).await?;
+        Ok(())
+    }
+
+    /// A GET whose answer isn't JSON, such as a tar.gz.
+    async fn get_bytes(&self, url: Url) -> Result<Vec<u8>, Error> {
+        let r = self.http.get(url).send().await?;
+        Ok(server_error(r).await?.bytes().await?.to_vec())
+    }
+
     async fn post<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -291,6 +343,15 @@ impl Endpoint {
         }
         let job: api::Job = r.json().await?;
         Ok(Job::new(job.id, job.kind))
+    }
+
+    async fn post_to<B: Serialize, T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &B,
+    ) -> Result<T, Error> {
+        let r = self.http.post(url).json(body).send().await?;
+        Ok(server_error(r).await?.json().await?)
     }
 
     async fn post_url<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
@@ -830,6 +891,214 @@ impl Client {
             url.query_pairs_mut().append_pair("allow", name);
         }
         self.endpoint.get(url).await
+    }
+
+    /// [`Client::audit_snapshots_against`] with `options`: with `review`, the
+    /// audit lists for each spec snapshot and head what a reviewer reads.
+    pub async fn audit_snapshots_against_with<I, S>(
+        &self,
+        against: I,
+        options: &AuditOptions,
+    ) -> Result<AuditSnapshotsResponse, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut url = self.run_url("snapshots/audit", against, &options.allow)?;
+        if options.review {
+            url.query_pairs_mut().append_pair("review", "true");
+        }
+        self.endpoint.get(url).await
+    }
+
+    /// The run that spec snapshots `against` start, as a Lake project for
+    /// `lake comparator`, in `pisa-run/` of a tar.gz: its bytes. `allow` is
+    /// as for the audit.
+    pub async fn export_run<I, S>(&self, against: I, allow: &[&str]) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let allow: Vec<String> = allow.iter().map(|s| s.to_string()).collect();
+        let url = self.run_url("snapshots/export", against, &allow)?;
+        self.endpoint.get_bytes(url).await
+    }
+
+    /// Judges the run that spec snapshots `against` start: audits it and
+    /// runs `lake comparator` on the pairs the audit compared, with this
+    /// client's timeout for each pair, and stores the result; see
+    /// [`AcceptResponse`].
+    pub async fn accept_run<I, S>(
+        &self,
+        against: I,
+        options: &AcceptOptions,
+    ) -> Result<AcceptResponse, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let body = self.accept_request(against, options)?;
+        self.endpoint.post("snapshots/accept", &body).await
+    }
+
+    /// Like [`Client::accept_run`], as a job.
+    pub async fn submit_accept_run<I, S>(
+        &self,
+        against: I,
+        options: &AcceptOptions,
+    ) -> Result<Job<AcceptResponse>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let body = self.accept_request(against, options)?;
+        let url = self.endpoint.url("snapshots/accept")?;
+        self.endpoint.submit(url, Some(&body)).await
+    }
+
+    /// An acceptance [`Client::accept_run`] stored, by its id.
+    pub async fn get_acceptance(&self, id: &str) -> Result<AcceptResponse, Error> {
+        let mut url = self.endpoint.url("snapshots/accept")?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(id.to_string()))?
+            .push(id);
+        self.endpoint.get(url).await
+    }
+
+    fn accept_request<I, S>(
+        &self,
+        against: I,
+        options: &AcceptOptions,
+    ) -> Result<api::AcceptRequest, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let against: Vec<String> = against
+            .into_iter()
+            .map(|s| s.as_ref().to_string())
+            .collect();
+        if against.is_empty() {
+            return Err(Error::Invalid(
+                "against names no snapshot: a run is named by its spec snapshots".into(),
+            ));
+        }
+        Ok(api::AcceptRequest {
+            against,
+            allow: options.allow.clone(),
+            paranoid: options.paranoid,
+            timeout: self.timeout,
+        })
+    }
+
+    /// `path`, with a run's spec snapshots and `allow` in its query. An empty
+    /// `against` is an [`Error::Invalid`].
+    fn run_url<I, S>(&self, path: &str, against: I, allow: &[String]) -> Result<Url, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut url = self.endpoint.url(path)?;
+        let mut none = true;
+        for id in against {
+            url.query_pairs_mut().append_pair("against", id.as_ref());
+            none = false;
+        }
+        if none {
+            return Err(Error::Invalid(
+                "against names no snapshot: a run is named by its spec snapshots".into(),
+            ));
+        }
+        for name in allow {
+            url.query_pairs_mut().append_pair("allow", name);
+        }
+        Ok(url)
+    }
+
+    /// Opens `code` as a document on Lean Beam, which keeps it elaborated for
+    /// goals and probes until [`Client::close_document`] or until it expires.
+    pub async fn open_document(&self, code: &str) -> Result<Document, Error> {
+        let body = api::OpenDocumentRequest {
+            code: code.to_string(),
+            version: self.version.clone(),
+            timeout: self.timeout,
+        };
+        self.endpoint.post("documents", &body).await
+    }
+
+    /// Replaces a document's code, which is at `revision`; answers the next
+    /// revision.
+    pub async fn edit_document(
+        &self,
+        id: &str,
+        revision: u64,
+        code: &str,
+    ) -> Result<Document, Error> {
+        let body = api::EditDocumentRequest {
+            code: code.to_string(),
+            revision,
+            timeout: self.timeout,
+        };
+        self.endpoint
+            .patch(self.document_url(id, None)?, &body)
+            .await
+    }
+
+    /// Closes a document and deletes its code.
+    pub async fn close_document(&self, id: &str) -> Result<(), Error> {
+        self.endpoint
+            .delete_empty(self.document_url(id, None)?)
+            .await
+    }
+
+    /// The goals at each of `at`, lines from 1; a position with only a line
+    /// is the line's first tactic.
+    pub async fn document_goals(
+        &self,
+        id: &str,
+        at: &[LinePos],
+        options: &GoalsOptions,
+    ) -> Result<DocumentGoals, Error> {
+        let body = api::DocumentGoalsRequest {
+            revision: options.revision,
+            at: at.to_vec(),
+            mode: options.mode,
+            timeout: self.timeout,
+        };
+        let url = self.document_url(id, Some("goals"))?;
+        self.endpoint.post_to(url, &body).await
+    }
+
+    /// Runs each of `candidates` at `at` on the document as it is, `revision`
+    /// if given: nothing a candidate does stays.
+    pub async fn probe_document(
+        &self,
+        id: &str,
+        at: ProbeAt,
+        candidates: &[&str],
+        revision: Option<u64>,
+    ) -> Result<DocumentProbes, Error> {
+        let body = api::DocumentProbesRequest {
+            revision,
+            at,
+            candidates: candidates.iter().map(|c| c.to_string()).collect(),
+            timeout: self.timeout,
+        };
+        let url = self.document_url(id, Some("probes"))?;
+        self.endpoint.post_to(url, &body).await
+    }
+
+    fn document_url(&self, id: &str, then: Option<&str>) -> Result<Url, Error> {
+        let mut url = self.endpoint.url("documents")?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| Error::Url(id.to_string()))?;
+        segments.push(id);
+        if let Some(then) = then {
+            segments.push(then);
+        }
+        drop(segments);
+        Ok(url)
     }
 
     /// Changes a snapshot's labels: each label `labels` maps to `None` is

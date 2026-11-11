@@ -219,6 +219,26 @@ class AuditComparison(TypedDict):
     changes: NotRequired[list[DeclarationChange]]
     replacement: NotRequired[Replacement]
 
+class ReviewDeclaration(TypedDict):
+    """A declaration a reviewer reads: `origin` is `spec`, `head` or
+    `snapshot`. A hole, and each definition the head adds that a hole's value
+    reaches, has its `value`; `holes` names the other holes it mentions."""
+    name: str
+    kind: str
+    origin: Literal["spec", "head", "snapshot"]
+    snapshot_id: NotRequired[str]
+    signature: NotRequired[str]
+    type: NotRequired[str]
+    hole: NotRequired[bool]
+    value: NotRequired[str]
+    holes: NotRequired[list[str]]
+
+class AuditReview(TypedDict):
+    spec: str
+    head: str
+    declarations: list[ReviewDeclaration]
+    library: list[str]
+
 class AuditSnapshotsResponse(TypedDict):
     summary: AuditSummary
     assumptions: list[AuditAssumption]
@@ -229,7 +249,68 @@ class AuditSnapshotsResponse(TypedDict):
     targets: NotRequired[list[AuditTarget]]
     links: NotRequired[list[AuditLink]]
     comparisons: NotRequired[list[AuditComparison]]
+    review: NotRequired[list[AuditReview]]
     unverified: NotRequired[list[str]]
+
+class PairError(TypedDict):
+    kind: Literal["refused", "build_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge"]
+    message: str
+
+class LeftOut(TypedDict):
+    name: str
+    reason: Literal["private", "not_a_definition_in_spec", "not_a_definition_in_head"]
+
+class AcceptPair(TypedDict):
+    """Comparator's verdict on a spec snapshot and a head it reaches."""
+    spec: str
+    head: str
+    config: str
+    accepted: bool
+    error: NotRequired[PairError]
+    exit_code: NotRequired[int]
+    output: str
+    theorems: int
+    left_out: NotRequired[list[LeftOut]]
+
+class AcceptResponse(TypedDict):
+    """A run's acceptance, stored under `id`: `accepted` when the audit is
+    `clean` and comparator accepted every pair, one at least."""
+    id: str
+    created: int
+    against: list[str]
+    allow: NotRequired[list[str]]
+    paranoid: bool
+    accepted: bool
+    clean: bool
+    heads: list[str]
+    audit: AuditSnapshotsResponse
+    pairs: list[AcceptPair]
+
+class Document(TypedDict):
+    id: str
+    revision: int
+    messages: list[Message]
+    sorries: list[Sorry]
+
+class GoalsAt(TypedDict):
+    pos: Pos
+    goals: list[str]
+
+class DocumentGoals(TypedDict):
+    revision: int
+    at: list[GoalsAt]
+
+class ProbeResult(TypedDict):
+    ok: bool
+    closed: bool
+    goals: list[str]
+    messages: list[Message]
+    error: NotRequired[Error]
+
+class DocumentProbes(TypedDict):
+    revision: int
+    pos: Pos
+    results: list[ProbeResult]
 
 class RebuildItem(TypedDict):
     """An item without `snapshot_id` is a support item: it has no labels and
@@ -325,7 +406,7 @@ class Health(TypedDict):
 
 class JobDone(TypedDict):
     done: Literal[True]
-    answer: CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse
+    answer: CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse | AcceptResponse
 
 class JobPending(TypedDict):
     done: Literal[False]
@@ -513,6 +594,7 @@ class Client:
         *,
         against: list[str] | None = None,
         allow: list[str] | None = None,
+        review: bool = False,
     ) -> AuditSnapshotsResponse:
         """What the snapshots with every label in `labels` rest on: their
         declarations by `status` (`proved`, `conditional` on assumptions,
@@ -526,8 +608,44 @@ class Client:
         allowed changes, and whether the run is `clean`, with no definition
         changed but the spec's `holes` and those `allow` names (the links' own
         allows don't count);
-        the counts are the heads'. `labels` and `against` don't combine,
-        `against` can't be empty, and `allow` needs `against` (ValueError)."""
+        the counts are the heads'. With `review`, also what a reviewer reads
+        on each head: the declarations the spec's statements use, each hole
+        with its value. `labels` and `against` don't combine, `against`
+        can't be empty, and `allow` and `review` need `against` (ValueError)."""
+    def export_run(self, against: list[str], *, allow: list[str] | None = None) -> bytes:
+        """The run that spec snapshots `against` start, as a Lake project for
+        `lake comparator` in `pisa-run/` of a tar.gz."""
+    def accept_run(
+        self, against: list[str], *, allow: list[str] | None = None, paranoid: bool = True
+    ) -> AcceptResponse:
+        """Audit the run and run `lake comparator` on the pairs the audit
+        compared, with the client's `timeout` for each pair, and store the
+        result. Paranoid runs the external kernels Lean bundles too."""
+    def submit_accept_run(
+        self, against: list[str], *, allow: list[str] | None = None, paranoid: bool = True
+    ) -> Job:
+        """Like `accept_run`, as a job."""
+    def get_acceptance(self, id: str) -> AcceptResponse:
+        """An acceptance `accept_run` stored, by its id."""
+    def open_document(self, code: str) -> Document:
+        """Open code on Lean Beam, which keeps it elaborated for goals and
+        probes until `close_document` or until it expires."""
+    def edit_document(self, id: str, revision: int, code: str) -> Document:
+        """Replace a document's code, which is at `revision`."""
+    def close_document(self, id: str) -> None:
+        """Close a document and delete its code."""
+    def document_goals(
+        self, id: str, at: list[dict], *, revision: int | None = None, mode: str = "before"
+    ) -> DocumentGoals:
+        """The goals at each position of `at`, `{"line": n}` (its first
+        tactic) or `{"line": n, "column": m}`, lines from 1; `mode` is
+        `before` or `after` the tactic there. With `revision`, a document at
+        another revision raises a conflict."""
+    def probe_document(
+        self, id: str, at: dict, candidates: list[str], *, revision: int | None = None
+    ) -> DocumentProbes:
+        """Run each candidate tactic at `at`, `{"sorry": i}` or a position as
+        for `document_goals`, on the document as it is: nothing stays."""
     def rebuild_snapshots(
         self,
         from_: str,

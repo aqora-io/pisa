@@ -1,5 +1,7 @@
 import { PisaError, isPisaError } from "./errors.ts";
 import type {
+  AcceptRequest,
+  AcceptResponse,
   ApplyTacticResponse,
   AuditSnapshotsResponse,
   CheckBatchResponse,
@@ -9,6 +11,12 @@ import type {
   DeclarationDetail,
   DeleteSnapshotResponse,
   Detail,
+  Document,
+  DocumentGoals,
+  DocumentProbes,
+  GoalsMode,
+  LinePos,
+  ProbeAt,
   ErrorKind,
   GetDeclarationResponse,
   Health,
@@ -282,18 +290,123 @@ export class PisaClient {
    *  `against` is refused (`bad_request`) without sending it, as it would be
    *  a label audit. */
   auditSnapshots(
-    params: { labels?: Labels; against?: SnapshotId[]; allow?: string[] } = {},
+    params: { labels?: Labels; against?: SnapshotId[]; allow?: string[]; review?: boolean } = {},
     options: VersionOptions = {},
   ): Promise<AuditSnapshotsResponse> {
     if (params.against?.length === 0) {
       const message = "against names no snapshot: audit a run against its spec snapshots, or a project by its labels";
       return Promise.reject(new PisaError("bad_request", message));
     }
+    if (params.review && !params.against) {
+      const message = "review is for an audit against a spec: name its spec snapshots in against";
+      return Promise.reject(new PisaError("bad_request", message));
+    }
     const query = params.against ? new URLSearchParams() : this.versionQuery(options);
     for (const [k, v] of Object.entries(params.labels ?? {})) query.append("label", `${k}:${v}`);
     for (const id of params.against ?? []) query.append("against", id);
     for (const name of params.allow ?? []) query.append("allow", name);
+    if (params.review) query.set("review", "true");
     return this.call("GET", ["snapshots", "audit"], undefined, options, query);
+  }
+
+  /** The run that spec snapshots `against` start, as a Lake project for
+   *  `lake comparator` in `pisa-run/` of a tar.gz: its bytes. */
+  async exportRun(
+    against: SnapshotId[],
+    params: { allow?: string[] } = {},
+    options: RequestOptions = {},
+  ): Promise<ArrayBuffer> {
+    const query = new URLSearchParams();
+    for (const id of against) query.append("against", id);
+    for (const name of params.allow ?? []) query.append("allow", name);
+    const r = await this.send("GET", ["snapshots", "export"], undefined, query, options.signal);
+    if (!r.ok) ok(r, await readJson(r));
+    return r.arrayBuffer();
+  }
+
+  /** Judges the run that spec snapshots `against` start: audits it and runs
+   *  `lake comparator` on the pairs the audit compared, with `timeout`
+   *  seconds for each pair, and stores the result. It is `accepted` when the
+   *  audit is `clean` and comparator accepted every pair. */
+  acceptRun(
+    against: SnapshotId[],
+    params: { allow?: string[]; paranoid?: boolean } = {},
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<AcceptResponse> {
+    return this.call("POST", ["snapshots", "accept"], this.acceptRequest(against, params, options), options);
+  }
+
+  /** `acceptRun` as a job. */
+  submitAcceptRun(
+    against: SnapshotId[],
+    params: { allow?: string[]; paranoid?: boolean } = {},
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<Job<AcceptResponse>> {
+    return this.submit(["snapshots", "accept"], this.acceptRequest(against, params, options), options);
+  }
+
+  /** An acceptance `acceptRun` stored, by its id. */
+  getAcceptance(id: string, options: RequestOptions = {}): Promise<AcceptResponse> {
+    return this.call("GET", ["snapshots", "accept", id], undefined, options);
+  }
+
+  private acceptRequest(
+    against: SnapshotId[],
+    params: { allow?: string[]; paranoid?: boolean },
+    options: Omit<RunOptions, "version">,
+  ): AcceptRequest {
+    const body: AcceptRequest = { against, ...this.timeoutOf(options) };
+    if (params.allow !== undefined && params.allow.length > 0) body.allow = params.allow;
+    if (params.paranoid !== undefined) body.paranoid = params.paranoid;
+    return body;
+  }
+
+  /** Opens `code` on Lean Beam, which keeps it elaborated for goals and
+   *  probes until `closeDocument` or until it expires. */
+  openDocument(code: string, options: RunOptions = {}): Promise<Document> {
+    return this.call("POST", ["documents"], { code, ...this.run(options) }, options);
+  }
+
+  /** Replaces a document's code, which is at `revision`. */
+  editDocument(
+    id: string,
+    revision: number,
+    code: string,
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<Document> {
+    return this.call("PATCH", ["documents", id], { code, revision, ...this.timeoutOf(options) }, options);
+  }
+
+  /** Closes a document and deletes its code. */
+  async closeDocument(id: string, options: RequestOptions = {}): Promise<void> {
+    const r = await this.send("DELETE", ["documents", id], undefined, undefined, options.signal);
+    if (!r.ok) ok(r, await readJson(r));
+  }
+
+  /** The goals at each of `at`, lines from 1; a position with only a line
+   *  is the line's first tactic. With `revision`, a document at another
+   *  revision is a `conflict`. */
+  documentGoals(
+    id: string,
+    at: LinePos[],
+    params: { revision?: number; mode?: GoalsMode } = {},
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<DocumentGoals> {
+    const body = { at, ...params, ...this.timeoutOf(options) };
+    return this.call("POST", ["documents", id, "goals"], body, options);
+  }
+
+  /** Runs each candidate tactic at `at`, a `sorry`'s index or a position, on
+   *  the document as it is: nothing a candidate does stays. */
+  probeDocument(
+    id: string,
+    at: ProbeAt,
+    candidates: string[],
+    params: { revision?: number } = {},
+    options: Omit<RunOptions, "version"> = {},
+  ): Promise<DocumentProbes> {
+    const body = { at, candidates, ...params, ...this.timeoutOf(options) };
+    return this.call("POST", ["documents", id, "probes"], body, options);
   }
 
   /** The snapshots of every module that imports `id`'s, directly or through
