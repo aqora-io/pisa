@@ -338,11 +338,80 @@ def parentOf (env : Environment) (own : NameSet) (n : Name) (ci : ConstantInfo) 
       return (← inductive_ c.induct).name
     afterType <|> afterConstructor <|> projection
 
+namespace Axioms
+
+/-- What a walk of constants' axioms has found. -/
+structure State where
+  /-- The axioms of each constant whose walk is complete. -/
+  done : NameMap NameSet := {}
+  /-- The constants being walked, at their depth. -/
+  walking : NameMap Nat := {}
+
+/-- What a constant's axioms come from, as `collectAxioms` walks it: the
+constants its type and value use, and an inductive type's constructors. -/
+def uses : ConstantInfo → Array Name
+  | .axiomInfo v => v.type.getUsedConstants
+  | .defnInfo v => v.type.getUsedConstants ++ v.value.getUsedConstants
+  | .thmInfo v => v.type.getUsedConstants ++ v.value.getUsedConstants
+  | .opaqueInfo v => v.type.getUsedConstants ++ v.value.getUsedConstants
+  | .quotInfo _ => #[]
+  | .ctorInfo v => v.type.getUsedConstants
+  | .recInfo v => v.type.getUsedConstants
+  | .inductInfo v => v.type.getUsedConstants ++ v.ctors.toArray
+
+/-- Walks constant `c` at `depth`: the axioms it depends on, and the lowest
+depth of a constant above it that is still being walked and that the walk
+reached, through a cycle such as an inductive type's with its constructors.
+Such a walk misses what that constant reaches by its other ways, so it is
+kept only once the cycle closes. -/
+partial def walk (env : Environment) (depth : Nat) (c : Name) :
+    StateM State (NameSet × Option Nat) := do
+  if let some axioms := (← get).done.find? c then
+    return (axioms, none)
+  if let some d := (← get).walking.find? c then
+    return ({}, some d)
+  modify fun s => { s with walking := s.walking.insert c depth }
+  let mut axioms : NameSet := {}
+  let mut low : Option Nat := none
+  if let some ci := env.find? c then
+    if ci matches .axiomInfo _ then
+      axioms := axioms.insert c
+    for d in uses ci do
+      let (found, l) ← walk env (depth + 1) d
+      axioms := axioms ∪ found
+      low := match low, l with
+        | some a, some b => some (min a b)
+        | a, b => a <|> b
+  modify fun s => { s with walking := s.walking.erase c }
+  let above := low.filter (· < depth)
+  if above.isNone then
+    modify fun s => { s with done := s.done.insert c axioms }
+  return (axioms, above)
+
+/-- The axioms each of `names` depends on, sorted, as `collectAxioms` finds
+them in an environment whose extensions have no state, such as one made from
+a kernel environment: by walking what constants use, here with one walk for
+all of `names`, so that what they share, such as a library's, is walked once. -/
+def of (env : Environment) (names : Array Name) : NameMap (Array Name) := Id.run do
+  let env := env.setExporting false
+  let (_, s) := (names.forM fun n => discard (walk env 0 n)).run {}
+  let mut out := {}
+  for n in names do
+    if let some axioms := s.done.find? n then
+      let mut sorted := #[]
+      for a in axioms do
+        sorted := sorted.push a
+      out := out.insert n (sorted.qsort Name.lt)
+  return out
+
+end Axioms
+
 /-- The description of the declaration `n` of module `mod`, whose constant is
-`ci`, among `own`, the declarations described with it. -/
-def describe (mod n : Name) (ci : ConstantInfo) (own : NameSet := {}) : CoreM Json := do
+`ci` and which depends on `axioms`, among `own`, the declarations described
+with it. -/
+def describe (mod n : Name) (ci : ConstantInfo) (axioms : Array Name) (own : NameSet := {}) :
+    CoreM Json := do
   let env ← getEnv
-  let axioms ← collectAxioms n
   -- Declared as `axiom` here or in a snapshot. Lean's own, and the ones it
   -- makes, such as `native_decide`'s (internal names), aren't assumptions.
   let assumes := axioms.filter fun a => tracked env a && !leanMade a &&
@@ -366,15 +435,23 @@ def describe (mod n : Name) (ci : ConstantInfo) (own : NameSet := {}) : CoreM Js
     ("parent", toJson (parentOf env own n ci))]
 
 /-- The descriptions of the declarations `names` of module `mod` that are
-described. -/
-def describeAll (mod : Name) (names : Array Name) : CoreM (Array Json) := do
+described. `fromKernel` is for an environment made from a kernel environment,
+whose extensions have no state, so `collectAxioms` has no axioms recorded for
+the imports and walks them for each declaration: their axioms are then found
+by one walk for all of `names` (see `Axioms.of`). -/
+def describeAll (mod : Name) (names : Array Name) (fromKernel := false) :
+    CoreM (Array Json) := do
   let env ← getEnv
   let own := names.foldl (·.insert ·) ({} : NameSet)
+  let walked := if fromKernel then Axioms.of env names else {}
   let mut out := #[]
   for n in names do
     let some ci := env.find? n | continue
     if auxiliary n ci then continue
-    out := out.push (← describe mod n ci own)
+    let axioms ← match walked.find? n with
+      | some axioms => pure axioms
+      | none => collectAxioms n
+    out := out.push (← describe mod n ci axioms own)
   return out
 
 /-- Logs `PISA_DECLS <descriptions>`, which the worker reads. -/

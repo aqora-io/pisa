@@ -790,3 +790,64 @@ fn a_declaration_added_without_the_kernel_is_rejected_and_ends_the_chain() {
     let reason = verdicts[0]["reason"].as_str().unwrap();
     assert!(reason.contains("bad"), "{reason}");
 }
+
+/// Code whose axioms come through an inductive type's constructors: `I.mk`
+/// and what builds one depend on what `I.mk2`'s type uses.
+const AXIOMS: &str = "def foo : Prop := sorry\n\n\
+                      inductive I where\n  | mk : I\n  | mk2 : foo → I\n\n\
+                      theorem t : Nonempty I := ⟨I.mk⟩\n\n\
+                      axiom ax : 1 = 1\n\ntheorem u : 1 = 1 := ax\n\n\
+                      theorem w (p : Prop) : p ∨ ¬p := Classical.em p\n\n\
+                      theorem v : True := trivial\n";
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_axioms_found_are_leans() {
+    let names = ["foo", "I", "I.mk", "I.mk2", "t", "ax", "u", "w", "v"];
+    let printed: String = names
+        .iter()
+        .map(|n| format!("#print axioms {n}\n"))
+        .collect();
+    let code = format!("{AXIOMS}\n{printed}");
+    let s = Snapshots::new();
+    let built = s.tool_build(&code);
+    // Lean's own, from `#print axioms`.
+    let mut lean = std::collections::HashMap::new();
+    for line in built.output.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(text) = message["data"].as_str() else {
+            continue;
+        };
+        let Some((name, rest)) = text.strip_prefix('\'').and_then(|t| t.split_once('\'')) else {
+            continue;
+        };
+        let axioms: Vec<String> = match rest.strip_prefix(" depends on axioms: [") {
+            Some(list) => list
+                .trim_end_matches(']')
+                .split(", ")
+                .map(String::from)
+                .collect(),
+            None if rest == " does not depend on any axioms" => Vec::new(),
+            None => continue,
+        };
+        lean.insert(name.to_string(), axioms);
+    }
+    assert_eq!(lean.len(), names.len(), "{}", built.output);
+    assert_eq!(lean["t"], ["sorryAx"]);
+    // The build's report and the verifier's find what Lean does.
+    let reported = parse_declarations(built.one("PISA_DECLS").clone()).unwrap();
+    let verified =
+        parse_declarations(s.tool_verify(&[&snapshot::id(&code)])[0]["declarations"].clone())
+            .unwrap();
+    for decls in [reported, verified] {
+        for name in names {
+            let d = decls
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(d.axioms, lean[name], "{name}");
+        }
+    }
+}

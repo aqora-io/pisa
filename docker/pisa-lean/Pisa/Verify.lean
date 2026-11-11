@@ -67,7 +67,7 @@ def run (modules : Array Name) : IO UInt32 := do
       return ← reject m s!"kernel re-check: {e}"
     let ctx : Core.Context := { fileName := "", fileMap := default, maxHeartbeats := 0 }
     let env := Environment.ofKernelEnv kenv
-    let (decls, _) ← (describeAll m data.constNames).toIO ctx { env }
+    let (decls, _) ← (describeAll m data.constNames (fromKernel := true)).toIO ctx { env }
     emit "PISA_VERIFY" (Json.mkObj [("module", toJson m), ("ok", true),
       ("declarations", Json.arr decls)])
   return 0

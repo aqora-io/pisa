@@ -113,7 +113,8 @@ def run (args : List String) : IO UInt32 := do
       | some ci => !ci.isUnsafe && !ci.isPartial
       | none => false
     let ctx : Core.Context := { fileName := "", fileMap := default, maxHeartbeats := 0 }
-    let (decls, _) ← (describeAll mainModule names).toIO ctx { env := .ofKernelEnv kenv }
+    let (decls, _) ←
+      (describeAll mainModule names (fromKernel := true)).toIO ctx { env := .ofKernelEnv kenv }
     emit "PISA_DECLS" (Json.arr decls)
   -- What importers see: a module-system module's exported part.
   let (names, seen) := if isModule then (parts[0]!.constNames, env.setExporting true)
