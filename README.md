@@ -212,6 +212,12 @@ To the release that supersedes amended specs and refuses clashing imports:
 - A spec created with `amends` and no `holes` keeps the amended spec's.
   Specs amended earlier keep the holes they were created with, and their
   records show no change of holes.
+- Workers export module-system snapshots built earlier again, as their
+  builds left out the declarations that aren't public, where a hole's value
+  can hide: one worker at a time, as it starts and every hour, one module at
+  a time in a slot whose Lean process it stops first. Until then, the review
+  list says such a value's module export doesn't have it. Search reindexes
+  each module exported again.
 
 To the release that re-checks snapshots by default and answers catalog reads
 on the servers:
@@ -915,11 +921,18 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
     A hole, or a definition `allow` names, has `hole` and its `value` on the
     head, printed with full names and no notation, which the code can't
     dress up, each `sorry` as `sorry`, and cut at 4,000 characters. So has
-    each definition the head adds that a hole's value reaches, as the value
-    can hide behind one. `holes` names the other holes a value mentions, to
+    each definition the head adds that a hole's value reaches, its own, a
+    non-public one of a module-system file included, or one of a snapshot
+    it builds on that the spec doesn't, as the value can hide behind one. A
+    hole may be a definition of a snapshot the spec builds on, and is
+    followed wherever the head declares it. Where such a value is missing,
+    `unprinted` says why: it didn't print, its module has no export, or the
+    export doesn't have it. `holes` names the other holes a value mentions, to
     read with it. What Lean derives of a declaration, such as a recursor or
-    `casesOn`, isn't listed. Snapshots built before values were printed, or
-    before private declarations were exported, have none of those.
+    `casesOn`, isn't listed. Snapshots built before values were printed
+    have none of those. Module-system ones built before private declarations
+    were exported have them once a worker has exported them again, which
+    workers do as they start and every hour.
   - **`library`** names the constants of Lean, Mathlib and the like that
     they use, which the version fixes.
   - **Trust.** The text is what the builds printed, for reading.

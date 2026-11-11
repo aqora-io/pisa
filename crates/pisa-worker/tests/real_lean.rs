@@ -809,8 +809,20 @@ fn the_build_names_its_imports_and_exports_what_importers_see() {
     let base = s.tool_build(MODULE);
     let id = snapshot::id(MODULE);
     let export = base.one("PISA_EXPORT").as_array().unwrap();
-    let names: Vec<&str> = export.iter().map(|d| d["name"].as_str().unwrap()).collect();
-    assert!(!names.contains(&"hidden"), "{names:?}");
+    // A declaration that isn't public is exported too, under its private
+    // name, with its value: a hole's value can hide behind one.
+    let hidden = export
+        .iter()
+        .find(|d| d["name"].as_str().unwrap().ends_with(".hidden"));
+    let hidden = hidden.unwrap_or_else(|| panic!("no hidden in {export:?}"));
+    assert!(
+        hidden["name"].as_str().unwrap().starts_with("_private."),
+        "{hidden}"
+    );
+    assert_eq!(
+        (&hidden["kind"], &hidden["value"]),
+        (&serde_json::json!("def"), &serde_json::json!("7"))
+    );
     let double = export.iter().find(|d| d["name"] == "double").unwrap();
     assert_eq!(double["docstring"], "Doubles.");
     // Importers see a module-system theorem as an axiom; the export says
@@ -843,6 +855,31 @@ fn the_build_names_its_imports_and_exports_what_importers_see() {
     let imports = s.tool_build(&on).one("PISA_IMPORTS").clone();
     let imports: Vec<String> = serde_json::from_value(imports).unwrap();
     assert!(imports.contains(&snapshot::module(&id)), "{imports:?}");
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn an_export_of_a_built_module_is_the_one_its_build_printed() {
+    let s = Snapshots::new();
+    let id = snapshot::id(MODULE);
+    let built = s.tool_build(MODULE).one("PISA_EXPORT").clone();
+    let on = format!(
+        "module\n\npublic import {}\n\n/-- Four. -/\npublic theorem four : double 2 = 4 := double_two\n\n\
+         def eight : Nat := double 4\n",
+        snapshot::module(&id)
+    );
+    let on_built = s.tool_build(&on).one("PISA_EXPORT").clone();
+    for (code, built) in [(MODULE.to_string(), built), (on, on_built)] {
+        let module = snapshot::module(&snapshot::id(&code));
+        let exported = s.tool(&["export", "--value-chars", "4000", &module]);
+        assert!(exported.ok, "pisa export failed:\n{}", exported.output);
+        assert_eq!(exported.one("PISA_EXPORT"), &built, "{module}");
+    }
+    // Outside the module system too.
+    let plain = s.tool_build(PLAIN).one("PISA_EXPORT").clone();
+    let module = snapshot::module(&snapshot::id(PLAIN));
+    let exported = s.tool(&["export", "--value-chars", "4000", &module]);
+    assert_eq!(exported.one("PISA_EXPORT"), &plain);
 }
 
 #[test]

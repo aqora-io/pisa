@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use diesel::dsl::{exists, not};
 use diesel::{
-    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl,
+    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, TextExpressionMethods,
 };
 use diesel_async::RunQueryDsl;
 use pisa_protocol::api::{AmendedHoles, Error, ErrorKind, Replaces};
@@ -1284,6 +1284,65 @@ pub(crate) async fn modules_with_decls_after(
         .await
         .map_err(DbError::from)?;
     Ok(ids)
+}
+
+pub(crate) async fn stale_exports_after(
+    db: &Handle,
+    v: &str,
+    after: Option<&str>,
+    limit: i64,
+) -> Result<Vec<(String, String)>, Error> {
+    let module_system = modules::header
+        .eq("module")
+        .or(modules::header.like("module\n%"));
+    let mut query = modules::table
+        .filter(modules::version.eq(v))
+        .filter(modules::decls.is_not_null())
+        .filter(module_system)
+        .into_boxed();
+    query = older_export(query);
+    if let Some(after) = after {
+        query = query.filter(modules::id.gt(after));
+    }
+    let rows = query
+        .order(modules::id)
+        .limit(limit)
+        .select((modules::id, modules::build))
+        .load(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows)
+}
+
+pub(crate) async fn replace_decls(
+    db: &Handle,
+    v: &str,
+    m: &str,
+    build: &str,
+    decls: &SnapshotDecls,
+) -> Result<bool, Error> {
+    let stored = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let Some(meta) = module_in(conn, v, m).await? else {
+                return Ok(false);
+            };
+            if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
+                return Ok(false);
+            }
+            let mut decls = decls.clone();
+            decls.refresh(&meta);
+            diesel::update(modules::table.find((v, m)))
+                .set(modules::decls.eq(Some(to_record(&decls)?)))
+                .execute(conn)
+                .await?;
+            log(conn, v, None, Some(m)).await?;
+            Ok(true)
+        })
+    })
+    .await?;
+    Ok(stored)
 }
 
 pub(crate) async fn changes(

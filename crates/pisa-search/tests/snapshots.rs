@@ -352,6 +352,7 @@ fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
         deprecated_to: None,
         value: None,
         private: false,
+        error: None,
         uses_sorry: false,
         status: ProofStatus::Proved,
     }

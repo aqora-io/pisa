@@ -126,6 +126,24 @@ pub async fn run_with_stores(
             }
         });
     }
+    {
+        let (pool, owner) = (pool.clone(), worker_id.clone());
+        tokio::spawn(async move {
+            // From the start, so that old snapshots are exported again as
+            // soon as a worker of this release runs.
+            let mut tick = tokio::time::interval(SWEEP_EVERY);
+            loop {
+                tick.tick().await;
+                match pool.snapshots().reexport(&pool, &owner).await {
+                    Ok(0) => {}
+                    Ok(modules) => {
+                        tracing::info!(modules, "exported old module-system snapshots again")
+                    }
+                    Err(e) => tracing::warn!("exporting old snapshots again failed: {e}"),
+                }
+            }
+        });
+    }
     let catalog = catalog::Catalog::new(db.clone(), version.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(LOG_PRUNE_EVERY);

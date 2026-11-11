@@ -138,14 +138,19 @@ pub async fn review(
             .map(|h| normalised(h).into_owned())
             .collect();
         let reached = closure(&start, &records);
-        // What the holes' values reach: the head's own definitions there are
-        // shown by value too, as a hole's value can hide behind one.
-        let hole_names: Vec<String> = start
-            .iter()
+        // What the holes' values reach: the definitions the head adds there,
+        // its own or those of a snapshot the spec doesn't build on, are shown
+        // by value too, as a hole's value can hide behind one. A hole may be
+        // a definition of a snapshot the spec builds on, so each is found
+        // wherever the head declares it.
+        let mut hole_names: Vec<String> = records
+            .keys()
             .filter(|n| holes.contains(normalised(n).as_ref()))
             .cloned()
             .collect();
+        hole_names.sort();
         let from_holes: HashSet<String> = closure(&hole_names, &records).into_iter().collect();
+        let spec_below = metas.below(catalog, [&spec.module]).await?;
         // The snapshot that stands for each module below the head that the
         // walk reaches.
         let mut unnamed: Vec<String> = reached
@@ -191,10 +196,9 @@ pub async fn review(
                 _ => None,
             };
             let hole = holes.contains(normalised(name).as_ref());
-            let by_value = hole
-                || (origin == ReviewOrigin::Head
-                    && from_holes.contains(name)
-                    && follows_value(&d.kind));
+            let added = origin == ReviewOrigin::Head
+                || (origin == ReviewOrigin::Snapshot && !spec_below.contains(m));
+            let by_value = hole || (added && from_holes.contains(name) && follows_value(&d.kind));
             if let Some(e) = exported {
                 let mut uses: Vec<&String> = e.type_refs.iter().collect();
                 if follows_value(&d.kind) {
@@ -215,6 +219,24 @@ pub async fn review(
                 type_full: exported.map(|e| e.type_pp_full.clone()),
                 hole,
                 value: exported.filter(|_| by_value).and_then(|e| e.value.clone()),
+                unprinted: match exported {
+                    _ if !(by_value && follows_value(&d.kind)) => None,
+                    Some(e) if e.value.is_some() => None,
+                    Some(e) => e
+                        .error
+                        .as_ref()
+                        .map(|error| format!("it didn't print: {error}")),
+                    None if !module_exported => Some(
+                        "its module has no export: built before exports, or its export \
+                         didn't fit"
+                            .into(),
+                    ),
+                    None => Some(
+                        "its module's export doesn't have it: built before private \
+                         declarations were exported"
+                            .into(),
+                    ),
+                },
                 holes: match by_value {
                     true => d
                         .value_refs

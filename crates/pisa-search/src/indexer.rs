@@ -350,8 +350,9 @@ impl Indexer {
         let Some(mut decls) = self.catalog.decls(m).await.map_err(store)? else {
             return Ok(None);
         };
-        // Exported for the audit's review list, not for search.
-        decls.decls.retain(|d| !d.private);
+        // Exported for the audit's review list, not for search, or not
+        // printed at all.
+        decls.decls.retain(|d| !d.private && d.error.is_none());
         let described = parse_described(self.catalog.described(m).await.map_err(store)?);
         let has_entries = self.catalog.has_entries(m).await.map_err(store)?;
         let has_heads = self.catalog.has_heads(m).await.map_err(store)?;

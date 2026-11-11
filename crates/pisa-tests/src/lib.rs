@@ -224,6 +224,14 @@ pub fn exports(code: &str) -> String {
             doc = None;
             continue;
         };
+        if line.contains("UNPRINTABLE") {
+            // A declaration that fails to print, as Lean's printer can.
+            decls.push(
+                json!({"name": name, "kind": kind, "error": "printing ran out of heartbeats"}),
+            );
+            doc = None;
+            continue;
+        }
         let (statement, value) = statement_and_value(line, name);
         decls.push(json!({
             "name": name,

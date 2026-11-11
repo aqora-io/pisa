@@ -1247,3 +1247,117 @@ async fn the_review_lists_what_the_specs_statements_use_on_each_head() {
         );
     }
 }
+
+/// The review entries as `name origin value`.
+fn reviewed(r: &Value) -> Vec<String> {
+    let declarations = r["review"][0]["declarations"].as_array().unwrap();
+    declarations
+        .iter()
+        .map(|d| {
+            format!(
+                "{} {} {}",
+                d["name"].as_str().unwrap(),
+                d["origin"].as_str().unwrap(),
+                d.get("value").map_or("-".into(), |v| v.to_string()),
+            )
+        })
+        .collect()
+}
+
+/// A hole's value can hide behind a definition of a helper snapshot the
+/// head imports, or behind the head's own definition when the hole is a
+/// definition of a snapshot the spec builds on: both are shown by value.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_review_follows_a_holes_value_into_helpers_and_below() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let s = create(&c, json!({"code": spec, "holes": ["cost"], "verify": true})).await;
+    let helper = create(&c, json!({"code": "import Foo\n\ndef three : Nat := 3"})).await;
+    let filled = on(
+        &helper,
+        "def cost : Nat := three\ntheorem t : cost = cost := rfl",
+    );
+    create(
+        &c,
+        json!({"code": filled, "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    let (_, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&review=true", id(&s)),
+    )
+    .await;
+    let listed = reviewed(&r);
+    assert!(
+        listed.contains(&"three snapshot \"3\"".to_string()),
+        "{listed:?}"
+    );
+
+    let base = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let spec = on(&base, "theorem u : g = g := sorry");
+    let s = create(&c, json!({"code": spec, "holes": ["g"], "verify": true})).await;
+    let own = "import Foo\n\ndef two : Nat := 2\ndef g : Nat := two\ntheorem u : g = g := rfl";
+    create(
+        &c,
+        json!({"code": own, "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    let (_, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&review=true", id(&s)),
+    )
+    .await;
+    let listed = reviewed(&r);
+    assert!(listed.contains(&"two head \"2\"".to_string()), "{listed:?}");
+}
+
+/// A value the review list should show but can't says why: it didn't print,
+/// or its module has no export.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_review_says_why_a_value_is_missing() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let s = create(&c, json!({"code": spec, "holes": ["cost"], "verify": true})).await;
+    let unprintable =
+        "import Foo\n\ndef cost : Nat := 3 -- UNPRINTABLE\ntheorem t : cost = cost := rfl";
+    create(
+        &c,
+        json!({"code": unprintable, "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    let (_, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&review=true", id(&s)),
+    )
+    .await;
+    let cost = &r["review"][0]["declarations"][0];
+    assert_eq!(cost["name"], "cost", "{r}");
+    let why = cost["unprinted"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{cost}"));
+    assert!(why.contains("ran out of heartbeats"), "{why}");
+
+    let other = "import Foo\n\ndef cost : Nat := sorry\ntheorem u : cost = cost := sorry";
+    let s = create(
+        &c,
+        json!({"code": other, "holes": ["cost"], "verify": true}),
+    )
+    .await;
+    let unexported =
+        "import Foo\n\n-- NO_EXPORT\ndef cost : Nat := 3\ntheorem u : cost = cost := rfl";
+    create(
+        &c,
+        json!({"code": unexported, "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    let (_, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&review=true", id(&s)),
+    )
+    .await;
+    let cost = &r["review"][0]["declarations"][0];
+    let why = cost["unprinted"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{cost}"));
+    assert!(why.contains("no export"), "{why}");
+}

@@ -310,6 +310,8 @@ class ReviewDeclaration(TypedDict):
     type: NotRequired[str]
     hole: NotRequired[bool]
     value: NotRequired[str]
+    # Why there is no value where there should be one.
+    unprinted: NotRequired[str]
     holes: NotRequired[list[str]]
 
 class AuditReview(TypedDict):

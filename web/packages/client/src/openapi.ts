@@ -2272,6 +2272,11 @@ export interface components {
             /** @description Its type, with full names and no notation. */
             type?: string;
             /**
+             * @description Why there is no `value` where there should be one: it didn't print,
+             *     its module has no export, or the export doesn't have it.
+             */
+            unprinted?: string;
+            /**
              * @description A hole's value on the head, and the value of each definition the
              *     head adds that a hole's value reaches, as the build printed it with
              *     full names and no notation, each `sorry` as `sorry`, cut at 4,000

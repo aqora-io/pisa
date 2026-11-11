@@ -375,6 +375,16 @@ impl Lease {
             .verify(self.id, modules, imports, per_module)
     }
 
+    /// Describes a built snapshot module again in this slot's sandbox and
+    /// cgroup; see [`Launcher::export`].
+    pub async fn export(
+        &self,
+        module: &str,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        self.pool.launcher.export(self.id, module, timeout).await
+    }
+
     pub fn policy(&self) -> &Policy {
         &self.pool.cfg.policy
     }

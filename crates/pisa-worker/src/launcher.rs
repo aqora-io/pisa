@@ -473,6 +473,46 @@ impl Launcher {
         })
     }
 
+    /// Has `pisa export` describe the built module `module` again, as
+    /// [`compile`](Self::compile) has `pisa build` describe a new one, set up
+    /// the same way, for at most `timeout`: its export (`PISA_EXPORT`), or
+    /// why there is none.
+    pub async fn export(
+        &self,
+        slot: usize,
+        module: &str,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, String> {
+        let chars = crate::catalog::VALUE_CHARS.to_string();
+        let args = ["export", "--value-chars", &chars, module];
+        let mut cmd = self
+            .command_on(slot, &self.tool, &args, &self.build_path)
+            .map_err(|e| e.to_string())?;
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd.spawn().map_err(|e| e.to_string())?;
+        let output = tokio::time::timeout(timeout, child.wait_with_output())
+            .await
+            .map_err(|_| format!("the export took more than {}s", timeout.as_secs()))?
+            .map_err(|e| e.to_string())?;
+        let (_, [_, _, export]) = Compiled::parse(&String::from_utf8_lossy(&output.stdout));
+        match export {
+            Some(export) if output.status.success() => Ok(export),
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let tail =
+                    &stderr[stderr.floor_char_boundary(stderr.len().saturating_sub(STDERR_TAIL))..];
+                Err(format!(
+                    "the export failed ({}): {}",
+                    output.status,
+                    tail.trim()
+                ))
+            }
+        }
+    }
+
     /// Starts `pisa verify` on `modules`, imports first, in the slot's
     /// sandbox and cgroup. It has `imports` to load what they import, and
     /// then `per_module` for each module.

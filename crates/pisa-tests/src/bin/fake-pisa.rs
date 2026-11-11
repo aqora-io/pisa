@@ -22,6 +22,9 @@
 //! take that long. `BREAK_KERNEL` makes the verifier exit 1 with an error on
 //! stderr, and `FAIL_KERNEL` makes it report a failure of its own
 //! (`PISA_FAILED`), as when it can't describe the module.
+//!
+//! `pisa export --value-chars <n> M` prints the `PISA_EXPORT` its build
+//! printed, from the module's code in its fake olean on LEAN_PATH.
 
 use std::io::Write;
 
@@ -39,8 +42,9 @@ fn main() {
             build(&args[at + 1], args.last().unwrap());
         }
         Some("verify") => verify(&args[1..]),
+        Some("export") => export(args.last().unwrap()),
         _ => {
-            eprintln!("usage: pisa build … | pisa verify MODULE…");
+            eprintln!("usage: pisa build … | pisa verify MODULE… | pisa export …");
             std::process::exit(2);
         }
     }
@@ -83,6 +87,14 @@ fn verify(modules: &[String]) {
             return;
         }
     }
+}
+
+fn export(module: &str) {
+    let Some(code) = find_module(module).and_then(|f| std::fs::read_to_string(f).ok()) else {
+        eprintln!("fake-pisa: unknown module {module}");
+        std::process::exit(1);
+    };
+    println!("PISA_EXPORT {}", exports(&as_reported(&code)));
 }
 
 fn build(olean: &str, file: &str) {
@@ -138,5 +150,9 @@ fn build(olean: &str, file: &str) {
     if !is_module(&code) {
         println!("PISA_DECLS {}", linked_declarations(&reported));
     }
-    println!("PISA_EXPORT {}", exports(&reported));
+    // A module that says `NO_EXPORT` prints none, as a build whose export
+    // failed.
+    if !code.contains("NO_EXPORT") {
+        println!("PISA_EXPORT {}", exports(&reported));
+    }
 }

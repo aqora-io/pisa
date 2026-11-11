@@ -1743,6 +1743,10 @@ pub struct ReviewDeclaration {
     /// characters. None from a build before values were printed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// Why there is no `value` where there should be one: it didn't print,
+    /// its module has no export, or the export doesn't have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unprinted: Option<String>,
     /// The other holes its value names, which a reviewer reads with it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holes: Vec<String>,

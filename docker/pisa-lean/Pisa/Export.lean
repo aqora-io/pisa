@@ -15,8 +15,8 @@ auto-generated names, but not private ones, which the review list shows and
 search leaves out (`private: true`). A definition's `value` is printed with
 full names and no notation, which code can't dress up with notation of its
 own, each `sorry` in it as `sorry`, and cut at `chars` characters. Each
-declaration gets its own heartbeat budget, and one that fails to print is left
-out.
+declaration gets its own heartbeat budget, and one that fails to print is kept
+with its kind and `error`.
 -/
 
 public section
@@ -24,7 +24,75 @@ public section
 namespace Pisa
 open Lean Meta
 
-/-- The export of declaration `n`, if it is one to export and prints. -/
+/-- What kind of declaration `ci` is, as the export names it. -/
+def exportKind (env : Environment) (ci : ConstantInfo) : String :=
+  match ci with
+  | .axiomInfo _ => "axiom"
+  | .defnInfo d =>
+    if isInstanceCore env d.name then "instance"
+    else if getReducibilityStatusCore env d.name == ReducibilityStatus.reducible then "abbrev"
+    else "def"
+  | .thmInfo _ => "theorem"
+  | .opaqueInfo _ => "opaque"
+  | .quotInfo _ => "quot"
+  | .inductInfo i =>
+    if isClass env i.name then "class"
+    else if isStructure env i.name then "structure"
+    else "inductive"
+  | .ctorInfo _ => "constructor"
+  | .recInfo _ => "recursor"
+
+/-- The export of `ci`, a declaration of kind `kind`, as it prints. -/
+def printed (ci : ConstantInfo) (kind : String) (chars : Nat) : MetaM Json := do
+  let env ← getEnv
+  let n := ci.name
+  let signature ← withOptions (fun o => o |>.setBool `pp.deepTerms true
+      |>.set `pp.deepTerms.threshold (10000 : Nat) |>.set `pp.maxSteps (100000 : Nat)) do
+    return (← PrettyPrinter.ppSignature n).fmt.pretty 120
+  let typeFull ← withOptions (fun o => o |>.setBool `pp.notation false
+      |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
+    return (← ppExpr ci.type).pretty 120
+  let valueExpr? : Option Expr := match ci with
+    | .defnInfo d => some d.value
+    | .opaqueInfo d => some d.value
+    | _ => none
+  -- Without notation a `sorry` prints as `sorryAx` with its type and
+  -- label, so each is marked with a constant that prints as `sorry`.
+  let mark := `Pisa.Export.sorryMark
+  let unsorried := valueExpr?.map fun v =>
+    v.replace fun e => if e.isSorry then some (mkConst mark) else none
+  let value? : Option String ← match unsorried with
+    | some v => withOptions (fun o => o |>.setBool `pp.notation false
+        |>.setBool `pp.fullNames true |>.set `pp.maxSteps (100000 : Nat)) do
+          let text := ((← ppExpr v).pretty 120).replace (toString mark) "sorry"
+          if text.length > chars then
+            return some (String.ofList (text.toList.take chars) ++ " …")
+          else
+            return some text
+    | none => pure none
+  let typeRefs := ci.type.getUsedConstants.filter (· != n)
+  let valueRefs := match ci.value? (allowOpaque := true) with
+    | some v => v.getUsedConstantsAsSet.toArray.filter (fun r => r != n && !r.isInternalDetail)
+    | none => #[]
+  let doc : Option String := match ← findInternalDocString? env n with
+    | some (.inl s) => some s
+    | _ => none
+  let deprecated := Linter.deprecatedAttr.getParam? env n
+  return Json.mkObj [
+    ("name", toJson n),
+    ("kind", toJson kind),
+    ("signature", toJson signature),
+    ("type_pp_full", toJson typeFull),
+    ("type_refs", toJson typeRefs),
+    ("value_refs", toJson valueRefs),
+    ("docstring", toJson doc),
+    ("deprecated_to", toJson (deprecated.bind (·.newName?))),
+    ("value", toJson value?),
+    ("private", toJson (isPrivateName n))]
+
+/-- The export of declaration `n`, if it is one to export. One that fails to
+print, even for want of heartbeats, is kept with its kind and `error`, so
+that the review list can say why it has no value. -/
 def exportDecl (n : Name) (chars : Nat) : MetaM (Option Json) := do
   let env ← getEnv
   let some ci := env.find? n | return none
@@ -33,66 +101,14 @@ def exportDecl (n : Name) (chars : Nat) : MetaM (Option Json) := do
     return none
   if isAuxRecursor env n || isNoConfusion env n then return none
   if ← isRec n <||> isMatcher n then return none
-  Core.withCurrHeartbeats do try
-      let signature ← withOptions (fun o => o |>.setBool `pp.deepTerms true
-          |>.set `pp.deepTerms.threshold (10000 : Nat) |>.set `pp.maxSteps (100000 : Nat)) do
-        return (← PrettyPrinter.ppSignature n).fmt.pretty 120
-      let typeFull ← withOptions (fun o => o |>.setBool `pp.notation false
-          |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
-        return (← ppExpr ci.type).pretty 120
-      let valueExpr? : Option Expr := match ci with
-        | .defnInfo d => some d.value
-        | .opaqueInfo d => some d.value
-        | _ => none
-      -- Without notation a `sorry` prints as `sorryAx` with its type and
-      -- label, so each is marked with a constant that prints as `sorry`.
-      let mark := `Pisa.Export.sorryMark
-      let unsorried := valueExpr?.map fun v =>
-        v.replace fun e => if e.isSorry then some (mkConst mark) else none
-      let value? : Option String ← match unsorried with
-        | some v => withOptions (fun o => o |>.setBool `pp.notation false
-            |>.setBool `pp.fullNames true |>.set `pp.maxSteps (100000 : Nat)) do
-              let text := ((← ppExpr v).pretty 120).replace (toString mark) "sorry"
-              if text.length > chars then
-                return some (String.ofList (text.toList.take chars) ++ " …")
-              else
-                return some text
-        | none => pure none
-      let kind : String := match ci with
-        | .axiomInfo _ => "axiom"
-        | .defnInfo d =>
-          if isInstanceCore env d.name then "instance"
-          else if getReducibilityStatusCore env d.name == ReducibilityStatus.reducible then "abbrev"
-          else "def"
-        | .thmInfo _ => "theorem"
-        | .opaqueInfo _ => "opaque"
-        | .quotInfo _ => "quot"
-        | .inductInfo i =>
-          if isClass env i.name then "class"
-          else if isStructure env i.name then "structure"
-          else "inductive"
-        | .ctorInfo _ => "constructor"
-        | .recInfo _ => "recursor"
-      let typeRefs := ci.type.getUsedConstants.filter (· != n)
-      let valueRefs := match ci.value? (allowOpaque := true) with
-        | some v => v.getUsedConstantsAsSet.toArray.filter (fun r => r != n && !r.isInternalDetail)
-        | none => #[]
-      let doc : Option String := match ← findInternalDocString? env n with
-        | some (.inl s) => some s
-        | _ => none
-      let deprecated := Linter.deprecatedAttr.getParam? env n
+  let kind := exportKind env ci
+  Core.withCurrHeartbeats do
+    tryCatchRuntimeEx (some <$> printed ci kind chars) fun e => do
       return some (Json.mkObj [
         ("name", toJson n),
         ("kind", toJson kind),
-        ("signature", toJson signature),
-        ("type_pp_full", toJson typeFull),
-        ("type_refs", toJson typeRefs),
-        ("value_refs", toJson valueRefs),
-        ("docstring", toJson doc),
-        ("deprecated_to", toJson (deprecated.bind (·.newName?))),
-        ("value", toJson value?),
+        ("error", toJson (← e.toMessageData.toString)),
         ("private", toJson (isPrivateName n))])
-    catch _ => return none
 
 /-- The exports of the declarations `names`, in order. -/
 def exportDecls (names : Array Name) (chars : Nat) : MetaM (Array Json) :=

@@ -219,9 +219,12 @@ impl EntryMeta {
 pub struct SnapshotDecl {
     pub name: String,
     pub kind: String,
-    /// The declaration's signature, with notation.
+    /// The declaration's signature, with notation; empty when it didn't
+    /// print.
+    #[serde(default)]
     pub signature: String,
     /// The type with full names and no notation.
+    #[serde(default)]
     pub type_pp_full: String,
     #[serde(default)]
     pub type_refs: Vec<String>,
@@ -240,6 +243,10 @@ pub struct SnapshotDecl {
     /// out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub private: bool,
+    /// Why it didn't print, if it didn't: the export has only its name and
+    /// kind. Search leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     /// Depends on `sorry`, by the module's check result.
     #[serde(default)]
     pub uses_sorry: bool,
@@ -256,6 +263,16 @@ fn proved() -> ProofStatus {
     ProofStatus::Proved
 }
 
+/// The format of the exports builds make now: a module-system module's
+/// export has its non-public declarations too, and one that didn't print is
+/// kept with its error. Older exports of module-system modules are made
+/// again ([`Catalog::stale_exports_after`]).
+pub const EXPORT_FORMAT: u32 = 2;
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 /// A module's declarations for the search service, with the module's state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotDecls {
@@ -263,15 +280,20 @@ pub struct SnapshotDecls {
     pub header: String,
     pub verified: bool,
     pub decls: Vec<SnapshotDecl>,
+    /// [`EXPORT_FORMAT`] when the export was made; 0 before formats.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub format: u32,
 }
 
 impl SnapshotDecls {
-    /// `decls` for the module `meta`, flagged from its check result.
+    /// `decls` for the module `meta`, flagged from its check result, in
+    /// today's format.
     pub fn new(meta: &ModuleMeta, decls: Vec<SnapshotDecl>) -> SnapshotDecls {
         let mut out = SnapshotDecls {
             header: meta.header.clone(),
             verified: false,
             decls,
+            format: EXPORT_FORMAT,
         };
         out.refresh(meta);
         out
@@ -872,6 +894,34 @@ impl Catalog {
         )
     }
 
+    /// Up to `limit` modules, in order of id after the module `after`, with
+    /// their own builds, whose declarations for search are a module-system
+    /// module's export older than [`EXPORT_FORMAT`].
+    pub async fn stale_exports_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(String, String)>, Error> {
+        dispatch!(
+            &self.db,
+            stale_exports_after(&self.version, after, limit.into())
+        )
+    }
+
+    /// Stores `decls` as module `m`'s declarations for search, flagged from
+    /// its record, and logs the change, if the module's own build is still
+    /// `build`; returns whether it stored them. Declarations that can't be
+    /// stored (see [`record_fits`]) are a `bad_request`.
+    pub async fn replace_decls(
+        &self,
+        m: &str,
+        build: &str,
+        decls: &SnapshotDecls,
+    ) -> Result<bool, Error> {
+        to_record(decls)?;
+        dispatch!(&self.db, replace_decls(&self.version, m, build, decls))
+    }
+
     /// The [`Change`]s logged at `since_micros` or later, oldest first, at most
     /// `limit` of them, after the time and id `after` of one from a previous
     /// page.
@@ -1047,6 +1097,7 @@ mod tests {
             deprecated_to: None,
             value: None,
             private: false,
+            error: None,
             uses_sorry: false,
             status: ProofStatus::Proved,
         }
@@ -1206,6 +1257,83 @@ mod tests {
             assert_eq!(
                 catalog.module("x").await.unwrap().status,
                 ProofStatus::Sorry
+            );
+        }
+    }
+
+    /// `meta(id)` with a module-system header.
+    fn module_system(id: &str) -> ModuleMeta {
+        let mut m = meta(id);
+        m.header = "module\n\npublic import PisaSnap.sx".into();
+        m.result.declarations = vec![checked("a", &[], ProofStatus::Proved)];
+        m
+    }
+
+    #[tokio::test]
+    async fn the_exports_to_redo_are_module_system_ones_of_an_older_format() {
+        for catalog in catalogs().await {
+            for (id, system, format) in [
+                ("w", true, None),
+                ("x", true, Some(0)),
+                ("y", true, Some(EXPORT_FORMAT)),
+                ("z", false, Some(0)),
+                ("zz", true, Some(1)),
+            ] {
+                let m = if system { module_system(id) } else { meta(id) };
+                let decls = format.map(|format| SnapshotDecls {
+                    format,
+                    ..SnapshotDecls::new(&m, vec![decl("a")])
+                });
+                catalog
+                    .commit(id, &m, decls.as_ref(), no_labels())
+                    .await
+                    .unwrap();
+            }
+            let stale = catalog.stale_exports_after(None, 10).await.unwrap();
+            let pair = |id: &str| (id.to_string(), "b".to_string());
+            assert_eq!(stale, [pair("x"), pair("zz")]);
+            let page = catalog.stale_exports_after(None, 1).await.unwrap();
+            assert_eq!(page, [pair("x")]);
+            let next = catalog.stale_exports_after(Some("x"), 1).await.unwrap();
+            assert_eq!(next, [pair("zz")]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_export_replaced_for_its_build_is_logged() {
+        for catalog in catalogs().await {
+            let m = module_system("x");
+            let old = SnapshotDecls {
+                format: 0,
+                ..SnapshotDecls::new(&m, vec![decl("a")])
+            };
+            catalog
+                .commit("x", &m, Some(&old), no_labels())
+                .await
+                .unwrap();
+            let before = catalog.changes(0, None, 100).await.unwrap().len();
+            let mut private = decl("_private.PisaSnap.sx.0.b");
+            private.private = true;
+            let mut m = m;
+            m.result
+                .declarations
+                .push(checked(&private.name, &[], ProofStatus::Proved));
+            let new = SnapshotDecls::new(&m, vec![decl("a"), private]);
+            assert!(catalog.replace_decls("x", "b", &new).await.unwrap());
+            let stored = catalog.decls("x").await.unwrap().unwrap();
+            // Flagged from the stored record's check, which has no `b`.
+            assert_eq!(stored.format, EXPORT_FORMAT);
+            let names: Vec<_> = stored.decls.iter().map(|d| d.name.as_str()).collect();
+            assert_eq!(names, ["a"]);
+            let changes = catalog.changes(0, None, 100).await.unwrap();
+            assert_eq!(changes.len(), before + 1);
+            assert_eq!(changes.last().unwrap().change.module.as_deref(), Some("x"));
+            // Another build's, or a module's that is gone, is not stored.
+            assert!(!catalog.replace_decls("x", "c", &old).await.unwrap());
+            assert!(!catalog.replace_decls("nope", "b", &old).await.unwrap());
+            assert_eq!(
+                catalog.decls("x").await.unwrap().unwrap().format,
+                EXPORT_FORMAT
             );
         }
     }

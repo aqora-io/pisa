@@ -66,6 +66,7 @@ mod build;
 mod cache;
 mod create;
 mod delete;
+mod reexport;
 #[cfg(test)]
 mod tests;
 mod verify;
