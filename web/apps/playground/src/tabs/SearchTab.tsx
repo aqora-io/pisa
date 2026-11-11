@@ -1,5 +1,5 @@
 import type { Hit, Labels, Query, SnapshotScope } from "@aqora/pisa-client";
-import { useDebouncedValue, useDeclaration, useResolve, useSearch } from "@aqora/pisa-react";
+import { type VersionInput, useDebouncedValue, useDeclaration, useResolve, useSearch } from "@aqora/pisa-react";
 import { type FormEvent, useEffect, useState } from "react";
 
 import { Badge, Button, ErrorNote, Field, Goals, Panel, Spinner, SubtleButton, inputClass } from "../components/ui.tsx";
@@ -70,8 +70,18 @@ function Names({ names, onOpen }: { names: string[]; onOpen: (name: string) => v
   );
 }
 
-function DeclView({ name, module, onOpen }: { name: string; module: string | undefined; onOpen: (open: Opened) => void }) {
-  const decl = useDeclaration(name, module);
+function DeclView({
+  name,
+  module,
+  version,
+  onOpen,
+}: {
+  name: string;
+  module: string | undefined;
+  version: VersionInput;
+  onOpen: (open: Opened) => void;
+}) {
+  const decl = useDeclaration(name, module, version);
   // A snapshot declaration's dependencies may be its module's too; the
   // server falls back to the bundle's.
   const openName = (n: string) => onOpen({ name: n, ...(module !== undefined && { module }) });
@@ -110,10 +120,10 @@ function DeclView({ name, module, onOpen }: { name: string; module: string | und
   );
 }
 
-function Resolver({ onOpen }: { onOpen: (name: string) => void }) {
+function Resolver({ version, onOpen }: { version: VersionInput; onOpen: (name: string) => void }) {
   const [text, setText] = useState("");
   const names = split(useDebouncedValue(text, 300));
-  const resolved = useResolve(names);
+  const resolved = useResolve(names, version);
   return (
     <Panel title="Did you mean…">
       <input className={`${inputClass} w-full font-mono`} value={text} onChange={(e) => setText(e.target.value)} placeholder="Real.sqrt_mul_sefl, Nat.add_com" />
@@ -153,19 +163,21 @@ function Searching({ seconds }: { seconds: number }) {
   );
 }
 
-export function SearchTab() {
+export function SearchTab({ version: asked }: { version: string }) {
+  const version: VersionInput = asked !== "" ? { version: asked } : {};
   const [mode, setMode] = useState<keyof typeof MODES>("text");
   const [text, setText] = useState("");
   const [libraries, setLibraries] = useState("");
   const [kinds, setKinds] = useState("");
   const [k, setK] = useState(10);
-  const [sorried, setSorried] = useState(false);
+  // Left out, the server includes them when searching snapshots.
+  const [sorried, setSorried] = useState<"default" | "include" | "exclude">("default");
   const [scope, setScope] = useState<"none" | "all" | "labels">("none");
   const [scopeLabels, setScopeLabels] = useState("");
   const [open, setOpen] = useState<Opened | null>(null);
   // What was last asked for, with Enter or the button; nothing runs as you type.
   const [submitted, setSubmitted] = useState<Query | null>(null);
-  const search = useSearch(submitted ?? {});
+  const search = useSearch(submitted ?? {}, version);
   const elapsed = useElapsed(search.isFetching);
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -175,7 +187,7 @@ export function SearchTab() {
       libraries: split(libraries),
       kinds: split(kinds),
       limit: k,
-      include_sorried: sorried,
+      ...(sorried !== "default" && { include_sorried: sorried === "include" }),
       snapshots,
     };
     // The same query again searches again.
@@ -232,10 +244,13 @@ export function SearchTab() {
                   <option value="labels">with labels</option>
                 </select>
               </Field>
-              <label className="flex items-end gap-1.5 pb-1 text-xs font-medium text-slate-600">
-                <input type="checkbox" checked={sorried} onChange={(e) => setSorried(e.target.checked)} />
-                include sorried
-              </label>
+              <Field label="Sorried">
+                <select className={inputClass} value={sorried} onChange={(e) => setSorried(e.target.value as typeof sorried)}>
+                  <option value="default">with snapshots only</option>
+                  <option value="include">included</option>
+                  <option value="exclude">left out</option>
+                </select>
+              </Field>
             </div>
             {scope === "labels" && (
               <input className={`${inputClass} mt-3 w-full`} value={scopeLabels} onChange={(e) => setScopeLabels(e.target.value)} placeholder="run=7" />
@@ -287,8 +302,8 @@ export function SearchTab() {
         )}
       </div>
       <div className="space-y-4">
-        {open !== null && <DeclView name={open.name} module={open.module} onOpen={setOpen} />}
-        <Resolver onOpen={(name) => setOpen({ name })} />
+        {open !== null && <DeclView name={open.name} module={open.module} version={version} onOpen={setOpen} />}
+        <Resolver version={version} onOpen={(name) => setOpen({ name })} />
       </div>
     </div>
   );

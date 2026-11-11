@@ -113,9 +113,9 @@ function Create({ version, onUse }: { version: string; onUse: (header: string) =
         </Field>
         <Field label="Kernel re-check">
           <select className={inputClass} value={verify} onChange={(e) => setVerify(e.target.value as typeof verify)}>
-            <option value="auto">if it uses macros</option>
-            <option value="yes">yes, with imports</option>
-            <option value="no">no</option>
+            <option value="auto">this code (the default)</option>
+            <option value="yes">this code and its imports</option>
+            <option value="no">none: the build's report only</option>
           </select>
         </Field>
         <Field label="Idempotency key (optional)">
@@ -253,7 +253,7 @@ export function SnapshotsTab({ version, onUse }: { version: string; onUse: (head
             </SubtleButton>
           )}
         </Panel>
-        {selected !== null && <Detail id={selected} onUse={onUse} onGone={() => setSelected(null)} />}
+        {selected !== null && <Detail key={selected} id={selected} onUse={onUse} onGone={() => setSelected(null)} />}
       </div>
     </div>
   );
