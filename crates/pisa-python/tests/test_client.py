@@ -46,6 +46,8 @@ def url(db):
     worker = subprocess.Popen(
         [BIN / "pisa-worker", "--database-url", db, "--version", "v",
          "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean",
+         # Snapshots are built and re-checked by the `pisa` tool, here its stand-in.
+         "--tool", BIN / "fake-pisa",
          # Sessions run on Lean Beam, here its stand-in.
          "--beam-slots", "1", "--beam-bin", BIN / "fake-beam"],
         env=env,
@@ -234,7 +236,8 @@ def test_threads_share_a_client(url):
 
 def test_snapshots(url):
     client = Client(url, timeout=5)
-    created = client.create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl")
+    # Not re-checked, so that `verify_snapshot` has it to do.
+    created = client.create_snapshot("import Foo\ntheorem base : 1 = 1 := rfl", verify=False)
     assert created["check"]["ok"] and "replacement" not in created
     base = created["snapshot"]
     assert base["status"] == "proved" and "dirty" not in base

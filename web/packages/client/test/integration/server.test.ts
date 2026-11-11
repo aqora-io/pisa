@@ -84,7 +84,11 @@ describe("sessions", () => {
 
 describe("snapshots", () => {
   it("keeps code that later code imports, with labels and keys", async () => {
-    const created = await client.createSnapshot("import Foo\ntheorem base : 1 = 1 := rfl", { labels: { suite: "web" } });
+    // Not re-checked, so that `verifySnapshot` has it to do.
+    const created = await client.createSnapshot("import Foo\ntheorem base : 1 = 1 := rfl", {
+      labels: { suite: "web" },
+      verify: false,
+    });
     const base = created.snapshot;
     if (base === undefined) throw new Error(`not kept: ${JSON.stringify(created)}`);
     expect(base).toMatchObject({ status: "proved", verified: false, labels: { suite: "web" }, version: "v" });
