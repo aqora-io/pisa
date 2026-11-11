@@ -798,6 +798,137 @@ fn on_both(a: &Value, b: &Value, body: &str) -> String {
     format!("{}\n\n{body}", lines.join("\n"))
 }
 
+/// Records as an earlier release left them: modules verified before creates
+/// refused a header whose imports declare one name twice. A worker of this
+/// release clears `verified` on them, and on what builds on them, once.
+#[tokio::test(flavor = "multi_thread")]
+async fn modules_verified_before_the_clash_check_lose_verified() {
+    use pisa_protocol::api::CheckResult;
+    use pisa_protocol::verify::{ProofStatus, ReportedDeclaration};
+    use pisa_worker::catalog::{Module, ModuleMeta, NewEntry};
+    let mut c = Cluster::start(&[]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let record = |id: &str, parents: &[&ModuleMeta], declares: &str| {
+        let mut modules: Vec<Module> = Vec::new();
+        for p in parents {
+            for m in &p.modules {
+                if !modules.contains(m) {
+                    modules.push(m.clone());
+                }
+            }
+        }
+        modules.push(Module {
+            id: id.into(),
+            build: "b".into(),
+            files: Vec::new(),
+        });
+        let theorem = ReportedDeclaration {
+            name: declares.into(),
+            kind: "theorem".into(),
+            ..Default::default()
+        };
+        let imports: Vec<String> = parents
+            .iter()
+            .map(|p| p.modules.last().unwrap().id.clone())
+            .collect();
+        let header = imports
+            .iter()
+            .map(|m| format!("import PisaSnap.s{m}"))
+            .collect::<Vec<_>>();
+        ModuleMeta {
+            imports,
+            modules,
+            header: header.join("\n"),
+            code: String::new(),
+            status: ProofStatus::Proved,
+            verified: true,
+            macros: false,
+            result: CheckResult {
+                ok: true,
+                declarations: vec![theorem.with_status(ProofStatus::Proved)],
+                ..Default::default()
+            },
+            created: 0,
+        }
+    };
+    let id = |n: char| n.to_string().repeat(32);
+    let a = record(&id('a'), &[], "t");
+    let b = record(&id('b'), &[], "t");
+    let both = record(&id('c'), &[&a, &b], "u");
+    let above = record(&id('d'), &[&both], "w");
+    // As an un-verify stopped after `e`, before what builds on it, leaves
+    // them.
+    let mut stopped = record(&id('e'), &[&a, &b], "x");
+    stopped.verified = false;
+    let left = record(&id('f'), &[&stopped], "y");
+    for m in [&a, &b, &both, &above, &stopped, &left] {
+        let own = &m.modules.last().unwrap().id;
+        catalog
+            .commit(own, m, None, NewEntry::default())
+            .await
+            .unwrap();
+    }
+    c.add_worker(common::worker_config("w0", "v", 1));
+    c.wait_for_workers(1).await;
+    let verified = |id: String| {
+        let catalog = &catalog;
+        async move { catalog.module(&id).await.unwrap() }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !catalog.clashes_checked().await.unwrap() {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the worker checks the version");
+    assert!(!verified(id('d')).await.verified);
+    assert!(!verified(id('f')).await.verified);
+    let both = verified(id('c')).await;
+    assert!(!both.verified);
+    let why = both.result.reasons.join("\n");
+    assert!(why.contains(" t,"), "{why}");
+    let above = verified(id('d')).await;
+    assert!(
+        above
+            .result
+            .reasons
+            .join("\n")
+            .contains(&format!("PisaSnap.s{}", id('c')))
+    );
+    assert!(verified(id('a')).await.verified && verified(id('b')).await.verified);
+}
+
+/// A check, a document and a session on such a header are refused too, as
+/// what Lean would make of it depends on the order of the imports.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_a_document_or_a_session_on_a_clashing_header_is_refused() {
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    let skeleton = create(&c, json!({"code": SKELETON})).await;
+    let proof = create(
+        &c,
+        json!({"code": PROOF, "replaces": replacing(entry(&skeleton))}),
+    )
+    .await;
+    let code = on_both(&skeleton, &proof, "theorem u : 1 = 1 := t");
+    let (status, checked) = c.post("/check", json!({"code": code})).await;
+    assert_eq!(status, 200, "{checked}");
+    assert_eq!(checked["ok"], false, "{checked}");
+    assert_eq!(checked["error"]["kind"], "bad_request", "{checked}");
+    let message = checked["error"]["message"].as_str().unwrap();
+    assert!(message.contains(" t,"), "{message}");
+    let code = on_both(&skeleton, &proof, "theorem u : 1 = 1 := by\n  sorry");
+    for path in ["/documents", "/sessions"] {
+        let (status, e) = c.post(path, json!({"code": code})).await;
+        assert_eq!(status, 400, "{path}: {e}");
+        let message = e["error"]["message"].as_str().unwrap();
+        assert!(message.contains(" t,"), "{path}: {message}");
+    }
+    // Each alone is fine.
+    let one = on(&proof, "theorem u : 1 = 1 := t");
+    let (_, checked) = c.post("/check", json!({"code": one})).await;
+    assert!(checked["error"].is_null(), "{checked}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_header_cant_import_two_snapshots_that_declare_one_name() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;

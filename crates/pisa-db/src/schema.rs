@@ -129,6 +129,7 @@ diesel::table! {
         created_micros -> BigInt,
         sweep_refused -> Nullable<Text>,
         sweep_refused_micros -> Nullable<BigInt>,
+        clashes_checked_micros -> Nullable<BigInt>,
     }
 }
 

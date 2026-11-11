@@ -49,6 +49,12 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         });
         return outcome;
     }
+    // Nor does a header whose imports declare one name twice. One whose
+    // imports can't be read is left to the import to report.
+    if let Ok(Some(e)) = pool.snapshots().clash(&split.header).await {
+        outcome.error = Some(e);
+        return outcome;
+    }
     let mut slot = pool.acquire(&split.header_key).await;
 
     let env = match slot.warm_up(&split.header, &split.header_key).await {

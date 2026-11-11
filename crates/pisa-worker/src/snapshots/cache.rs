@@ -59,6 +59,28 @@ impl Snapshots {
         Ok(())
     }
 
+    /// Why code on `header` can't be checked, if its snapshot imports
+    /// declare one name twice (see [`Reader::clashes`]): Lean would take the
+    /// first import's, and the code would mean one or the other by the order
+    /// of its imports. A header that names no snapshot module, or one that
+    /// isn't kept, is left to the import to report.
+    pub async fn clash(&self, header: &str) -> Result<Option<Error>, Error> {
+        if self.clean_headers.lock().unwrap().contains(header) {
+            return Ok(None);
+        }
+        let Ok(imports) = snapshot::imports(header) else {
+            return Ok(None);
+        };
+        let clash = self.reader.clashes(&imports).await?;
+        if clash.is_none() {
+            self.clean_headers
+                .lock()
+                .unwrap()
+                .insert(header.to_string());
+        }
+        Ok(clash)
+    }
+
     pub(super) async fn ensure_one(&self, id: &str) -> Result<(), Error> {
         let lock = self.lock(id);
         let _loading = lock.lock().await;

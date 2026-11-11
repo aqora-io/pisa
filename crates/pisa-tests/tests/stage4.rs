@@ -1442,3 +1442,32 @@ async fn verify_again_describes_a_verified_chain_again() {
     assert_eq!(r["checked"], json!(modules), "{r}");
     assert_eq!(r["snapshot"]["verified"], true);
 }
+
+/// A record marked verified that the kernel rejects when asked again loses
+/// `verified`, and so does what builds on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_check_that_rejects_a_verified_module_clears_verified() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let forged = unverified(&c, FORGED).await;
+    let id = &module(&forged)["PisaSnap.s".len()..];
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let build = catalog
+        .module(id)
+        .await
+        .unwrap()
+        .modules
+        .pop()
+        .unwrap()
+        .build;
+    // As though its record had been marked verified wrongly.
+    let marked = catalog.update_module(id, &build, |meta| meta.verified = true);
+    assert!(marked.await.unwrap().is_some());
+    let above = create_with(&c, &on(&forged, "theorem c : 2 = 2 := rfl"), true).await;
+    assert_eq!(above["snapshot"]["verified"], true, "{above}");
+    let path = format!("/snapshots/{}/verify?again=true", entry(&forged));
+    let (status, r) = request(&c, reqwest::Method::POST, &path).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["failure"]["kind"], "lean", "{r}");
+    assert_eq!(info(&c, &forged).await["verified"], false);
+    assert_eq!(info(&c, &above).await["verified"], false);
+}

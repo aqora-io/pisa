@@ -703,7 +703,9 @@ impl Catalog {
 
     /// Rewrites module `m`'s record with `f` if the module's own build is
     /// still `build`. `None` if it isn't, because the module was deleted and
-    /// built again: the record is then left alone.
+    /// built again, or if `f` marks it verified while a module it needs
+    /// isn't, which an un-verify may have cleared since its re-check: the
+    /// record is then left alone.
     pub async fn update_module(
         &self,
         m: &str,
@@ -1064,6 +1066,54 @@ impl Catalog {
     /// so that a worker sweeps only a store its own catalog wrote.
     pub async fn identity(&self) -> Result<String, Error> {
         dispatch!(&self.db, identity(&self.version))
+    }
+
+    /// Up to `limit` modules, in order of id after the module `after`, with
+    /// their own builds.
+    pub async fn modules_after(
+        &self,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<(String, String)>, Error> {
+        dispatch!(&self.db, modules_after(&self.version, after, limit.into()))
+    }
+
+    /// Clears `verified` on module `m`, if its own build is still `build`,
+    /// and on every verified module that builds on it, adding why to each
+    /// one's check reasons and logging each change. What builds on `m` is
+    /// cleared even if `m` was cleared already, so an un-verify stopped
+    /// after `m` is finished by the next. Returns the modules it cleared, `m`
+    /// first if it was verified.
+    pub async fn unverify(&self, m: &str, build: &str, why: &str) -> Result<Vec<String>, Error> {
+        let mut cleared = Vec::new();
+        let Some(own) = dispatch!(&self.db, unverify(&self.version, m, Some(build), why))? else {
+            return Ok(cleared);
+        };
+        if own {
+            cleared.push(m.to_string());
+        }
+        let because = format!(
+            "it builds on {}, which isn't verified: {why}",
+            snapshot::module(m)
+        );
+        for above in self.dependents(m).await?.into_keys() {
+            if dispatch!(&self.db, unverify(&self.version, &above, None, &because))? == Some(true) {
+                cleared.push(above);
+            }
+        }
+        Ok(cleared)
+    }
+
+    /// Whether this version's modules verified before creates refused
+    /// clashing imports have been checked for them.
+    pub async fn clashes_checked(&self) -> Result<bool, Error> {
+        dispatch!(&self.db, clashes_checked(&self.version))
+    }
+
+    /// Records that they have.
+    pub async fn mark_clashes_checked(&self) -> Result<(), Error> {
+        self.identity().await?;
+        dispatch!(&self.db, mark_clashes_checked(&self.version))
     }
 
     /// Records what this version's sweep of the store's files came to: why
@@ -2442,6 +2492,98 @@ mod tests {
             );
             assert_eq!(catalog.prune_log(Duration::ZERO).await.unwrap(), 3);
             assert!(catalog.changes(0, None, 10).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_module_unverified_takes_what_builds_on_it() {
+        for catalog in catalogs().await {
+            let mut x = meta("x");
+            x.verified = true;
+            let mut y = child("y", &x);
+            y.verified = true;
+            let mut z = meta("z");
+            z.verified = false;
+            for (id, m) in [("x", &x), ("y", &y), ("z", &z)] {
+                catalog.commit(id, m, None, no_labels()).await.unwrap();
+            }
+            let all = catalog.modules_after(None, 10).await.unwrap();
+            let pair = |id: &str| (id.to_string(), "b".to_string());
+            assert_eq!(all, [pair("x"), pair("y"), pair("z")]);
+            assert_eq!(
+                catalog.modules_after(Some("x"), 10).await.unwrap(),
+                [pair("y"), pair("z")]
+            );
+            let before = catalog.changes(0, None, 100).await.unwrap().len();
+            // Another build's record is left alone.
+            assert!(catalog.unverify("x", "c", "why").await.unwrap().is_empty());
+            let gone = catalog.unverify("x", "b", "why").await.unwrap();
+            assert_eq!(gone, ["x", "y"]);
+            let x = catalog.module("x").await.unwrap();
+            assert!(!x.verified);
+            assert!(
+                x.result.reasons.contains(&"why".to_string()),
+                "{:?}",
+                x.result
+            );
+            let y = catalog.module("y").await.unwrap();
+            assert!(!y.verified);
+            let because = y.result.reasons.iter().find(|r| r.contains("why"));
+            assert!(
+                because.is_some_and(|r| r.contains("PisaSnap.sx")),
+                "{:?}",
+                y.result
+            );
+            assert_eq!(
+                catalog.changes(0, None, 100).await.unwrap().len(),
+                before + 2
+            );
+            assert!(catalog.unverify("x", "b", "why").await.unwrap().is_empty());
+        }
+    }
+
+    /// An un-verify stopped after its module, before what builds on it, is
+    /// finished by the next un-verify of that module.
+    #[tokio::test]
+    async fn an_unverify_stopped_half_way_is_finished_by_the_next() {
+        for catalog in catalogs().await {
+            let x = meta("x");
+            let mut y = child("y", &x);
+            y.verified = true;
+            for (id, m) in [("x", &x), ("y", &y)] {
+                catalog.commit(id, m, None, no_labels()).await.unwrap();
+            }
+            assert_eq!(catalog.unverify("x", "b", "why").await.unwrap(), ["y"]);
+            assert!(!catalog.module("y").await.unwrap().verified);
+        }
+    }
+
+    /// A module isn't marked verified while a module it needs isn't.
+    #[tokio::test]
+    async fn a_module_is_verified_only_on_verified_modules() {
+        for catalog in catalogs().await {
+            let x = meta("x");
+            let y = child("y", &x);
+            for (id, m) in [("x", &x), ("y", &y)] {
+                catalog.commit(id, m, None, no_labels()).await.unwrap();
+            }
+            let marked = catalog.update_module("y", "b", |meta| meta.verified = true);
+            assert!(marked.await.unwrap().is_none());
+            assert!(!catalog.module("y").await.unwrap().verified);
+            let marked = catalog.update_module("x", "b", |meta| meta.verified = true);
+            assert!(marked.await.unwrap().is_some());
+            let marked = catalog.update_module("y", "b", |meta| meta.verified = true);
+            assert!(marked.await.unwrap().is_some());
+            assert!(catalog.module("y").await.unwrap().verified);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_version_is_checked_for_clashes_once() {
+        for catalog in catalogs().await {
+            assert!(!catalog.clashes_checked().await.unwrap());
+            catalog.mark_clashes_checked().await.unwrap();
+            assert!(catalog.clashes_checked().await.unwrap());
         }
     }
 

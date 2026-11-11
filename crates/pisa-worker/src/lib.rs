@@ -152,8 +152,9 @@ pub async fn run_with_stores(
     {
         let (pool, owner) = (pool.clone(), worker_id.clone());
         tokio::spawn(async move {
-            // From the start, so that old snapshots are exported again as
-            // soon as a worker of this release runs.
+            // From the start, so that old snapshots are exported again, and
+            // checked for clashing imports, as soon as a worker of this
+            // release runs.
             let mut tick = tokio::time::interval(SWEEP_EVERY);
             loop {
                 tick.tick().await;
@@ -163,6 +164,13 @@ pub async fn run_with_stores(
                         tracing::info!(modules, "exported old module-system snapshots again")
                     }
                     Err(e) => tracing::warn!("exporting old snapshots again failed: {e}"),
+                }
+                match pool.snapshots().unverify_old_clashes(&owner).await {
+                    Ok(0) => {}
+                    Ok(modules) => {
+                        tracing::info!(modules, "cleared verified on modules whose imports clash")
+                    }
+                    Err(e) => tracing::warn!("checking verified modules for clashes failed: {e}"),
                 }
             }
         });

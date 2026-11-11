@@ -8,8 +8,8 @@ use super::*;
 pub(super) enum Recheck {
     Passed,
     AlreadyVerified,
-    /// The module was deleted and built again since the chain was read, so
-    /// this run doesn't verify it.
+    /// The module was deleted and built again since the chain was read, or
+    /// a module it needs lost `verified`, so this run doesn't verify it.
     Changed,
 }
 
@@ -193,6 +193,15 @@ impl Snapshots {
             let decls = match verdict {
                 Ok(decls) => decls,
                 Err((kind, reason)) => {
+                    // The kernel rejects a module verified already, as
+                    // `again` asks: it loses `verified`, and so does what
+                    // builds on it.
+                    if kind == ErrorKind::Lean {
+                        let why = format!("the kernel re-check rejected it: {reason}");
+                        self.catalog
+                            .unverify(&module.id, &module.build, &why)
+                            .await?;
+                    }
                     failure = Some(VerifyFailure {
                         module: name,
                         kind,

@@ -32,7 +32,7 @@
 //! `audit` read the catalog, and `cache`, `create`, `build`, `verify` and
 //! `delete` the store and the local cache too.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +64,7 @@ use crate::pool::{Lease, Pool};
 
 mod build;
 mod cache;
+mod clashes;
 mod create;
 mod delete;
 mod reexport;
@@ -96,6 +97,9 @@ pub struct Snapshots {
     reader: Reader,
     /// Whether this worker has claimed the store, or found it another's.
     marked: AtomicBool,
+    /// Headers whose snapshot imports declare no name twice: modules are
+    /// named by their code, so one stays clean.
+    clean_headers: Mutex<HashSet<String>>,
     /// Whether to make the store's marker name this catalog whatever it
     /// names (`PISA_CLAIM_STORE`).
     claim_store: bool,
@@ -141,6 +145,7 @@ impl Snapshots {
             confirmed: Mutex::default(),
             locks: Mutex::default(),
             marked: AtomicBool::new(false),
+            clean_headers: Mutex::default(),
             claim_store: false,
         }
     }

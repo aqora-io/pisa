@@ -810,7 +810,11 @@ pub(crate) async fn update_module(
             if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
                 return Ok(None);
             }
+            let was_verified = meta.verified;
             f(&mut meta);
+            if meta.verified && !was_verified && !needs_verified(conn, v, &meta).await? {
+                return Ok(None);
+            }
             let decls = match decls {
                 Some(decls) => {
                     let mut decls: SnapshotDecls = serde_json::from_value(decls)?;
@@ -826,6 +830,23 @@ pub(crate) async fn update_module(
     })
     .await?;
     Ok(updated)
+}
+
+/// Whether every module `meta` needs, but its own, is verified.
+async fn needs_verified(conn: &mut Conn, v: &str, meta: &ModuleMeta) -> Result<bool, Fail> {
+    let needs: Vec<&str> = meta.modules.iter().rev().skip(1).map(|m| m.id.as_str()).collect();
+    if needs.is_empty() {
+        return Ok(true);
+    }
+    let unverified: Option<String> = modules::table
+        .filter(modules::version.eq(v))
+        .filter(modules::id.eq_any(needs))
+        .filter(modules::verified.eq(false))
+        .select(modules::id)
+        .first(conn)
+        .await
+        .optional()?;
+    Ok(unverified.is_none())
 }
 
 pub(crate) async fn keyed(
@@ -1803,6 +1824,96 @@ pub(crate) async fn record_sweep(db: &Handle, v: &str, refused: Option<&str>) ->
                     .await?;
             }
         }
+        Ok::<_, DbError>(())
+    })
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn modules_after(
+    db: &Handle,
+    v: &str,
+    after: Option<&str>,
+    limit: i64,
+) -> Result<Vec<(String, String)>, Error> {
+    let mut query = modules::table
+        .filter(modules::version.eq(v))
+        .into_boxed();
+    if let Some(after) = after {
+        query = query.filter(modules::id.gt(after));
+    }
+    let rows = query
+        .order(modules::id)
+        .limit(limit)
+        .select((modules::id, modules::build))
+        .load(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows)
+}
+
+pub(crate) async fn unverify(
+    db: &Handle,
+    v: &str,
+    m: &str,
+    build: Option<&str>,
+    why: &str,
+) -> Result<Option<bool>, Error> {
+    let cleared = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let Some(mut meta) = module_in(conn, v, m).await? else {
+                return Ok(None);
+            };
+            let own = meta.modules.last().map(|own| own.build.as_str());
+            if build.is_some_and(|b| own != Some(b)) {
+                return Ok(None);
+            }
+            if !meta.verified {
+                return Ok(Some(false));
+            }
+            let decls: Option<Value> = modules::table
+                .find((v, m))
+                .select(modules::decls)
+                .first(conn)
+                .await?;
+            meta.verified = false;
+            meta.result.reasons.push(why.to_string());
+            let decls = match decls {
+                Some(decls) => {
+                    let mut decls: SnapshotDecls = serde_json::from_value(decls)?;
+                    decls.refresh(&meta);
+                    Some(to_record(&decls)?)
+                }
+                None => None,
+            };
+            write_module(conn, v, m, &meta, decls.as_ref()).await?;
+            log(conn, v, None, Some(m)).await?;
+            Ok(Some(true))
+        })
+    })
+    .await?;
+    Ok(cleared)
+}
+
+pub(crate) async fn clashes_checked(db: &Handle, v: &str) -> Result<bool, Error> {
+    let checked = catalogs::table
+        .find(v)
+        .select(catalogs::clashes_checked_micros)
+        .first::<Option<i64>>(&mut *conn(db).await?)
+        .await
+        .optional()
+        .map_err(DbError::from)?;
+    Ok(checked.flatten().is_some())
+}
+
+pub(crate) async fn mark_clashes_checked(db: &Handle, v: &str) -> Result<(), Error> {
+    retry(|| async {
+        diesel::update(catalogs::table.find(v))
+            .set(catalogs::clashes_checked_micros.eq(Some(now_micros() as i64)))
+            .execute(&mut *conn(db).await?)
+            .await?;
         Ok::<_, DbError>(())
     })
     .await?;

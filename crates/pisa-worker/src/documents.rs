@@ -402,6 +402,9 @@ impl Documents {
     ) -> Result<(), Error> {
         let split = split_header(code);
         self.pool.snapshots().ensure(&split.header, None).await?;
+        if let Some(e) = self.pool.snapshots().clash(&split.header).await? {
+            return Err(e);
+        }
         let map = CodeMap::new(code, &split);
         let slot = match doc.as_ref() {
             Some(open) if self.is_current(open).await => open.slot,

@@ -201,6 +201,15 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release that checks old modules for clashing imports:
+- A worker of this release clears `verified`, once per version, on each
+  module verified before creates refused a header whose imports declare one
+  name twice, and on everything built on it, with the clash in its
+  `check.reasons`. Verifying one again fails with the clash. `/check`,
+  documents and sessions refuse such a header too.
+- A re-check with `again` that the kernel rejects clears `verified` on the
+  module and on what builds on it.
+
 To the release that keeps requests to their scope and runs to their names:
 - The first process of this release migrates the catalog: `labels` on
   documents, sessions, jobs, acceptances and refutations, `runs` on
@@ -653,6 +662,8 @@ loads both when the name is a theorem of one statement in each, as a
 skeleton and its fill are, and the code then uses whichever comes first in
 its imports, so what it proves would hang on their order. When the two are
 versions of one run, the error names the run's head to import instead.
+`/check` answers such a header with the same `bad_request` in `error`, and
+opening a document or starting a session on it is a 400.
 
 **Who answers.** The servers read the catalog themselves: `GET` of a
 snapshot, listings, dependents, label edits, audits and their review lists,
@@ -1573,7 +1584,8 @@ about 2 s to a small chunk on `import Mathlib`. Every create runs it, unless
 
 `verified` means the snapshot and everything it imports have passed the
 re-check. So a chunk re-checked on top of unverified snapshots isn't `verified`
-yet.
+yet. A module that loses it, as one the kernel rejects when verified `again`
+does, takes it from everything built on it, and its `check.reasons` say why.
 
 The re-check at creation has the request's `timeout` for each module, once
 their imports are loaded. If it runs out of time or memory, code outside the
