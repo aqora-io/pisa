@@ -808,6 +808,96 @@ async fn plain_code_whose_re_check_runs_out_of_time_is_kept_unverified() {
     assert_eq!(verify(&c, &r).await["snapshot"]["verified"], true);
 }
 
+/// Kept code that isn't verified, as a create with `verify: false` or an
+/// earlier release leaves it, is re-checked by a create that doesn't opt
+/// out, with the fallback new code has.
+#[tokio::test(flavor = "multi_thread")]
+async fn kept_code_that_isnt_verified_is_re_checked_by_a_default_create() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let code = "import Foo\n\ntheorem k : 1 = 1 := rfl";
+    unverified(&c, code).await;
+    // Opting out adds an entry as it is.
+    let r = create_with(&c, code, false).await;
+    assert_eq!(r["snapshot"]["verified"], false, "{r}");
+    let r = kept(&c, code).await;
+    assert_eq!(r["snapshot"]["verified"], true, "{r}");
+
+    // Out of time, plain code gets its entry, unverified, and says why.
+    let slow = unverified(&c, SLOW).await;
+    let (status, r) = c
+        .post("/snapshots", json!({"code": SLOW, "timeout": 1}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["snapshot"]["verified"], false, "{r}");
+    assert_eq!(r["unverified"]["module"], module(&slow), "{r}");
+    assert_eq!(r["unverified"]["kind"], "timeout", "{r}");
+
+    // A rejection or a crash adds none.
+    unverified(&c, FORGED).await;
+    let r = create(&c, FORGED).await;
+    assert!(r["snapshot"].is_null(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "lean", "{r}");
+    let breaking = "import Foo\n\ntheorem b : 1 = 1 := rfl\n-- BREAK_KERNEL";
+    unverified(&c, breaking).await;
+    let r = create(&c, breaking).await;
+    assert!(r["snapshot"].is_null(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "crash", "{r}");
+}
+
+/// A re-check that fails, rather than run out of time or memory, may be
+/// the code's doing: nothing is kept, and the error is a crash that says
+/// what the verifier said.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_re_check_that_fails_keeps_nothing_and_says_why() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    for (marker, said) in [
+        ("BREAK_KERNEL", "the fake kernel fell over"),
+        ("FAIL_KERNEL", "the fake describe failed"),
+    ] {
+        let code = format!("import Foo\n\ntheorem s : 1 = 1 := rfl\n-- {marker}");
+        let r = create(&c, &code).await;
+        assert!(r["snapshot"].is_null(), "{r}");
+        assert_eq!(r["check"]["error"]["kind"], "crash", "{r}");
+        let message = r["check"]["error"]["message"].as_str().unwrap();
+        assert!(message.contains(said), "{message}");
+    }
+    assert_eq!(stored(&c).await, (vec![], vec![]));
+}
+
+/// A verify's failure says whether the kernel rejected the module or the
+/// re-check didn't finish, and a create that asked to verify an import out
+/// of time is a timeout, not the kernel's verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_verify_says_what_kind_of_failure_it_was() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let forged = unverified(&c, FORGED).await;
+    let r = verify(&c, &forged).await;
+    assert_eq!(r["failure"]["kind"], "lean", "{r}");
+    let crashing = unverified(
+        &c,
+        "import Foo\n\ntheorem s : 1 = 1 := rfl\n-- BREAK_KERNEL",
+    )
+    .await;
+    let r = verify(&c, &crashing).await;
+    assert_eq!(r["failure"]["kind"], "crash", "{r}");
+
+    let slow = unverified(&c, SLOW).await;
+    let (status, r) = c
+        .post(
+            "/snapshots",
+            json!({"code": on(&slow, "theorem t : 2 = 2 := rfl"), "verify": true, "timeout": 1}),
+        )
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert!(r["snapshot"].is_null(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "timeout", "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(module(&slow)) && message.contains("more than 1s"),
+        "{message}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn macros_are_re_checked_unless_the_request_opts_out() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;

@@ -43,14 +43,24 @@ pub(super) async fn recheck_module(
     }
 }
 
-/// The error of a create whose re-check didn't finish.
-pub(super) fn unfinished_error(unfinished: &Unfinished) -> Error {
-    let kind = match unfinished {
+/// The kind of error a re-check that didn't finish is.
+pub(super) fn unfinished_kind(unfinished: &Unfinished) -> ErrorKind {
+    match unfinished {
         Unfinished::Timeout(_) => ErrorKind::Timeout,
         Unfinished::OutOfMemory => ErrorKind::OutOfMemory,
         Unfinished::Crash(_) => ErrorKind::Crash,
-    };
-    Error::new(kind, unfinished.to_string())
+    }
+}
+
+/// Whether a re-check that didn't finish ran out of time or memory, which
+/// says nothing about the code, rather than failed.
+pub(super) fn outgrown(unfinished: &Unfinished) -> bool {
+    matches!(unfinished, Unfinished::Timeout(_) | Unfinished::OutOfMemory)
+}
+
+/// The error of a create whose re-check didn't finish.
+pub(super) fn unfinished_error(unfinished: &Unfinished) -> Error {
+    Error::new(unfinished_kind(unfinished), unfinished.to_string())
 }
 
 /// A verdict's declarations, or why there are none: the kernel rejected the
@@ -136,6 +146,7 @@ impl Snapshots {
             Err(e) => {
                 let failure = VerifyFailure {
                     module: names[0].clone(),
+                    kind: ErrorKind::Crash,
                     reason: format!("the re-check failed to start: {e}"),
                 };
                 return Ok((checked, Some(failure)));
@@ -144,15 +155,20 @@ impl Snapshots {
         let mut failure = None;
         for (module, name) in todo.iter().zip(names) {
             let verdict = match run.next().await {
-                Some(Ok(verdict)) => verified_declarations(verdict),
-                Some(Err(unfinished)) => Err(unfinished.to_string()),
-                None => Err("the re-check gave no verdict".into()),
+                Some(Ok(verdict)) => {
+                    verified_declarations(verdict).map_err(|reason| (ErrorKind::Lean, reason))
+                }
+                Some(Err(unfinished)) => {
+                    Err((unfinished_kind(&unfinished), unfinished.to_string()))
+                }
+                None => Err((ErrorKind::Crash, "the re-check gave no verdict".into())),
             };
             let decls = match verdict {
                 Ok(decls) => decls,
-                Err(reason) => {
+                Err((kind, reason)) => {
                     failure = Some(VerifyFailure {
                         module: name,
+                        kind,
                         reason,
                     });
                     break;

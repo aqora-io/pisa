@@ -553,8 +553,8 @@ export interface components {
             /**
              * @description Why the head doesn't keep the spec's statements, as a refused create
              *     says it, e.g. `statement: t has a different type`. Empty if it keeps
-             *     them, or if either record isn't verified, which leaves the targets
-             *     unaccepted anyway.
+             *     them. If either record isn't verified, which leaves the targets
+             *     unaccepted, it says which and how to verify it instead.
              */
             reasons?: string[];
             /**
@@ -697,6 +697,12 @@ export interface components {
              *     it replaces, so every head carries them all.
              */
             targets?: components["schemas"]["AuditTarget"][];
+            /**
+             * @description With `against`: the spec snapshots and heads whose records the kernel
+             *     hasn't re-checked, so the audit can't compare them and the run isn't
+             *     `clean`. Verify each with `POST /snapshots/{id}/verify`.
+             */
+            unverified?: string[];
         };
         /**
          * @description The snapshots' declarations by status, each module's once, without the
@@ -2046,6 +2052,13 @@ export interface components {
         };
         /** @description A module that failed the kernel re-check. */
         VerifyFailure: {
+            /**
+             * @description `lean` when the kernel rejected the module. Otherwise the re-check
+             *     didn't finish, which is no verdict on the code: `timeout` and
+             *     `out_of_memory` (retry with more time, or on a larger worker), or
+             *     `crash` (the verifier failed).
+             */
+            kind: components["schemas"]["ErrorKind"];
             module: string;
             /** @description Why the re-check failed, e.g. the kernel's error or a timeout. */
             reason: string;

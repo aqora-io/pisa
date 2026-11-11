@@ -193,6 +193,8 @@ impl Reader {
         }
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
         let mut comparisons = Vec::new();
+        // Snapshots whose records the kernel hasn't re-checked, in order.
+        let mut unverified: Vec<String> = Vec::new();
         // The links' allows are what their creates asked for, by whoever
         // made them: the comparison takes only what the leader allows, the
         // spec's holes and the audit's `allow`.
@@ -208,10 +210,20 @@ impl Reader {
                     Some(Err(changes)) => (changes, None),
                     None => (Vec::new(), None),
                 };
+                let mut reasons: Vec<String> = changes.iter().map(ToString::to_string).collect();
+                for (e, m) in [(spec, &spec_meta.module), (head, head_module)] {
+                    if records.held(m).is_some_and(|r| !r.verified) {
+                        let id = self.id(e);
+                        reasons.push(format!("{id} isn't verified: POST /snapshots/{id}/verify"));
+                        if !unverified.contains(&id) {
+                            unverified.push(id);
+                        }
+                    }
+                }
                 comparisons.push(AuditComparison {
                     spec: self.id(spec),
                     head: self.id(head),
-                    reasons: changes.iter().map(ToString::to_string).collect(),
+                    reasons,
                     changes,
                     replacement,
                 });
@@ -238,6 +250,7 @@ impl Reader {
         }
         audit.clean = Some(clean);
         audit.heads = heads.iter().map(|(e, _)| self.id(e)).collect();
+        audit.unverified = unverified;
         audit.forks = forks;
         audit.targets = targets;
         audit.links = links;

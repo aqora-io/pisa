@@ -927,3 +927,52 @@ fn the_axioms_found_are_leans() {
         }
     }
 }
+
+/// Two modules declare the same theorem with the same type, one by `sorry`.
+/// Lean's replay keeps the first one's and skips the other's, so a chain of
+/// both rejects the second, whichever it is, rather than describe it from
+/// the first.
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_theorem_another_module_declares_is_rejected() {
+    let s = Snapshots::new();
+    let (sorried, proved) = ("theorem t : 1 = 1 := sorry\n", "theorem t : 1 = 1 := rfl\n");
+    s.tool_build(sorried);
+    s.tool_build(proved);
+    let (sorried, proved) = (snapshot::id(sorried), snapshot::id(proved));
+    for (first, second) in [(&sorried, &proved), (&proved, &sorried)] {
+        let verdicts = s.tool_verify(&[first, second]);
+        assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+        assert_eq!(verdicts[0]["ok"], true, "{verdicts:?}");
+        assert_eq!(verdicts[1]["ok"], false, "{verdicts:?}");
+        let reason = verdicts[1]["reason"].as_str().unwrap();
+        let clash = format!("`t` is also declared by `{}`", snapshot::module(first));
+        assert!(reason.contains(&clash), "{reason}");
+    }
+    // Alone, each is described from its own proof.
+    for (id, axioms) in [(&sorried, vec!["sorryAx"]), (&proved, vec![])] {
+        let verdict = &s.tool_verify(&[id])[0];
+        let t = verdict_declarations(verdict)
+            .into_iter()
+            .find(|d| d.name == "t")
+            .unwrap();
+        assert_eq!(t.axioms, axioms);
+    }
+}
+
+/// A failure that is no verdict on the code, here a module whose files
+/// aren't there, ends the run with `PISA_FAILED` and its reason.
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_verifier_that_cant_read_a_module_says_so() {
+    let s = Snapshots::new();
+    let missing = snapshot::module(&snapshot::id("theorem gone : True := trivial\n"));
+    let run = s.tool(&["verify", &missing]);
+    assert!(!run.ok, "{}", run.output);
+    let reason = run.one("PISA_FAILED")["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains(&format!("reading `{missing}`")), "{reason}");
+    assert!(run.all("PISA_VERIFY").is_empty(), "{}", run.output);
+}

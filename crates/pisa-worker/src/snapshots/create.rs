@@ -30,10 +30,11 @@ pub(super) fn replaced(
 }
 
 /// The error for a create that asked to verify an import or existing snapshot
-/// and couldn't.
+/// and couldn't: of the failure's kind, so that a re-check out of time reads
+/// as a timeout and not as the kernel's verdict.
 pub(super) fn failure_error(f: &VerifyFailure) -> Error {
     Error::new(
-        ErrorKind::Lean,
+        f.kind,
         format!("{} failed verification: {}", f.module, f.reason),
     )
 }
@@ -247,12 +248,15 @@ impl Snapshots {
         })
     }
 
-    /// A create for code that is already kept: it verifies the module's chain
-    /// first if the request asks for that and the module isn't verified, then
-    /// adds the entry. Its check is what is stored. If the re-check fails,
-    /// the check has the error and no entry is added, as for new code that
-    /// fails it. `None` if the module is gone by the time it is needed, or
-    /// was built again during the re-check.
+    /// A create for code that is already kept: unless the request says
+    /// `verify: false`, it verifies the module's chain first if the module
+    /// isn't verified, then adds the entry. Its check is what is stored. If
+    /// the re-check fails, the check has the error and no entry is added, as
+    /// for new code that fails it; as there, a re-check out of time or memory
+    /// of plain code with no macros adds the entry, not `verified`, and says
+    /// so in `unverified`, unless the request asked to verify. `None` if the
+    /// module is gone by the time it is needed, or was built again during the
+    /// re-check.
     pub(super) async fn add_to_kept(
         &self,
         pool: &Arc<Pool>,
@@ -262,7 +266,10 @@ impl Snapshots {
         replacing: Option<&Replacing>,
         mut response: CreateSnapshotResponse,
     ) -> Option<CreateSnapshotResponse> {
-        let meta = if job.verify == Some(true) && !meta.verified {
+        let module_system = split_header(&job.code).header.lines().next() == Some("module");
+        let reported_stands = !module_system && !meta.macros && job.verify.is_none();
+        let mut unverified = None;
+        let meta = if job.verify != Some(false) && !meta.verified {
             let verified = async {
                 let ids = [id.to_string()];
                 let per_module = Duration::from_secs(job.timeout_secs);
@@ -273,6 +280,13 @@ impl Snapshots {
                 // Nothing failed, so the chain stopped at a module built again.
                 Ok((meta, None)) if !meta.verified => return None,
                 Ok((meta, None)) => meta,
+                Ok((meta, Some(failure)))
+                    if reported_stands
+                        && matches!(failure.kind, ErrorKind::Timeout | ErrorKind::OutOfMemory) =>
+                {
+                    unverified = Some(failure);
+                    meta
+                }
                 Ok((meta, Some(failure))) => {
                     let mut refused = self.refused(meta);
                     refused.check.error = Some(failure_error(&failure));
@@ -359,6 +373,7 @@ impl Snapshots {
         }
         let mut done = self.created(meta, added);
         replaced(&mut done, replacing, replacement);
+        done.unverified = unverified;
         Some(done)
     }
 }

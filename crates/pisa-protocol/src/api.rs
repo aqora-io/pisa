@@ -1227,6 +1227,11 @@ pub struct AuditSnapshotsResponse {
     /// on the head.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review: Vec<AuditReview>,
+    /// With `against`: the spec snapshots and heads whose records the kernel
+    /// hasn't re-checked, so the audit can't compare them and the run isn't
+    /// `clean`. Verify each with `POST /snapshots/{id}/verify`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unverified: Vec<String>,
 }
 
 /// A head compared with a spec snapshot it is reached from.
@@ -1238,8 +1243,8 @@ pub struct AuditComparison {
     pub head: String,
     /// Why the head doesn't keep the spec's statements, as a refused create
     /// says it, e.g. `statement: t has a different type`. Empty if it keeps
-    /// them, or if either record isn't verified, which leaves the targets
-    /// unaccepted anyway.
+    /// them. If either record isn't verified, which leaves the targets
+    /// unaccepted, it says which and how to verify it instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasons: Vec<String>,
     /// The same, as the declarations that changed.
@@ -1503,6 +1508,11 @@ pub struct VerifySnapshotResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct VerifyFailure {
     pub module: String,
+    /// `lean` when the kernel rejected the module. Otherwise the re-check
+    /// didn't finish, which is no verdict on the code: `timeout` and
+    /// `out_of_memory` (retry with more time, or on a larger worker), or
+    /// `crash` (the verifier failed).
+    pub kind: ErrorKind,
     /// Why the re-check failed, e.g. the kernel's error or a timeout.
     pub reason: String,
 }

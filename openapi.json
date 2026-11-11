@@ -130,7 +130,7 @@
             "type": "string"
           },
           "reasons": {
-            "description": "Why the head doesn't keep the spec's statements, as a refused create\nsays it, e.g. `statement: t has a different type`. Empty if it keeps\nthem, or if either record isn't verified, which leaves the targets\nunaccepted anyway.",
+            "description": "Why the head doesn't keep the spec's statements, as a refused create\nsays it, e.g. `statement: t has a different type`. Empty if it keeps\nthem. If either record isn't verified, which leaves the targets\nunaccepted, it says which and how to verify it instead.",
             "items": {
               "type": "string"
             },
@@ -292,6 +292,13 @@
             "description": "With `against`: each declaration of a spec snapshot's module, other\nthan its assumptions and what Lean generated, on each head reached\nfrom that spec snapshot. A replacement keeps every declaration of what\nit replaces, so every head carries them all.",
             "items": {
               "$ref": "#/components/schemas/AuditTarget"
+            },
+            "type": "array"
+          },
+          "unverified": {
+            "description": "With `against`: the spec snapshots and heads whose records the kernel\nhasn't re-checked, so the audit can't compare them and the run isn't\n`clean`. Verify each with `POST /snapshots/{id}/verify`.",
+            "items": {
+              "type": "string"
             },
             "type": "array"
           }
@@ -2687,6 +2694,10 @@
       "VerifyFailure": {
         "description": "A module that failed the kernel re-check.",
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ErrorKind",
+            "description": "`lean` when the kernel rejected the module. Otherwise the re-check\ndidn't finish, which is no verdict on the code: `timeout` and\n`out_of_memory` (retry with more time, or on a larger worker), or\n`crash` (the verifier failed)."
+          },
           "module": {
             "type": "string"
           },
@@ -2697,6 +2708,7 @@
         },
         "required": [
           "module",
+          "kind",
           "reason"
         ],
         "type": "object"

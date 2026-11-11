@@ -212,6 +212,12 @@ on the servers:
   themselves.
 - The worker image builds the `pisa` tool beside the `Pisa` library, and
   `PISA_TOOL` (`/opt/pisa/.lake/build/bin/pisa`) replaces `PISA_VERIFIER`.
+- Snapshots of plain code made before the upgrade keep the `verified` they
+  had, which is false unless they were verified on request, and an audit
+  against a spec isn't `clean` until its spec snapshots and heads are. The
+  audit's `unverified` lists them: verify each with
+  `POST /snapshots/{id}/verify` before relying on an audit. A create of their
+  code re-checks them too.
 - A worker with `PISA_CGROUP_ROOT` set (the chart's `worker.cgroups`) that
   can't set up its cgroups doesn't start, where it used to warn and run Lean
   with no memory or process limit. On a node without a delegated cgroup v2
@@ -796,7 +802,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   on assumptions the spec permits, those declared in a spec snapshot's module
   or in a module it builds on. The records of a module the kernel hasn't
   re-checked come from its build's report, which the code being judged could
-  influence, so they don't count. Each of `assumptions` says whether the spec
+  influence, so they don't count: `unverified` lists those spec snapshots
+  and heads, and their comparison's `reasons` say to verify each with
+  `POST /snapshots/{id}/verify`. Each of `assumptions` says whether the spec
   permits it (`in_spec`).
 - **Links.** For review, `links` lists every link that let definitions change
   (with an `allow`, or filling holes): those on the way to the heads, and those of each spec
@@ -1114,7 +1122,7 @@ about 2 s to a small chunk on `import Mathlib`. Every create runs it, unless
 
 | `verify` | Kernel re-check at creation |
 | --- | --- |
-| omitted | This chunk; if the kernel rejects it, it isn't kept |
+| omitted | This chunk, or kept code that isn't verified yet; if the kernel rejects it, it isn't kept |
 | `true` | This chunk and any unverified imports; the snapshot is `verified`, or `check` has an `error` |
 | `false` | None, and the statuses are the build's own report; module-system code is re-checked all the same, as only the re-check can describe it |
 
@@ -1130,7 +1138,11 @@ module system with no macros, its own or an import's, is kept, not
 Other code, and code asked to be verified, isn't kept, and `check.error` is a
 `timeout` or `out_of_memory`: module-system code exports its theorems as
 axioms to what it imports, so only the kernel re-check can say what it
-proves, and macros could expand into what the policy forbids.
+proves, and macros could expand into what the policy forbids. A re-check
+that fails, rather than run out of time or memory, keeps nothing: `check.error`
+is a `crash` with what the verifier said. A create with `verify: true` whose
+imports' re-check doesn't finish answers with that kind, `timeout` included,
+and `lean` only when the kernel rejected one.
 
 `POST /snapshots/{id}/verify?timeout=60` re-checks the snapshot's module and
 everything it imports, imports first, in one process that loads their imports
@@ -1141,8 +1153,10 @@ chunks, and a retry resumes where the last one stopped. `verified` and
   imports are loaded.
 - `snapshot` is the snapshot as the re-check left it, and `checked` lists the
   modules this run re-checked and passed.
-- If the kernel rejects a module or the re-check runs out of time or memory,
-  the run stops, still with a 200, and `failure` has the module and the reason.
+- If the kernel rejects a module or the re-check doesn't finish, the run
+  stops, still with a 200, and `failure` has the module, the reason and its
+  `kind`: `lean` when the kernel rejected it; `timeout` or `out_of_memory`,
+  worth a retry with more time or memory; `crash` when the verifier failed.
   Nothing is deleted, because other code may import it: the module stays usable
   and not `verified`. Delete its snapshots if you don't want it.
 - `status` and the module's `check` are updated from the re-check, whose axioms

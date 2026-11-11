@@ -163,6 +163,21 @@ async fn a_spec_the_kernel_hasnt_rechecked_is_not_clean() {
     // The targets are the spec's records, which only the build reported.
     let r = audit(&c, &[id(&s)]).await;
     assert_eq!(r["clean"], false, "{r}");
+    // It names the spec, and how to verify it.
+    assert_eq!(r["unverified"], json!([id(&s)]), "{r}");
+    let reasons = &r["comparisons"][0]["reasons"];
+    let how = format!(
+        "{} isn't verified: POST /snapshots/{}/verify",
+        id(&s),
+        id(&s)
+    );
+    assert_eq!(reasons, &json!([how]), "{r}");
+    let (status, verified) = c
+        .post(&format!("/snapshots/{}/verify", id(&s)), json!({}))
+        .await;
+    assert_eq!(status, 200, "{verified}");
+    let r = audit(&c, &[id(&s)]).await;
+    assert!(r.get("unverified").is_none(), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

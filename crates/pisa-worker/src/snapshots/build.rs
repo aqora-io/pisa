@@ -219,9 +219,12 @@ impl Snapshots {
         let (rechecked, unverified) = if recheck {
             match recheck_module(slot, id, per_module).await {
                 Ok(decls) => (Some(decls), None),
-                Err(Unchecked::Unfinished(u)) if reported_stands => {
+                // Only a re-check out of time or memory keeps it: a crash may
+                // be the code's doing.
+                Err(Unchecked::Unfinished(u)) if reported_stands && outgrown(&u) => {
                     let unverified = VerifyFailure {
                         module: snapshot::module(id),
+                        kind: unfinished_kind(&u),
                         reason: u.to_string(),
                     };
                     (None, Some(unverified))

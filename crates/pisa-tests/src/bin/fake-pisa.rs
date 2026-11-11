@@ -19,7 +19,9 @@
 //! declarations (see `pisa_tests::declarations`). A `forge` marker in the code
 //! stands in for the kernel catching a forged declaration: the module is
 //! rejected and the run ends. A `SLOW_KERNEL <ms>` marker makes the module
-//! take that long.
+//! take that long. `BREAK_KERNEL` makes the verifier exit 1 with an error on
+//! stderr, and `FAIL_KERNEL` makes it report a failure of its own
+//! (`PISA_FAILED`), as when it can't describe the module.
 
 use std::io::Write;
 
@@ -55,6 +57,17 @@ fn verify(modules: &[String]) {
         if let Some(ms) = code.split("SLOW_KERNEL ").nth(1) {
             let ms: u64 = ms.lines().next().unwrap().trim().parse().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        if code.contains("BREAK_KERNEL") {
+            eprintln!("uncaught exception: the fake kernel fell over");
+            std::process::exit(1);
+        }
+        if code.contains("FAIL_KERNEL") {
+            let failed =
+                json!({"reason": format!("describing `{module}`: the fake describe failed")});
+            writeln!(out, "PISA_FAILED {failed}").unwrap();
+            out.flush().unwrap();
+            std::process::exit(1);
         }
         let rejected = code.contains("forge");
         let verdict = if rejected {

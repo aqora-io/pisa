@@ -135,6 +135,8 @@ class CreateSnapshotResponse(TypedDict):
     check: CheckResult
     replacement: NotRequired[Replacement]
     heads: NotRequired[list[str]]
+    # A re-check out of time or memory that kept plain code unverified.
+    unverified: NotRequired[VerifyFailure]
 
 class Description(TypedDict):
     title: str
@@ -227,6 +229,7 @@ class AuditSnapshotsResponse(TypedDict):
     targets: NotRequired[list[AuditTarget]]
     links: NotRequired[list[AuditLink]]
     comparisons: NotRequired[list[AuditComparison]]
+    unverified: NotRequired[list[str]]
 
 class RebuildItem(TypedDict):
     """An item without `snapshot_id` is a support item: it has no labels and
@@ -284,6 +287,9 @@ class RebuildSnapshotsResponse(TypedDict):
 
 class VerifyFailure(TypedDict):
     module: str
+    # `lean` when the kernel rejected the module; `timeout`, `out_of_memory`
+    # or `crash` when the re-check didn't finish.
+    kind: ErrorKind
     reason: str
 
 class VerifySnapshotResponse(TypedDict):

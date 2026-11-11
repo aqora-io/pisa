@@ -117,7 +117,8 @@ pub enum Unfinished {
     Timeout(Duration),
     /// The slot's memory limit killed it.
     OutOfMemory,
-    /// It couldn't start, or ended without a verdict.
+    /// It couldn't start, failed (`PISA_FAILED`), or ended without a
+    /// verdict.
     Crash(String),
 }
 
@@ -141,6 +142,8 @@ pub struct VerifyRun<'a> {
     slot: usize,
     child: tokio::process::Child,
     lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    /// The end of what it writes to stderr, read as it runs.
+    stderr: Option<tokio::task::JoinHandle<String>>,
     oom_before: u64,
     /// The time left for the imports, until `PISA_IMPORTED`.
     imports: Option<Duration>,
@@ -177,12 +180,24 @@ impl VerifyRun<'_> {
                 }
                 return match status {
                     Ok(s) if s.success() => None,
-                    Ok(s) => Some(Err(Unfinished::Crash(format!("it exited with {s}")))),
+                    Ok(s) => {
+                        let tail = self.stderr_tail().await;
+                        Some(Err(Unfinished::Crash(with_tail(
+                            format!("it exited with {s}"),
+                            &tail,
+                        ))))
+                    }
                     Err(e) => Some(Err(Unfinished::Crash(e.to_string()))),
                 };
             };
             if line.starts_with("PISA_IMPORTED ") {
                 self.imports = None;
+            } else if let Some(json) = line.strip_prefix("PISA_FAILED ") {
+                let reason = serde_json::from_str::<serde_json::Value>(json)
+                    .ok()
+                    .and_then(|v| v["reason"].as_str().map(String::from))
+                    .unwrap_or_else(|| format!("an unreadable failure: {json}"));
+                return Some(Err(Unfinished::Crash(reason)));
             } else if let Some(json) = line.strip_prefix("PISA_VERIFY ") {
                 return Some(
                     serde_json::from_str(json)
@@ -190,6 +205,48 @@ impl VerifyRun<'_> {
                 );
             }
         }
+    }
+}
+
+impl VerifyRun<'_> {
+    /// What the process wrote to stderr, at most [`STDERR_TAIL`] bytes of its
+    /// end, once it has ended.
+    async fn stderr_tail(&mut self) -> String {
+        match self.stderr.take() {
+            Some(read) => read.await.unwrap_or_default(),
+            None => String::new(),
+        }
+    }
+}
+
+/// How much of a failed process's stderr its error keeps, from the end.
+const STDERR_TAIL: usize = 2000;
+
+/// Reads `stderr` to its end as the process runs, so that a full pipe never
+/// stops it, and keeps the last [`STDERR_TAIL`] bytes.
+fn read_tail(mut stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
+    use tokio::io::AsyncReadExt;
+    tokio::spawn(async move {
+        let mut kept: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            kept.extend_from_slice(&buf[..n]);
+            if kept.len() > STDERR_TAIL {
+                kept.drain(..kept.len() - STDERR_TAIL);
+            }
+        }
+        String::from_utf8_lossy(&kept).trim().to_string()
+    })
+}
+
+/// `message`, then what the process wrote to stderr, if anything.
+fn with_tail(message: String, tail: &str) -> String {
+    match tail.is_empty() {
+        true => message,
+        false => format!("{message}: {tail}"),
     }
 }
 
@@ -424,15 +481,17 @@ impl Launcher {
         let mut cmd = self.command_on(slot, &self.tool, &args, &self.build_path)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().map(read_tail);
         Ok(VerifyRun {
             launcher: self,
             slot,
             child,
             lines: tokio::io::BufReader::new(stdout).lines(),
+            stderr,
             oom_before,
             imports: Some(imports),
             per_module,
