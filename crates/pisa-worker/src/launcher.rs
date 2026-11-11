@@ -306,6 +306,12 @@ impl Launcher {
                 Some(c.with_beam(cfg.slots(), beam))
             }
         };
+        if cgroups.is_none() {
+            tracing::warn!(
+                "PISA_CGROUP_ROOT is unset: Lean runs without memory or process limits, and an \
+                 out-of-memory kill reads as a crash"
+            );
+        }
         Ok(Launcher {
             repl: std::path::absolute(&cfg.repl).unwrap_or_else(|_| cfg.repl.clone()),
             // Usually a bare `lean`, found on the project environment's PATH.
@@ -321,6 +327,11 @@ impl Launcher {
             snapshot_root,
             cgroups,
         })
+    }
+
+    /// Whether Lean runs with the memory and process limits of cgroups.
+    pub fn limited(&self) -> bool {
+        self.cgroups.is_some()
     }
 
     /// The Lake project the REPL imports from, if there is one.

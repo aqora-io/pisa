@@ -76,7 +76,14 @@ pub async fn run_with_stores(
         launcher.snapshot_root().to_path_buf(),
         Duration::from_secs(cfg.snapshot_confirm_secs),
         cfg.policy(),
-    );
+    )
+    .claiming_store(cfg.claim_store);
+    if cfg.claim_store {
+        snapshots
+            .mark_store()
+            .await
+            .map_err(|e| anyhow::anyhow!("claiming the store: {}", e.message))?;
+    }
     let (pool, warm_rx) = Pool::new(
         launcher,
         Arc::new(snapshots),
@@ -116,7 +123,23 @@ pub async fn run_with_stores(
                 match catalog.take_lease(SWEEP_LEASE, &owner, SWEEP_EVERY).await {
                     Ok(Some(_)) => match pool.snapshots().sweep(SWEEP_GRACE).await {
                         Ok((modules, files)) => {
-                            tracing::info!(modules, files, "swept what deletes left")
+                            let refused = match &files {
+                                snapshots::FileSweep::Swept(files) => {
+                                    tracing::info!(modules, files, "swept what deletes left");
+                                    None
+                                }
+                                snapshots::FileSweep::Refused(why) => {
+                                    tracing::info!(modules, "swept what deletes left of modules");
+                                    tracing::error!(
+                                        "not sweeping the store's snapshot files: {why}"
+                                    );
+                                    Some(why.as_str())
+                                }
+                            };
+                            // For health to show.
+                            if let Err(e) = catalog.record_sweep(refused).await {
+                                tracing::warn!("recording the sweep failed: {e}");
+                            }
                         }
                         Err(e) => tracing::warn!("sweeping snapshots failed: {e}"),
                     },

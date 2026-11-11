@@ -81,7 +81,13 @@ async fn without_qdrant_there_is_no_search() {
     assert_eq!(status, 200);
     assert_eq!(
         health,
-        json!({"status": "ok", "workers": 0, "search": null})
+        json!({
+            "status": "ok",
+            "workers": 0,
+            "unlimited_workers": [],
+            "sweeps_refused": [],
+            "search": null
+        })
     );
     let searches = [
         post(&url("/search"), json!({"queries": []})).await,

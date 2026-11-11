@@ -272,9 +272,31 @@ pub struct Health {
     /// The live workers on the queue; `null` if it can't be read.
     #[schema(required = true)]
     pub workers: Option<u64>,
+    /// The live workers that run Lean without memory or process limits, as
+    /// a worker without `PISA_CGROUP_ROOT` does, by name; `null` if the
+    /// queue can't be read.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub unlimited_workers: Option<Vec<String>>,
+    /// The versions the live workers serve whose sweeps of the store's
+    /// snapshot files are refused, as when the store names another
+    /// database's catalog; `null` if they can't be read.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub sweeps_refused: Option<Vec<SweepRefused>>,
     /// Search's state; `null` if the server doesn't search.
     #[schema(required = true)]
     pub search: Option<crate::search::SearchHealth>,
+}
+
+/// A version whose sweeps of the store's snapshot files are refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SweepRefused {
+    pub version: String,
+    /// Why the last sweep was refused.
+    pub reason: String,
+    /// Since when its sweeps have been, in seconds since the Unix epoch.
+    pub since: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

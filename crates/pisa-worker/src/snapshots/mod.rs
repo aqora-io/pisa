@@ -73,6 +73,7 @@ mod verify;
 
 use cache::*;
 use create::*;
+pub use delete::FileSweep;
 use verify::*;
 
 pub use pisa_snapshots::Reader;
@@ -93,9 +94,11 @@ pub struct Snapshots {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// What reads the catalog: snapshots, audits, rebuild plans.
     reader: Reader,
-    /// Whether the store's marker names this catalog, as this worker wrote
-    /// or read it.
+    /// Whether this worker has claimed the store, or found it another's.
     marked: AtomicBool,
+    /// Whether to make the store's marker name this catalog whatever it
+    /// names (`PISA_CLAIM_STORE`).
+    claim_store: bool,
 }
 
 fn internal(e: impl std::fmt::Display) -> Error {
@@ -138,6 +141,16 @@ impl Snapshots {
             confirmed: Mutex::default(),
             locks: Mutex::default(),
             marked: AtomicBool::new(false),
+            claim_store: false,
+        }
+    }
+
+    /// With `claim`, the store's marker is made to name this catalog, as
+    /// `PISA_CLAIM_STORE` asks.
+    pub fn claiming_store(self, claim: bool) -> Self {
+        Snapshots {
+            claim_store: claim,
+            ..self
         }
     }
 

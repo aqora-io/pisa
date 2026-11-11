@@ -986,6 +986,18 @@ impl Catalog {
         dispatch!(&self.db, identity(&self.version))
     }
 
+    /// Records what this version's sweep of the store's files came to: why
+    /// it was refused, or `None` once it swept.
+    pub async fn record_sweep(&self, refused: Option<&str>) -> Result<(), Error> {
+        dispatch!(&self.db, record_sweep(&self.version, refused))
+    }
+
+    /// Why this version's sweeps of the store's files are refused, and since
+    /// when (microseconds since the Unix epoch), if they are.
+    pub async fn sweep_refused(&self) -> Result<Option<(String, u64)>, Error> {
+        dispatch!(&self.db, sweep_refused(&self.version))
+    }
+
     /// Takes or renews lease `name` for `owner` for `ttl`, unless another
     /// owner holds it; returns when it ends if `owner` holds it now.
     pub async fn take_lease(
@@ -2150,6 +2162,25 @@ mod tests {
             );
             assert_eq!(catalog.prune_log(Duration::ZERO).await.unwrap(), 3);
             assert!(catalog.changes(0, None, 10).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_sweep_is_kept_until_one_sweeps() {
+        for catalog in catalogs().await {
+            catalog.identity().await.unwrap();
+            assert_eq!(catalog.sweep_refused().await.unwrap(), None);
+            catalog.record_sweep(Some("no marker")).await.unwrap();
+            let (why, since) = catalog.sweep_refused().await.unwrap().unwrap();
+            assert_eq!(why, "no marker");
+            // Since the first of the refusals in a row.
+            catalog.record_sweep(Some("another's")).await.unwrap();
+            assert_eq!(
+                catalog.sweep_refused().await.unwrap(),
+                Some(("another's".to_string(), since))
+            );
+            catalog.record_sweep(None).await.unwrap();
+            assert_eq!(catalog.sweep_refused().await.unwrap(), None);
         }
     }
 

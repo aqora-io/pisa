@@ -85,6 +85,7 @@ pub fn worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
         lease_secs: 1,
         state_ttl_secs: 0,
         snapshot_confirm_secs: 60,
+        claim_store: false,
         drain_timeout_secs: 30,
         beam_slots: 0,
         beam_documents: 4,

@@ -1,4 +1,5 @@
 use super::*;
+use delete::Claim;
 use object_store::memory::InMemory;
 use pisa_protocol::verify::ProofStatus;
 
@@ -194,10 +195,10 @@ async fn a_sweep_clears_what_a_stopped_delete_left() {
 
     // Files are kept for their grace, as a build uploads them first.
     let (modules, files) = s.sweep(Duration::from_secs(3600)).await.unwrap();
-    assert_eq!((modules, files), (1, 0));
+    assert_eq!((modules, files), (1, FileSweep::Swept(0)));
     assert!(stored(own(&c)).await && stored(stray.clone()).await);
     let (modules, files) = s.sweep(Duration::ZERO).await.unwrap();
-    assert_eq!((modules, files), (0, 2));
+    assert_eq!((modules, files), (0, FileSweep::Swept(2)));
     assert!(!stored(own(&p)).await && !stored(own(&c)).await && !stored(stray).await);
     assert!(stored(own(&k)).await);
     assert!(catalog.module(&p_id).await.is_err());
@@ -220,9 +221,15 @@ async fn a_kept_build_outlives_the_sweeps_grace() {
     upload(&s, &meta, b"kept").await;
     let catalog = Catalog::new(db, "v".into());
     catalog.commit_module(&id, &meta, None).await.unwrap();
-    assert_eq!(s.sweep(Duration::from_secs(3600)).await.unwrap(), (0, 0));
+    assert_eq!(
+        s.sweep(Duration::from_secs(3600)).await.unwrap(),
+        (0, FileSweep::Swept(0))
+    );
     assert!(has_files(&s, &meta).await);
-    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (1, 0));
+    assert_eq!(
+        s.sweep(Duration::ZERO).await.unwrap(),
+        (1, FileSweep::Swept(0))
+    );
     assert!(!has_files(&s, &meta).await);
     assert!(catalog.module(&id).await.is_err());
 }
@@ -247,28 +254,95 @@ async fn a_sweep_leaves_another_catalogs_store_alone() {
         .unwrap();
 
     other.mark_store().await.unwrap();
-    assert_eq!(other.sweep(Duration::ZERO).await.unwrap(), (0, 0));
-    assert!(has_files(&s, &meta).await);
     let ours = s.catalog.identity().await.unwrap();
+    let (_, refused) = other.sweep(Duration::ZERO).await.unwrap();
+    let FileSweep::Refused(why) = refused else {
+        panic!("{refused:?}")
+    };
+    assert!(why.contains(&ours), "{why}");
+    assert!(has_files(&s, &meta).await);
     assert_eq!(other.store_catalog().await.unwrap(), Some(ours));
     // Its own catalog's worker still sweeps it.
-    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    assert_eq!(
+        s.sweep(Duration::ZERO).await.unwrap(),
+        (0, FileSweep::Swept(0))
+    );
     assert!(has_files(&s, &meta).await);
 }
 
 /// A store that names no catalog yet, as one an earlier release wrote,
-/// isn't swept until a worker's upload marks it.
+/// isn't swept until a worker's upload marks it. A worker marks it only if
+/// it knows every build the store holds, but for those new enough to be
+/// uploads whose records are on their way.
 #[tokio::test]
-async fn an_unmarked_store_isnt_swept() {
+async fn an_unmarked_store_is_claimed_only_by_a_catalog_that_knows_its_files() {
     let dir = tempfile::tempdir().unwrap();
-    let s = snapshots(Db::memory().await, dir.path());
+    let db = Db::memory().await;
+    let s = snapshots(db.clone(), dir.path());
+    let kept = built(&snapshot::id("kept"), b"kept");
+    upload(&s, &kept, b"kept").await;
+    Catalog::new(db, "v".into())
+        .commit(&kept.modules[0].id, &kept, None, no_labels())
+        .await
+        .unwrap();
     let stray = built(&snapshot::id("gone"), b"gone");
     upload(&s, &stray, b"gone").await;
-    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    let (_, refused) = s.sweep(Duration::ZERO).await.unwrap();
+    let FileSweep::Refused(why) = refused else {
+        panic!("{refused:?}")
+    };
+    assert!(why.contains("PISA_CLAIM_STORE"), "{why}");
     assert!(has_files(&s, &stray).await);
+    // As though the stray were older than the claim's grace.
+    let Claim::Refused(why) = s.claim(Duration::ZERO).await.unwrap() else {
+        panic!("claimed a store with a file it has no record of")
+    };
+    assert!(why.contains(&stray.modules[0].id), "{why}");
+    assert!(why.contains("PISA_CLAIM_STORE"), "{why}");
+    assert_eq!(s.store_catalog().await.unwrap(), None);
+    // A new file is an upload on its way: it doesn't stop the claim.
     s.mark_store().await.unwrap();
-    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 1));
-    assert!(!has_files(&s, &stray).await);
+    let ours = s.catalog.identity().await.unwrap();
+    assert_eq!(s.store_catalog().await.unwrap(), Some(ours));
+    assert_eq!(
+        s.sweep(Duration::ZERO).await.unwrap(),
+        (0, FileSweep::Swept(1))
+    );
+    assert!(!has_files(&s, &stray).await && has_files(&s, &kept).await);
+}
+
+/// A new store names no catalog until a worker uploads to it: its sweep has
+/// nothing to do, which isn't a refusal.
+#[tokio::test]
+async fn an_empty_unmarked_store_sweeps_nothing_and_refuses_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = snapshots(Db::memory().await, dir.path());
+    assert_eq!(
+        s.sweep(Duration::ZERO).await.unwrap(),
+        (0, FileSweep::Swept(0))
+    );
+}
+
+/// `PISA_CLAIM_STORE` makes the store's marker name this catalog, whatever
+/// it named: a reset database on a kept store.
+#[tokio::test]
+async fn a_worker_told_to_claims_the_store() {
+    let (dir, other_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let old = snapshots_on(store.clone(), Db::memory().await, dir.path());
+    old.mark_store().await.unwrap();
+    let stray = built(&snapshot::id("old"), b"old");
+    upload(&old, &stray, b"old").await;
+    let reset = snapshots_on(store, Db::memory().await, other_dir.path());
+    let reset = Arc::into_inner(reset).unwrap().claiming_store(true);
+    assert_eq!(reset.claim(Duration::ZERO).await.unwrap(), Claim::Ours);
+    let ours = reset.catalog.identity().await.unwrap();
+    assert_eq!(reset.store_catalog().await.unwrap(), Some(ours));
+    // The old catalog's files have no record here, and go.
+    assert_eq!(
+        reset.sweep(Duration::ZERO).await.unwrap(),
+        (0, FileSweep::Swept(1))
+    );
 }
 
 /// A sweep that would delete most of the store's files stops: a catalog
@@ -292,7 +366,11 @@ async fn a_sweep_stops_when_most_files_have_no_record() {
     for stray in &strays {
         upload(&s, stray, b"x").await;
     }
-    assert_eq!(s.sweep(Duration::ZERO).await.unwrap(), (0, 0));
+    let (_, refused) = s.sweep(Duration::ZERO).await.unwrap();
+    let FileSweep::Refused(why) = refused else {
+        panic!("{refused:?}")
+    };
+    assert!(why.contains("have no record"), "{why}");
     for stray in &strays {
         assert!(has_files(&s, stray).await);
     }
@@ -303,7 +381,7 @@ async fn a_sweep_stops_when_most_files_have_no_record() {
         .unwrap();
     assert_eq!(
         s.sweep(Duration::ZERO).await.unwrap(),
-        (0, delete::SWEEP_GUARD - 1)
+        (0, FileSweep::Swept(delete::SWEEP_GUARD - 1))
     );
     assert!(has_files(&s, &kept).await);
 }

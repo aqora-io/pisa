@@ -1713,6 +1713,26 @@
             "$ref": "#/components/schemas/HealthStatus",
             "description": "`draining`, with a 503, once the server is stopping."
           },
+          "sweeps_refused": {
+            "description": "The versions the live workers serve whose sweeps of the store's\nsnapshot files are refused, as when the store names another\ndatabase's catalog; `null` if they can't be read.",
+            "items": {
+              "$ref": "#/components/schemas/SweepRefused"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "unlimited_workers": {
+            "description": "The live workers that run Lean without memory or process limits, as\na worker without `PISA_CGROUP_ROOT` does, by name; `null` if the\nqueue can't be read.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "workers": {
             "description": "The live workers on the queue; `null` if it can't be read.",
             "format": "int64",
@@ -1726,6 +1746,8 @@
         "required": [
           "status",
           "workers",
+          "unlimited_workers",
+          "sweeps_refused",
           "search"
         ],
         "type": "object"
@@ -3245,6 +3267,30 @@
         "required": [
           "spec",
           "by"
+        ],
+        "type": "object"
+      },
+      "SweepRefused": {
+        "description": "A version whose sweeps of the store's snapshot files are refused.",
+        "properties": {
+          "reason": {
+            "description": "Why the last sweep was refused.",
+            "type": "string"
+          },
+          "since": {
+            "description": "Since when its sweeps have been, in seconds since the Unix epoch.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "reason",
+          "since"
         ],
         "type": "object"
       },

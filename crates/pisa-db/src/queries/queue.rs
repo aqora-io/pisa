@@ -365,6 +365,22 @@ pub(crate) async fn counts(db: &Handle, q: &str, stale: Duration) -> Result<Coun
     Ok(counts)
 }
 
+pub(crate) async fn unlimited_workers(
+    db: &Handle,
+    q: &str,
+    stale: Duration,
+) -> Result<Vec<String>, DbError> {
+    let names = workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::seen_micros.ge(now() - micros(stale)))
+        .filter(workers::unlimited.eq(true))
+        .order(workers::name)
+        .select(workers::name)
+        .load(&mut *conn(db).await?)
+        .await?;
+    Ok(names)
+}
+
 pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, DbError> {
     let cutoff = now - micros(SWEEP_GRACE);
     retry(|| async {
@@ -424,6 +440,7 @@ pub(crate) async fn register(
     version: &str,
     slots: u32,
     beam_slots: u32,
+    unlimited: bool,
 ) -> Result<i64, DbError> {
     let now = now();
     retry(|| async {
@@ -433,6 +450,7 @@ pub(crate) async fn register(
                 workers::version.eq(version),
                 workers::slots.eq(slots as i32),
                 workers::beam_slots.eq(beam_slots as i32),
+                workers::unlimited.eq(unlimited),
                 workers::warm.eq(Value::Array(Vec::new())),
                 workers::draining.eq(false),
                 workers::seen_micros.eq(now),

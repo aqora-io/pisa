@@ -110,6 +110,12 @@ pub struct WorkerConfig {
     /// cached. A deleted snapshot keeps working here for at most this long.
     #[arg(long, env = "PISA_SNAPSHOT_CONFIRM_SECS", default_value_t = 60)]
     pub snapshot_confirm_secs: u64,
+    /// Make the store's marker name this database's catalog as the worker
+    /// starts, whatever it names, so that this catalog's workers sweep the
+    /// store: for a database reset on a store that is kept. Unset it again
+    /// once a worker has started with it.
+    #[arg(long, env = "PISA_CLAIM_STORE")]
+    pub claim_store: bool,
     /// On shutdown, how long to wait for in-flight jobs before exiting anyway.
     #[arg(long, env = "PISA_DRAIN_TIMEOUT_SECS", default_value_t = 600)]
     pub drain_timeout_secs: u64,

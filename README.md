@@ -248,11 +248,14 @@ on the servers:
   can't set up its cgroups doesn't start, where it used to warn and run Lean
   with no memory or process limit. On a node without a delegated cgroup v2
   tree, set `worker.cgroups: false`, or leave the variable unset, to run
-  without those limits on purpose.
+  without those limits on purpose. Such a worker logs a warning as it
+  starts, and `/health`'s `unlimited_workers` names it.
 - The store's files of a version are swept only once the store names its
   catalog, which the first create after the upgrade does. Run that first
   create against the database the store belongs to: a store marked by another
-  database's worker is never swept by this one's.
+  database's worker is never swept by this one's. A worker doesn't mark a
+  store that holds files more than an hour old of builds its database has no
+  record of; `PISA_CLAIM_STORE=1` makes it (see [Retention](#retention)).
 - The worker image's entrypoint is `tini -- pisa-worker`. A deployment that
   sets its own command keeps an init as PID 1: without one, the sandboxes
   the worker kills stay as zombies in their slots' cgroups until Lean can't
@@ -340,7 +343,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, search}`, the live workers on the queue (`null` if it can't be read) and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
+| `GET /health` | Liveness: `{status, workers, unlimited_workers, sweeps_refused, search}`, the live workers on the queue, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -1486,9 +1489,19 @@ that a create's link refused is kept with no snapshot for the create that
 follows (see [Replacing](#replacing)). Files are swept only from a store that names the worker's
 own catalog: each version's catalog has a random id, which a worker writes to
 `catalogs/<version>` in the store with its first upload, unless the store
-names one already. A worker on an empty, scratch or other database leaves the
+names one already, or holds files more than an hour old of builds its catalog
+has no record of. A worker on an empty, scratch or other database leaves the
 store's files alone and logs an error, and so does a sweep that would delete
-most of them (16 or more).
+most of them (16 or more); `/health`'s `sweeps_refused` says why, until a
+sweep goes through. A new store, which names no catalog until the first
+upload, has nothing to sweep, which isn't a refusal.
+
+**A database reset on a kept store.** The store names the old catalog, or
+none, and holds builds the new one has no record of, so no worker sweeps it.
+To have the new catalog own the store, start one worker with
+`PISA_CLAIM_STORE=1`, which makes the store's marker name its catalog, then
+unset it. Its sweeps then delete the old builds' files, unless they are most
+of the store's: delete those by hand, under `snapshots/<version>/`.
 
 **Trust.** A snapshot that isn't `verified` has the same guarantee as a
 `/check`: the policy scan and an axiom report from the process that imported

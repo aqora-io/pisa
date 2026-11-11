@@ -113,6 +113,8 @@ diesel::table! {
         version -> Text,
         id -> Text,
         created_micros -> BigInt,
+        sweep_refused -> Nullable<Text>,
+        sweep_refused_micros -> Nullable<BigInt>,
     }
 }
 
@@ -194,6 +196,7 @@ diesel::table! {
         seen_micros -> BigInt,
         beam_slots -> Integer,
         documents_open -> Integer,
+        unlimited -> Bool,
     }
 }
 

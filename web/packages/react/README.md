@@ -27,7 +27,8 @@ function Editor({ code }: { code: string }) {
 
 - **Health.** `useHealth()` polls the server every 5 s: it says whether the
   server is up or draining, how many workers are live (with none, checks wait
-  and then get a 429), and whether search can serve.
+  and then get a 429), which run without limits, which versions' sweeps are
+  refused, and whether search can serve.
 - **Checks.**
   - `useCheck({ code, version?, timeout?, detail?, at? } | null)` checks the code.
     Its `data` is `{ code, result }`, so an editor draws diagnostics only while

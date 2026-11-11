@@ -10,11 +10,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::StreamExt;
+use pisa_db::catalog::Catalog;
 use pisa_db::queue::LIVE;
 use pisa_protocol::api::{
     self, Accepted, ApiErrors, CheckBatchRequest, CheckBatchResponse, CheckRequest, CheckResult,
     Detail, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, MAX_BATCH, Pos,
-    PreferAsync,
+    PreferAsync, SweepRefused,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -201,7 +202,8 @@ impl App {
     }
 
     /// The API's health: up, or 503 once draining, with the number of live
-    /// workers on the queue, `null` if the queue can't be read.
+    /// workers on the queue, those without limits, and the versions whose
+    /// sweeps are refused, each `null` if it can't be read.
     pub async fn health(&self) -> (StatusCode, Health) {
         let workers = self.dispatcher.workers().await;
         let (code, status) = if self.draining.load(Ordering::Acquire) {
@@ -209,12 +211,50 @@ impl App {
         } else {
             (StatusCode::OK, HealthStatus::Ok)
         };
+        let queue = self.dispatcher.queue();
+        let unlimited_workers = match queue.unlimited_workers(LIVE).await {
+            Ok(names) => Some(names),
+            Err(e) => {
+                tracing::warn!("reading the workers without limits failed: {e}");
+                None
+            }
+        };
         let health = Health {
             status,
             workers,
+            unlimited_workers,
+            sweeps_refused: self.sweeps_refused().await,
             search: None,
         };
         (code, health)
+    }
+
+    /// The versions of the live workers whose sweeps are refused.
+    async fn sweeps_refused(&self) -> Option<Vec<SweepRefused>> {
+        let queue = self.dispatcher.queue();
+        let read = async {
+            let mut refused = Vec::new();
+            for version in queue.live_versions(LIVE).await.map_err(|e| e.to_string())? {
+                let catalog = Catalog::new(queue.db().clone(), version.clone());
+                if let Some((reason, since)) =
+                    catalog.sweep_refused().await.map_err(|e| e.message)?
+                {
+                    refused.push(SweepRefused {
+                        version,
+                        reason,
+                        since: since / 1_000_000,
+                    });
+                }
+            }
+            Ok::<_, String>(refused)
+        };
+        match read.await {
+            Ok(refused) => Some(refused),
+            Err(e) => {
+                tracing::warn!("reading the refused sweeps failed: {e}");
+                None
+            }
+        }
     }
 }
 

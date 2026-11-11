@@ -329,11 +329,18 @@ impl Shared {
     ) -> anyhow::Result<()> {
         let slots = self.pool.slots();
         let beam_slots = self.documents.as_ref().map_or(0, |d| d.beam_slots());
+        let unlimited = !self.pool.launcher().limited();
         let mut backoff = Duration::from_millis(100);
         let since = loop {
             match self
                 .queue
-                .register(&self.me, &self.version, slots as u32, beam_slots as u32)
+                .register(
+                    &self.me,
+                    &self.version,
+                    slots as u32,
+                    beam_slots as u32,
+                    unlimited,
+                )
                 .await
             {
                 Ok(since) => break since,

@@ -530,9 +530,16 @@ class SearchHealth(TypedDict):
     leader: bool
     error: NotRequired[str]
 
+class SweepRefused(TypedDict):
+    version: str
+    reason: str
+    since: int
+
 class Health(TypedDict):
     status: Literal["ok", "draining"]
     workers: int | None
+    unlimited_workers: list[str] | None
+    sweeps_refused: list[SweepRefused] | None
     search: SearchHealth | None
 
 class JobDone(TypedDict):

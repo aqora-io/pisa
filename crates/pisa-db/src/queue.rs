@@ -221,7 +221,8 @@ impl Queue {
         dispatch!(&self.db, sweep_jobs(&self.name, now))
     }
 
-    /// Adds or resets `worker`'s row, with its REPL slots and Beam slots, and
+    /// Adds or resets `worker`'s row, with its REPL slots and Beam slots and
+    /// whether it runs Lean without limits, and
     /// lets its claims from before, of a process under the same name, lapse at
     /// once. Returns when, which [`Queue::heartbeat`] takes.
     pub async fn register(
@@ -230,11 +231,18 @@ impl Queue {
         version: &str,
         slots: u32,
         beam_slots: u32,
+        unlimited: bool,
     ) -> Result<i64, DbError> {
         dispatch!(
             &self.db,
-            register(&self.name, worker, version, slots, beam_slots)
+            register(&self.name, worker, version, slots, beam_slots, unlimited)
         )
+    }
+
+    /// The live workers, seen within `stale`, that run Lean without memory
+    /// or process limits, by name.
+    pub async fn unlimited_workers(&self, stale: Duration) -> Result<Vec<String>, DbError> {
+        dispatch!(&self.db, unlimited_workers(&self.name, stale))
     }
 
     /// Up to `limit` jobs that a worker of `version` could claim for its REPL
@@ -654,13 +662,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_live_workers_without_limits_are_named() {
+        for q in queues().await {
+            q.register("free", "v", 1, 0, true).await.unwrap();
+            q.register("held", "v", 1, 0, false).await.unwrap();
+            assert_eq!(q.unlimited_workers(LEASE).await.unwrap(), ["free"]);
+            assert!(
+                q.unlimited_workers(Duration::ZERO)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            // A process under the same name, with limits.
+            q.register("free", "v", 1, 0, false).await.unwrap();
+            assert!(q.unlimited_workers(LEASE).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn only_live_workers_with_beam_slots_serve_documents() {
         for q in queues().await {
             assert_eq!(q.serving_documents(Some("v"), LEASE).await.unwrap(), 0);
-            q.register("repl", "v", 2, 0).await.unwrap();
-            q.register("beam", "v", 2, 1).await.unwrap();
-            q.register("leaving", "v", 2, 1).await.unwrap();
-            q.register("other", "w", 2, 1).await.unwrap();
+            q.register("repl", "v", 2, 0, false).await.unwrap();
+            q.register("beam", "v", 2, 1, false).await.unwrap();
+            q.register("leaving", "v", 2, 1, false).await.unwrap();
+            q.register("other", "w", 2, 1, false).await.unwrap();
             q.set_draining("leaving").await.unwrap();
             assert_eq!(q.serving_documents(Some("v"), LEASE).await.unwrap(), 1);
             assert_eq!(q.serving_documents(None, LEASE).await.unwrap(), 2);
@@ -672,9 +698,9 @@ mod tests {
     #[tokio::test]
     async fn the_registry_has_live_workers_and_their_claims() {
         for q in queues().await {
-            q.register("w1", "v", 2, 1).await.unwrap();
-            q.register("w2", "v", 1, 0).await.unwrap();
-            q.register("x", "other", 4, 0).await.unwrap();
+            q.register("w1", "v", 2, 1, false).await.unwrap();
+            q.register("w2", "v", 1, 0, false).await.unwrap();
+            q.register("x", "other", 4, 0, false).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 0)).await.unwrap();
             q.enqueue(&job(Some("v"), 1)).await.unwrap();
             // A job on a document takes none of its REPL slots.
@@ -726,7 +752,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeats_renew_only_this_registrations_claims() {
         for q in queues().await {
-            let since = q.register("w", "v", 1, 0).await.unwrap();
+            let since = q.register("w", "v", 1, 0, false).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             q.claim("w", &[id], Duration::from_millis(1)).await.unwrap();
             q.heartbeat("w", since, LEASE).await.unwrap();
@@ -735,7 +761,7 @@ mod tests {
 
             // A new process under the same name doesn't run the old one's
             // jobs: they lapse, and its heartbeats don't renew them.
-            let since = q.register("w", "v", 1, 0).await.unwrap();
+            let since = q.register("w", "v", 1, 0, false).await.unwrap();
             q.heartbeat("w", since, LEASE).await.unwrap();
             assert_eq!(ids(&q, "v").await, [id]);
         }

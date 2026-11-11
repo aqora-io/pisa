@@ -1628,6 +1628,18 @@ export interface components {
             /** @description `draining`, with a 503, once the server is stopping. */
             status: components["schemas"]["HealthStatus"];
             /**
+             * @description The versions the live workers serve whose sweeps of the store's
+             *     snapshot files are refused, as when the store names another
+             *     database's catalog; `null` if they can't be read.
+             */
+            sweeps_refused: components["schemas"]["SweepRefused"][] | null;
+            /**
+             * @description The live workers that run Lean without memory or process limits, as
+             *     a worker without `PISA_CGROUP_ROOT` does, by name; `null` if the
+             *     queue can't be read.
+             */
+            unlimited_workers: string[] | null;
+            /**
              * Format: int64
              * @description The live workers on the queue; `null` if it can't be read.
              */
@@ -2486,6 +2498,17 @@ export interface components {
             by: string;
             spec: string;
         };
+        /** @description A version whose sweeps of the store's snapshot files are refused. */
+        SweepRefused: {
+            /** @description Why the last sweep was refused. */
+            reason: string;
+            /**
+             * Format: int64
+             * @description Since when its sweeps have been, in seconds since the Unix epoch.
+             */
+            since: number;
+            version: string;
+        };
         /** @description One run of a tactic, with the goals before and after it. */
         TacticInfo: {
             end_pos: components["schemas"]["Pos"];
@@ -2673,6 +2696,7 @@ export type StartSessionRequest = components['schemas']['StartSessionRequest'];
 export type State = components['schemas']['State'];
 export type Suggestion = components['schemas']['Suggestion'];
 export type Superseded = components['schemas']['Superseded'];
+export type SweepRefused = components['schemas']['SweepRefused'];
 export type TacticInfo = components['schemas']['TacticInfo'];
 export type Tarball = components['schemas']['Tarball'];
 export type TermInfo = components['schemas']['TermInfo'];

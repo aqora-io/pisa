@@ -62,6 +62,42 @@ async fn client_covers_checks_and_sessions() {
     }
 }
 
+/// Health names the workers that run Lean without memory or process limits,
+/// as a cluster's do (no cgroups), and a version whose sweep of the store's
+/// files was refused, as a store another database's worker marked is.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_names_workers_without_limits_and_a_refused_sweep() {
+    use object_store::ObjectStoreExt as _;
+    let mut c = Cluster::start(&[]).await;
+    let client = Client::new(&c.url("/")).unwrap();
+    let marker = object_store::path::Path::from(format!("catalogs/{}", c.version("v")));
+    let other = object_store::PutPayload::from_static(b"another-catalog");
+    c.store.put(&marker, other).await.unwrap();
+    c.add_worker(common::worker_config("w0", "v", 1));
+    c.wait_for_workers(1).await;
+    // A worker sweeps as it starts.
+    let health = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let health = client.health().await.unwrap();
+            if health
+                .sweeps_refused
+                .as_ref()
+                .is_some_and(|r| !r.is_empty())
+            {
+                return health;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("health shows the refused sweep");
+    assert_eq!(health.unlimited_workers, Some(vec!["w0".to_string()]));
+    let refused = &health.sweeps_refused.unwrap()[0];
+    assert_eq!(refused.version, c.version("v"));
+    assert!(refused.reason.contains("another-catalog"), "{refused:?}");
+    assert!(refused.since > 0);
+}
+
 /// A 503 that isn't a draining server's health, such as a proxy's, is an
 /// error.
 #[tokio::test(flavor = "multi_thread")]

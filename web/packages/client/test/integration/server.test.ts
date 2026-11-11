@@ -273,7 +273,11 @@ describe("status through links", () => {
 
 describe("the server", () => {
   it("is healthy, with its worker, and doesn't search", async () => {
-    expect(await client.health()).toEqual({ status: "ok", workers: 1, search: null });
+    const health = await client.health();
+    expect(health).toMatchObject({ status: "ok", workers: 1, search: null });
+    // Its worker runs without cgroups; its new store has nothing to sweep.
+    expect(health.unlimited_workers).toHaveLength(1);
+    expect(health.sweeps_refused).toEqual([]);
     const search = await client.search({ description: "x" }).catch((e: unknown) => e);
     expect(search).toMatchObject({ kind: "not_found", status: 404 });
   });

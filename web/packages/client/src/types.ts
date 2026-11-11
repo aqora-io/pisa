@@ -115,6 +115,7 @@ export type {
   State,
   Suggestion,
   Superseded,
+  SweepRefused,
   TacticInfo,
   Tarball,
   TermInfo,

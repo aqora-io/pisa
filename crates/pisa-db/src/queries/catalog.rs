@@ -1578,6 +1578,52 @@ pub(crate) async fn identity(db: &Handle, v: &str) -> Result<String, Error> {
     Ok(id)
 }
 
+pub(crate) async fn record_sweep(db: &Handle, v: &str, refused: Option<&str>) -> Result<(), Error> {
+    retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        let row = catalogs::table.find(v);
+        match refused {
+            Some(why) => {
+                diesel::update(row.filter(catalogs::sweep_refused_micros.is_null()))
+                    .set(catalogs::sweep_refused_micros.eq(Some(now_micros() as i64)))
+                    .execute(conn)
+                    .await?;
+                diesel::update(row)
+                    .set(catalogs::sweep_refused.eq(Some(why)))
+                    .execute(conn)
+                    .await?;
+            }
+            None => {
+                diesel::update(row)
+                    .set((
+                        catalogs::sweep_refused.eq(None::<String>),
+                        catalogs::sweep_refused_micros.eq(None::<i64>),
+                    ))
+                    .execute(conn)
+                    .await?;
+            }
+        }
+        Ok::<_, DbError>(())
+    })
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn sweep_refused(db: &Handle, v: &str) -> Result<Option<(String, u64)>, Error> {
+    let row = catalogs::table
+        .find(v)
+        .select((catalogs::sweep_refused, catalogs::sweep_refused_micros))
+        .first::<(Option<String>, Option<i64>)>(&mut *conn(db).await?)
+        .await
+        .optional()
+        .map_err(DbError::from)?;
+    Ok(match row {
+        Some((Some(why), since)) => Some((why, since.unwrap_or(0) as u64)),
+        _ => None,
+    })
+}
+
 pub(crate) async fn take_lease(
     db: &Handle,
     v: &str,
