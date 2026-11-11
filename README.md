@@ -1503,6 +1503,23 @@ pnpm dev                                  # http://localhost:5173
 PISA_URL=http://localhost:8001 pnpm dev   # another server
 ```
 
+A Playwright walk through every tab (`web/apps/playground/e2e`) drives the
+dev server, which it starts, against a stack whose data doesn't matter, and
+deletes the snapshots it made. Building a second compose project retags the
+`pisa-server` and `pisa-worker:$PROJECT` images, so give it other `image:`
+names in an override file when another stack runs from them:
+
+```sh
+export COMPOSE_PROJECT_NAME=pisa-e2e PROJECT=lean-core PISA_PORT=9100
+docker compose up -d --build
+PISA_URL=http://localhost:9100 pnpm -C web --filter playground e2e
+docker compose down -v
+```
+
+With `COMPOSE_PROJECT_NAME` set, it stops the stack's workers for a moment to
+withdraw a job no worker has taken. `PLAYWRIGHT_CHROMIUM` names a Chromium to
+run instead of Playwright's own. Screenshots land in `e2e/out`.
+
 To serve the built playground from another origin, build it with
 `VITE_PISA_URL` set to the server, and allow its origin with
 `PISA_CORS_ORIGINS` (see [API](#api)).
