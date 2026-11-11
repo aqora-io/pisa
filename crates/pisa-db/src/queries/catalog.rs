@@ -71,13 +71,19 @@ async fn with_links(
             .await?;
         found.extend(links.into_iter().map(|l| (l.0.clone(), l)));
     }
-    rows.into_iter()
-        .map(|row| {
-            let link = found.remove(&row.0);
-            entry_from_row(row, link)
-        })
-        .collect()
+    let scope = crate::scope::current();
+    let mut entries = Vec::new();
+    for row in rows {
+        let link = found.remove(&row.0);
+        let (e, meta) = entry_from_row(row, link)?;
+        // An entry outside the request's scope isn't there for it.
+        if scope.matches(&meta.labels) {
+            entries.push((e, meta));
+        }
+    }
+    Ok(entries)
 }
+
 
 /// The entries with ids `ids`, oldest first, with their links.
 async fn entries_by_id(
@@ -352,6 +358,7 @@ async fn entry_in(conn: &mut Conn, v: &str, e: &str) -> Result<Option<EntryMeta>
 
 /// The entry made with idempotency key `k`, if there is one.
 async fn keyed_in(conn: &mut Conn, v: &str, k: &str) -> Result<Option<(String, EntryMeta)>, Fail> {
+    let k = crate::scope::current().key(k);
     let row = entries::table
         .filter(entries::version.eq(v))
         .filter(entries::idempotency_key.eq(k))
@@ -471,9 +478,16 @@ async fn add(
     entry: &NewEntry,
 ) -> Result<(String, EntryMeta), Fail> {
     let e = uuid::Uuid::new_v4().simple().to_string();
+    // What a request creates carries its scope.
+    let scope = crate::scope::current();
+    let mut labels = entry.labels.clone();
+    scope
+        .merge_into(&mut labels)
+        .and_then(|()| check_labels(&labels))
+        .map_err(|m| Fail::Api(Error::new(ErrorKind::BadRequest, m)))?;
     let meta = EntryMeta {
         module: m.to_string(),
-        labels: entry.labels.clone(),
+        labels,
         key: entry.key.clone(),
         created_micros: now_micros(),
         replaces: entry.replaces.clone(),
@@ -490,7 +504,7 @@ async fn add(
             entries::id.eq(&e),
             entries::module.eq(m),
             entries::labels.eq(to_record(&meta.labels)?),
-            entries::idempotency_key.eq(meta.key.as_deref()),
+            entries::idempotency_key.eq(meta.key.as_deref().map(|k| scope.key(k))),
             entries::created_micros.eq(meta.created_micros as i64),
             entries::holes.eq(holes),
             entries::source.eq(meta.source.as_deref()),
@@ -539,6 +553,7 @@ async fn add(
                 refutations::target.eq(&r.target),
                 refutations::theorem.eq(&r.theorem),
                 refutations::target_hash.eq(&r.target_hash),
+                refutations::labels.eq(serde_json::to_string(&meta.labels)?),
             ))
             .execute(conn)
             .await?;
@@ -616,8 +631,9 @@ async fn name_run(
     e: &str,
     amends: Option<&str>,
 ) -> Result<(), Fail> {
+    let scope = crate::scope::current().canonical();
     let held: Option<String> = run_names::table
-        .find((v, name))
+        .find((v, &scope, name))
         .select(run_names::root)
         .first(conn)
         .await
@@ -626,6 +642,7 @@ async fn name_run(
         diesel::insert_into(run_names::table)
             .values((
                 run_names::version.eq(v),
+                run_names::scope.eq(&scope),
                 run_names::name.eq(name),
                 run_names::root.eq(e),
             ))
@@ -640,7 +657,7 @@ async fn name_run(
     if amended.as_deref() != Some(root.as_str()) && run_has_entries(conn, v, &root).await? {
         return Err(Fail::Api(name_taken(v, name, &root)));
     }
-    diesel::update(run_names::table.find((v, name)))
+    diesel::update(run_names::table.find((v, &scope, name)))
         .set(run_names::root.eq(e))
         .execute(conn)
         .await?;
@@ -1223,6 +1240,12 @@ pub(crate) async fn set_labels(
             let Some(mut meta) = entry_in(conn, v, e).await? else {
                 return Err(Fail::Api(unknown_entry(v, e)));
             };
+            if let Some(key) = crate::scope::current().touched(labels.keys()) {
+                return Err(Fail::Api(Error::new(
+                    ErrorKind::BadRequest,
+                    format!("label {key} is the request's scope's: it can't be changed"),
+                )));
+            }
             for (key, value) in labels {
                 match value {
                     Some(value) => meta.labels.insert(key.clone(), value.clone()),
@@ -1508,6 +1531,7 @@ pub(crate) async fn put_acceptance(
                     acceptances::id.eq(id),
                     acceptances::created_micros.eq(created),
                     acceptances::result.eq(result),
+                    acceptances::labels.eq(crate::scope::stamp()),
                 ))
                 .execute(conn)
                 .await?;
@@ -1551,11 +1575,13 @@ pub(crate) async fn acceptances_of(
     let mut results: HashMap<String, Value> = acceptances::table
         .filter(acceptances::version.eq(v))
         .filter(acceptances::id.eq_any(&ids))
-        .select((acceptances::id, acceptances::result))
-        .load::<(String, Value)>(&mut *c)
+        .select((acceptances::id, acceptances::result, acceptances::labels))
+        .load::<(String, Value, String)>(&mut *c)
         .await
         .map_err(DbError::from)?
         .into_iter()
+        .filter(|(_, _, labels)| crate::scope::in_scope(labels))
+        .map(|(id, result, _)| (id, result))
         .collect();
     Ok(ids.iter().filter_map(|id| results.remove(id)).collect())
 }
@@ -1588,6 +1614,19 @@ pub(crate) async fn amendments_of(
         .load::<AmendmentRow>(&mut *conn(db).await?)
         .await
         .map_err(DbError::from)?;
+    // An amendment is its amending entry's, in scope or not.
+    let rows = if crate::scope::current().is_empty() {
+        rows
+    } else {
+        let mut c = conn(db).await?;
+        let made: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+        let kept: HashSet<String> = entries_by_id(&mut c, v, &made)
+            .await?
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect();
+        rows.into_iter().filter(|r| kept.contains(&r.0)).collect()
+    };
     let read = |rows: Vec<AmendmentRow>| {
         rows.into_iter()
             .map(|(entry, amends, reason, changes, added, before, after)| {
@@ -1630,13 +1669,15 @@ pub(crate) async fn refutations_of(
             refutations::target,
             refutations::theorem,
             refutations::target_hash,
+            refutations::labels,
         ))
-        .load::<(String, String, String, String, Option<String>)>(&mut *conn(db).await?)
+        .load::<(String, String, String, String, Option<String>, String)>(&mut *conn(db).await?)
         .await
         .map_err(DbError::from)?;
     Ok(rows
         .into_iter()
-        .map(|(entry, spec, target, theorem, target_hash)| {
+        .filter(|row| crate::scope::in_scope(&row.5))
+        .map(|(entry, spec, target, theorem, target_hash, _)| {
             let refutation = Refutation {
                 spec,
                 target,
@@ -1649,13 +1690,16 @@ pub(crate) async fn refutations_of(
 }
 
 pub(crate) async fn acceptance(db: &Handle, v: &str, id: &str) -> Result<Option<Value>, Error> {
-    Ok(acceptances::table
+    let found = acceptances::table
         .find((v, id))
-        .select(acceptances::result)
-        .first::<Value>(&mut *conn(db).await?)
+        .select((acceptances::result, acceptances::labels))
+        .first::<(Value, String)>(&mut *conn(db).await?)
         .await
         .optional()
-        .map_err(DbError::from)?)
+        .map_err(DbError::from)?;
+    Ok(found
+        .filter(|(_, labels)| crate::scope::in_scope(labels))
+        .map(|(result, _)| result))
 }
 
 pub(crate) async fn identity(db: &Handle, v: &str) -> Result<String, Error> {
@@ -1927,11 +1971,13 @@ pub(crate) async fn run_roots(
     v: &str,
     names: &[String],
 ) -> Result<HashMap<String, String>, Error> {
+    let scope = crate::scope::current().canonical();
     let mut c = conn(db).await?;
     let mut found = HashMap::new();
     for chunk in names.chunks(REPLACED_CHUNK) {
         let rows = run_names::table
             .filter(run_names::version.eq(v))
+            .filter(run_names::scope.eq(&scope))
             .filter(run_names::name.eq_any(chunk))
             .select((run_names::name, run_names::root))
             .load::<(String, String)>(&mut *c)
@@ -1948,6 +1994,7 @@ pub(crate) async fn run_names_of(
     v: &str,
     entries: &[String],
 ) -> Result<HashMap<String, String>, Error> {
+    let scope = crate::scope::current().canonical();
     let mut c = conn(db).await?;
     let c = &mut *c;
     let mut roots: HashMap<String, String> =
@@ -1967,6 +2014,7 @@ pub(crate) async fn run_names_of(
     for chunk in wanted.chunks(REPLACED_CHUNK) {
         let rows = run_names::table
             .filter(run_names::version.eq(v))
+            .filter(run_names::scope.eq(&scope))
             .filter(run_names::root.eq_any(chunk))
             .select((run_names::root, run_names::name))
             .load::<(String, String)>(c)
@@ -1986,12 +2034,13 @@ pub(crate) async fn run_named(
     v: &str,
     name: &str,
 ) -> Result<Option<(String, bool)>, Error> {
+    let scope = crate::scope::current().canonical();
     let found = retry(|| async {
         let mut c = conn(db).await?;
         let conn = &mut *c;
         read_tx!(conn, {
             let root: Option<String> = run_names::table
-                .find((v, name))
+                .find((v, &scope, name))
                 .select(run_names::root)
                 .first(conn)
                 .await

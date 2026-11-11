@@ -273,6 +273,20 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("sends its scope with every request", async () => {
+    const sent: Record<string, string>[] = [];
+    const client = new PisaClient({
+      url: "/api/",
+      scope: { user: "42", org: "7" },
+      fetch: async (_input, init) => {
+        sent.push((init?.headers ?? {}) as Record<string, string>);
+        return json({ snapshots: [] });
+      },
+    });
+    await client.listSnapshots();
+    expect(sent[0]?.["pisa-scope"]).toBe("user=42,org=7");
+  });
+
   it("names the run a create starts", async () => {
     const { client, sent } = recording(() => json({ check: { ok: true } }));
     await client.createSnapshot("x", { name: "proj.lemma", holes: ["f"] });

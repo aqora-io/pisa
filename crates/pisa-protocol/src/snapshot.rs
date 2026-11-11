@@ -15,6 +15,24 @@ pub const ROOT: &str = "PisaSnap";
 /// `PisaRun.<name>`, which the server resolves to the run's head.
 pub const RUNS: &str = "PisaRun";
 
+/// The root of the modules of open documents, a worker's own, which code
+/// can't import.
+pub const DOCUMENTS: &str = "PisaDocs";
+
+/// The first module of the documents' library ([`DOCUMENTS`]) that a
+/// normalised header imports.
+pub fn document_import(header: &str) -> Option<String> {
+    header
+        .lines()
+        .filter_map(import_parts)
+        .find_map(|(_, modules)| {
+            modules.into_iter().find_map(|m| {
+                let plain: String = m.chars().filter(|c| !matches!(c, '«' | '»')).collect();
+                (plain.split('.').next() == Some(DOCUMENTS)).then_some(plain)
+            })
+        })
+}
+
 /// The root of a named run's spec module in an export, beside [`RUNS`] for
 /// its head.
 pub const SPECS: &str = "PisaSpec";

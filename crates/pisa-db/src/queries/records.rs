@@ -52,6 +52,15 @@ pub(crate) async fn state(db: &Handle, v: &str, id: &str) -> Result<Option<State
         .first::<(String, Option<i32>, Option<String>, Option<String>)>(&mut *conn(db).await?)
         .await
         .optional()?;
+    // A state is its session's: in the request's scope if the session is.
+    let row = match row {
+        Some(row)
+            if !crate::scope::current().is_empty() && session(db, v, &row.0).await?.is_none() =>
+        {
+            None
+        }
+        row => row,
+    };
     Ok(row.map(|(session, sorry, parent, tactic)| StateRow {
         session,
         sorry: sorry.map(|n| n as u32),
@@ -74,6 +83,7 @@ pub(crate) async fn put_session(
                 sessions::id.eq(id),
                 sessions::meta.eq(meta),
                 sessions::created.eq(created as i64),
+                sessions::labels.eq(crate::scope::stamp()),
             ))
             .on_conflict((sessions::version, sessions::id))
             .do_update()
@@ -89,13 +99,15 @@ pub(crate) async fn put_session(
 }
 
 pub(crate) async fn session(db: &Handle, v: &str, id: &str) -> Result<Option<Value>, DbError> {
-    Ok(sessions::table
+    let found = sessions::table
         .find((v, id))
-        .select(sessions::meta)
-        .first(&mut *conn(db).await?)
+        .select((sessions::meta, sessions::labels))
+        .first::<(Value, String)>(&mut *conn(db).await?)
         .await
-        .optional()?)
+        .optional()?;
+    Ok(found.filter(|(_, labels)| crate::scope::in_scope(labels)).map(|(meta, _)| meta))
 }
+
 
 pub(crate) async fn put_document(
     db: &Handle,
@@ -116,6 +128,7 @@ pub(crate) async fn put_document(
                 documents::holder.eq(holder),
                 documents::updated.eq(now as i64),
                 documents::timeout.eq(timeout as i64),
+                documents::labels.eq(crate::scope::stamp()),
             ))
             .on_conflict((documents::version, documents::id))
             .do_update()
@@ -145,11 +158,13 @@ pub(crate) async fn document(
             documents::revision,
             documents::holder,
             documents::timeout,
+            documents::labels,
         ))
-        .first::<(String, i64, Option<String>, i64)>(&mut *conn(db).await?)
+        .first::<(String, i64, Option<String>, i64, String)>(&mut *conn(db).await?)
         .await
         .optional()?;
-    Ok(row.map(|(code, revision, holder, timeout)| DocumentRow {
+    let row = row.filter(|r| crate::scope::in_scope(&r.4));
+    Ok(row.map(|(code, revision, holder, timeout, _)| DocumentRow {
         code,
         revision: revision as u64,
         holder,
@@ -231,6 +246,9 @@ pub(crate) async fn release_document(
 }
 
 pub(crate) async fn delete_document(db: &Handle, v: &str, id: &str) -> Result<bool, DbError> {
+    if !crate::scope::current().is_empty() && document(db, v, id).await?.is_none() {
+        return Ok(false);
+    }
     retry(|| async {
         let n = diesel::delete(documents::table.find((v, id)))
             .execute(&mut *conn(db).await?)

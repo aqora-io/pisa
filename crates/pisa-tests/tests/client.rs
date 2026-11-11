@@ -1061,3 +1061,27 @@ async fn client_names_a_run_and_imports_it_by_name() {
     assert_eq!(detail.source.as_deref(), Some(code));
     assert!(detail.code.contains(&spec.module), "{}", detail.code);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_keeps_to_its_scope() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let scoped = |user: &str| {
+        let scope = BTreeMap::from([("user".to_string(), user.to_string())]);
+        Client::new(&c.url("/"))
+            .unwrap()
+            .with_version("v")
+            .with_scope(&scope)
+            .unwrap()
+    };
+    let made = scoped("a")
+        .create_snapshot("import Foo\ntheorem sc : 1 = 1 := rfl")
+        .await
+        .unwrap();
+    let made = made.snapshot.unwrap();
+    assert_eq!(made.labels["user"], "a");
+    assert!(scoped("a").get_snapshot(&made.id).await.is_ok());
+    let err = scoped("b").get_snapshot(&made.id).await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+    let bad = BTreeMap::from([("user".to_string(), "a,b".to_string())]);
+    assert!(Client::new(&c.url("/")).unwrap().with_scope(&bad).is_err());
+}

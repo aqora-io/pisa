@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api;
 use crate::repl::CommandResponse;
+use crate::scope::Scope;
 use crate::verify::{DeclarationChange, Verification};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +338,30 @@ pub struct CheckOutcome {
     pub runs: Vec<api::RunImport>,
 }
 
+/// The JSON `job` is queued as, with the scope it runs in beside its `kind`
+/// when there is one.
+pub fn scoped(job: &Job, scope: &Scope) -> serde_json::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(job)?;
+    if !scope.is_empty()
+        && let Some(fields) = value.as_object_mut()
+    {
+        fields.insert("scope".into(), serde_json::to_value(scope)?);
+    }
+    Ok(value)
+}
+
+/// A queued job, and the scope it runs in: none for a job queued without one.
+pub fn unscoped(mut value: serde_json::Value) -> serde_json::Result<(Job, Scope)> {
+    let scope = match value
+        .as_object_mut()
+        .and_then(|fields| fields.remove("scope"))
+    {
+        Some(scope) => serde_json::from_value(scope)?,
+        None => Scope::default(),
+    };
+    Ok((serde_json::from_value(value)?, scope))
+}
+
 impl From<CheckOutcome> for api::CheckResult {
     fn from(o: CheckOutcome) -> Self {
         let (messages, sorries, tactics, at) = o.response.map_or_else(Default::default, |r| {
@@ -379,6 +404,22 @@ pub struct SessionChecked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_carries_its_scope_beside_its_kind() {
+        let job = Job::DocumentClose(DocumentJob {
+            document: "d".into(),
+        });
+        let scope = Scope::parse("user=42").unwrap();
+        let queued = scoped(&job, &scope).unwrap();
+        assert_eq!(queued["scope"], serde_json::json!({"user": "42"}));
+        let (back, found) = unscoped(queued).unwrap();
+        assert!(matches!(back, Job::DocumentClose(d) if d.document == "d"));
+        assert_eq!(found, scope);
+        let plain = scoped(&job, &Scope::default()).unwrap();
+        assert!(plain.get("scope").is_none());
+        assert!(unscoped(plain).unwrap().1.is_empty());
+    }
 
     #[test]
     fn unknown_job_kinds_parse_as_unsupported() {

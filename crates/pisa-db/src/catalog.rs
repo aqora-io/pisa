@@ -514,6 +514,12 @@ pub(crate) fn entry_from_row(
     link: Option<LinkRow>,
 ) -> Result<(String, EntryMeta), Fail> {
     let (e, module, labels, key, created, holes, source) = row;
+    // A key is stored after its scope's text; give it back without.
+    let scope = crate::scope::current();
+    let key = key.map(|k| match k.strip_prefix(&scope.key("")) {
+        Some(own) if !scope.is_empty() => own.to_string(),
+        _ => k,
+    });
     let (replaces, replacement) = match link {
         Some((_, replaced, allow, replacement)) => (
             Some(Replaces {
@@ -631,8 +637,10 @@ pub(crate) fn now_micros() -> u64 {
 /// `labels` with each key once, or `None` if they give a key two values,
 /// which no entry matches: an entry has one value per key.
 fn wanted(labels: &[(String, String)]) -> Option<Vec<(String, String)>> {
+    // A read keeps to the request's scope too.
+    let scope = crate::scope::current().pairs();
     let mut wanted: BTreeMap<&str, &str> = BTreeMap::new();
-    for (k, value) in labels {
+    for (k, value) in labels.iter().chain(&scope) {
         if wanted.insert(k, value).is_some_and(|old| old != value) {
             return None;
         }
@@ -1472,6 +1480,92 @@ mod tests {
                 assert_eq!(found.1.replaces, replaces);
             }
             assert_eq!(catalog.entry(&old).await.unwrap().replaces, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scope_labels_what_it_creates_and_bounds_what_it_reads() {
+        use crate::scope::{Scope, within};
+        for catalog in catalogs().await {
+            let (a, b) = (
+                Scope::parse("user=a").unwrap(),
+                Scope::parse("user=b").unwrap(),
+            );
+            let entry = |key: &str, name: &str, labels: &[(&str, &str)]| NewEntry {
+                key: Some(key.into()),
+                name: Some(name.into()),
+                labels: labels
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                ..no_labels()
+            };
+            let made = within(a.clone(), async {
+                let (e, meta, _) = catalog
+                    .commit("m", &meta("m"), None, entry("k", "n", &[("run", "1")]))
+                    .await
+                    .unwrap();
+                // Stamped, with its key given back as it was sent.
+                let wanted =
+                    BTreeMap::from([("run".into(), "1".into()), ("user".into(), "a".into())]);
+                assert_eq!((meta.labels, meta.key.as_deref()), (wanted, Some("k")));
+                assert_eq!(catalog.keyed("k").await.unwrap().unwrap().0, e);
+                assert_eq!(catalog.run_roots(&["n".into()]).await.unwrap()["n"], e);
+                // Its scope's label can't change, nor be set otherwise.
+                let edit = BTreeMap::from([("user".to_string(), None)]);
+                let refused = catalog.set_labels(&e, &edit).await.unwrap_err();
+                assert_eq!(refused.kind, ErrorKind::BadRequest);
+                let other = catalog
+                    .add_entry("m", entry("k2", "n2", &[("user", "b")]))
+                    .await
+                    .unwrap_err();
+                assert_eq!(other.kind, ErrorKind::BadRequest);
+                e
+            })
+            .await;
+            within(b.clone(), async {
+                // Nothing of `a`'s is there: not the entry, its key or its name.
+                assert_eq!(
+                    catalog.entry(&made).await.unwrap_err().kind,
+                    ErrorKind::NotFound
+                );
+                assert!(
+                    catalog
+                        .list(&[], 10, None, false)
+                        .await
+                        .unwrap()
+                        .0
+                        .is_empty()
+                );
+                assert!(
+                    catalog
+                        .entries_on(&["m".into()], &[])
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(
+                    catalog
+                        .runs(std::slice::from_ref(&made))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert!(catalog.keyed("k").await.unwrap().is_none());
+                assert!(catalog.run_roots(&["n".into()]).await.unwrap().is_empty());
+                // So the same key and name are free here.
+                let (e, ..) = catalog
+                    .add_entry("m", entry("k", "n", &[]))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(e, made);
+            })
+            .await;
+            // Without a scope, everything is there.
+            let all = catalog.list(&[], 10, None, false).await.unwrap().0;
+            assert_eq!(all.len(), 2);
+            assert!(catalog.entry(&made).await.is_ok());
         }
     }
 

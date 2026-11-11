@@ -850,12 +850,16 @@ pub async fn rebuild(
         Err(e) => return ApiError::from(e).into_response(),
     };
     let job = held.token.clone();
-    tokio::spawn(async move {
-        let outcome = rebuild::run(&app, &req, &version).await.map_err(|e| e.0);
-        if let Err(e) = held.finish(&JobResult::SnapshotRebuild(outcome)).await {
-            tracing::warn!("storing a rebuild's answer failed: {e}");
-        }
-    });
+    // The run creates in the request's scope.
+    tokio::spawn(pisa_db::scope::within(
+        pisa_db::scope::current(),
+        async move {
+            let outcome = rebuild::run(&app, &req, &version).await.map_err(|e| e.0);
+            if let Err(e) = held.finish(&JobResult::SnapshotRebuild(outcome)).await {
+                tracing::warn!("storing a rebuild's answer failed: {e}");
+            }
+        },
+    ));
     accepted(job, JobKind::RebuildSnapshots, JobStatus::Running)
 }
 
@@ -909,14 +913,18 @@ pub async fn resubmit(
         Err(e) => return ApiError::from(e).into_response(),
     };
     let job = held.token.clone();
-    tokio::spawn(async move {
-        let outcome = (resubmit::run(&app, &req, &version).await)
-            .map(Box::new)
-            .map_err(|e| e.0);
-        if let Err(e) = held.finish(&JobResult::SnapshotResubmit(outcome)).await {
-            tracing::warn!("storing a resubmit's answer failed: {e}");
-        }
-    });
+    // The run creates in the request's scope.
+    tokio::spawn(pisa_db::scope::within(
+        pisa_db::scope::current(),
+        async move {
+            let outcome = (resubmit::run(&app, &req, &version).await)
+                .map(Box::new)
+                .map_err(|e| e.0);
+            if let Err(e) = held.finish(&JobResult::SnapshotResubmit(outcome)).await {
+                tracing::warn!("storing a resubmit's answer failed: {e}");
+            }
+        },
+    ));
     accepted(job, JobKind::ResubmitSnapshots, JobStatus::Running)
 }
 
@@ -989,12 +997,16 @@ pub async fn settle(
         Err(e) => return ApiError::from(e).into_response(),
     };
     let job = held.token.clone();
-    tokio::spawn(async move {
-        let done = rebuild::run_plan(&app, plan, &creates, &version).await;
-        if let Err(e) = held.finish(&JobResult::SnapshotRebuild(Ok(done))).await {
-            tracing::warn!("storing a settle's answer failed: {e}");
-        }
-    });
+    // The run creates in the request's scope.
+    tokio::spawn(pisa_db::scope::within(
+        pisa_db::scope::current(),
+        async move {
+            let done = rebuild::run_plan(&app, plan, &creates, &version).await;
+            if let Err(e) = held.finish(&JobResult::SnapshotRebuild(Ok(done))).await {
+                tracing::warn!("storing a settle's answer failed: {e}");
+            }
+        },
+    ));
     accepted(job, JobKind::RebuildSnapshots, JobStatus::Running)
 }
 

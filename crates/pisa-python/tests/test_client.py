@@ -574,3 +574,14 @@ def test_run_names(url):
     assert made["runs"] == checked["runs"], made
     detail = client.get_snapshot(made["snapshot"]["id"])
     assert detail["source"] == code and spec["module"] in detail["code"], detail
+
+
+def test_a_client_keeps_to_its_scope(url):
+    mine = Client(url, timeout=30, scope={"user": "py"})
+    made = mine.create_snapshot("import Foo\ntheorem py_scoped : 1 = 1 := rfl")["snapshot"]
+    assert made["labels"]["user"] == "py", made
+    assert mine.get_snapshot(made["id"])["id"] == made["id"]
+    with pytest.raises(NotFoundError):
+        Client(url, timeout=30, scope={"user": "other"}).get_snapshot(made["id"])
+    with pytest.raises(ValueError):
+        Client(url, scope={"user": "a,b"})

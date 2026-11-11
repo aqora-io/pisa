@@ -104,6 +104,7 @@ fn cors(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
         .allow_headers([
             header::CONTENT_TYPE,
             header::HeaderName::from_static("prefer"),
+            header::HeaderName::from_static(pisa_protocol::scope::HEADER),
         ])
         .expose_headers([
             header::LOCATION,
@@ -194,7 +195,9 @@ pub async fn start_with(
 
     let listener = TcpListener::bind(cfg.http).await?;
     let http_addr = listener.local_addr()?;
-    let mut routes = http::router(app.clone()).merge(extra(app.clone()));
+    let mut routes = http::router(app.clone())
+        .merge(extra(app.clone()))
+        .layer(axum::middleware::from_fn(http::scoped));
     if let Some(cors) = cors(&cfg.cors_origins)? {
         routes = routes.layer(cors);
     }

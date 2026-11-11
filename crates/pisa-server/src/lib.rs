@@ -121,7 +121,39 @@ pub fn openapi() -> Value {
     doc.merge(pisa_search::server::ApiDoc::openapi());
     let mut spec = json!(doc);
     absent_not_null(&mut spec);
+    scoped(&mut spec);
     spec
+}
+
+/// Adds the `Pisa-Scope` header to every operation but the server's own.
+fn scoped(spec: &mut Value) {
+    let header = json!({
+        "name": "Pisa-Scope",
+        "in": "header",
+        "required": false,
+        "description": "The request's scope, `key=value` labels separated by commas, e.g. \
+            `user=42`: what the request creates carries them, and what it names or reaches \
+            must, else it is a 404. Run names and idempotency keys are unique within a scope. \
+            Without it, the request is bounded by nothing.",
+        "schema": {"type": "string"},
+    });
+    let Some(Value::Object(paths)) = spec.get_mut("paths") else {
+        return;
+    };
+    for (path, item) in paths.iter_mut() {
+        if path == "/health" || path == "/openapi.json" {
+            continue;
+        }
+        let Value::Object(methods) = item else {
+            continue;
+        };
+        for operation in methods.values_mut().filter_map(Value::as_object_mut) {
+            let parameters = operation.entry("parameters").or_insert_with(|| json!([]));
+            if let Value::Array(parameters) = parameters {
+                parameters.push(header.clone());
+            }
+        }
+    }
 }
 
 static SPEC: LazyLock<Value> = LazyLock::new(openapi);

@@ -180,6 +180,20 @@ impl Reader {
         Ok(names)
     }
 
+    /// The first of the snapshot modules `ids` that the request's scope can't
+    /// reach, as no entry in the scope is on it; none without a scope. A
+    /// module's closure comes with it, so only what code imports directly
+    /// needs asking.
+    pub async fn unreachable(&self, ids: &[String]) -> Result<Option<String>, Error> {
+        if ids.is_empty() || pisa_db::scope::current().is_empty() {
+            return Ok(None);
+        }
+        let on: HashSet<String> = (self.catalog.entries_on(ids, &[]).await?.into_iter())
+            .map(|(_, meta)| meta.module)
+            .collect();
+        Ok(ids.iter().find(|id| !on.contains(*id)).cloned())
+    }
+
     /// Sets each of `snapshots`' `run` to the name of the run it is in, if
     /// that run has one.
     pub async fn name_runs(&self, snapshots: &mut [Snapshot]) -> Result<(), Error> {

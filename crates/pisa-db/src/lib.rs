@@ -8,3 +8,4 @@ pub mod db;
 pub mod queue;
 pub mod records;
 mod schema;
+pub mod scope;

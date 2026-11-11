@@ -61,6 +61,11 @@ export interface ClientOptions {
   timeout?: number;
   fetch?: typeof fetch;
   headers?: Record<string, string>;
+  /** Labels every request is scoped to, sent as the `Pisa-Scope` header:
+   *  what a request creates carries them, and what it names or reaches must,
+   *  else it is `not_found`. Run names and idempotency keys are unique
+   *  within a scope. */
+  scope?: Record<string, string>;
 }
 
 /** What any request takes. */
@@ -237,7 +242,9 @@ export class PisaClient {
     this.version = options.version;
     this.timeout = options.timeout;
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
-    this.headers = options.headers ?? {};
+    this.headers = { ...options.headers };
+    const scope = Object.entries(options.scope ?? {});
+    if (scope.length > 0) this.headers["pisa-scope"] = scope.map(([k, v]) => `${k}=${v}`).join(",");
   }
 
   /** The server's health. A draining server's 503 is returned, not thrown. */

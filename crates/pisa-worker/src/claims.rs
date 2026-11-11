@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::Notice;
 use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue};
-use pisa_protocol::wire::{Job, JobResult};
+use pisa_protocol::wire::{self, JobResult};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify, watch};
 
@@ -245,8 +245,12 @@ impl Shared {
     /// its result.
     async fn run_one(self: Arc<Self>, claimed: Claimed, document: Option<String>) {
         let documents = self.documents.as_deref();
-        let result = match serde_json::from_value::<Job>(claimed.job) {
-            Ok(job) => run_job(&self.pool, &self.sessions, documents, job).await,
+        let result = match wire::unscoped(claimed.job) {
+            // In the scope of the request that queued it.
+            Ok((job, scope)) => {
+                let running = run_job(&self.pool, &self.sessions, documents, job);
+                pisa_db::scope::within(scope, running).await
+            }
             Err(e) => {
                 tracing::warn!(id = claimed.id, "a job did not decode: {e}");
                 JobResult::Failed {

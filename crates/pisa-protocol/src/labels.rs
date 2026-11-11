@@ -52,7 +52,7 @@ fn check_label_value(value: &str) -> Result<(), String> {
 }
 
 /// Checks a label key: 1–128 bytes of `[A-Za-z0-9._/-]`.
-fn check_label_key(key: &str) -> Result<(), String> {
+pub(crate) fn check_label_key(key: &str) -> Result<(), String> {
     let allowed = |b: u8| b.is_ascii_alphanumeric() || b"._/-".contains(&b);
     if key.is_empty() || key.len() > MAX_KEY || !key.bytes().all(allowed) {
         return Err(format!(

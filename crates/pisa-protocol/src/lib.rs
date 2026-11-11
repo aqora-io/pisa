@@ -14,6 +14,7 @@ pub mod api;
 pub mod header;
 pub mod labels;
 pub mod repl;
+pub mod scope;
 pub mod search;
 pub mod snapshot;
 pub mod verify;

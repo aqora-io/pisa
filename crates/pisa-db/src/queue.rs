@@ -479,6 +479,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_job_is_read_and_cancelled_in_its_scope_only() {
+        use crate::scope::{Scope, within};
+        for q in queues().await {
+            let a = Scope::parse("user=a").unwrap();
+            let (_, token) = within(a.clone(), q.enqueue_async(&job(Some("v"), 1), "check"))
+                .await
+                .unwrap();
+            let elsewhere = Scope::parse("user=b").unwrap();
+            assert!(
+                within(elsewhere.clone(), q.status(&token))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(within(elsewhere, q.cancel(&token)).await.unwrap().is_none());
+            assert!(within(a.clone(), q.status(&token)).await.unwrap().is_some());
+            assert!(q.status(&token).await.unwrap().is_some());
+            assert!(within(a, q.cancel(&token)).await.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn an_async_job_is_read_by_its_token_until_swept() {
         for q in queues().await {
             let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();

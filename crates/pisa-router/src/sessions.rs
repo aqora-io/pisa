@@ -164,8 +164,13 @@ pub async fn check(
         Ok(session) => session,
         Err(e) => return e.into_response(),
     };
-    // The worker resolves imports by run name as the session did; routing
-    // by what they resolve to now finds the warm workers.
+    // What it imports by hash must be in the request's scope; the worker
+    // resolves imports by run name as the session did.
+    let header = split_header(&req.code).header;
+    if let Err(e) = app.guard_imports(Some(&session.version), &header).await {
+        return ApiError(e).into_response();
+    }
+    // Routing by what names resolve to now finds the warm workers.
     let header_key = match app.resolve_runs(Some(&session.version), &req.code).await {
         Ok(Some(r)) => split_header(&r.code).header_key,
         _ => split_header(&req.code).header_key,

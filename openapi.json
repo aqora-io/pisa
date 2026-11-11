@@ -3545,6 +3545,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -3663,6 +3672,17 @@
       "post": {
         "description": "Each item gets a result, as from `/check`, with its own failure in `error`. Up to 128 items, of which 32 are queued at a time, so that an item's wait for a worker starts when it is queued, not when the batch arrives.",
         "operationId": "checkBatch",
+        "parameters": [
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3782,6 +3802,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3866,6 +3895,17 @@
       "post": {
         "description": "Opens the code on Lean Beam, and answers Lean's errors and warnings and the goals of its `sorry`s. The document stays open, for goals at positions and candidate tactics probed there. A worker holds it open, and the code is stored, so another worker reopens it if that one goes; unused, it expires after the workers' `PISA_STATE_TTL_SECS`. Nothing here is a verdict: check finished code with `/check`. A 503 means no worker serves documents.",
         "operationId": "openDocument",
+        "parameters": [
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -3967,6 +4007,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4048,6 +4097,15 @@
             "in": "path",
             "name": "id",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -4164,6 +4222,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -4274,6 +4341,15 @@
             "in": "path",
             "name": "id",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -4422,6 +4498,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4524,6 +4609,15 @@
               "minimum": 0,
               "type": "integer"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4618,6 +4712,17 @@
       "post": {
         "description": "Whether each name exists, with close names for one that doesn't.",
         "operationId": "resolve",
+        "parameters": [
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -4710,6 +4815,17 @@
       "post": {
         "description": "Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.",
         "operationId": "search",
+        "parameters": [
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -4807,6 +4923,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -4943,6 +5068,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -5114,6 +5248,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5201,6 +5344,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -5332,6 +5484,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5419,6 +5580,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -5547,6 +5717,15 @@
             "in": "path",
             "name": "id",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -5688,6 +5867,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5796,6 +5984,15 @@
               },
               "type": "array"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5885,6 +6082,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -6016,6 +6222,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -6139,6 +6354,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -6279,6 +6503,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -6378,6 +6611,15 @@
             "schema": {
               "$ref": "#/components/schemas/Detail"
             }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -6466,6 +6708,15 @@
             "in": "path",
             "name": "id",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -6583,6 +6834,15 @@
                 "type": "string"
               },
               "type": "array"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -6702,6 +6962,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"
@@ -6828,6 +7097,15 @@
             "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
             "in": "header",
             "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
             "required": false,
             "schema": {
               "type": "string"

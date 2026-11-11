@@ -188,6 +188,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn documents_sessions_and_states_keep_to_their_scope() {
+        use crate::scope::{Scope, within};
+        for (_, r, _) in records().await {
+            let a = Scope::parse("user=a").unwrap();
+            let state = StateRow {
+                session: "s".into(),
+                sorry: Some(0),
+                parent: None,
+                tactic: None,
+            };
+            within(a.clone(), async {
+                r.put_document("d", "code", 10, "w", 1).await.unwrap();
+                r.put_session("s", 1, &serde_json::json!({})).await.unwrap();
+                r.put_state("t", &state, 1).await.unwrap();
+                assert!(r.document("d").await.unwrap().is_some());
+            })
+            .await;
+            within(Scope::parse("user=b").unwrap(), async {
+                assert!(r.document("d").await.unwrap().is_none());
+                assert!(r.session("s").await.unwrap().is_none());
+                assert!(r.state("t").await.unwrap().is_none());
+                assert!(!r.delete_document("d").await.unwrap());
+            })
+            .await;
+            within(a, async {
+                assert!(r.session("s").await.unwrap().is_some());
+                assert_eq!(r.state("t").await.unwrap(), Some(state.clone()));
+            })
+            .await;
+            assert!(r.document("d").await.unwrap().is_some());
+        }
+    }
+
+    #[tokio::test]
     async fn a_state_is_a_sorry_or_a_tactic_on_another_state() {
         for (db, r, version) in records().await {
             let root = StateRow {

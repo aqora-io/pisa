@@ -346,6 +346,13 @@ impl Engine {
         queries: &[Query],
         lanes: Lanes,
     ) -> Result<Vec<QueryResult>, SearchError> {
+        let queries: Vec<Query> = (queries.iter())
+            .map(|q| Query {
+                snapshots: in_request_scope(&q.snapshots),
+                ..q.clone()
+            })
+            .collect();
+        let queries = queries.as_slice();
         let parsed: Vec<Parsed> = queries.iter().map(parse).collect();
         let mut results: Vec<QueryResult> = vec![QueryResult::default(); queries.len()];
         let vectors = self.embed(queries, &parsed, lanes).await;
@@ -938,7 +945,23 @@ impl Engine {
         module: Option<&str>,
     ) -> anyhow::Result<Option<DeclarationDetail>> {
         let mut searches = Vec::new();
-        if let Some(m) = module.filter(|_| self.snapshots.is_some()) {
+        // Within a scope, only a module with a head in it.
+        let scope = pisa_db::scope::current();
+        let module = match module.filter(|_| self.snapshots.is_some()) {
+            Some(m) if !scope.is_empty() => {
+                let q = Query {
+                    snapshots: SnapshotScope::Labels(scope.labels().clone()),
+                    ..Default::default()
+                };
+                let modules = self.scopes(std::slice::from_ref(&q)).await?;
+                let wanted = snapshot_module_id(m);
+                (modules.into_iter().flatten().flatten())
+                    .any(|id| Some(&id) == wanted.as_ref())
+                    .then_some(m)
+            }
+            m => m,
+        };
+        if let Some(m) = module {
             let snapshot = vec![
                 is("name", name),
                 is("source", "snapshot"),
@@ -1287,6 +1310,32 @@ pub fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) ->
     out
 }
 
+/// `snapshots` within the request's scope (see `pisa_db::scope`): every
+/// snapshot becomes those with the scope's labels, labels are ANDed with
+/// them, and labels that contradict them reach no snapshot.
+fn in_request_scope(snapshots: &SnapshotScope) -> SnapshotScope {
+    let scope = pisa_db::scope::current();
+    if scope.is_empty() {
+        return snapshots.clone();
+    }
+    match snapshots {
+        SnapshotScope::None => SnapshotScope::None,
+        SnapshotScope::All => SnapshotScope::Labels(scope.labels().clone()),
+        SnapshotScope::Labels(labels) => {
+            let mut labels = labels.clone();
+            match scope.merge_into(&mut labels) {
+                Ok(()) => SnapshotScope::Labels(labels),
+                Err(_) => SnapshotScope::None,
+            }
+        }
+    }
+}
+
+/// The id in a snapshot module's name, `PisaSnap.s<id>`.
+fn snapshot_module_id(module: &str) -> Option<String> {
+    pisa_protocol::snapshot::parse_module(module).ok().flatten()
+}
+
 /// What a query's hits leave out: hidden points, and those that use `sorry`
 /// unless the query includes them, which by default it does only with
 /// snapshots in scope.
@@ -1301,6 +1350,33 @@ fn hidden(q: &Query) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_query_keeps_to_the_request_scope() {
+        use pisa_db::scope::{Scope, within};
+        let labels = |pairs: &[(&str, &str)]| {
+            (pairs.iter())
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let all = SnapshotScope::All;
+        let run = SnapshotScope::Labels(labels(&[("run", "1")]));
+        assert_eq!(in_request_scope(&all), all);
+        within(Scope::parse("user=a").unwrap(), async {
+            assert_eq!(
+                in_request_scope(&all),
+                SnapshotScope::Labels(labels(&[("user", "a")]))
+            );
+            assert_eq!(
+                in_request_scope(&run),
+                SnapshotScope::Labels(labels(&[("run", "1"), ("user", "a")]))
+            );
+            let other = SnapshotScope::Labels(labels(&[("user", "b")]));
+            assert_eq!(in_request_scope(&other), SnapshotScope::None);
+            assert_eq!(in_request_scope(&SnapshotScope::None), SnapshotScope::None);
+        })
+        .await;
+    }
 
     #[test]
     fn sorried_declarations_show_when_searching_snapshots() {

@@ -579,12 +579,22 @@ class Client:
     """A client for one pisa server. Safe to share between threads; calls
     release the GIL while waiting."""
 
-    def __init__(self, url: str, *, version: str | None = None, timeout: int = 60) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        version: str | None = None,
+        timeout: int = 60,
+        scope: dict[str, str] | None = None,
+    ) -> None:
         """`version` selects a worker pool label or alias for checks,
         sessions, creates, listings, audits and searches; session, state and
         snapshot ids carry their own. Search answers for the version of its
         index and of its snapshots, and raises NotFoundError for any other.
-        `timeout` is Lean's limit per request in seconds."""
+        `timeout` is Lean's limit per request in seconds. `scope` sends every
+        request in that scope (the `Pisa-Scope` header): what it creates
+        carries these labels, and what it names or reaches must, else
+        NotFoundError; run names and keys are unique within a scope."""
     def health(self) -> Health:
         """The server's health. A draining server's 503 is returned, with
         `status` "draining", not raised."""

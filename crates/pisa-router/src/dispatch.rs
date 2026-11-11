@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use pisa_db::db::{DbError, Notice};
 use pisa_db::queue::{LIVE, NewJob, Poll, Queue, Stage};
 use pisa_protocol::api::{JobKind, JobStatus};
-use pisa_protocol::wire::{Job, JobResult};
+use pisa_protocol::wire::{self, Job, JobResult};
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -251,7 +251,7 @@ impl Dispatcher {
             header_key: None,
             header: None,
             document: None,
-            job: serde_json::to_value(job)
+            job: wire::scoped(job, &pisa_db::scope::current())
                 .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?,
             max_wait: self.cfg.max_wait,
             max_attempts: 1,
@@ -408,7 +408,8 @@ impl Dispatcher {
     }
 
     fn new_job(&self, p: Prepared) -> Result<NewJob, DispatchError> {
-        let job = serde_json::to_value(&p.job)
+        // The worker runs it in the request's scope.
+        let job = wire::scoped(&p.job, &pisa_db::scope::current())
             .map_err(|e| DispatchError::Unavailable(format!("encoding the job: {e}")))?;
         let route = p.route;
         Ok(NewJob {

@@ -444,6 +444,25 @@ impl Client {
         self
     }
 
+    /// Sends every request in `scope`, as the `Pisa-Scope` header: what a
+    /// request creates carries these labels, and what it names or reaches
+    /// must, else it is [`ErrorKind::NotFound`]. Run names and idempotency
+    /// keys are unique within a scope. An empty scope sends no header.
+    pub fn with_scope(mut self, scope: &BTreeMap<String, String>) -> Result<Self, Error> {
+        let scope = pisa_protocol::scope::Scope::new(scope.clone()).map_err(Error::Invalid)?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        if !scope.is_empty() {
+            let value = reqwest::header::HeaderValue::from_str(&scope.header())
+                .map_err(|e| Error::Invalid(format!("the scope can't be a header: {e}")))?;
+            headers.insert(pisa_protocol::scope::HEADER, value);
+        }
+        self.endpoint.http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .map_err(|e| Error::Invalid(e.to_string()))?;
+        Ok(self)
+    }
+
     /// Lean's time limit per request, in seconds (default 60).
     pub fn with_timeout(mut self, seconds: u64) -> Self {
         self.timeout = seconds;

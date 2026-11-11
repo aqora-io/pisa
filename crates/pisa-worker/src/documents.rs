@@ -46,7 +46,7 @@ use crate::records::{DocumentRow, Records};
 mod sessions;
 
 /// The library the documents' files belong to.
-const LIB: &str = "PisaDocs";
+const LIB: &str = pisa_protocol::snapshot::DOCUMENTS;
 
 /// How long `lean-beam-mcp` gets to start.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(120);

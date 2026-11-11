@@ -20,6 +20,7 @@ use pisa_protocol::api::{
     PreferAsync, RunImport, SweepRefused,
 };
 use pisa_protocol::header::split_header;
+use pisa_protocol::scope::Scope;
 use pisa_protocol::snapshot;
 use pisa_protocol::version::Versions;
 use pisa_protocol::wire::{CheckJob, Job, JobResult};
@@ -205,14 +206,16 @@ impl App {
 
     /// `code` with its imports by run name (`import PisaRun.<name>`)
     /// resolved to the runs' heads, on the version `requested` reads as
-    /// [`read_version`](Self::read_version) has it; `None` for code that
-    /// imports no run by name, which needs no read.
+    /// [`read_version`](Self::read_version) has it, once its imports are
+    /// checked as [`guard_imports`](Self::guard_imports) does; `None` for
+    /// code that imports no run by name.
     pub(crate) async fn resolve_runs(
         &self,
         requested: Option<&str>,
         code: &str,
     ) -> Result<Option<ResolvedRuns>, Error> {
         let header = split_header(code).header;
+        self.guard_imports(requested, &header).await?;
         let names =
             snapshot::run_imports(&header).map_err(|e| Error::new(ErrorKind::BadRequest, e))?;
         if names.is_empty() {
@@ -229,6 +232,31 @@ impl App {
             runs: resolved.runs,
             version,
         }))
+    }
+
+    /// Refuses what normalised `header` can't import: an open document's
+    /// module, and, within a scope, a snapshot module no entry in the scope
+    /// is on, which is `not_found` as for one that doesn't exist.
+    pub(crate) async fn guard_imports(
+        &self,
+        requested: Option<&str>,
+        header: &str,
+    ) -> Result<(), Error> {
+        if let Some(m) = snapshot::document_import(header) {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!("{m} is an open document's module, which code can't import"),
+            ));
+        }
+        let ids = snapshot::imports(header).unwrap_or_default();
+        if ids.is_empty() || pisa_db::scope::current().is_empty() {
+            return Ok(());
+        }
+        let version = self.read_version(requested).await.map_err(|e| e.0)?;
+        match self.snapshots.version(&version).unreachable(&ids).await? {
+            Some(id) => Err(pisa_db::catalog::unknown_module(&id)),
+            None => Ok(()),
+        }
     }
 
     /// The API's health: up, or 503 once draining, with the number of live
@@ -286,6 +314,23 @@ impl App {
             }
         }
     }
+}
+
+/// Runs a request within the scope its `Pisa-Scope` header gives (see
+/// [`Scope`]): none without the header, and a 400 for a header that isn't
+/// one.
+pub(crate) async fn scoped(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let header = req.headers().get(pisa_protocol::scope::HEADER);
+    let parsed = header.map(|h| match h.to_str() {
+        Ok(text) => Scope::parse(text),
+        Err(_) => Err("Pisa-Scope must be text".to_string()),
+    });
+    let scope = match parsed {
+        None => Scope::default(),
+        Some(Ok(scope)) => scope,
+        Some(Err(e)) => return ApiError::new(ErrorKind::BadRequest, e).into_response(),
+    };
+    pisa_db::scope::within(scope, next.run(req)).await
 }
 
 /// A request's code with its imports by run name resolved.

@@ -35,12 +35,14 @@ diesel::table! {
         created_micros -> BigInt,
         holes -> Nullable<Text>,
         source -> Nullable<Text>,
+        runs -> Nullable<Text>,
     }
 }
 
 diesel::table! {
-    run_names (version, name) {
+    run_names (version, scope, name) {
         version -> Text,
+        scope -> Text,
         name -> Text,
         root -> Text,
     }
@@ -97,6 +99,7 @@ diesel::table! {
         target -> Text,
         theorem -> Text,
         target_hash -> Nullable<Text>,
+        labels -> Text,
     }
 }
 
@@ -115,6 +118,7 @@ diesel::table! {
         id -> Text,
         created_micros -> BigInt,
         result -> Jsonb,
+        labels -> Text,
     }
 }
 
@@ -155,6 +159,7 @@ diesel::table! {
         id -> Text,
         meta -> Jsonb,
         created -> BigInt,
+        labels -> Text,
     }
 }
 
@@ -167,6 +172,8 @@ diesel::table! {
         holder -> Nullable<Text>,
         updated -> BigInt,
         timeout -> BigInt,
+        labels -> Text,
+        runs -> Nullable<Text>,
     }
 }
 
@@ -192,6 +199,7 @@ diesel::table! {
         token -> Nullable<Text>,
         kind -> Nullable<Text>,
         document -> Nullable<Text>,
+        labels -> Text,
     }
 }
 

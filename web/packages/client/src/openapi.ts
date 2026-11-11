@@ -2795,6 +2795,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -2892,7 +2894,10 @@ export interface operations {
     checkBatch: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2984,7 +2989,10 @@ export interface operations {
                  */
                 version?: string;
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The full name */
                 name: string;
@@ -3067,7 +3075,10 @@ export interface operations {
     openDocument: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3151,7 +3162,10 @@ export interface operations {
     closeDocument: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description A document's id */
                 id: string;
@@ -3232,7 +3246,10 @@ export interface operations {
     editDocument: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description A document's id */
                 id: string;
@@ -3328,7 +3345,10 @@ export interface operations {
     documentGoals: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description A document's id */
                 id: string;
@@ -3424,7 +3444,10 @@ export interface operations {
     probeDocument: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description A document's id */
                 id: string;
@@ -3555,7 +3578,10 @@ export interface operations {
                  */
                 wait?: number;
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The job's id, from the 202 */
                 id: string;
@@ -3647,7 +3673,10 @@ export interface operations {
     cancelJob: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The job's id, from the 202 */
                 id: string;
@@ -3730,7 +3759,10 @@ export interface operations {
     resolve: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3814,7 +3846,10 @@ export interface operations {
     search: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -3904,6 +3939,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -4007,6 +4044,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path: {
                 /** @description A session's id */
@@ -4118,7 +4157,10 @@ export interface operations {
                 /** @description The version whose snapshots to list; when absent, the server's default, or else the one version the live workers serve. */
                 version?: string;
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4204,6 +4246,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -4304,7 +4348,10 @@ export interface operations {
                 /** @description The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since */
                 spec: string;
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4390,6 +4437,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -4487,7 +4536,10 @@ export interface operations {
     getAcceptance: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The acceptance's id, `<version>~<32 hex>` */
                 id: string;
@@ -4581,7 +4633,10 @@ export interface operations {
                 /** @description With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value */
                 review?: boolean;
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4666,7 +4721,10 @@ export interface operations {
                 /** @description A definition the run's heads may change besides the spec's holes, as for the audit; repeatable */
                 allow?: string[];
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path?: never;
             cookie?: never;
         };
@@ -4752,6 +4810,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -4855,6 +4915,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -4958,6 +5020,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path?: never;
             cookie?: never;
@@ -5058,7 +5122,10 @@ export interface operations {
                 /** @description `declarations` for every field of the check's declarations */
                 detail?: components["schemas"]["Detail"];
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
@@ -5144,7 +5211,10 @@ export interface operations {
                 /** @description `true` to delete the snapshots that replace it too, directly or through others; `false` by default */
                 with_replacers?: boolean;
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
@@ -5227,7 +5297,10 @@ export interface operations {
     updateSnapshot: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
@@ -5317,7 +5390,10 @@ export interface operations {
                 /** @description `key:value`, split on the first `:`; repeatable */
                 label?: string[];
             };
-            header?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */
                 id: string;
@@ -5411,6 +5487,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path: {
                 /** @description The snapshot's id, `<version>~<32 hex>` */
@@ -5513,6 +5591,8 @@ export interface operations {
                  *     `/jobs/{id}`, rather than the answer.
                  */
                 Prefer?: string;
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
             };
             path: {
                 /** @description A state's id, from a session or an earlier tactic */

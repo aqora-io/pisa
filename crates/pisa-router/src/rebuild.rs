@@ -114,7 +114,9 @@ pub(crate) async fn run_plan(
                 .map(|item| {
                     let (app, creates, item) = (app.clone(), creates.clone(), (*item).clone());
                     let version = version.clone();
-                    tokio::spawn(async move { create(&app, &creates, version, &item).await })
+                    let scope = pisa_db::scope::current();
+                    let created = async move { create(&app, &creates, version, &item).await };
+                    tokio::spawn(pisa_db::scope::within(scope, created))
                 })
                 .collect();
             for (item, running) in chunk.iter().zip(running) {

@@ -118,6 +118,7 @@ async fn insert(
                 jobs::enqueued_micros.eq(now()),
                 jobs::max_wait_micros.eq(micros(job.max_wait)),
                 jobs::max_attempts.eq(job.max_attempts as i32),
+                jobs::labels.eq(crate::scope::stamp()),
             ))
             .returning(jobs::id)
             .get_result::<i64>(&mut *c)
@@ -224,7 +225,26 @@ type Row = (
     i64,
 );
 
+/// Whether the job of `token` is in the request's scope: its token alone
+/// finds it otherwise.
+async fn token_in_scope(db: &Handle, q: &str, token: &str) -> Result<bool, DbError> {
+    if crate::scope::current().is_empty() {
+        return Ok(true);
+    }
+    let labels: Option<String> = jobs::table
+        .filter(jobs::queue.eq(q))
+        .filter(jobs::token.eq(token))
+        .select(jobs::labels)
+        .first(&mut *conn(db).await?)
+        .await
+        .optional()?;
+    Ok(labels.is_some_and(|l| crate::scope::in_scope(&l)))
+}
+
 pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<Status>, DbError> {
+    if !token_in_scope(db, q, token).await? {
+        return Ok(None);
+    }
     retry(|| async {
         let mut c = conn(db).await?;
         // Closing it races the workers, other servers and the sweep: whoever
@@ -292,6 +312,9 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
 }
 
 pub(crate) async fn cancel(db: &Handle, q: &str, token: &str) -> Result<Option<i64>, DbError> {
+    if !token_in_scope(db, q, token).await? {
+        return Ok(None);
+    }
     let now = now();
     retry(|| async {
         let mut c = conn(db).await?;
