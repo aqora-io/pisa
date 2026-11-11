@@ -1,0 +1,461 @@
+{
+ "target": "Physlib.QuantumMechanics",
+ "modules": 30,
+ "as_modules": false,
+ "header": "import Mathlib\nimport Pisa\nimport Physlib.Meta.TODO.Basic\nimport Physlib.Meta.Informal.Basic",
+ "verify": "false",
+ "auto_implicit": true,
+ "api": {
+  "creates": [
+   {
+    "module": "Physlib.Units.PositiveRealUnit",
+    "seconds": 6.026396036148071,
+    "build_seconds": 3.380392,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 219,
+    "snapshot_module": "PisaSnap.sff80d5c1d8d70e522369919f8dae9aab",
+    "verified": false,
+    "checks": [
+     0.017874956130981445,
+     0.018109798431396484,
+     0.016256093978881836
+    ]
+   },
+   {
+    "module": "Physlib.SpaceAndTime.Time.TimeUnit",
+    "seconds": 5.517861843109131,
+    "build_seconds": 2.953834,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 145,
+    "snapshot_module": "PisaSnap.s06150544c2ff320d95c6beffebd03c1a",
+    "verified": false,
+    "checks": [
+     0.016902685165405273,
+     0.014765739440917969,
+     0.015366792678833008
+    ]
+   },
+   {
+    "module": "Physlib.SpaceAndTime.Space.LengthUnit",
+    "seconds": 5.560852527618408,
+    "build_seconds": 2.982872,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 169,
+    "snapshot_module": "PisaSnap.s1d415506947f2e05ee9264848f611088",
+    "verified": false,
+    "checks": [
+     0.018382549285888672,
+     0.015045166015625,
+     0.015227794647216797
+    ]
+   },
+   {
+    "module": "Physlib.ClassicalMechanics.Mass.MassUnit",
+    "seconds": 5.392250299453735,
+    "build_seconds": 2.821366,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 127,
+    "snapshot_module": "PisaSnap.s25c726a763fee619c93d216a527cff0b",
+    "verified": false,
+    "checks": [
+     0.01604151725769043,
+     0.013376474380493164,
+     0.014185428619384766
+    ]
+   },
+   {
+    "module": "Physlib.Electromagnetism.Charge.ChargeUnit",
+    "seconds": 5.324467658996582,
+    "build_seconds": 2.760241,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 75,
+    "snapshot_module": "PisaSnap.s48ed0f9c08cfc916fca393cadbc2a3e7",
+    "verified": false,
+    "checks": [
+     0.018193960189819336,
+     0.015202999114990234,
+     0.014101743698120117
+    ]
+   },
+   {
+    "module": "Physlib.Thermodynamics.Temperature.TemperatureUnits",
+    "seconds": 5.3073341846466064,
+    "build_seconds": 2.737893,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 83,
+    "snapshot_module": "PisaSnap.s0ea540238c353d62376eb657bb0b4602",
+    "verified": false,
+    "checks": [
+     0.018414020538330078,
+     0.01615428924560547,
+     0.014382362365722656
+    ]
+   },
+   {
+    "module": "Physlib.Units.Exponent",
+    "seconds": 5.775555849075317,
+    "build_seconds": 3.203296,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 285,
+    "snapshot_module": "PisaSnap.s498de5ba056d69582c53723a6138a93d",
+    "verified": false,
+    "checks": [
+     0.016242504119873047,
+     0.014293670654296875,
+     0.014620780944824219
+    ]
+   },
+   {
+    "module": "Physlib.Units.Dimension",
+    "seconds": 5.566439151763916,
+    "build_seconds": 2.99113,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 265,
+    "snapshot_module": "PisaSnap.s65a882f6329a7fc21b2478f2600d1488",
+    "verified": false,
+    "checks": [
+     0.0168912410736084,
+     0.01377725601196289,
+     0.013314247131347656
+    ]
+   },
+   {
+    "module": "Physlib.Units.LTMCTDimensionBase",
+    "seconds": 5.601653337478638,
+    "build_seconds": 3.026357,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 368,
+    "snapshot_module": "PisaSnap.s0fbbf7d6c74ba1d53c0a9161f4074535",
+    "verified": false,
+    "checks": [
+     0.017141342163085938,
+     0.016201257705688477,
+     0.015179634094238281
+    ]
+   },
+   {
+    "module": "Physlib.Units.Basic",
+    "seconds": 6.43925404548645,
+    "build_seconds": 3.859605,
+    "imports": 6,
+    "kept": true,
+    "status": "proved",
+    "lines": 490,
+    "snapshot_module": "PisaSnap.sd858d36592bce7fd0367f480262378be",
+    "verified": false,
+    "checks": [
+     0.0175936222076416,
+     0.014107942581176758,
+     0.014876604080200195
+    ]
+   },
+   {
+    "module": "Physlib.StatisticalMechanics.BoltzmannConstant",
+    "seconds": 5.497046709060669,
+    "build_seconds": 2.910734,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 134,
+    "snapshot_module": "PisaSnap.sa48804c350c30374f36e6b1e393b7a9c",
+    "verified": false,
+    "checks": [
+     0.016834497451782227,
+     0.013854265213012695,
+     0.014692306518554688
+    ]
+   },
+   {
+    "module": "Physlib.Thermodynamics.Temperature.Basic",
+    "seconds": 5.765273332595825,
+    "build_seconds": 3.194206,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 238,
+    "snapshot_module": "PisaSnap.se48bf694b299a2107b3e0356dca22b1a",
+    "verified": false,
+    "checks": [
+     0.016537189483642578,
+     0.014181852340698242,
+     0.014128684997558594
+    ]
+   },
+   {
+    "module": "Physlib.Units.UnitDependent",
+    "seconds": 7.170099258422852,
+    "build_seconds": 4.573765,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 531,
+    "snapshot_module": "PisaSnap.s05ef1e852d673fdd58e419c440a6e8e3",
+    "verified": false,
+    "checks": [
+     0.017848968505859375,
+     0.014189481735229492,
+     0.014458894729614258
+    ]
+   },
+   {
+    "module": "Physlib.Units.WithDim.Basic",
+    "seconds": 6.2693493366241455,
+    "build_seconds": 3.704113,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 376,
+    "snapshot_module": "PisaSnap.s1b36d16388a0425ff5a36e411c437e85",
+    "verified": false,
+    "checks": [
+     0.015815258026123047,
+     0.013695716857910156,
+     0.014754056930541992
+    ]
+   },
+   {
+    "module": "Physlib.Relativity.SpeedOfLight",
+    "seconds": 5.518163204193115,
+    "build_seconds": 2.946417,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 177,
+    "snapshot_module": "PisaSnap.se9a155b71c7da8e79fa9c5612aec0b9c",
+    "verified": false,
+    "checks": [
+     0.019699573516845703,
+     0.014350175857543945,
+     0.014103174209594727
+    ]
+   },
+   {
+    "module": "Physlib.QuantumMechanics.PlanckConstant",
+    "seconds": 5.44602632522583,
+    "build_seconds": 2.880538,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 67,
+    "snapshot_module": "PisaSnap.s21ee5a17254e0fdfe62757d8aedf1667",
+    "verified": false,
+    "checks": [
+     0.016324520111083984,
+     0.01323246955871582,
+     0.014197587966918945
+    ]
+   },
+   {
+    "module": "Physlib.Optics.Frequency",
+    "seconds": 5.278721332550049,
+    "build_seconds": 2.678014,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 52,
+    "snapshot_module": "PisaSnap.se2435b5b808aeb1bb6fb41686bcafca6",
+    "verified": false,
+    "checks": [
+     0.019175052642822266,
+     0.0138092041015625,
+     0.01511073112487793
+    ]
+   },
+   {
+    "module": "Physlib.Optics.Wavelength",
+    "seconds": 5.62935209274292,
+    "build_seconds": 3.053845,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 204,
+    "snapshot_module": "PisaSnap.seeff632a5c79aecfddc4bab51a3f6cc5",
+    "verified": false,
+    "checks": [
+     0.016754865646362305,
+     0.014354228973388672,
+     0.014294624328613281
+    ]
+   },
+   {
+    "module": "Physlib.QuantumMechanics.Blackbody.PlancksLaw",
+    "seconds": 5.640308380126953,
+    "build_seconds": 3.063646,
+    "imports": 4,
+    "kept": true,
+    "status": "proved",
+    "lines": 282,
+    "snapshot_module": "PisaSnap.sdea990e67ed31398ceecda4e1f78c1db",
+    "verified": false,
+    "checks": [
+     0.01726984977722168,
+     0.013991117477416992,
+     0.0142364501953125
+    ]
+   },
+   {
+    "module": "Physlib.Mathematics.ForMathlib.OneParameterSubgroups.Basic",
+    "seconds": 6.510316848754883,
+    "build_seconds": 3.92878,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 187,
+    "snapshot_module": "PisaSnap.se52e6b6130223be1269438770b54e821",
+    "verified": false,
+    "checks": [
+     0.018130064010620117,
+     0.014336824417114258,
+     0.013832569122314453
+    ]
+   },
+   {
+    "module": "Physlib.Mathematics.ForMathlib.OneParameterSubgroups.Unitary",
+    "seconds": 8.786561965942383,
+    "build_seconds": 6.221006,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 218,
+    "snapshot_module": "PisaSnap.s16a8a420d54cd3119590de7946ac2fd3",
+    "verified": false,
+    "checks": [
+     0.01781630516052246,
+     0.014843225479125977,
+     0.013831853866577148
+    ]
+   },
+   {
+    "module": "Physlib.QuantumMechanics.FiniteTarget",
+    "seconds": 6.46198034286499,
+    "build_seconds": 3.87046,
+    "imports": 2,
+    "kept": true,
+    "status": "proved",
+    "lines": 86,
+    "snapshot_module": "PisaSnap.s310fd25e78a9ee9c5a55d954f9969289",
+    "verified": false,
+    "checks": [
+     0.017308950424194336,
+     0.01433706283569336,
+     0.013810396194458008
+    ]
+   },
+   {
+    "module": "Physlib.Mathematics.InnerProductSpace.Submodule",
+    "seconds": 5.834002733230591,
+    "build_seconds": 3.26913,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 130,
+    "snapshot_module": "PisaSnap.sb448aba936f6a47ce4413467dfb620b6",
+    "verified": false,
+    "checks": [
+     0.017449378967285156,
+     0.014836549758911133,
+     0.01482534408569336
+    ]
+   },
+   {
+    "module": "Physlib.Mathematics.ForMathlib.LinearPMap",
+    "seconds": 6.401142835617065,
+    "build_seconds": 3.820322,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 396,
+    "snapshot_module": "PisaSnap.s6ab9d2f78705435230d5662829b2806d",
+    "verified": false,
+    "checks": [
+     0.016297101974487305,
+     0.014345884323120117,
+     0.014423847198486328
+    ]
+   },
+   {
+    "module": "Physlib.QuantumMechanics.Operators.Unbounded",
+    "seconds": 10.89168405532837,
+    "build_seconds": 8.282538,
+    "imports": 2,
+    "kept": true,
+    "status": "proved",
+    "lines": 1000,
+    "snapshot_module": "PisaSnap.s5e79a056a7ef8896f74d3d8339073d75",
+    "verified": false,
+    "checks": [
+     0.019232988357543945,
+     0.014675378799438477,
+     0.014389276504516602
+    ]
+   },
+   {
+    "module": "Physlib.SpaceAndTime.Space.Basic",
+    "seconds": 6.291673421859741,
+    "build_seconds": 3.722349,
+    "imports": 0,
+    "kept": true,
+    "status": "proved",
+    "lines": 289,
+    "snapshot_module": "PisaSnap.s58165e94c628b66c1106035f03ea8dd6",
+    "verified": false,
+    "checks": [
+     0.016672849655151367,
+     0.014257192611694336,
+     0.014121532440185547
+    ]
+   },
+   {
+    "module": "Physlib.SpaceAndTime.Space.Origin",
+    "seconds": 5.5151121616363525,
+    "build_seconds": 2.936883,
+    "imports": 1,
+    "kept": true,
+    "status": "proved",
+    "lines": 64,
+    "snapshot_module": "PisaSnap.s5a0c7dcd3b2fa01bdea7f8a819fec7dd",
+    "verified": false,
+    "checks": [
+     0.018934965133666992,
+     0.014052629470825195,
+     0.013961553573608398
+    ]
+   },
+   {
+    "module": "Physlib.SpaceAndTime.Space.Module",
+    "seconds": 8.408358097076416,
+    "build_seconds": 8.389019,
+    "imports": 1,
+    "kept": false,
+    "status": null,
+    "lines": 755,
+    "snapshot_module": null,
+    "verified": null,
+    "error": [
+     "unsolved goals\nd : \u2115\nx : Space d\n\u22a2 \u221a(\u2211 x_1, ({ toFun := fun p => WithLp.toLp 2 fun i => p.val i, map_add' := \u22ef, map_smul' := \u22ef } x).ofLp x_1 ^ 2) =\n    \u221a(\u2211 i, x.val i ^ 2)",
+     "unsolved goals\nd : \u2115\np : Space d\ni : Fin d\n\u22a2 p.val i = ({ toFun := fun p => WithLp.toLp 2 fun i => p.val i, map_add' := \u22ef, map_smul' := \u22ef } p).ofLp i",
+     "failed to synthesize\n  ContinuousSMul \u211d (EuclideanSpace \u211d (Fin d))\n(deterministic) timeout at `typeclass`, maximum number of heartbeats (20000) has been reached\n\nNote: Use `set_option synthInstance.maxHeartbeats <num>` to set the limit.\n\nHint: Additional diagnostic information may be available using"
+    ]
+   }
+  ],
+  "checks": []
+ }
+}
