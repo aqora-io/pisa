@@ -17,6 +17,10 @@ export function useResolve(names: string[], input: VersionInput = {}): UseQueryR
 
 /** A declaration's details, or nothing while `name` is null. Pass a snapshot
  *  hit's `module` to open that snapshot's declaration. */
-export function useDeclaration(name: string | null, module?: ModuleName): UseQueryResult<DeclarationDetail, PisaError> {
-  return useQuery({ ...declarationOptions(usePisaClient(), name ?? "", module), enabled: name !== null });
+export function useDeclaration(
+  name: string | null,
+  module?: ModuleName,
+  input: VersionInput = {},
+): UseQueryResult<DeclarationDetail, PisaError> {
+  return useQuery({ ...declarationOptions(usePisaClient(), name ?? "", module, input), enabled: name !== null });
 }

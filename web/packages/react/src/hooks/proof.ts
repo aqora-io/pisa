@@ -1,6 +1,8 @@
 import {
   type CheckResult,
+  type Detail,
   type Message,
+  type PisaClient,
   PisaError,
   type SessionId,
   type State,
@@ -30,7 +32,7 @@ export interface ProofNode {
   complete: boolean;
   messages: Message[];
   /** Why the tactic failed: `lean` or `policy` when Lean rejected it,
-   *  `not_found` when the state it was applied to has expired. */
+   *  `not_found` when the session was closed or has expired. */
   error?: PisaError;
   /** For a root, the `sorry` it stands for. */
   sorry?: State;
@@ -172,8 +174,10 @@ export interface ProofSession extends Omit<ProofState, "nodes" | "order" | "root
   /** Applies a tactic to a node that is `ok`, branching from it; returns the
    *  new node's id. Nodes run in parallel. */
   apply(id: number, tactic: string): number | undefined;
-  /** Checks completed code against the session. */
-  check(code: string): void;
+  /** Checks completed code against the session; its declarations in full
+   *  with `detail: ["declarations"]`. */
+  check(code: string, options?: { detail?: Detail[] }): void;
+  /** Closes the session and forgets it. */
   reset(): void;
 }
 
@@ -181,21 +185,37 @@ function asPisaError(e: unknown): PisaError {
   return isPisaError(e) ? e : new PisaError("bad_response", String(e));
 }
 
-/** A proof session as a tree of states, kept in the component. Its requests
- *  are aborted when it is reset, started again, or unmounted. */
+/** Closes a session's document, without waiting: one already gone is
+ *  fine. */
+function close(client: PisaClient, session: SessionId): void {
+  void client.closeDocument(session).catch(() => undefined);
+}
+
+/** A proof session as a tree of states, kept in the component. When it is
+ *  reset, started again, or unmounted, its requests are aborted and its
+ *  session closed. A start a worker had taken before it was aborted can't
+ *  be closed: it goes when the server's state lifetime ends. */
 export function useProofSession(options: ProofSessionOptions = {}): ProofSession {
   const client = usePisaClient();
   const [state, dispatch] = useReducer(proofReducer, initialProof);
   const generation = useRef(0);
   const nextId = useRef(0);
   const latest = useRef(state);
+  const clientRef = useRef(client);
   const inFlight = useRef(new Set<AbortController>());
   useEffect(() => {
     latest.current = state;
   }, [state]);
   useEffect(() => {
+    clientRef.current = client;
+  }, [client]);
+  useEffect(() => {
     const requests = inFlight.current;
-    return () => requests.forEach((c) => c.abort());
+    return () => {
+      requests.forEach((c) => c.abort());
+      const session = latest.current.session;
+      if (session !== undefined) close(clientRef.current, session);
+    };
   }, []);
 
   const { version, timeout } = options;
@@ -204,6 +224,12 @@ export function useProofSession(options: ProofSessionOptions = {}): ProofSession
     const abortAll = () => {
       inFlight.current.forEach((c) => c.abort());
       inFlight.current.clear();
+    };
+    /** Aborts what is in flight and closes the session there is. */
+    const end = () => {
+      const session = latest.current.session;
+      abortAll();
+      if (session !== undefined) close(client, session);
     };
     async function request<T>(go: (signal: AbortSignal) => Promise<T>, ok: (v: T) => void, fail: (e: PisaError) => void) {
       const controller = new AbortController();
@@ -245,12 +271,14 @@ export function useProofSession(options: ProofSessionOptions = {}): ProofSession
           }),
         ),
       start(code) {
-        abortAll();
+        end();
         const gen = ++generation.current;
         dispatch({ type: "start", generation: gen, code });
         void request(
           (signal) => client.startSession(code, { ...run, signal }),
-          (r) =>
+          (r) => {
+            // Started after all, for a start since given up: close it.
+            if (gen !== generation.current) return close(client, r.id);
             dispatch({
               type: "started",
               generation: gen,
@@ -258,7 +286,8 @@ export function useProofSession(options: ProofSessionOptions = {}): ProofSession
               states: r.states,
               messages: r.messages,
               ids: r.states.map(() => nextId.current++),
-            }),
+            });
+          },
           (error) => dispatch({ type: "startFailed", generation: gen, error }),
         );
       },
@@ -285,19 +314,23 @@ export function useProofSession(options: ProofSessionOptions = {}): ProofSession
         );
         return id;
       },
-      check(code) {
+      check(code, checkOptions = {}) {
         const session = latest.current.session;
         if (session === undefined) return;
         const gen = generation.current;
         dispatch({ type: "check", generation: gen, code });
+        const asked = {
+          ...(timeout !== undefined && { timeout }),
+          ...(checkOptions.detail !== undefined && { detail: checkOptions.detail }),
+        };
         void request(
-          (signal) => client.checkSession(session, code, { ...(timeout !== undefined && { timeout }), signal }),
+          (signal) => client.checkSession(session, code, { ...asked, signal }),
           (result) => dispatch({ type: "checked", generation: gen, result }),
           (error) => dispatch({ type: "checkFailed", generation: gen, error }),
         );
       },
       reset() {
-        abortAll();
+        end();
         dispatch({ type: "reset", generation: ++generation.current });
       },
     };

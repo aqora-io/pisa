@@ -3,7 +3,7 @@ import { type UseQueryResult, keepPreviousData, useQuery, useQueryClient } from 
 import { useEffect, useState } from "react";
 
 import { useDebouncedValue } from "../debounce.ts";
-import { type CheckInput, type Checked, checkOptions } from "../options.ts";
+import { type CheckBatchInput, type CheckInput, type Checked, checkBatchOptions, checkOptions } from "../options.ts";
 import { usePisaClient } from "../provider.tsx";
 
 export type CheckQuery = UseQueryResult<Checked, PisaError> & {
@@ -21,6 +21,24 @@ export function useCheck(input: CheckInput | null): CheckQuery {
   const queryClient = useQueryClient();
   const options = checkOptions(client, input ?? { code: "" });
   const query = useQuery({ ...options, enabled: input !== null, placeholderData: keepPreviousData });
+  const cancel = () => void queryClient.cancelQueries({ queryKey: options.queryKey, exact: true });
+  return Object.assign(query, { cancel });
+}
+
+export type CheckBatchQuery = UseQueryResult<Checked[], PisaError> & {
+  /** Stops waiting for the batch; as for `useCheck`, what workers have
+   *  started runs on. */
+  cancel: () => void;
+};
+
+/** Checks each of `input.codes`, or nothing while `input` is null, keeping
+ *  the last results while a new batch runs. */
+export function useCheckBatch(input: CheckBatchInput | null): CheckBatchQuery {
+  const client = usePisaClient();
+  const queryClient = useQueryClient();
+  const options = checkBatchOptions(client, input ?? { codes: [] });
+  const enabled = input !== null && input.codes.length > 0;
+  const query = useQuery({ ...options, enabled, placeholderData: keepPreviousData });
   const cancel = () => void queryClient.cancelQueries({ queryKey: options.queryKey, exact: true });
   return Object.assign(query, { cancel });
 }

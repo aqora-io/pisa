@@ -8,6 +8,8 @@ export interface Call {
   method: string;
   path: string;
   body: Record<string, unknown> | undefined;
+  headers: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 /** A client over a fake server: `route` answers each request, with a value
@@ -22,6 +24,8 @@ export function fakeClient(route: (call: Call) => unknown | Promise<unknown>): {
         method: init?.method ?? "GET",
         path: url.pathname + url.search,
         body: init?.body === undefined ? undefined : (JSON.parse(String(init.body)) as Record<string, unknown>),
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        ...(init?.signal != null && { signal: init.signal }),
       };
       calls.push(call);
       const signal = init?.signal;
@@ -35,8 +39,12 @@ export function fakeClient(route: (call: Call) => unknown | Promise<unknown>): {
   return { client, calls };
 }
 
-export function wrapper(client: PisaClient): (props: { children: ReactNode }) => ReactNode {
-  const queryClient = new QueryClient();
+/** Renders hooks with `client`, in `queryClient`'s cache: pass one to look
+ *  at the cache, or to share it between renders. */
+export function wrapper(
+  client: PisaClient,
+  queryClient: QueryClient = new QueryClient(),
+): (props: { children: ReactNode }) => ReactNode {
   return ({ children }) => (
     <QueryClientProvider client={queryClient}>
       <PisaProvider client={client}>{children}</PisaProvider>
