@@ -353,26 +353,35 @@ def timed_check(url, code):
     return r, time.time() - t
 
 
-def chunk_code(m, src, snaps, chunked, as_modules):
+def chunk_code(m, src, snaps, chunked, as_modules, auto_implicit=False):
     """Module `m` as the code of a snapshot. As plain Lean, it imports the
     snapshots of its dependencies (or, without any, the header) and drops the
     module system. As a module-system file it stays verbatim, with imports of
-    other chunks pointing at their snapshots."""
+    other chunks pointing at their snapshots. With `auto_implicit`, the code
+    turns `autoImplicit` back on after its imports, as Physlib expects."""
     if as_modules:
         def to_snapshot(i):
             name = i.group(1)
             return i.group(0).replace(name, snaps[name]["module"]) if name in chunked else i.group(0)
-        return IMPORT.sub(to_snapshot, src[m])
-    deps = [d for d in IMPORT.findall(src[m]) if d in chunked]
-    header = "\n".join(f"import {snaps[d]['module']}" for d in deps) if deps else HEADER
-    return header + "\n\n" + "\n".join(plain_lines(src[m]))
+        code = IMPORT.sub(to_snapshot, src[m])
+    else:
+        deps = [d for d in IMPORT.findall(src[m]) if d in chunked]
+        # The `Pisa` library is the REPL's, not on the build's path.
+        header = "\n".join(f"import {snaps[d]['module']}" for d in deps) if deps else \
+            HEADER.replace("\nimport Pisa", "")
+        code = header + "\n\n" + "\n".join(plain_lines(src[m]))
+    if auto_implicit:
+        last = list(IMPORT.finditer(code))
+        at = last[-1].end() if last else 0
+        code = code[:at] + "\n\nset_option autoImplicit true" + code[at:]
+    return code
 
 
 def suffix(as_modules):
     return "-modules" if as_modules else ""
 
 
-def phase_api(src, order, url, checks, out, as_modules=False, verify="omit"):
+def phase_api(src, order, url, checks, out, as_modules=False, verify="omit", auto_implicit=False):
     """Each chunk as a snapshot through pisa's API, importing the snapshots of
     the modules it imports, followed by `checks` checks on its header. The
     creates send `verify` unless it is `omit`."""
@@ -382,7 +391,7 @@ def phase_api(src, order, url, checks, out, as_modules=False, verify="omit"):
     snaps, res = {}, {"api": {"creates": [], "checks": []}}
     for i, m in enumerate(order):
         deps = [d for d in IMPORT.findall(src[m]) if d in chunked]
-        code = chunk_code(m, src, snaps, chunked, as_modules)
+        code = chunk_code(m, src, snaps, chunked, as_modules, auto_implicit)
         body = {"code": code, "timeout": 1200}
         if verify != "omit":
             body["verify"] = verify == "true"
@@ -439,7 +448,8 @@ def phase_api(src, order, url, checks, out, as_modules=False, verify="omit"):
 
 
 def workers():
-    """The compose stack's worker containers."""
+    """The compose stack's worker containers, of the project
+    `COMPOSE_PROJECT_NAME` names if it is set."""
     return sh("docker", "compose", "ps", "-q", "worker").decode().split()
 
 
@@ -487,26 +497,33 @@ def phase_verify(out, as_modules=False):
     missing = [m for m in modules
                if subprocess.run(["docker", "exec", worker, "test", "-f",
                                   f"{root}/{m.replace('.', '/')}.olean"]).returncode != 0]
-    env = f"cd /opt/project && lake env bash -c 'export LEAN_PATH=$LEAN_PATH:{root}; "
+    # The script imports the `Pisa` library, which the worker puts on the
+    # path; the tool needs only the snapshots.
+    env = f"cd /opt/project && lake env bash -c 'export LEAN_PATH=$LEAN_PATH:{root}:/opt/pisa/.lake/build/lib/lean; "
 
     def run(cmd):
         t = time.time()
         r = subprocess.run(["docker", "exec", worker, "bash", "-c", env + cmd + "'"], capture_output=True)
-        return time.time() - t, r.stdout.decode()
+        out = r.stdout.decode()
+        return time.time() - t, out.count('"ok":true')
+
+    def each(cmd):
+        runs = [run(cmd(m)) for m in modules]
+        return [dt for dt, _ in runs], sum(ok for _, ok in runs)
 
     res = {"modules": len(modules), "missing": missing}
     tool = "/opt/pisa/.lake/build/bin/pisa"
     has_tool = subprocess.run(["docker", "exec", worker, "test", "-x", tool]).returncode == 0
     if subprocess.run(["docker", "exec", worker, "test", "-f", "/opt/verifier/PisaVerify.lean"]).returncode == 0:
-        res["script_each"] = [run(f"lean --run /opt/verifier/PisaVerify.lean {m}")[0] for m in modules]
-        print(f"verify: script each {sum(res['script_each']):.1f}s in all", flush=True)
+        res["script_each"], res["script_each_ok"] = each(lambda m: f"lean --run /opt/verifier/PisaVerify.lean {m}")
+        print(f"verify: script each {sum(res['script_each']):.1f}s in all "
+              f"({res['script_each_ok']} of {len(modules)} passed)", flush=True)
     if has_tool:
-        res["tool_each"] = [run(f"{tool} verify {m}")[0] for m in modules]
-        dt, output = run(f"{tool} verify {' '.join(modules)}")
-        res["tool_chain"] = dt
-        res["tool_chain_ok"] = output.count('"ok":true')
-        print(f"verify: tool each {sum(res['tool_each']):.1f}s in all, chain {dt:.1f}s "
-              f"({res['tool_chain_ok']} of {len(modules)} passed)", flush=True)
+        res["tool_each"], res["tool_each_ok"] = each(lambda m: f"{tool} verify {m}")
+        dt, ok = run(f"{tool} verify {' '.join(modules)}")
+        res["tool_chain"], res["tool_chain_ok"] = dt, ok
+        print(f"verify: tool each {sum(res['tool_each']):.1f}s in all ({res['tool_each_ok']} passed), "
+              f"chain {dt:.1f}s ({ok} of {len(modules)} passed)", flush=True)
     return res
 
 
@@ -601,6 +618,8 @@ def main():
     ap.add_argument("--keep", action="store_true", help="leave the container running")
     ap.add_argument("--verify", choices=["omit", "true", "false"], default="omit",
                     help="what the api phase's creates send as `verify`")
+    ap.add_argument("--auto-implicit", action="store_true",
+                    help="have each chunk turn autoImplicit back on, as Physlib's code expects")
     ap.add_argument("--report-only", action="store_true", help="render tables from an existing raw.json")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -642,8 +661,9 @@ def main():
                 order = [m for m in order if m not in bad]
             api_raw = {"target": args.target, "modules": len(order), "as_modules": args.as_modules,
                        "header": None if args.as_modules else HEADER, "verify": args.verify}
+            api_raw["auto_implicit"] = args.auto_implicit
             api_raw.update(phase_api(src, order, args.url, args.checks, args.out, args.as_modules,
-                                     args.verify))
+                                     args.verify, args.auto_implicit))
             (args.out / f"raw-api{suffix(args.as_modules)}.json").write_text(json.dumps(api_raw, indent=1))
         if "restart" in phases:
             cold = phase_restart(args.url, args.out, args.as_modules)
