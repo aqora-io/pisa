@@ -28,6 +28,7 @@ import type {
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ModuleName,
+  NamedRun,
   Pos,
   ProbeAt,
   Query,
@@ -421,6 +422,19 @@ export class PisaClient {
   /** An acceptance `acceptRun` stored, by its id. */
   getAcceptance(id: string, options: RequestOptions = {}): Promise<AcceptResponse> {
     return this.call("GET", ["snapshots", "accept", id], undefined, options);
+  }
+
+  /** The run named `name`: its root, its heads, and, when they are on one
+   *  module, what `import PisaRun.<name>` resolves to now. */
+  getRun(name: string, options: VersionOptions = {}): Promise<NamedRun> {
+    return this.call("GET", ["runs", name], undefined, options, this.versionQuery(options));
+  }
+
+  /** Names `name` the run snapshot `snapshotId` is in, as a create's `name`
+   *  names the run it starts: a name the run had goes, and one another run
+   *  with snapshots has is a conflict. */
+  nameRun(name: string, snapshotId: SnapshotId, options: RequestOptions = {}): Promise<NamedRun> {
+    return this.call("PUT", ["runs", name], { snapshot_id: snapshotId }, options);
   }
 
   /** The acceptances that judged spec snapshot `spec`, newest first, at most

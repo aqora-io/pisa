@@ -291,7 +291,7 @@ impl Reader {
                 used.extend(users);
                 theorems
             };
-            let item = |entry: Option<String>, labels, replaces| RebuildItem {
+            let item = |entry: Option<String>, labels, replaces, source| RebuildItem {
                 level: 0,
                 key: format!("rebuild:{old}:{new}:{}", entry.as_deref().unwrap_or(&m)),
                 replaces,
@@ -302,6 +302,7 @@ impl Reader {
                 code: code.clone(),
                 labels,
                 affected: affected.clone(),
+                source,
             };
             let Some(entries) = matching.remove(&m) else {
                 // Nothing to copy: it supports the copies above it, with no
@@ -309,7 +310,7 @@ impl Reader {
                 planned.push(Planned {
                     created: meta.created * 1_000_000,
                     module: m.clone(),
-                    item: item(None, BTreeMap::new(), None),
+                    item: item(None, BTreeMap::new(), None, None),
                 });
                 continue;
             };
@@ -358,10 +359,13 @@ impl Reader {
                             allow: (!named.is_empty()).then_some(Allow { definitions: named }),
                         }
                     });
+                // The text as written, its names kept, its hashes swapped.
+                let source =
+                    (entry_meta.source.as_deref()).map(|s| snapshot::rewrite_imports(s, &renamed));
                 planned.push(Planned {
                     created: entry_meta.created_micros,
                     module: m.clone(),
-                    item: item(Some(e), entry_meta.labels, replaces),
+                    item: item(Some(e), entry_meta.labels, replaces, source),
                 });
             }
         }

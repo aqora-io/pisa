@@ -466,6 +466,48 @@ pub struct RunImport {
     pub module: String,
     /// The run's head on that module.
     pub snapshot_id: String,
+    /// Where the name resolves to keep it, as a session's and a document's
+    /// do: the run's head now, when it is on another module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<String>,
+}
+
+/// `GET /runs/{name}`'s query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RunQuery {
+    /// The version whose runs to read; when absent, the server's default, or
+    /// else the one version the live workers serve.
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+/// A named run, as `GET` and `PUT /runs/{name}` answer it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct NamedRun {
+    /// The run's name: code imports its head as `PisaRun.<name>`.
+    pub name: String,
+    /// The snapshot that starts the run, `<version>~<32 hex>`, which may have
+    /// been deleted since.
+    pub root: String,
+    /// The run's snapshots that nothing replaces, oldest first.
+    pub heads: Vec<String>,
+    /// The module `import PisaRun.<name>` resolves to, `PisaSnap.s<32 hex>`,
+    /// when the heads are on one module; a fork has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    /// The newest head on that module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+}
+
+/// `PUT /runs/{name}`: names the run a snapshot is in. A run has one name,
+/// so one it had goes, and a name that another run with snapshots has is a
+/// conflict.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NameRunRequest {
+    /// A snapshot of the run to name, `<version>~<32 hex>`.
+    pub snapshot_id: String,
 }
 
 /// What Lean recorded at a position asked about in `at`. Each part is
@@ -1486,6 +1528,11 @@ pub struct RebuildItem {
     /// directly or through other definitions, here or below.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub affected: Vec<String>,
+    /// The copied snapshot's code as its create sent it, if it imported runs
+    /// by name, with its imports by hash swapped as `code`'s are: the copy
+    /// keeps it, so an agent reading the copy back finds the names it wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// `GET /snapshots/audit`: what the snapshots that have every label the
@@ -1709,6 +1756,15 @@ pub struct AcceptPair {
     /// The head's module.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub head_module: String,
+    /// The spec's module as the export names it, which comparator judged as
+    /// the challenge: `PisaSpec.<name>` or `PisaRun.<name>` for a named
+    /// run's, else `spec_module`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub challenge_module: String,
+    /// The head's module as the export names it, which comparator judged as
+    /// the solution: `PisaRun.<name>` for a named run's, else `head_module`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub solution_module: String,
     /// Its comparator configuration in the export.
     pub config: String,
     pub accepted: bool,

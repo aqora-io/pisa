@@ -498,6 +498,7 @@ async fn an_audit_target_without_its_records_is_not_accepted() {
         replacement: None,
         holes: Vec::new(),
         source: None,
+        runs: Vec::new(),
     };
     // Each module declares `t`, proved and verified.
     let module = |_: &str| ModuleRecord {
@@ -693,6 +694,7 @@ async fn a_run_name_resolves_to_the_runs_head() {
         name: "proj.lemma".into(),
         module: snapshot::module(module),
         snapshot_id: s.id(entry),
+        moved_to: None,
     };
     assert_eq!(resolved.runs, [run(&a, &root)]);
 

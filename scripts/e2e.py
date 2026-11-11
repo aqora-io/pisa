@@ -535,15 +535,19 @@ def run_names(outside):
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         names = tar.getnames()
         config = json.load(tar.extractfile("pisa-run/comparator/1.json"))
-    for path in ["PisaRun/e2e/main.lean", "PisaSpec/e2e/main.lean", "PisaRun/e2e/lemma.lean",
-                 "PisaSpec/e2e/lemma.lean"]:
+    # The pair is named by its run; the lemma it imports keeps its hash names.
+    lemma_files = [x["snapshot"]["module"].replace(".", "/") + ".lean" for x in (spec, lemma_head)]
+    for path in ["PisaRun/e2e/main.lean", "PisaSpec/e2e/main.lean", *lemma_files]:
         assert f"pisa-run/{path}" in names, names
-    assert (config["challenge_module"], config["solution_module"]) == ("PisaSpec.e2e.main", "PisaRun.e2e.main"), config
+    judged = ("PisaSpec.e2e.main", "PisaRun.e2e.main")
+    assert (config["challenge_module"], config["solution_module"]) == judged, config
     verdict = post("/snapshots/accept", {"against": [target_id]})
     assert verdict["accepted"] and verdict["clean"], verdict
+    pair = verdict["pairs"][0]
+    assert (pair["challenge_module"], pair["solution_module"]) == judged, pair
     if outside:
         built_outside(archive)
-    step("run names: the export names files by run, builds and is accepted")
+    step("run names: the export names the pair by its run, builds and is accepted")
     for x in [resent, head, target, lemma_head, spec]:
         status, gone = call("DELETE", f"/snapshots/{x['snapshot']['id']}")
         assert status == 200, gone

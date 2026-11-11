@@ -2,6 +2,7 @@
 //! each with the time it was stored (a document's, when it was last used), so
 //! that old ones can be swept.
 
+use pisa_protocol::api::RunImport;
 use serde_json::Value;
 
 use crate::backend::dispatch;
@@ -19,6 +20,9 @@ pub struct DocumentRow {
     /// The time limit in seconds its open or last edit took, which a reopen
     /// takes too.
     pub timeout: u64,
+    /// What its imports by run name resolved to when it was opened: its
+    /// edits resolve them the same.
+    pub runs: Vec<RunImport>,
 }
 
 /// A tactic session's state: one of its `sorry`s, or a tactic applied to
@@ -75,10 +79,11 @@ impl Records {
         timeout: u64,
         holder: &str,
         now: u64,
+        runs: &[RunImport],
     ) -> Result<(), DbError> {
         dispatch!(
             &self.db,
-            put_document(&self.version, id, code, timeout, holder, now)
+            put_document(&self.version, id, code, timeout, holder, now, runs)
         )
     }
 
@@ -89,6 +94,7 @@ impl Records {
     /// Replaces document `id`'s code if it is at `revision`, as edited
     /// within `timeout` seconds on `holder` at `now`. Returns the new
     /// revision, or `None` if the document is at another or gone.
+    #[allow(clippy::too_many_arguments)]
     pub async fn edit_document(
         &self,
         id: &str,
@@ -97,10 +103,20 @@ impl Records {
         revision: u64,
         holder: &str,
         now: u64,
+        runs: &[RunImport],
     ) -> Result<Option<u64>, DbError> {
         dispatch!(
             &self.db,
-            edit_document(&self.version, id, code, timeout, revision, holder, now)
+            edit_document(
+                &self.version,
+                id,
+                code,
+                timeout,
+                revision,
+                holder,
+                now,
+                runs
+            )
         )
     }
 
@@ -150,21 +166,26 @@ mod tests {
     #[tokio::test]
     async fn a_document_is_edited_only_at_its_revision() {
         for (_, r, _) in records().await {
-            r.put_document("d", "a", 30, "w1", 10).await.unwrap();
+            r.put_document("d", "a", 30, "w1", 10, &[]).await.unwrap();
             let row = |code: &str, revision, holder: &str, timeout| DocumentRow {
                 code: code.into(),
                 revision,
                 holder: Some(holder.into()),
                 timeout,
+                runs: Vec::new(),
             };
             assert_eq!(r.document("d").await.unwrap(), Some(row("a", 1, "w1", 30)));
             assert_eq!(
-                r.edit_document("d", "b", 90, 1, "w2", 11).await.unwrap(),
+                r.edit_document("d", "b", 90, 1, "w2", 11, &[])
+                    .await
+                    .unwrap(),
                 Some(2)
             );
             // A stale revision changes nothing.
             assert_eq!(
-                r.edit_document("d", "c", 5, 1, "w3", 12).await.unwrap(),
+                r.edit_document("d", "c", 5, 1, "w3", 12, &[])
+                    .await
+                    .unwrap(),
                 None
             );
             assert_eq!(r.document("d").await.unwrap(), Some(row("b", 2, "w2", 90)));
@@ -181,7 +202,9 @@ mod tests {
             assert_eq!(r.document("d").await.unwrap(), None);
             assert!(!r.hold_document("d", "w3", 14).await.unwrap());
             assert_eq!(
-                r.edit_document("d", "c", 5, 2, "w3", 14).await.unwrap(),
+                r.edit_document("d", "c", 5, 2, "w3", 14, &[])
+                    .await
+                    .unwrap(),
                 None
             );
         }
@@ -199,7 +222,7 @@ mod tests {
                 tactic: None,
             };
             within(a.clone(), async {
-                r.put_document("d", "code", 10, "w", 1).await.unwrap();
+                r.put_document("d", "code", 10, "w", 1, &[]).await.unwrap();
                 r.put_session("s", 1, &serde_json::json!({})).await.unwrap();
                 r.put_state("t", &state, 1).await.unwrap();
                 assert!(r.document("d").await.unwrap().is_some());
@@ -251,8 +274,10 @@ mod tests {
     #[tokio::test]
     async fn the_sweep_takes_documents_unused_since_the_cutoff() {
         for (db, r, version) in records().await {
-            r.put_document("old", "a", 60, "w", 100).await.unwrap();
-            r.put_document("used", "a", 60, "w", 100).await.unwrap();
+            r.put_document("old", "a", 60, "w", 100, &[]).await.unwrap();
+            r.put_document("used", "a", 60, "w", 100, &[])
+                .await
+                .unwrap();
             r.hold_document("used", "w", 200).await.unwrap();
             assert_eq!(r.sweep(150).await.unwrap(), 1);
             assert_eq!(db.rows(&version).await.unwrap(), [["documents", "used"]]);

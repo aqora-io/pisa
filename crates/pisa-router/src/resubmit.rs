@@ -61,6 +61,8 @@ pub(crate) async fn run(
         };
         let made = async {
             let head = reader.get(&item.snapshot_id).await?;
+            // The head's code is copied as it is, and so is its text.
+            let source = head.source.clone();
             let create = CreateSnapshotRequest {
                 code: head.code,
                 version: Some(version.to_string()),
@@ -79,7 +81,7 @@ pub(crate) async fn run(
                 detail: Vec::new(),
                 name: None,
             };
-            create_retrying(app, create).await
+            create_retrying(app, create, source).await
         };
         match made.await {
             Ok(r) => match r.snapshot {

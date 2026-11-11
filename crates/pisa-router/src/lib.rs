@@ -23,6 +23,7 @@ pub mod http;
 pub mod jobs;
 mod rebuild;
 mod resubmit;
+pub mod runs;
 pub mod sessions;
 pub mod snapshots;
 
@@ -99,7 +100,13 @@ fn cors(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
     };
     let layer = CorsLayer::new()
         .allow_origin(allow)
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         // An async request prefers `respond-async`, and its 202 names the job.
         .allow_headers([
             header::CONTENT_TYPE,

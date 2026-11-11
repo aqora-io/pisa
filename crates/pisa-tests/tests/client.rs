@@ -1060,6 +1060,17 @@ async fn client_names_a_run_and_imports_it_by_name() {
         .unwrap();
     assert_eq!(detail.source.as_deref(), Some(code));
     assert!(detail.code.contains(&spec.module), "{}", detail.code);
+
+    // The run by its name, and named again.
+    let run = client.get_run("cl.lemma").await.unwrap();
+    assert_eq!(
+        (run.root.as_str(), run.snapshot_id.as_deref()),
+        (spec.id.as_str(), Some(spec.id.as_str()))
+    );
+    let renamed = client.name_run("cl.renamed", &spec.id).await.unwrap();
+    assert_eq!(renamed.heads, std::slice::from_ref(&spec.id));
+    let err = client.get_run("cl.lemma").await.unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
 }
 
 #[tokio::test(flavor = "multi_thread")]

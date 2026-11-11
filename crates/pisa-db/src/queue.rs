@@ -666,7 +666,7 @@ mod tests {
             let records = Records::new(q.db().clone(), "v".into());
             let id = uuid::Uuid::new_v4().simple().to_string();
             records
-                .put_document(&id, "theorem t : True := trivial", 60, "w1", 0)
+                .put_document(&id, "theorem t : True := trivial", 60, "w1", 0, &[])
                 .await
                 .unwrap();
             q.enqueue(&document_job(&id)).await.unwrap();

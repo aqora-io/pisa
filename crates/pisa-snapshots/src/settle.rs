@@ -164,7 +164,7 @@ impl Reader {
             }
             needs_now.push(id.clone());
             through.insert(id.clone(), needs_now.clone());
-            let item = |entry: Option<&str>, labels, replaces| RebuildItem {
+            let item = |entry: Option<&str>, labels, replaces, source| RebuildItem {
                 level: 0,
                 key: format!("settle:{}:{id}", entry.unwrap_or(&m)),
                 replaces,
@@ -175,12 +175,13 @@ impl Reader {
                 code: code.clone(),
                 labels,
                 affected: Vec::new(),
+                source,
             };
             let Some(entries) = copies.remove(&m) else {
                 planned.push(Planned {
                     created: meta.created * 1_000_000,
                     module: m.clone(),
-                    item: item(None, BTreeMap::new(), None),
+                    item: item(None, BTreeMap::new(), None, None),
                 });
                 continue;
             };
@@ -207,7 +208,15 @@ impl Reader {
                 planned.push(Planned {
                     created: entry_meta.created_micros,
                     module: m.clone(),
-                    item: item(Some(&e), entry_meta.labels, replaces),
+                    item: item(
+                        Some(&e),
+                        entry_meta.labels,
+                        replaces,
+                        // The text as written, its names kept, its hashes
+                        // swapped.
+                        (entry_meta.source.as_deref())
+                            .map(|s| snapshot::rewrite_imports(s, &renamed)),
+                    ),
                 });
             }
         }

@@ -415,6 +415,7 @@ impl Snapshots {
             refutes,
             name: job.name.clone(),
             source: job.source.clone(),
+            runs: job.runs.clone(),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)

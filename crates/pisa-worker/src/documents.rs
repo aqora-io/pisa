@@ -552,7 +552,14 @@ impl Documents {
         self.load(&mut doc, &j.document, &j.code, 1, budget).await?;
         let stored = self
             .records
-            .put_document(&j.document, &j.code, j.timeout_secs, &self.me, now_secs())
+            .put_document(
+                &j.document,
+                &j.code,
+                j.timeout_secs,
+                &self.me,
+                now_secs(),
+                &j.runs,
+            )
             .await;
         if let Err(e) = stored {
             self.unload(&mut doc, &j.document).await;
@@ -586,6 +593,7 @@ impl Documents {
                 j.revision,
                 &self.me,
                 now_secs(),
+                &j.runs,
             )
             .await;
         match stored {

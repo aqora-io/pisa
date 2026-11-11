@@ -213,15 +213,20 @@ async fn create(
         detail: Vec::new(),
         name: None,
     };
-    create_retrying(app, create).await
+    create_retrying(app, create, item.source.clone()).await
 }
 
 /// Sends `create` as a create job, again while no worker takes it in time.
+/// The snapshot keeps `source`, the text it was first written as, if any.
 pub(crate) async fn create_retrying(
     app: &App,
     create: CreateSnapshotRequest,
+    source: Option<String>,
 ) -> Result<CreateSnapshotResponse, Error> {
-    let p = prepare_create(app, create).map_err(|e| e.0)?;
+    let mut p = prepare_create(app, create).map_err(|e| e.0)?;
+    if let Job::SnapshotCreate(job) | Job::SnapshotReplace(job) = &mut p.job {
+        job.source = source;
+    }
     let mut tries = 0;
     loop {
         match app.dispatcher.submit(p.clone()).await {

@@ -93,6 +93,18 @@ class RunImport(TypedDict):
     name: str
     module: str
     snapshot_id: str
+    # Where the name resolves to keep it, as a session's and a document's do:
+    # the run's head now, when it is on another module.
+    moved_to: NotRequired[str]
+
+class NamedRun(TypedDict):
+    """A run by its name: its root, its heads, and, when they are on one
+    module, what `import PisaRun.<name>` resolves to."""
+    name: str
+    root: str
+    heads: list[str]
+    module: NotRequired[str]
+    snapshot_id: NotRequired[str]
 
 class CheckResult(TypedDict):
     ok: bool
@@ -383,6 +395,10 @@ class AcceptPair(TypedDict):
     # Their modules, `PisaSnap.s…`: the code judged, named when a snapshot goes.
     spec_module: NotRequired[str]
     head_module: NotRequired[str]
+    # Their modules as the export names them, which comparator judged: a
+    # named run's `PisaSpec.<name>` and `PisaRun.<name>`.
+    challenge_module: NotRequired[str]
+    solution_module: NotRequired[str]
     config: str
     accepted: bool
     error: NotRequired[PairError]
@@ -838,6 +854,13 @@ class Client:
     def list_acceptances(self, spec: str) -> ListAcceptancesResponse:
         """The acceptances that judged spec snapshot `spec`, newest first, at
         most 100; each says `stale` once the run's heads have moved on."""
+    def get_run(self, name: str) -> NamedRun:
+        """The run named `name`: its root, its heads, and, when they are on
+        one module, what `import PisaRun.<name>` resolves to now."""
+    def name_run(self, name: str, snapshot_id: str) -> NamedRun:
+        """Names `name` the run snapshot `snapshot_id` is in, as a create's
+        `name` names the run it starts: a name the run had goes, and one
+        another run with snapshots has is a conflict."""
     def open_document(self, code: str) -> Document:
         """Open code on Lean Beam, which keeps it elaborated for goals and
         probes until `close_document` or until it expires."""

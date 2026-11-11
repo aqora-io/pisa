@@ -373,6 +373,7 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
         refutes: None,
         name: None,
         source: None,
+        runs: Vec::new(),
     }
 }
 

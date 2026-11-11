@@ -62,11 +62,12 @@ pub use pisa_protocol::api::{
     DeleteSnapshotResponse, Detail, Document, DocumentGoals, DocumentProbes, ErrorKind, Export,
     GoalsAt, GoalsMode, Health, HealthStatus, Inherited, JobKind, JobStatus, LeftOut,
     LeftOutReason, LinePos, ListAcceptancesResponse, ListDependentsResponse, ListSnapshotsResponse,
-    Message, PairError, PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated,
-    RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse,
-    Refutation, Refutes, Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse,
-    ReviewDeclaration, ReviewOrigin, Session, Severity, Snapshot, SnapshotDetail, Sorry, State,
-    Superseded, TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
+    Message, NameRunRequest, NamedRun, PairError, PairErrorKind, Pos, ProbeAt, ProbeResult,
+    ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped,
+    RebuildSnapshotsResponse, Refutation, Refutes, Replacement, Replaces, ResubmitItem,
+    ResubmitSnapshotsResponse, ReviewDeclaration, ReviewOrigin, RunImport, Session, Severity,
+    Snapshot, SnapshotDetail, Sorry, State, Superseded, TacticInfo, TermInfo, VerifyFailure,
+    VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
@@ -414,6 +415,11 @@ impl Endpoint {
         body: &B,
     ) -> Result<T, Error> {
         let r = self.http.patch(url).json(body).send().await?;
+        Ok(server_error(r).await?.json().await?)
+    }
+
+    async fn put<B: Serialize, T: DeserializeOwned>(&self, url: Url, body: &B) -> Result<T, Error> {
+        let r = self.http.put(url).json(body).send().await?;
         Ok(server_error(r).await?.json().await?)
     }
 }
@@ -1150,6 +1156,34 @@ impl Client {
             .map_err(|_| Error::Url(id.to_string()))?
             .push(id);
         self.endpoint.get(url).await
+    }
+
+    /// The run named `name`: its root, its heads, and, when they are on one
+    /// module, what `import PisaRun.<name>` resolves to now.
+    pub async fn get_run(&self, name: &str) -> Result<NamedRun, Error> {
+        let mut url = self.named_run_url(name)?;
+        if let Some(v) = &self.version {
+            url.query_pairs_mut().append_pair("version", v);
+        }
+        self.endpoint.get(url).await
+    }
+
+    /// Names `name` the run snapshot `snapshot_id` is in, as a create's
+    /// `name` names the run it starts: a name the run had goes, and one
+    /// another run with snapshots has is a conflict. Returns the run.
+    pub async fn name_run(&self, name: &str, snapshot_id: &str) -> Result<NamedRun, Error> {
+        let req = NameRunRequest {
+            snapshot_id: snapshot_id.to_string(),
+        };
+        self.endpoint.put(self.named_run_url(name)?, &req).await
+    }
+
+    fn named_run_url(&self, name: &str) -> Result<Url, Error> {
+        let mut url = self.endpoint.url("runs")?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(name.to_string()))?
+            .push(name);
+        Ok(url)
     }
 
     /// The acceptances that judged spec snapshot `spec`, newest first, at

@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 
 use crate::dispatch::{DispatchError, Dispatcher, Prepared, Priority, Route};
 use crate::jobs::{self, Prefer};
-use crate::{documents, sessions, snapshots};
+use crate::{documents, runs, sessions, snapshots};
 
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
@@ -67,6 +67,8 @@ pub struct App {
         snapshots::accept,
         snapshots::acceptance,
         snapshots::acceptances,
+        runs::get,
+        runs::put,
         documents::open,
         documents::edit,
         documents::goals,
@@ -105,6 +107,7 @@ pub fn router(app: Arc<App>) -> Router {
             post(snapshots::accept).get(snapshots::acceptances),
         )
         .route("/snapshots/accept/{id}", get(snapshots::acceptance))
+        .route("/runs/{name}", get(runs::get).put(runs::put))
         .route("/documents", post(documents::open))
         .route(
             "/documents/{id}",
@@ -214,6 +217,19 @@ impl App {
         requested: Option<&str>,
         code: &str,
     ) -> Result<Option<ResolvedRuns>, Error> {
+        self.resolve_runs_with(requested, code, &[]).await
+    }
+
+    /// As [`resolve_runs`](Self::resolve_runs), with the names `pins` has
+    /// resolving as it says, as a document's do, each with where its run has
+    /// moved since (`moved_to`). What the names bring in must load with the
+    /// rest of the imports, as a create checks.
+    pub(crate) async fn resolve_runs_with(
+        &self,
+        requested: Option<&str>,
+        code: &str,
+        pins: &[RunImport],
+    ) -> Result<Option<ResolvedRuns>, Error> {
         let header = split_header(code).header;
         self.guard_imports(requested, &header).await?;
         let names =
@@ -222,14 +238,31 @@ impl App {
             return Ok(None);
         }
         let version = self.read_version(requested).await.map_err(|e| e.0)?;
-        let resolved = self
-            .snapshots
-            .version(&version)
-            .resolve_runs(code, &[])
-            .await?;
+        let reader = self.snapshots.version(&version);
+        let resolved = reader.resolve_runs(code, pins).await?;
+        if !pins.is_empty() {
+            reader.pins_kept(&resolved.runs).await?;
+        }
+        let imports = snapshot::imports(&split_header(&resolved.code).header).unwrap_or_default();
+        if let Some(e) = reader.clashes(&imports).await? {
+            let named: Vec<String> = (resolved.runs.iter())
+                .map(|r| format!("{}.{} is {}", snapshot::RUNS, r.name, r.module))
+                .collect();
+            let message = format!(
+                "{} (imported by name: {}; import a run by its name only, without another \
+                 version of it)",
+                e.message,
+                named.join(", ")
+            );
+            return Err(Error::new(e.kind, message));
+        }
+        let runs = match pins.is_empty() {
+            true => resolved.runs,
+            false => reader.moved(resolved.runs).await,
+        };
         Ok(Some(ResolvedRuns {
             code: resolved.code,
-            runs: resolved.runs,
+            runs,
             version,
         }))
     }

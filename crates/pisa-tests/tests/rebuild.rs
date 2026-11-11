@@ -1284,6 +1284,7 @@ async fn a_rebuild_plans_past_a_thousand_items() {
             refutes: None,
             name: None,
             source: None,
+            runs: Vec::new(),
         };
         catalog.commit(&id, &meta, None, entry).await.unwrap();
     }

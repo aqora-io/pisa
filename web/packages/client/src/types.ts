@@ -72,6 +72,8 @@ export type {
   ListDependentsResponse,
   ListSnapshotsResponse,
   Message,
+  NameRunRequest,
+  NamedRun,
   OpenDocumentRequest,
   PairError,
   PairErrorKind,

@@ -101,7 +101,7 @@ impl Documents {
         let open = doc.as_ref().unwrap();
         let stored = async {
             self.records
-                .put_document(id, &j.code, j.timeout_secs, &self.me, now)
+                .put_document(id, &j.code, j.timeout_secs, &self.me, now, &j.runs)
                 .await?;
             let meta = serde_json::to_value(&meta).unwrap_or_default();
             self.records.put_session(id, now, &meta).await?;

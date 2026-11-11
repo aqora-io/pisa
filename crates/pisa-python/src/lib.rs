@@ -549,6 +549,22 @@ impl Client {
         call(py, async move { self.inner.list_acceptances(&spec).await })
     }
 
+    fn get_run<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
+        call(py, async move { self.inner.get_run(&name).await })
+    }
+
+    fn name_run<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        snapshot_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        call(
+            py,
+            async move { self.inner.name_run(&name, &snapshot_id).await },
+        )
+    }
+
     fn open_document<'py>(&self, py: Python<'py>, code: String) -> PyResult<Bound<'py, PyAny>> {
         call(py, async move { self.inner.open_document(&code).await })
     }

@@ -33,6 +33,7 @@ const ENTRY: (
     entries::created_micros,
     entries::holes,
     entries::source,
+    entries::runs,
 ) = (
     entries::id,
     entries::module,
@@ -41,6 +42,7 @@ const ENTRY: (
     entries::created_micros,
     entries::holes,
     entries::source,
+    entries::runs,
 );
 
 const LINK: (links::entry, links::replaces, links::allow, links::replacement) = (
@@ -494,6 +496,7 @@ async fn add(
         replacement: entry.replacement.clone(),
         holes: entry.holes.clone(),
         source: entry.source.clone(),
+        runs: entry.runs.clone(),
     };
     let holes = (!meta.holes.is_empty())
         .then(|| serde_json::to_string(&meta.holes))
@@ -508,6 +511,9 @@ async fn add(
             entries::created_micros.eq(meta.created_micros as i64),
             entries::holes.eq(holes),
             entries::source.eq(meta.source.as_deref()),
+            entries::runs.eq((!meta.runs.is_empty())
+                .then(|| serde_json::to_string(&meta.runs))
+                .transpose()?),
         ))
         .execute(conn)
         .await?;
@@ -558,7 +564,12 @@ async fn add(
             .execute(conn)
             .await?;
     }
-    if let Some(name) = &entry.name {
+    // A spec that amends a named run's takes its name.
+    let moved = match &entry.amends {
+        Some(a) => take_name(conn, v, &a.amends, &e, entry.name.as_deref()).await?,
+        None => false,
+    };
+    if let Some(name) = entry.name.as_ref().filter(|_| !moved) {
         if meta.replaces.is_some() {
             return Err(Fail::Api(Error::new(
                 ErrorKind::BadRequest,
@@ -662,6 +673,44 @@ async fn name_run(
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Moves the name of the run that entry `amended` is in, if it has one, to
+/// the run that the new entry `e`, which amends it, starts; returns whether a
+/// name moved. A `given` name other than that one is refused: a run has one
+/// name.
+async fn take_name(
+    conn: &mut Conn,
+    v: &str,
+    amended: &str,
+    e: &str,
+    given: Option<&str>,
+) -> Result<bool, Fail> {
+    let root = run_root_of(conn, v, amended).await?;
+    let held: Option<(String, String)> = run_names::table
+        .filter(run_names::version.eq(v))
+        .filter(run_names::root.eq(&root))
+        .select((run_names::scope, run_names::name))
+        .first(conn)
+        .await
+        .optional()?;
+    let Some((scope, name)) = held else {
+        return Ok(false);
+    };
+    if let Some(given) = given.filter(|g| *g != name) {
+        return Err(Fail::Api(Error::new(
+            ErrorKind::BadRequest,
+            format!(
+                "the amended spec's run is named {name}, which the amending spec's takes: \
+                 leave out name {given}, or give that one"
+            ),
+        )));
+    }
+    diesel::update(run_names::table.find((v, &scope, &name)))
+        .set(run_names::root.eq(e))
+        .execute(conn)
+        .await?;
+    Ok(true)
 }
 
 /// Removes the name of the run that starts at `root` once it has no entry.
@@ -2029,6 +2078,68 @@ pub(crate) async fn run_names_of(
 }
 
 /// The root of the run named `name`, and whether that run has entries.
+pub(crate) async fn rename_run(db: &Handle, v: &str, e: &str, name: &str) -> Result<(), Error> {
+    retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            if entry_in(conn, v, e).await?.is_none() {
+                return Err(Fail::Api(unknown_entry(v, e)));
+            }
+            let root = run_root_of(conn, v, e).await?;
+            // A run's name stays in the scope it was given in.
+            let own: Option<(String, String)> = run_names::table
+                .filter(run_names::version.eq(v))
+                .filter(run_names::root.eq(&root))
+                .select((run_names::scope, run_names::name))
+                .first(conn)
+                .await
+                .optional()?;
+            let scope = match &own {
+                Some((_, held)) if held == name => return Ok(()),
+                Some((scope, _)) => scope.clone(),
+                None => crate::scope::current().canonical(),
+            };
+            let other: Option<String> = run_names::table
+                .find((v, &scope, name))
+                .select(run_names::root)
+                .first(conn)
+                .await
+                .optional()?;
+            if let Some(other) = other {
+                if run_has_entries(conn, v, &other).await? {
+                    return Err(Fail::Api(name_taken(v, name, &other)));
+                }
+                diesel::delete(run_names::table.find((v, &scope, name)))
+                    .execute(conn)
+                    .await?;
+            }
+            match own {
+                Some((_, held)) => {
+                    diesel::update(run_names::table.find((v, &scope, &held)))
+                        .set(run_names::name.eq(name))
+                        .execute(conn)
+                        .await?;
+                }
+                None => {
+                    diesel::insert_into(run_names::table)
+                        .values((
+                            run_names::version.eq(v),
+                            run_names::scope.eq(&scope),
+                            run_names::name.eq(name),
+                            run_names::root.eq(&root),
+                        ))
+                        .execute(conn)
+                        .await?;
+                }
+            }
+            Ok(())
+        })
+    })
+    .await?;
+    Ok(())
+}
+
 pub(crate) async fn run_named(
     db: &Handle,
     v: &str,

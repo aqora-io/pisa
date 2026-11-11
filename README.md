@@ -1067,10 +1067,14 @@ accepting a run takes both:
   `allow=` as for the audit) answers the run as a Lake project in
   `pisa-run/`, as a tar.gz:
   - every module the spec snapshots and their heads need, with its stored
-    code. A [named run](#run-names)'s head is `PisaRun/<name>.lean` and its
-    spec, if it isn't the head, `PisaSpec/<name>.lean`; other modules are
+    code. A pair whose spec is of a [named run](#run-names) is named by the
+    run: its head `PisaRun/<name>.lean` and its spec, if it isn't the head,
+    `PisaSpec/<name>.lean`, unless the run is forked, whose heads keep their
+    hash names. Other modules, those the pairs import among them, are
     `PisaSnap/s….lean`. Each file imports the others by those names, and the
-    configurations name the modules the same way;
+    configurations name the modules the same way: the export is a renamed
+    build of what pisa built, and an acceptance's pairs record the names
+    comparator judged, `challenge_module` and `solution_module`;
   - the worker project's `lean-toolchain` and `lake-manifest.json`, and a
     `lakefile.toml` that requires what the project requires and builds the
     modules with `autoImplicit` off, as pisa builds them;

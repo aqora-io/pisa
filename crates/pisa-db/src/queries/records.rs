@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::db::{DbError, retry};
 use crate::records::{DocumentRow, StateRow};
+use pisa_protocol::api::RunImport;
 use crate::schema::{
     amendments, catalogs, described, documents, refutations, entries, leases, links, module_imports, modules, run_names, sessions,
     states,
@@ -109,6 +110,7 @@ pub(crate) async fn session(db: &Handle, v: &str, id: &str) -> Result<Option<Val
 }
 
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn put_document(
     db: &Handle,
     v: &str,
@@ -117,7 +119,9 @@ pub(crate) async fn put_document(
     timeout: u64,
     holder: &str,
     now: u64,
+    runs: &[RunImport],
 ) -> Result<(), DbError> {
+    let runs = runs_text(runs);
     retry(|| async {
         diesel::insert_into(documents::table)
             .values((
@@ -129,6 +133,7 @@ pub(crate) async fn put_document(
                 documents::updated.eq(now as i64),
                 documents::timeout.eq(timeout as i64),
                 documents::labels.eq(crate::scope::stamp()),
+                documents::runs.eq(&runs),
             ))
             .on_conflict((documents::version, documents::id))
             .do_update()
@@ -138,6 +143,7 @@ pub(crate) async fn put_document(
                 documents::holder.eq(holder),
                 documents::updated.eq(now as i64),
                 documents::timeout.eq(timeout as i64),
+                documents::runs.eq(&runs),
             ))
             .execute(&mut *conn(db).await?)
             .await?;
@@ -159,16 +165,20 @@ pub(crate) async fn document(
             documents::holder,
             documents::timeout,
             documents::labels,
+            documents::runs,
         ))
-        .first::<(String, i64, Option<String>, i64, String)>(&mut *conn(db).await?)
+        .first::<(String, i64, Option<String>, i64, String, Option<String>)>(&mut *conn(db).await?)
         .await
         .optional()?;
     let row = row.filter(|r| crate::scope::in_scope(&r.4));
-    Ok(row.map(|(code, revision, holder, timeout, _)| DocumentRow {
+    Ok(row.map(|(code, revision, holder, timeout, _, runs)| DocumentRow {
         code,
         revision: revision as u64,
         holder,
         timeout: timeout as u64,
+        runs: runs
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default(),
     }))
 }
 
@@ -182,7 +192,9 @@ pub(crate) async fn edit_document(
     revision: u64,
     holder: &str,
     now: u64,
+    runs: &[RunImport],
 ) -> Result<Option<u64>, DbError> {
+    let runs = runs_text(runs);
     retry(|| async {
         let revision = diesel::update(
             documents::table
@@ -195,6 +207,7 @@ pub(crate) async fn edit_document(
             documents::holder.eq(holder),
             documents::updated.eq(now as i64),
             documents::timeout.eq(timeout as i64),
+            documents::runs.eq(&runs),
         ))
         .returning(documents::revision)
         .get_result::<i64>(&mut *conn(db).await?)
@@ -203,6 +216,12 @@ pub(crate) async fn edit_document(
         Ok(revision.map(|r| r as u64))
     })
     .await
+}
+
+/// What a document's imports by run name resolved to, as stored: JSON text,
+/// or nothing for none.
+fn runs_text(runs: &[RunImport]) -> Option<String> {
+    (!runs.is_empty()).then(|| serde_json::to_string(runs).unwrap_or_default())
 }
 
 pub(crate) async fn hold_document(

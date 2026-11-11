@@ -407,20 +407,31 @@ impl Snapshots {
     /// snapshots has it, unless the create amends that run's spec, as `amends`
     /// says: the name then moves.
     async fn name_free(&self, name: &str, amends: Option<&Amends>) -> Result<(), Error> {
-        let Some((root, true)) = self.catalog.run_named(name).await? else {
-            return Ok(());
-        };
+        // A spec that amends a named run's takes that name, and no other.
         if let Some(a) = amends {
             let amended = self.reader.parse(&a.snapshot_id)?;
             let names = self
                 .catalog
                 .run_names_of(std::slice::from_ref(&amended))
                 .await?;
-            if names.get(&amended).map(String::as_str) == Some(name) {
-                return Ok(());
+            match names.get(&amended) {
+                Some(held) if held == name => return Ok(()),
+                Some(held) => {
+                    return Err(Error::new(
+                        ErrorKind::BadRequest,
+                        format!(
+                            "the amended spec's run is named {held}, which the amending spec's \
+                             takes: leave out name {name}, or give that one"
+                        ),
+                    ));
+                }
+                None => {}
             }
         }
-        Err(name_taken(&self.version, name, &root))
+        match self.catalog.run_named(name).await? {
+            Some((root, true)) => Err(name_taken(&self.version, name, &root)),
+            _ => Ok(()),
+        }
     }
 
     /// [`create`](Self::create) after validation. `None` if the module was
@@ -623,6 +634,7 @@ impl Snapshots {
             refutes,
             name: job.name.clone(),
             source: job.source.clone(),
+            runs: job.runs.clone(),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,

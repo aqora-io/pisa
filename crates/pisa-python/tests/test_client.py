@@ -574,6 +574,11 @@ def test_run_names(url):
     assert made["runs"] == checked["runs"], made
     detail = client.get_snapshot(made["snapshot"]["id"])
     assert detail["source"] == code and spec["module"] in detail["code"], detail
+    run = client.get_run("py.lemma")
+    assert (run["root"], run["snapshot_id"]) == (spec["id"], spec["id"]), run
+    assert client.name_run("py.renamed", spec["id"])["heads"] == [spec["id"]]
+    with pytest.raises(NotFoundError):
+        client.get_run("py.lemma")
 
 
 def test_a_client_keeps_to_its_scope(url):

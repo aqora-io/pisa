@@ -9,6 +9,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use pisa_db::queue::LIVE;
+use pisa_db::records::Records;
 use pisa_protocol::api::{
     ApiErrors, Document, DocumentGoals, DocumentGoalsRequest, DocumentId, DocumentProbes,
     DocumentProbesRequest, EditDocumentRequest, ErrorKind, ErrorResponse, LinePos, MAX_AT,
@@ -145,8 +146,17 @@ pub async fn edit(
     Body(req): Body<EditDocumentRequest>,
 ) -> Result<Json<Document>, ApiError> {
     let id = parse_id(&id)?;
-    // Each revision resolves imports by run name afresh.
-    let (code, runs) = match app.resolve_runs(Some(&id.version), &req.code).await? {
+    // Imports by run name resolve as the document's did when it was opened,
+    // and new ones afresh.
+    let records = Records::new(app.dispatcher.queue().db().clone(), id.version.clone());
+    let pins = match records.document(&id.id).await {
+        Ok(Some(row)) => row.runs,
+        _ => Vec::new(),
+    };
+    let resolved = app
+        .resolve_runs_with(Some(&id.version), &req.code, &pins)
+        .await?;
+    let (code, runs) = match resolved {
         Some(r) => (r.code, r.runs),
         None => (req.code, Vec::new()),
     };

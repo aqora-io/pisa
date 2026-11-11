@@ -32,7 +32,7 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 
 use crate::dispatch::{Prepared, Priority, Route};
-use crate::http::{ApiError, App, Body};
+use crate::http::{ApiError, App, Body, ResolvedRuns};
 use crate::jobs::{Params, Prefer, accepted};
 use crate::rebuild;
 use crate::resubmit;
@@ -93,12 +93,36 @@ async fn resolve_create(app: &App, p: &mut Prepared) -> Result<(), Error> {
     else {
         return Ok(());
     };
-    let Some(resolved) = app
-        .resolve_runs(p.route.version.as_deref(), &job.code)
-        .await?
-    else {
+    let requested = p.route.version.as_deref();
+    let resolved = match replayed(app, requested, job).await? {
+        Some(resolved) => Some(resolved),
+        None => app.resolve_runs(requested, &job.code).await?,
+    };
+    let Some(resolved) = resolved else {
         return Ok(());
     };
+    // A replacement that imported its own run would import the head it
+    // replaces.
+    if let Some(r) = &job.replaces {
+        let reader = app.snapshots.version(&resolved.version);
+        let replaced = reader.parse(&r.snapshot_id)?;
+        let own = reader
+            .catalog()
+            .run_names_of(std::slice::from_ref(&replaced))
+            .await?;
+        if let Some(own) = own.get(&replaced)
+            && resolved.runs.iter().any(|run| run.name == *own)
+        {
+            return Err(Error::new(
+                ErrorKind::BadRequest,
+                format!(
+                    "{}.{own} is the run this snapshot replaces into, which it can't import: \
+                     that would import the head it replaces",
+                    snapshot::RUNS
+                ),
+            ));
+        }
+    }
     job.source = Some(std::mem::replace(&mut job.code, resolved.code));
     job.runs = resolved.runs;
     let split = split_header(&job.code);
@@ -106,6 +130,37 @@ async fn resolve_create(app: &App, p: &mut Prepared) -> Result<(), Error> {
     p.route.header_key = Some(header_key(&next));
     p.route.version = Some(resolved.version);
     Ok(())
+}
+
+/// How a create sent again with its key resolves: as its first create did,
+/// when the key's snapshot (in the request's scope) was sent as the same
+/// text, so the replay answers what it answered then, whatever the runs did
+/// since. `None` otherwise, and for code that imports no run by name.
+async fn replayed(
+    app: &App,
+    requested: Option<&str>,
+    job: &SnapshotCreateJob,
+) -> Result<Option<ResolvedRuns>, Error> {
+    let Some(key) = &job.key else {
+        return Ok(None);
+    };
+    let header = split_header(&job.code).header;
+    if snapshot::run_imports(&header).map_or(true, |names| names.is_empty()) {
+        return Ok(None);
+    }
+    let version = app.read_version(requested).await.map_err(|e| e.0)?;
+    let reader = app.snapshots.version(&version);
+    let Some((_, kept)) = reader.catalog().keyed(key).await? else {
+        return Ok(None);
+    };
+    if kept.source.as_deref() != Some(job.code.as_str()) {
+        return Ok(None);
+    }
+    Ok(Some(ResolvedRuns {
+        code: pisa_snapshots::resolve_with(&job.code, &kept.runs),
+        runs: kept.runs,
+        version,
+    }))
 }
 
 /// Checks that snapshot `id`, which a create's `field` names, is of the

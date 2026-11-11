@@ -125,9 +125,13 @@ impl Sessions {
             Ok(resolved) => resolved,
             Err(e) => return failed(e),
         };
+        if let Err(e) = reader.pins_kept(&resolved.runs).await {
+            return failed(e);
+        }
         let same_imports =
             split_header(&resolved.code).header_key == split_header(&session.code).header_key;
-        let outcome = check(resolved.code, resolved.runs).await;
+        let mut outcome = check(resolved.code, resolved.runs).await;
+        outcome.runs = reader.moved(std::mem::take(&mut outcome.runs)).await;
         let now = outcome
             .verification
             .as_ref()

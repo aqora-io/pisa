@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime};
 
 use pisa_protocol::api::{
     Allow, AmendedHoles, CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces,
-    SnapshotId,
+    RunImport, SnapshotId,
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{DeclarationChange, normalised};
@@ -207,6 +207,9 @@ pub struct EntryMeta {
     /// The code as its create sent it, where it imported runs by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// What those imports by run name resolved to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunImport>,
 }
 
 impl EntryMeta {
@@ -403,6 +406,8 @@ pub struct NewEntry {
     pub name: Option<String>,
     /// The code as its create sent it, where it imported runs by name.
     pub source: Option<String>,
+    /// What those imports by run name resolved to.
+    pub runs: Vec<RunImport>,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -492,14 +497,16 @@ fn has_nul(value: &Value) -> bool {
     }
 }
 
-/// An entry's id, module, labels, key, creation time, holes (JSON text) and
-/// the code as sent, as selected.
+/// An entry's id, module, labels, key, creation time, holes (JSON text), the
+/// code as sent and what its imports by run name resolved to (JSON text), as
+/// selected.
 pub(crate) type EntryRow = (
     String,
     String,
     Value,
     Option<String>,
     i64,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -513,7 +520,7 @@ pub(crate) fn entry_from_row(
     row: EntryRow,
     link: Option<LinkRow>,
 ) -> Result<(String, EntryMeta), Fail> {
-    let (e, module, labels, key, created, holes, source) = row;
+    let (e, module, labels, key, created, holes, source, runs) = row;
     // A key is stored after its scope's text; give it back without.
     let scope = crate::scope::current();
     let key = key.map(|k| match k.strip_prefix(&scope.key("")) {
@@ -542,6 +549,10 @@ pub(crate) fn entry_from_row(
             .transpose()?
             .unwrap_or_default(),
         source,
+        runs: runs
+            .map(|text| serde_json::from_str(&text))
+            .transpose()?
+            .unwrap_or_default(),
     };
     Ok((e, meta))
 }
@@ -851,6 +862,13 @@ impl Catalog {
     /// whose run has one.
     pub async fn run_names_of(&self, entries: &[String]) -> Result<HashMap<String, String>, Error> {
         dispatch!(&self.db, run_names_of(&self.version, entries))
+    }
+
+    /// Names `name` the run entry `e` (bare hex) is in, in the request's
+    /// scope: a name the run had goes, and a name that another run with an
+    /// entry has is a conflict.
+    pub async fn rename_run(&self, e: &str, name: &str) -> Result<(), Error> {
+        dispatch!(&self.db, rename_run(&self.version, e, name))
     }
 
     /// The root of the run named `name`, if a run has it, and whether that
@@ -1189,6 +1207,7 @@ mod tests {
             refutes: None,
             name: None,
             source: None,
+            runs: Vec::new(),
         }
     }
 
@@ -1207,6 +1226,7 @@ mod tests {
             refutes: None,
             name: None,
             source: None,
+            runs: Vec::new(),
         }
     }
 
@@ -1222,6 +1242,7 @@ mod tests {
             refutes: None,
             name: None,
             source: None,
+            runs: Vec::new(),
         }
     }
 
@@ -1812,6 +1833,7 @@ mod tests {
             replacement,
             holes: Vec::new(),
             source: None,
+            runs: Vec::new(),
         };
         let root = entry(None, None);
         let top = entry(link("p1", &["f"]), Some(replacement(&[], &["f"], &[])));
@@ -2026,6 +2048,7 @@ mod tests {
             replacement,
             holes: Vec::new(),
             source: None,
+            runs: Vec::new(),
         };
         // The comparisons are what the creates' builds reported; the allows
         // are what the links' authors declared, which an audit reads.

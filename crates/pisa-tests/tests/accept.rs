@@ -150,8 +150,9 @@ async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
     assert!(run.forks.is_empty());
 }
 
-/// A named run's modules are named by the run: its head `PisaRun.<name>`,
-/// its spec `PisaSpec.<name>`, and they import each other by those names.
+/// A pair of a named run is named by the run: its head `PisaRun.<name>`,
+/// its spec `PisaSpec.<name>`. What the pairs import keeps its hash name,
+/// even when it is a named run's, and a fork's heads keep theirs.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_named_run_exports_its_files_by_name() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
@@ -174,16 +175,14 @@ async fn a_named_run_exports_its_files_by_name() {
         .filter(|p| p.ends_with(".lean"))
         .collect();
     paths.sort();
+    let base_file = format!("{}.lean", module(&base).replace('.', "/"));
     assert_eq!(
         paths,
-        [
-            "PisaRun/base.lean",
-            "PisaRun/main.lean",
-            "PisaSpec/main.lean"
-        ]
+        ["PisaRun/main.lean", &base_file, "PisaSpec/main.lean"]
     );
-    assert_eq!(text(&run, "PisaSpec/main.lean"), spec);
-    assert_eq!(text(&run, "PisaRun/main.lean"), filled);
+    let by_hash = |code: &str| code.replace("PisaRun.base", &module(&base));
+    assert_eq!(text(&run, "PisaSpec/main.lean"), by_hash(spec));
+    assert_eq!(text(&run, "PisaRun/main.lean"), by_hash(filled));
     let config: Value = serde_json::from_str(text(&run, &run.pairs[0].config)).unwrap();
     assert_eq!(
         (&config["challenge_module"], &config["solution_module"]),
@@ -191,20 +190,47 @@ async fn a_named_run_exports_its_files_by_name() {
     );
     let lakefile = text(&run, "lakefile.toml");
     assert!(
-        lakefile.contains("defaultTargets = [\"PisaRun\", \"PisaSpec\"]"),
+        lakefile.contains("defaultTargets = [\"PisaRun\", \"PisaSnap\", \"PisaSpec\"]"),
         "{lakefile}"
     );
-    assert!(!lakefile.contains("PisaSnap"), "{lakefile}");
     let readme = text(&run, "README.md");
     let row = format!("| `PisaRun/main.lean` | `{}` |", id(&p));
     assert!(readme.contains(&row), "{readme}");
     assert!(
-        readme.contains(&format!("| `PisaRun/base.lean` | `{}` |", id(&base))),
+        readme.contains(&format!("| `{base_file}` | `{}` |", id(&base))),
         "{readme}"
     );
-    // Acceptance runs comparator on these files.
+    assert!(readme.contains("a renamed build"), "{readme}");
+    // Acceptance runs comparator on these files, and says what it judged.
     let verdict = accept(&c, &[&id(&s)], &[], true, 60).await;
-    assert!(verdict.pairs[0].accepted, "{verdict:?}");
+    let pair = &verdict.pairs[0];
+    assert!(pair.accepted, "{verdict:?}");
+    assert_eq!(
+        (
+            pair.challenge_module.as_str(),
+            pair.solution_module.as_str()
+        ),
+        ("PisaSpec.main", "PisaRun.main")
+    );
+    assert_eq!(pair.spec_module, module(&s));
+
+    // Forked, the run's heads keep their hash names; its spec keeps its.
+    let forked = format!("{filled}\n-- forked");
+    let f = json!({"code": forked, "replaces": replaces, "fork": true});
+    let f = create(&c, f).await;
+    let run = export(&c, &[&id(&s)], &[]).await;
+    let mut solutions: Vec<&str> = (run.pairs.iter())
+        .map(|p| p.solution_module.as_str())
+        .collect();
+    solutions.sort();
+    let mut heads = [module(&p), module(&f)];
+    heads.sort();
+    assert_eq!(solutions, heads);
+    assert!(
+        run.pairs
+            .iter()
+            .all(|p| p.challenge_module == "PisaSpec.main")
+    );
 }
 
 async fn accept(

@@ -85,9 +85,10 @@ async fn audited_export(
             needed.extend(record(m).await?.modules.iter().map(|m| m.id.clone()));
         }
     }
-    // A named run's modules are named by the run, the others by their hash.
+    // The pairs of a named run are named by the run, the others by their
+    // hash.
     let modules: Vec<String> = needed.iter().cloned().collect();
-    let names = snapshots.reader().readable_names(&modules).await?;
+    let names = snapshots.reader().readable_names(&run.pairs).await?;
     let named = |m: &str| names.get(m).cloned().unwrap_or_else(|| snapshot::module(m));
     let path = |m: &str| format!("{}.lean", named(m).replace('.', "/"));
     let mut files = Vec::new();
@@ -125,9 +126,10 @@ async fn audited_export(
             }
         }
         let holes: Vec<String> = pair.holes.iter().chain(allow).cloned().collect();
+        let (challenge, solution) = (named(&pair.spec_module), named(&pair.head_module));
         let named = config(
-            &named(&pair.spec_module),
-            &named(&pair.head_module),
+            &pair.spec_module,
+            (&challenge, &solution),
             &spec_meta.result.declarations,
             &holes,
             &assumptions,
@@ -141,6 +143,8 @@ async fn audited_export(
             head: compared.head.clone(),
             spec_module: snapshot::module(&pair.spec_module),
             head_module: snapshot::module(&pair.head_module),
+            challenge_module: challenge,
+            solution_module: solution,
             config: path,
             theorems: named.theorems,
             left_out: named.left_out,
@@ -274,6 +278,8 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
             head: pair.head.clone(),
             spec_module: pair.spec_module.clone(),
             head_module: pair.head_module.clone(),
+            challenge_module: pair.challenge_module.clone(),
+            solution_module: pair.solution_module.clone(),
             config: pair.config.clone(),
             accepted: error.is_none(),
             error,
@@ -571,8 +577,9 @@ struct Named {
     left_out: Vec<LeftOut>,
 }
 
-/// Comparator's configuration for the spec's module named `spec` (the
-/// challenge) and the head's named `head` (the solution): the spec's theorems among
+/// Comparator's configuration for the spec's module, snapshot `spec` (its
+/// id), and the head's, named `modules` in the export (the challenge and the
+/// solution): the spec's theorems among
 /// `declarations`, `holes` as its definition holes, and the standard axioms
 /// and `assumptions` as permitted. Left out, and listed with why: private
 /// names, which differ between the two modules, and holes that aren't plain
@@ -580,7 +587,7 @@ struct Named {
 /// comparator would refuse as definition holes.
 fn config(
     spec: &str,
-    head: &str,
+    modules: (&str, &str),
     declarations: &[Declaration],
     holes: &[String],
     assumptions: &[String],
@@ -643,8 +650,8 @@ fn config(
     let standard: Vec<String> = STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
     let axioms = name(&mut standard.iter().chain(kept_axioms), false);
     let config = json!({
-        "challenge_module": spec,
-        "solution_module": head,
+        "challenge_module": modules.0,
+        "solution_module": modules.1,
         "theorem_names": theorems,
         "definition_names": holes,
         "permitted_axioms": axioms,
@@ -657,7 +664,8 @@ fn config(
 }
 
 /// The spec's theorems whose statement reaches a private name of the spec's
-/// own module, `spec`, directly or through the definitions of that module
+/// own module, snapshot `spec`'s as pisa built it, directly or through the
+/// definitions of that module
 /// that its type uses. A private name of a snapshot below is one constant on
 /// both sides, so it doesn't count.
 fn private_in_statement<'a>(spec: &str, declarations: &'a [Declaration]) -> HashSet<&'a str> {
@@ -713,10 +721,13 @@ fn readme(pairs: &[ExportedPair], about: &About) -> String {
         );
     }
     out.push_str(
-        "\n`lake build` builds every module, with `autoImplicit` off as pisa built them. A \
-         named run's head is `PisaRun/<name>.lean`, and its spec, if it isn't the head, \
-         `PisaSpec/<name>.lean`. Other modules are named by their code's hash, \
-         `PisaSnap/s<hash>.lean`. Each imports the others by those names.\n\n\
+        "\n`lake build` builds every module, with `autoImplicit` off as pisa built them. pisa \
+         built each under its code's hash, `PisaSnap/s<hash>.lean`. Here a pair whose spec is \
+         of a named run is named by the run instead: its head `PisaRun/<name>.lean`, and its \
+         spec, if it isn't the head, `PisaSpec/<name>.lean`. Other modules, those the pairs \
+         import among them, keep their hash names. Each imports the others by these names, so \
+         this is a renamed build: the code is pisa's, but module names, and private names \
+         with them, differ from pisa's build.\n\n\
          ## Judging it\n\n\
          Judge each pair with `lake comparator --paranoid --config comparator/<n>.json`, which \
          needs `bwrap`. It accepts a pair when each theorem of the spec is proved in the head \
@@ -850,8 +861,8 @@ mod tests {
         let head_defs: HashSet<String> = ["cost".to_string()].into();
         let head_axioms: HashSet<String> = ["lit".to_string()].into();
         let named = config(
-            "PisaSnap.sa",
-            "PisaSnap.sb",
+            "a",
+            ("PisaSnap.sa", "PisaSnap.sb"),
             &declarations,
             &holes,
             &assumptions,
@@ -890,7 +901,8 @@ mod tests {
     /// A target whose statement reaches a private name of the spec's own
     /// module, directly or through the spec's definitions, and a spec axiom
     /// the head no longer builds on, are left out and say why: comparator
-    /// would refuse the pair for either.
+    /// would refuse the pair for either. The records name the spec's private
+    /// names by its hash module, whatever the export names it.
     #[test]
     fn a_pair_leaves_out_what_comparator_cant_judge() {
         let using = |name: &str, kind: &str, type_refs: &[&str], value_refs: &[&str]| Declaration {
@@ -913,7 +925,7 @@ mod tests {
         let head_axioms: HashSet<String> = ["lit".to_string()].into();
         let named = config(
             "a",
-            "b",
+            ("PisaSpec.p", "PisaRun.p"),
             &declarations,
             &[],
             &assumptions,
@@ -949,6 +961,8 @@ mod tests {
             head: "v~h".into(),
             spec_module: "PisaSnap.ss".into(),
             head_module: "PisaSnap.sh".into(),
+            challenge_module: "PisaSnap.ss".into(),
+            solution_module: "PisaSnap.sh".into(),
             config: "comparator/1.json".into(),
             accepted: true,
             error: None,
@@ -1104,6 +1118,8 @@ mod tests {
             head: "v~b".into(),
             spec_module: "PisaSnap.sa".into(),
             head_module: "PisaSnap.sb".into(),
+            challenge_module: "PisaSnap.sa".into(),
+            solution_module: "PisaSnap.sb".into(),
             config: "comparator/1.json".into(),
             theorems: 2,
             left_out: vec![LeftOut {

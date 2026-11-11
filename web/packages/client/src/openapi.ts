@@ -212,6 +212,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/runs/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A run by name
+         * @description The run `import PisaRun.<name>` imports: its root, its heads, and, when they are on one module, the module and the head the name resolves to now. A name no run has, or whose run has no snapshot left, is `not_found`.
+         */
+        get: operations["getRun"];
+        /**
+         * Name a run
+         * @description Names the run that a snapshot is in, as a create's `name` names the run it starts, so that code can import its head as `PisaRun.<name>`. A run has one name: one it had goes. A name another run with snapshots has is a `conflict`.
+         */
+        put: operations["nameRun"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/search": {
         parameters: {
             query?: never;
@@ -531,6 +555,12 @@ export interface components {
     schemas: {
         AcceptPair: {
             accepted: boolean;
+            /**
+             * @description The spec's module as the export names it, which comparator judged as
+             *     the challenge: `PisaSpec.<name>` or `PisaRun.<name>` for a named
+             *     run's, else `spec_module`.
+             */
+            challenge_module?: string;
             /** @description Its comparator configuration in the export. */
             config: string;
             /** @description Why it isn't accepted, if it isn't. */
@@ -549,6 +579,11 @@ export interface components {
             left_out?: components["schemas"]["LeftOut"][];
             /** @description The end of what it printed. */
             output: string;
+            /**
+             * @description The head's module as the export names it, which comparator judged as
+             *     the solution: `PisaRun.<name>` for a named run's, else `head_module`.
+             */
+            solution_module?: string;
             /** @description The spec snapshot. */
             spec: string;
             /**
@@ -1836,6 +1871,34 @@ export interface components {
             text: string;
         };
         /**
+         * @description `PUT /runs/{name}`: names the run a snapshot is in. A run has one name,
+         *     so one it had goes, and a name that another run with snapshots has is a
+         *     conflict.
+         */
+        NameRunRequest: {
+            /** @description A snapshot of the run to name, `<version>~<32 hex>`. */
+            snapshot_id: string;
+        };
+        /** @description A named run, as `GET` and `PUT /runs/{name}` answer it. */
+        NamedRun: {
+            /** @description The run's snapshots that nothing replaces, oldest first. */
+            heads: string[];
+            /**
+             * @description The module `import PisaRun.<name>` resolves to, `PisaSnap.s<32 hex>`,
+             *     when the heads are on one module; a fork has none.
+             */
+            module?: string;
+            /** @description The run's name: code imports its head as `PisaRun.<name>`. */
+            name: string;
+            /**
+             * @description The snapshot that starts the run, `<version>~<32 hex>`, which may have
+             *     been deleted since.
+             */
+            root: string;
+            /** @description The newest head on that module. */
+            snapshot_id?: string;
+        };
+        /**
          * @description `POST /documents`: opens code on Lean Beam, for the goals at positions in
          *     it and candidate tactics probed there. A worker keeps it open, and the
          *     code is stored so that another can reopen it. Nothing a document says is a
@@ -2031,6 +2094,12 @@ export interface components {
              *     again replays them. Absent for a support item, which copies none.
              */
             snapshot_id?: string;
+            /**
+             * @description The copied snapshot's code as its create sent it, if it imported runs
+             *     by name, with its imports by hash swapped as `code`'s are: the copy
+             *     keeps it, so an agent reading the copy back finds the names it wrote.
+             */
+            source?: string;
         };
         /** @description A snapshot a rebuild run was to delete and couldn't. */
         RebuildNotDeleted: {
@@ -2361,6 +2430,11 @@ export interface components {
         RunImport: {
             /** @description The module imported in its place, `PisaSnap.s<32 hex>`. */
             module: string;
+            /**
+             * @description Where the name resolves to keep it, as a session's and a document's
+             *     do: the run's head now, when it is on another module.
+             */
+            moved_to?: string;
             /** @description The run's name. */
             name: string;
             /** @description The run's head on that module. */
@@ -2733,6 +2807,8 @@ export type ListAcceptancesResponse = components['schemas']['ListAcceptancesResp
 export type ListDependentsResponse = components['schemas']['ListDependentsResponse'];
 export type ListSnapshotsResponse = components['schemas']['ListSnapshotsResponse'];
 export type Message = components['schemas']['Message'];
+export type NameRunRequest = components['schemas']['NameRunRequest'];
+export type NamedRun = components['schemas']['NamedRun'];
 export type OpenDocumentRequest = components['schemas']['OpenDocumentRequest'];
 export type PairError = components['schemas']['PairError'];
 export type PairErrorKind = components['schemas']['PairErrorKind'];
@@ -3779,6 +3855,188 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ResolveResponse"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    getRun: {
+        parameters: {
+            query?: {
+                /**
+                 * @description The version whose runs to read; when absent, the server's default, or
+                 *     else the one version the live workers serve.
+                 */
+                version?: string;
+            };
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
+            path: {
+                /** @description The run's name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NamedRun"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    nameRun: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
+            path: {
+                /** @description The run's new name: dotted parts of letters, digits and `_` */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NameRunRequest"];
+            };
+        };
+        responses: {
+            /** @description The run */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NamedRun"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

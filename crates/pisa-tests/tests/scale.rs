@@ -81,6 +81,7 @@ async fn a_chain_of_1500_modules_reads_and_plans() {
             refutes: None,
             name: None,
             source: None,
+            runs: Vec::new(),
         };
         catalog.commit(&id, &meta, None, entry).await.unwrap();
         chain.push(id.clone());

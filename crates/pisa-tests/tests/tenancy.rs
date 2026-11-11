@@ -157,6 +157,20 @@ async fn keys_names_and_imports_keep_to_their_scope() {
     assert_eq!(r["runs"][0]["snapshot_id"], id(&b), "{r}");
     let (_, r) = post(&c, "user=c", "/check", json!({"code": uses})).await;
     assert_eq!(r["error"]["kind"], "not_found", "{r}");
+    // So does a run read by its name, and one is named in its scope only.
+    assert_eq!(get(&c, A, "/runs/lemma").await.1["snapshot_id"], id(&a));
+    assert_eq!(get(&c, B, "/runs/lemma").await.1["snapshot_id"], id(&b));
+    assert_eq!(get(&c, "user=c", "/runs/lemma").await.0, 404);
+    let named = json!({"snapshot_id": id(&a)});
+    let (status, _) = send(&c, B, Method::PUT, "/runs/mine", Some(named.clone())).await;
+    assert_eq!(status, 404);
+    assert_eq!(
+        send(&c, A, Method::PUT, "/runs/mine", Some(named)).await.0,
+        200
+    );
+    assert_eq!(get(&c, A, "/runs/lemma").await.0, 404);
+    assert_eq!(get(&c, B, "/runs/lemma").await.0, 200);
+    assert_eq!(get(&c, B, "/runs/mine").await.0, 404);
 
     // A module by its hash, only from a scope with a snapshot of it.
     let by_hash = format!(

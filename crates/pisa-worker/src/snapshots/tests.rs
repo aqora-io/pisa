@@ -65,6 +65,7 @@ fn no_labels() -> NewEntry {
         refutes: None,
         name: None,
         source: None,
+        runs: Vec::new(),
     }
 }
 

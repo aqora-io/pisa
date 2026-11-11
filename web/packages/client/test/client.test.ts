@@ -293,6 +293,19 @@ describe("PisaClient", () => {
     expect(sent.map((s) => s.body)).toEqual([{ code: "x", version: "v1", holes: ["f"], name: "proj.lemma" }]);
   });
 
+  it("reads a run by its name, and names one", async () => {
+    const run = { name: "proj.lemma", root: "v1~a", heads: ["v1~b"], module: "PisaSnap.sb", snapshot_id: "v1~b" };
+    const { client, sent } = recording(() => json(run));
+    expect((await client.getRun("proj.lemma")).snapshot_id).toBe("v1~b");
+    await client.getRun("proj.lemma", { version: "v2" });
+    await client.nameRun("proj.lemma", "v1~b");
+    expect(sent.map((s) => [s.method, s.url, s.body])).toEqual([
+      ["GET", "/api/runs/proj.lemma?version=v1", undefined],
+      ["GET", "/api/runs/proj.lemma?version=v2", undefined],
+      ["PUT", "/api/runs/proj.lemma", { snapshot_id: "v1~b" }],
+    ]);
+  });
+
   it("settles a run and verifies again", async () => {
     const { client, sent } = recording((s) =>
       s.headers["prefer"] ? json({ id: "j", kind: "rebuild_snapshots", status: "queued" }, 202) : json({ ok: true, plan: [] }),

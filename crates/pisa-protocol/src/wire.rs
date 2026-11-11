@@ -218,6 +218,12 @@ pub struct ExportedPair {
     pub spec_module: String,
     #[serde(default)]
     pub head_module: String,
+    /// What the project names them, which comparator judges: a named run's
+    /// as `PisaSpec.<name>` and `PisaRun.<name>`, others as their modules.
+    #[serde(default)]
+    pub challenge_module: String,
+    #[serde(default)]
+    pub solution_module: String,
     /// Its comparator configuration's path in the project.
     pub config: String,
     /// How many of the spec's theorems it names.
@@ -503,6 +509,8 @@ mod tests {
                 head: "v~h".into(),
                 spec_module: "PisaSnap.ss".into(),
                 head_module: "PisaSnap.sh".into(),
+                challenge_module: "PisaSpec.p".into(),
+                solution_module: "PisaRun.p".into(),
                 config: "comparator/1.json".into(),
                 theorems: 1,
                 left_out: vec![api::LeftOut {

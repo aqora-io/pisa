@@ -6,6 +6,10 @@
           "accepted": {
             "type": "boolean"
           },
+          "challenge_module": {
+            "description": "The spec's module as the export names it, which comparator judged as\nthe challenge: `PisaSpec.<name>` or `PisaRun.<name>` for a named\nrun's, else `spec_module`.",
+            "type": "string"
+          },
           "config": {
             "description": "Its comparator configuration in the export.",
             "type": "string"
@@ -36,6 +40,10 @@
           },
           "output": {
             "description": "The end of what it printed.",
+            "type": "string"
+          },
+          "solution_module": {
+            "description": "The head's module as the export names it, which comparator judged as\nthe solution: `PisaRun.<name>` for a named run's, else `head_module`.",
             "type": "string"
           },
           "spec": {
@@ -2080,6 +2088,53 @@
         ],
         "type": "object"
       },
+      "NameRunRequest": {
+        "description": "`PUT /runs/{name}`: names the run a snapshot is in. A run has one name,\nso one it had goes, and a name that another run with snapshots has is a\nconflict.",
+        "properties": {
+          "snapshot_id": {
+            "description": "A snapshot of the run to name, `<version>~<32 hex>`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id"
+        ],
+        "type": "object"
+      },
+      "NamedRun": {
+        "description": "A named run, as `GET` and `PUT /runs/{name}` answer it.",
+        "properties": {
+          "heads": {
+            "description": "The run's snapshots that nothing replaces, oldest first.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "module": {
+            "description": "The module `import PisaRun.<name>` resolves to, `PisaSnap.s<32 hex>`,\nwhen the heads are on one module; a fork has none.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The run's name: code imports its head as `PisaRun.<name>`.",
+            "type": "string"
+          },
+          "root": {
+            "description": "The snapshot that starts the run, `<version>~<32 hex>`, which may have\nbeen deleted since.",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "The newest head on that module.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "root",
+          "heads"
+        ],
+        "type": "object"
+      },
       "OpenDocumentRequest": {
         "description": "`POST /documents`: opens code on Lean Beam, for the goals at positions in\nit and candidate tactics probed there. A worker keeps it open, and the\ncode is stored so that another can reopen it. Nothing a document says is a\nverdict: check finished code with `/check`.",
         "properties": {
@@ -2393,6 +2448,10 @@
           },
           "snapshot_id": {
             "description": "The snapshot it copies: a head with the labels, or one that only its\ncopies from this same rebuild replace, so that sending the rebuild\nagain replays them. Absent for a support item, which copies none.",
+            "type": "string"
+          },
+          "source": {
+            "description": "The copied snapshot's code as its create sent it, if it imported runs\nby name, with its imports by hash swapped as `code`'s are: the copy\nkeeps it, so an agent reading the copy back finds the names it wrote.",
             "type": "string"
           }
         },
@@ -2932,6 +2991,10 @@
         "properties": {
           "module": {
             "description": "The module imported in its place, `PisaSnap.s<32 hex>`.",
+            "type": "string"
+          },
+          "moved_to": {
+            "description": "Where the name resolves to keep it, as a session's and a document's\ndo: the run's head now, when it is on another module.",
             "type": "string"
           },
           "name": {
@@ -4808,6 +4871,227 @@
         "summary": "Check names exist",
         "tags": [
           "search"
+        ]
+      }
+    },
+    "/runs/{name}": {
+      "get": {
+        "description": "The run `import PisaRun.<name>` imports: its root, its heads, and, when they are on one module, the module and the head the name resolves to now. A name no run has, or whose run has no snapshot left, is `not_found`.",
+        "operationId": "getRun",
+        "parameters": [
+          {
+            "description": "The run's name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The version whose runs to read; when absent, the server's default, or\nelse the one version the live workers serve.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamedRun"
+                }
+              }
+            },
+            "description": "The run"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "A run by name",
+        "tags": [
+          "snapshots"
+        ]
+      },
+      "put": {
+        "description": "Names the run that a snapshot is in, as a create's `name` names the run it starts, so that code can import its head as `PisaRun.<name>`. A run has one name: one it had goes. A name another run with snapshots has is a `conflict`.",
+        "operationId": "nameRun",
+        "parameters": [
+          {
+            "description": "The run's new name: dotted parts of letters, digits and `_`",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NameRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamedRun"
+                }
+              }
+            },
+            "description": "The run"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Name a run",
+        "tags": [
+          "snapshots"
         ]
       }
     },
