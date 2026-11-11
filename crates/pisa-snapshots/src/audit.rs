@@ -295,7 +295,21 @@ impl Reader {
         // Every head keeps its spec's statements, whether or not the spec has
         // targets, such as one of assumptions only.
         let kept = comparisons.iter().all(|c| c.replacement.is_some());
-        let clean = forks.is_empty() && accepted && kept && !cut && refutations.is_empty();
+        let mut superseded = Vec::new();
+        for spec in &spec_entries {
+            if let Some(by) = self.superseding(spec).await? {
+                superseded.push(Superseded {
+                    spec: self.id(spec),
+                    by: self.id(&by),
+                });
+            }
+        }
+        let clean = forks.is_empty()
+            && accepted
+            && kept
+            && !cut
+            && refutations.is_empty()
+            && superseded.is_empty();
 
         // Each head stands for its module.
         let mut entries: BTreeMap<String, String> = BTreeMap::new();
@@ -322,6 +336,7 @@ impl Reader {
             .collect();
         amendments.sort_by(|a, b| (&a.amends, &a.snapshot_id).cmp(&(&b.amends, &b.snapshot_id)));
         audit.amendments = amendments;
+        audit.superseded = superseded;
         Ok(AuditedRun { audit, pairs })
     }
 

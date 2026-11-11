@@ -101,9 +101,10 @@ pub struct SnapshotCreateJob {
     /// Whether `replaces` may name a snapshot that another replaces.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fork: bool,
-    /// A spec's holes; empty with `replaces`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub holes: Vec<String>,
+    /// A spec's holes as the request names them: none with `replaces`, and
+    /// with `amends`, when it names none, the amended spec's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holes: Option<Vec<String>>,
     /// The spec it amends; not with `replaces`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amends: Option<api::Amends>,
@@ -358,7 +359,7 @@ mod tests {
                 allow: None,
             }),
             fork: true,
-            holes: Vec::new(),
+            holes: None,
             amends: None,
             refutes: None,
             detail: Vec::new(),

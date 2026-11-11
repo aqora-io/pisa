@@ -30,7 +30,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
 
 use pisa_protocol::api::{
-    Allow, CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces, SnapshotId,
+    Allow, AmendedHoles, CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces,
+    SnapshotId,
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{DeclarationChange, normalised};
@@ -331,6 +332,9 @@ pub struct Amendment {
     pub changes: Vec<DeclarationChange>,
     /// The new spec's declarations that the amended one doesn't have.
     pub added: Vec<String>,
+    /// The holes before and after, when the new spec's differ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holes: Option<AmendedHoles>,
 }
 
 /// A snapshot's refutation of a spec's target, as its create checked it.
@@ -2040,6 +2044,10 @@ mod tests {
                 reason: "t was false".into(),
                 changes: vec![DeclarationChange::new("t", Change::Type)],
                 added: vec!["u".into()],
+                holes: Some(AmendedHoles {
+                    before: vec!["cost".into()],
+                    after: Vec::new(),
+                }),
             };
             let amending = |a: &Amendment| NewEntry {
                 amends: Some(a.clone()),
@@ -2081,6 +2089,61 @@ mod tests {
             );
             catalog.remove_entry(&new).await.unwrap();
             assert!(catalog.amendments_of(&[new, old]).await.unwrap().is_empty());
+        }
+    }
+
+    /// An entry can't join a run whose spec is amended, forked or not: the
+    /// check in the transaction catches an amendment made while it built.
+    #[tokio::test]
+    async fn an_entry_cant_join_a_run_whose_spec_is_amended() {
+        for catalog in catalogs().await {
+            let (spec, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let replacing = |entry: &str| NewEntry {
+                replaces: Some(Replaces {
+                    snapshot_id: entry.into(),
+                    allow: None,
+                }),
+                replacement: Some(Replacement {
+                    filled: Vec::new(),
+                    changed_definitions: Vec::new(),
+                    affected: Vec::new(),
+                }),
+                fork: true,
+                ..no_labels()
+            };
+            let (head, _) = catalog
+                .add_entry("x", replacing(&spec))
+                .await
+                .unwrap()
+                .unwrap();
+            let amendment = Amendment {
+                amends: spec.clone(),
+                reason: "t was false".into(),
+                changes: Vec::new(),
+                added: Vec::new(),
+                holes: None,
+            };
+            let amending = NewEntry {
+                amends: Some(amendment),
+                ..no_labels()
+            };
+            let (new, _) = catalog.add_entry("x", amending).await.unwrap().unwrap();
+            for replaced in [&spec, &head] {
+                let e = catalog
+                    .add_entry("x", replacing(replaced))
+                    .await
+                    .unwrap_err();
+                assert_eq!(e.kind, ErrorKind::Conflict, "{e:?}");
+            }
+            // The new spec's run takes it.
+            catalog
+                .add_entry("x", replacing(&new))
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 

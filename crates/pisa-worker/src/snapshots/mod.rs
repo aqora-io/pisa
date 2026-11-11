@@ -41,8 +41,8 @@ use std::time::{Duration, Instant, SystemTime};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
 use pisa_protocol::api::{
-    CheckResult, CreateSnapshotResponse, DeleteSnapshotResponse, Error, ErrorKind, Replacement,
-    Snapshot, VerifyFailure, VerifySnapshotResponse,
+    AmendedHoles, CheckResult, CreateSnapshotResponse, DeleteSnapshotResponse, Error, ErrorKind,
+    Replacement, Snapshot, VerifyFailure, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{Split, header_key, split_header};
 use pisa_protocol::labels::{check_key, check_labels};

@@ -811,9 +811,10 @@ pub struct CreateSnapshotRequest {
     /// builds on. The snapshots that replace it inherit them and may change
     /// them without `allow`, and a [spec audit](AuditSnapshotsResponse)
     /// allows them to change. Not with `replaces`, as a replacement
-    /// inherits the replaced snapshot's, and not empty (`bad_request`); a
-    /// name that isn't such a definition keeps nothing (`check.error` is a
-    /// `bad_request`).
+    /// inherits the replaced snapshot's. With `amends`, the amended spec's
+    /// unless named, and an empty list leaves none; otherwise not empty
+    /// (`bad_request`). A name that isn't such a definition keeps nothing
+    /// (`check.error` is a `bad_request`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holes: Option<Vec<String>>,
     /// The spec snapshot this spec amends, during a run, and why. The code
@@ -899,6 +900,26 @@ pub struct Amendment {
     #[schema(required = true)]
     #[serde(default)]
     pub added: Vec<String>,
+    /// The holes before and after, when the amending spec names other
+    /// holes than the amended spec's, which it otherwise keeps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holes: Option<AmendedHoles>,
+}
+
+/// An amendment's change to a spec's holes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AmendedHoles {
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
+/// A spec that an amendment supersedes, and the spec now current.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Superseded {
+    pub spec: String,
+    /// The current spec: the newest amendment of `spec`, followed through
+    /// the amendments made of it.
+    pub by: String,
 }
 
 /// A snapshot that a create replaces, and what the replacement may change:
@@ -1452,12 +1473,16 @@ pub struct AuditSnapshotsResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified: Vec<String>,
     /// With `against`: the amendments of the spec snapshots, both those they
-    /// make and those made of them, as the creates recorded them. They don't
-    /// change `clean`, which judges the run against the specs `against`
-    /// names: `POST /snapshots/resubmit` carries a run over to the spec
-    /// that amends its own.
+    /// make and those made of them, as the creates recorded them.
+    /// `POST /snapshots/resubmit` carries a run over to the spec that amends
+    /// its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub amendments: Vec<Amendment>,
+    /// With `against`: each spec snapshot that an amendment supersedes, with
+    /// the current spec, the newest amendment's, followed through its own
+    /// amendments. Its run takes no more submissions, and isn't `clean`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded: Vec<Superseded>,
     /// With `against`: the refutations of the spec snapshots' targets, each
     /// a snapshot that proves `¬` a target's statement on the spec. Any one
     /// makes the run not `clean`: what it set out to prove is false as

@@ -9,7 +9,7 @@ use diesel::{
     BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl,
 };
 use diesel_async::RunQueryDsl;
-use pisa_protocol::api::{Error, ErrorKind, Replaces};
+use pisa_protocol::api::{AmendedHoles, Error, ErrorKind, Replaces};
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::snapshot;
 use serde_json::Value;
@@ -386,6 +386,29 @@ async fn check_replaced(conn: &mut Conn, v: &str, entry: &NewEntry) -> Result<()
             "the replaced snapshot was deleted while this one was being built".to_string(),
         )));
     }
+    // The run's spec: what the replaced entry's own link starts from, or
+    // the replaced entry.
+    let root: Option<String> = links::table
+        .filter(links::version.eq(v))
+        .filter(links::entry.eq(&replaces.snapshot_id))
+        .select(links::run_root)
+        .first(conn)
+        .await
+        .optional()?;
+    let root = root.unwrap_or_else(|| replaces.snapshot_id.clone());
+    let amended: bool = diesel::select(exists(
+        amendments::table
+            .filter(amendments::version.eq(v))
+            .filter(amendments::amends.eq(&root)),
+    ))
+    .get_result(conn)
+    .await?;
+    if amended {
+        return Err(Fail::Api(Error::new(
+            ErrorKind::Conflict,
+            "the run's spec was amended while this one was being built".to_string(),
+        )));
+    }
     if entry.fork {
         return Ok(());
     }
@@ -487,6 +510,8 @@ async fn add(
                 amendments::reason.eq(&a.reason),
                 amendments::changes.eq(serde_json::to_string(&a.changes)?),
                 amendments::added.eq(serde_json::to_string(&a.added)?),
+                amendments::holes_before.eq(a.holes.as_ref().map(|h| serde_json::to_string(&h.before)).transpose()?),
+                amendments::holes_after.eq(a.holes.as_ref().map(|h| serde_json::to_string(&h.after)).transpose()?),
             ))
             .execute(conn)
             .await?;
@@ -1324,6 +1349,10 @@ pub(crate) async fn put_acceptance(
     Ok(())
 }
 
+/// An amendment's columns: the amending entry, the amended, the reason, the
+/// changes, what it adds, and the holes before and after.
+type AmendmentRow = (String, String, String, String, String, Option<String>, Option<String>);
+
 pub(crate) async fn amendments_of(
     db: &Handle,
     v: &str,
@@ -1342,18 +1371,28 @@ pub(crate) async fn amendments_of(
             amendments::reason,
             amendments::changes,
             amendments::added,
+            amendments::holes_before,
+            amendments::holes_after,
         ))
-        .load::<(String, String, String, String, String)>(&mut *conn(db).await?)
+        .load::<AmendmentRow>(&mut *conn(db).await?)
         .await
         .map_err(DbError::from)?;
-    let read = |rows: Vec<(String, String, String, String, String)>| {
+    let read = |rows: Vec<AmendmentRow>| {
         rows.into_iter()
-            .map(|(entry, amends, reason, changes, added)| {
+            .map(|(entry, amends, reason, changes, added, before, after)| {
+                let holes = match (before, after) {
+                    (Some(before), Some(after)) => Some(AmendedHoles {
+                        before: serde_json::from_str(&before)?,
+                        after: serde_json::from_str(&after)?,
+                    }),
+                    _ => None,
+                };
                 let amendment = Amendment {
                     amends,
                     reason,
                     changes: serde_json::from_str(&changes)?,
                     added: serde_json::from_str(&added)?,
+                    holes,
                 };
                 Ok((entry, amendment))
             })

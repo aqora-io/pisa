@@ -100,7 +100,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         ));
     }
     match &req.holes {
-        Some(holes) if holes.is_empty() => {
+        Some(holes) if holes.is_empty() && req.amends.is_none() => {
             return Err(ApiError::new(
                 ErrorKind::BadRequest,
                 "holes is empty: to leave no definition to change, leave holes out",
@@ -192,7 +192,7 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         ),
         replaces: req.replaces,
         fork: req.fork,
-        holes: req.holes.unwrap_or_default(),
+        holes: req.holes,
         amends: req.amends,
         refutes: req.refutes,
         detail: req.detail,

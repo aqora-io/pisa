@@ -75,6 +75,8 @@ diesel::table! {
         reason -> Text,
         changes -> Text,
         added -> Text,
+        holes_before -> Nullable<Text>,
+        holes_after -> Nullable<Text>,
     }
 }
 

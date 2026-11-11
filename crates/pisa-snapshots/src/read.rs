@@ -143,6 +143,68 @@ impl Reader {
         Ok(Some((Error::new(ErrorKind::Conflict, message), heads)))
     }
 
+    /// The refusal of a create that replaces `entry` when the spec of the
+    /// run it is on was amended: the error, which names the spec that
+    /// supersedes it, and that spec's run's heads. A fork is refused too: the
+    /// run is the old spec's either way.
+    pub async fn superseded(&self, entry: &str) -> Result<Option<(Error, Vec<String>)>, Error> {
+        let root = self.run_root(entry).await?;
+        let Some(current) = self.superseding(&root).await? else {
+            return Ok(None);
+        };
+        let heads = self.heads_from(&current).await?;
+        let message = format!(
+            "{}'s run, from spec {}, was amended by {}: replace one of the heads of its run, {}, \
+             or carry a head over with POST /snapshots/resubmit",
+            self.id(entry),
+            self.id(&root),
+            self.id(&current),
+            heads.join(", ")
+        );
+        Ok(Some((Error::new(ErrorKind::Conflict, message), heads)))
+    }
+
+    /// The spec now current in place of `spec`: the newest of the specs that
+    /// amend it, followed through the amendments made of those. `None` if
+    /// nothing amends it.
+    pub async fn superseding(&self, spec: &str) -> Result<Option<String>, Error> {
+        let mut current = spec.to_string();
+        let mut seen = HashSet::new();
+        loop {
+            seen.insert(current.clone());
+            let mut amenders = Vec::new();
+            for (e, a) in self
+                .catalog
+                .amendments_of(std::slice::from_ref(&current))
+                .await?
+            {
+                if a.amends == current && !seen.contains(&e) {
+                    let created = self.catalog.find_entry(&e).await?.map(|m| m.created_micros);
+                    amenders.push((created.unwrap_or(0), e));
+                }
+            }
+            match amenders.into_iter().max() {
+                Some((_, e)) => current = e,
+                None => break,
+            }
+        }
+        Ok((current != spec).then_some(current))
+    }
+
+    /// The spec the run `entry` is on starts from: `entry`, or what its
+    /// chain of replacements leads back to, which may be deleted since.
+    async fn run_root(&self, entry: &str) -> Result<String, Error> {
+        let mut at = entry.to_string();
+        // Links point at older entries, so the chain ends.
+        while let Some(meta) = self.catalog.find_entry(&at).await? {
+            match meta.replaces {
+                Some(r) => at = r.snapshot_id,
+                None => break,
+            }
+        }
+        Ok(at)
+    }
+
     /// The snapshot ids of the heads of the run from `entry`: the entries
     /// that nothing replaces, reached from `entry` through what replaces it,
     /// oldest first.

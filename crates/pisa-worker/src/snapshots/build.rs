@@ -352,7 +352,7 @@ impl Snapshots {
             .collect();
         match self
             .reader
-            .holes_error(&job.holes, &verification.declarations, &closure)
+            .holes_error(&spec_holes(job, rel), &verification.declarations, &closure)
             .await
         {
             Ok(None) => {}
@@ -367,7 +367,10 @@ impl Snapshots {
                 let own = exported.iter().flatten();
                 let own = own.map(|d| (d.name.clone(), d.signature.clone()));
                 let decls = &verification.declarations;
-                match self.amendment(a, &needs, id, decls, own).await {
+                match self
+                    .amendment(a, &spec_holes(job, rel), &needs, id, decls, own)
+                    .await
+                {
                     Ok(a) => Some(a),
                     Err(e) => {
                         self.unbuild(slot, id);
@@ -406,7 +409,7 @@ impl Snapshots {
             replaces: replacing.map(Replacing::link),
             replacement: replacement.clone(),
             fork: job.fork,
-            holes: replacing.map_or_else(|| job.holes.clone(), |r| r.holes.clone()),
+            holes: replacing.map_or_else(|| spec_holes(job, rel), |r| r.holes.clone()),
             amends,
             refutes,
         };

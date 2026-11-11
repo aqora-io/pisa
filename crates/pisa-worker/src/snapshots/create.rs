@@ -53,6 +53,19 @@ impl Refuting {
 pub(super) struct Amending {
     pub amended: Replacing,
     pub reason: String,
+    /// The amended spec's holes, which the new spec keeps unless the
+    /// request names its own.
+    pub holes: Vec<String>,
+}
+
+/// The holes of the snapshot a create makes, unless it replaces one: those
+/// the request names, or with `amends` and none named, the amended spec's.
+pub(super) fn spec_holes(job: &SnapshotCreateJob, rel: &Relations) -> Vec<String> {
+    match (&job.holes, &rel.amending) {
+        (Some(holes), _) => holes.clone(),
+        (None, Some(a)) => a.holes.clone(),
+        (None, None) => Vec::new(),
+    }
 }
 
 /// Puts what a create's comparison with `replacing` found into its
@@ -238,10 +251,11 @@ impl Snapshots {
                 };
                 match self.reader.replacing(&amended).await {
                     Ok(mut amended) => {
-                        amended.holes.clear();
+                        let holes = std::mem::take(&mut amended.holes);
                         Some(Amending {
                             amended,
                             reason: a.reason.clone(),
+                            holes,
                         })
                     }
                     Err(e) => {
@@ -267,6 +281,20 @@ impl Snapshots {
             amending,
             refuting,
         };
+        if let Some(r) = rel.replacing.as_ref() {
+            match self.reader.superseded(&r.entry).await {
+                Ok(Some((error, heads))) => {
+                    response.check.error = Some(error);
+                    response.heads = heads;
+                    return response;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    response.check.error = Some(e);
+                    return response;
+                }
+            }
+        }
         if let Some(r) = rel.replacing.as_ref().filter(|_| !job.fork) {
             match self.reader.replaced_by(&r.entry).await {
                 Ok(Some((error, heads))) => {
@@ -288,25 +316,31 @@ impl Snapshots {
                 .create_once(pool, &job, &split, &rel, response.clone())
                 .await;
             if let Some(mut done) = done {
-                // Another create replaced it while this one was building.
+                // Another create replaced it, or amended the run's spec, while
+                // this one was building.
                 if let Some(r) = &rel.replacing
                     && done
                         .check
                         .error
                         .as_ref()
                         .is_some_and(|e| e.kind == ErrorKind::Conflict)
-                    && let Ok(Some((mut error, heads))) = self.reader.replaced_by(&r.entry).await
                 {
-                    if done
-                        .check
-                        .error
-                        .as_ref()
-                        .is_some_and(|e| e.message.ends_with(build::KEPT))
-                    {
-                        error.message.push_str(build::KEPT);
+                    let found = match self.reader.superseded(&r.entry).await {
+                        Ok(None) => self.reader.replaced_by(&r.entry).await,
+                        found => found,
+                    };
+                    if let Ok(Some((mut error, heads))) = found {
+                        if done
+                            .check
+                            .error
+                            .as_ref()
+                            .is_some_and(|e| e.message.ends_with(build::KEPT))
+                        {
+                            error.message.push_str(build::KEPT);
+                        }
+                        done.check.error = Some(error);
+                        done.heads = heads;
                     }
-                    done.check.error = Some(error);
-                    done.heads = heads;
                 }
                 return done;
             }
@@ -482,7 +516,7 @@ impl Snapshots {
         let closure: Vec<String> = ids(&meta.modules).filter(|m| *m != id).cloned().collect();
         match self
             .reader
-            .holes_error(&job.holes, &meta.result.declarations, &closure)
+            .holes_error(&spec_holes(job, rel), &meta.result.declarations, &closure)
             .await
         {
             Ok(None) => {}
@@ -511,7 +545,10 @@ impl Snapshots {
                 let needs: Vec<String> = ids(&meta.modules).cloned().collect();
                 let own = self.reader.exports_of(&[id.to_string()]).await;
                 let decls = &meta.result.declarations;
-                match self.amendment(a, &needs, id, decls, own).await {
+                match self
+                    .amendment(a, &spec_holes(job, rel), &needs, id, decls, own)
+                    .await
+                {
                     Ok(a) => Some(a),
                     Err(e) => {
                         response.check.error = Some(e);
@@ -527,7 +564,7 @@ impl Snapshots {
             replaces: replacing.map(Replacing::link),
             replacement: replacement.clone(),
             fork: job.fork,
-            holes: replacing.map_or_else(|| job.holes.clone(), |r| r.holes.clone()),
+            holes: replacing.map_or_else(|| spec_holes(job, rel), |r| r.holes.clone()),
             amends,
             refutes,
         };
@@ -572,6 +609,7 @@ impl Snapshots {
     pub(super) async fn amendment(
         &self,
         a: &Amending,
+        holes: &[String],
         needs: &[String],
         id: &str,
         decls: &[Declaration],
@@ -598,11 +636,16 @@ impl Snapshots {
             .filter(|d| !d.generated && !had.contains(normalised(&d.name).as_ref()))
             .map(|d| d.name.clone())
             .collect();
+        let holes = (a.holes != holes).then(|| AmendedHoles {
+            before: a.holes.clone(),
+            after: holes.to_vec(),
+        });
         Ok(crate::catalog::Amendment {
             amends: a.amended.entry.clone(),
             reason: a.reason.clone(),
             changes,
             added,
+            holes,
         })
     }
 }

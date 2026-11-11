@@ -153,6 +153,11 @@ class Amends(TypedDict):
     snapshot_id: str
     reason: str
 
+class AmendedHoles(TypedDict):
+    """An amendment's change to a spec's holes."""
+    before: list[str]
+    after: list[str]
+
 class Amendment(TypedDict):
     """A spec's amendment of an earlier spec: what changed of it, and what
     the amending spec adds."""
@@ -161,6 +166,14 @@ class Amendment(TypedDict):
     reason: str
     changes: list[DeclarationChange]
     added: list[str]
+    # When the amending spec names other holes than the amended spec's.
+    holes: NotRequired[AmendedHoles]
+
+class Superseded(TypedDict):
+    """A spec an amendment supersedes, and the spec now current: the newest
+    amendment, followed through the amendments made of it."""
+    spec: str
+    by: str
 
 class Refutes(TypedDict):
     """The spec target a create refutes."""
@@ -318,6 +331,8 @@ class AuditSnapshotsResponse(TypedDict):
     review: NotRequired[list[AuditReview]]
     unverified: NotRequired[list[str]]
     amendments: NotRequired[list[Amendment]]
+    # A superseded spec's run takes no more submissions, and isn't clean.
+    superseded: NotRequired[list[Superseded]]
     # A refuted target makes the run not clean.
     refutations: NotRequired[list[Refutation]]
     # The heads whose targets hold only through links, for `settle_run`.

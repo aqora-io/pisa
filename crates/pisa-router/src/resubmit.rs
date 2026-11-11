@@ -43,11 +43,22 @@ pub(crate) async fn run(
     if req.dry_run {
         return Ok(response);
     }
-    let mut first = true;
+    let to = reader.parse(&req.to)?;
     for item in response.items.iter_mut().filter(|i| i.passes) {
-        // The heads of a forked run come over forked.
-        let fork = !first;
-        first = false;
+        // A head comes over forked once the new spec has a replacer: an
+        // earlier item's, so that a forked run comes over forked, or
+        // another create's. A key replay comes before that check, so the
+        // same resubmit sent again replays.
+        let fork = match reader.replaced_by(&to).await {
+            Ok(replaced) => replaced.is_some(),
+            Err(error) => {
+                item.check = Some(CheckResult {
+                    error: Some(error),
+                    ..Default::default()
+                });
+                continue;
+            }
+        };
         let made = async {
             let head = reader.get(&item.snapshot_id).await?;
             let create = CreateSnapshotRequest {

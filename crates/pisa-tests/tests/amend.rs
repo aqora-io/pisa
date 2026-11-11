@@ -177,11 +177,19 @@ async fn an_audit_lists_a_specs_amendments_both_ways() {
     let body = json!({"code": AMENDED, "holes": ["cost"], "amends": amends(&old, "t was false")});
     let amendment = create(&c, body).await["amendment"].clone();
     let new = amendment["snapshot_id"].as_str().unwrap().to_string();
-    // From the amended spec, whose run it doesn't change, and from the new.
+    // From the amended spec, which it supersedes, and from the new.
+    assert_eq!(before["clean"], true, "{before}");
     let after = audit(old.clone()).await;
     assert_eq!(after["amendments"], json!([amendment]));
-    assert_eq!(after["clean"], before["clean"]);
-    assert_eq!(audit(new).await["amendments"], json!([amendment]));
+    assert_eq!(
+        after["superseded"],
+        json!([{"spec": old, "by": new}]),
+        "{after}"
+    );
+    assert_eq!(after["clean"], false, "{after}");
+    let current = audit(new).await;
+    assert_eq!(current["amendments"], json!([amendment]));
+    assert!(current.get("superseded").is_none(), "{current}");
 }
 
 /// A spec with a false target `w`, and its amendment without it.
@@ -346,4 +354,143 @@ async fn a_resubmit_is_from_a_spec_to_one_that_amends_it() {
         let message = r["error"]["message"].as_str().unwrap();
         assert!(message.contains(says), "{message}");
     }
+}
+
+/// Asserts that a create into a run kept nothing: a conflict that names
+/// `current` and gives its heads, `heads`.
+fn superseded(r: &Value, current: &str, heads: &[String]) {
+    assert!(r.get("snapshot").is_none(), "{r}");
+    assert_eq!(r["check"]["error"]["kind"], "conflict", "{r}");
+    let message = r["check"]["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&format!("amended by {current}")),
+        "{message}"
+    );
+    assert_eq!(r["heads"], json!(heads), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_whose_spec_is_amended_takes_no_more_submissions() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = id(&create(&c, json!({"code": WITH_W, "holes": ["cost"]})).await);
+    let h = id(&create(
+        &c,
+        json!({"code": head(1), "replaces": {"snapshot_id": old}}),
+    )
+    .await);
+    let body = json!({"code": WITHOUT_W, "holes": ["cost"], "amends": amends(&old, "w is false")});
+    let new = id(&create(&c, body).await);
+    // Into the old run, onto its head or its spec, forked or not.
+    for (replaced, fork) in [(&h, false), (&h, true), (&old, true)] {
+        let body = json!({"code": head(2), "replaces": {"snapshot_id": replaced}, "fork": fork});
+        superseded(&create(&c, body).await, &new, std::slice::from_ref(&new));
+    }
+    // Once the run is carried over, the conflict gives its heads.
+    let (_, done) = resubmit(&c, json!({"from": old, "to": new})).await;
+    let made = done["items"][0]["new_snapshot_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = json!({"code": head(2), "replaces": {"snapshot_id": h}});
+    superseded(&create(&c, body).await, &new, &[made]);
+    // An amendment of the amendment supersedes both.
+    let newer = WITHOUT_W.replace("cost = cost", "cost + 0 = cost");
+    let body = json!({"code": newer, "holes": ["cost"], "amends": amends(&new, "simpler")});
+    let newer = id(&create(&c, body).await);
+    let body = json!({"code": head(2), "replaces": {"snapshot_id": h}});
+    superseded(
+        &create(&c, body).await,
+        &newer,
+        std::slice::from_ref(&newer),
+    );
+    let audit = audit_against(&c, &old).await;
+    assert_eq!(
+        audit["superseded"],
+        json!([{"spec": old, "by": newer}]),
+        "{audit}"
+    );
+    // The current spec's run takes them.
+    let body = json!({"code": WITHOUT_W.replace("sorry", "1"), "replaces": {"snapshot_id": newer}});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    assert_ne!(r["check"]["error"]["kind"], "conflict", "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_amendment_keeps_the_holes_it_doesnt_change() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = id(&create(&c, json!({"code": WITH_W, "holes": ["cost"]})).await);
+    // Naming none keeps the amended spec's.
+    let r = create(
+        &c,
+        json!({"code": WITHOUT_W, "amends": amends(&old, "w is false")}),
+    )
+    .await;
+    assert_eq!(r["snapshot"]["holes"], json!(["cost"]), "{r}");
+    assert!(r["amendment"].get("holes").is_none(), "{r}");
+    // Naming some replaces them, and the record has both.
+    let two = "import Foo\n\ndef cost : Nat := sorry\ndef rate : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let body = json!({"code": two, "holes": ["cost", "rate"], "amends": amends(&old, "rate too")});
+    let r = create(&c, body).await;
+    assert_eq!(r["snapshot"]["holes"], json!(["cost", "rate"]), "{r}");
+    let changed = json!({"before": ["cost"], "after": ["cost", "rate"]});
+    assert_eq!(r["amendment"]["holes"], changed, "{r}");
+    // An empty list, with `amends` only, leaves none.
+    let fixed = "import Foo\n\ndef cost : Nat := 3\ntheorem t : cost = cost := sorry";
+    let body = json!({"code": fixed, "holes": [], "amends": amends(&old, "cost is 3")});
+    let r = create(&c, body).await;
+    assert!(r["snapshot"].get("holes").is_none(), "{r}");
+    assert_eq!(
+        r["amendment"]["holes"],
+        json!({"before": ["cost"], "after": []}),
+        "{r}"
+    );
+    let (status, r) = c
+        .post("/snapshots", json!({"code": fixed, "holes": []}))
+        .await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
+    // An audit lists the record as the create answered it.
+    let audit = audit_against(&c, &old).await;
+    let recorded: Vec<&Value> = audit["amendments"].as_array().unwrap().iter().collect();
+    assert!(recorded.iter().any(|a| a["holes"] == changed), "{audit}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resubmit_comes_over_forked_onto_a_spec_replaced_already() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = id(&create(&c, json!({"code": WITH_W, "holes": ["cost"]})).await);
+    create(
+        &c,
+        json!({"code": head(1), "replaces": {"snapshot_id": old}}),
+    )
+    .await;
+    let body = json!({"code": WITHOUT_W, "holes": ["cost"], "amends": amends(&old, "w is false")});
+    let new = id(&create(&c, body).await);
+    // An agent submits to the new spec before the run is carried over.
+    let theirs = WITHOUT_W.replace("cost : Nat := sorry", "cost : Nat := 2");
+    let theirs = id(&create(
+        &c,
+        json!({"code": theirs, "replaces": {"snapshot_id": new}}),
+    )
+    .await);
+    let (status, done) = resubmit(&c, json!({"from": old, "to": new})).await;
+    assert_eq!(status, 200, "{done}");
+    assert_eq!(done["ok"], true, "{done}");
+    let made = done["items"][0]["new_snapshot_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let audit = audit_against(&c, &new).await;
+    let heads: Vec<&Value> = audit["heads"].as_array().unwrap().iter().collect();
+    assert!(
+        heads.contains(&&json!(theirs)) && heads.contains(&&json!(made)),
+        "{audit}"
+    );
+    // Sent again, it replays.
+    let (_, again) = resubmit(&c, json!({"from": old, "to": new})).await;
+    assert_eq!(again, done);
 }

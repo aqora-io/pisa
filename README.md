@@ -201,10 +201,17 @@ and the rest of the API works.
 
 ## Upgrading
 
-To the release that refuses imports declaring one name twice:
+To the release that supersedes amended specs and refuses clashing imports:
 - A module built earlier whose header imports two snapshots that declare
   the same name no longer verifies: its re-check fails with the clash, and
   it stays as it was.
+- An amendment now supersedes the spec it amends, those made before
+  included: an audit against an amended spec isn't `clean`, and its run
+  takes no more submissions. Carry what should stay over with
+  `POST /snapshots/resubmit`.
+- A spec created with `amends` and no `holes` keeps the amended spec's.
+  Specs amended earlier keep the holes they were created with, and their
+  records show no change of holes.
 
 To the release that re-checks snapshots by default and answers catalog reads
 on the servers:
@@ -312,7 +319,7 @@ pnpm -C web generate
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/settle` | `{against, allow?, dry_run?, verify?, timeout?}` → as `POST /snapshots/rebuild`; async with `Prefer: respond-async`; see [Settling a run](#settling) |
 | `POST /snapshots/resubmit` | `{from, to, dry_run?, labels?, verify?, timeout?}` → `{ok, items: [{snapshot_id, module, key, passes, reasons?, changes?, replacement?, new_snapshot_id?, check?}]}`; async with `Prefer: respond-async`; see [Amending a spec](#amending) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added}], refutations?: [{snapshot_id, spec, target, theorem}], unsettled?: [{head, swaps: [{snapshot_id, head}], blockers?}]}`, each target with `linked_status?` and `through?: [{name, snapshot_id, head}]`; see [Statuses](#statuses), [Auditing a run](#spec-audit) and [Through links](#through-links) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added, holes?: {before, after}}], superseded?: [{spec, by}], refutations?: [{snapshot_id, spec, target, theorem}], unsettled?: [{head, swaps: [{snapshot_id, head}], blockers?}]}`, each target with `linked_status?` and `through?: [{name, snapshot_id, head}]`; see [Statuses](#statuses), [Auditing a run](#spec-audit) and [Through links](#through-links) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -865,7 +872,7 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   target is `accepted` on its head: the
   spec snapshot and the head are verified, their comparison found the
   spec's statements kept, nothing [refutes](#refuting) the target (its
-  `refuted_by`), and the target is `proved`, or `conditional` only
+  `refuted_by`), no amendment supersedes the spec, and the target is `proved`, or `conditional` only
   on assumptions the spec permits, those declared in a spec snapshot's module
   or in a module it builds on. The records of a module the kernel hasn't
   re-checked come from its build's report, which the code being judged could
@@ -875,7 +882,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   permits it (`in_spec`).
 - **Amendments and refutations.** `amendments` lists the
   [amendments](#amending) of the spec snapshots, both those they make and
-  those made of them, which don't change `clean`. `refutations` lists the
+  those made of them. `superseded` lists each spec snapshot an amendment
+  supersedes, `{spec, by}`, with `by` the spec now current, and any one
+  makes the run not `clean`: it is judged against the current spec.
+  `refutations` lists the
   snapshots that [refute](#refuting) a spec snapshot's target: any one makes
   the run not `clean`.
 - **Links.** For review, `links` lists every link that let definitions change
@@ -1119,22 +1129,30 @@ accepting a run takes both:
 hypothesis missing, a hole that should be a definition. A leader fixes it
 during a run by creating the corrected spec with `amends: {snapshot_id,
 reason}`, the spec it amends and why (1 to 4,096 characters):
-- **The new spec** is a spec of its own, with its own `holes`, that
-  replaces nothing (`replaces` with `amends` is a 400). It is always
+- **The new spec** is a spec of its own that replaces nothing (`replaces`
+  with `amends` is a 400). It keeps the amended spec's `holes` unless it
+  names its own, and `holes: []` leaves none. It is always
   re-checked through the kernel (`verify: false` is a 400).
 - **The record.** Its create compares it with the amended spec as a
   replacement that may change nothing would be compared (see
   [Replacing](#replacing)), holes included, and records what changed
   (`changes`, as a refused replacement's) and the declarations it adds
-  (`added`), with the reason. The response's `amendment` has it, and an
+  (`added`), with the reason, and the holes before and after
+  (`holes: {before, after}`) when they differ. The response's `amendment` has it, and an
   audit against either spec lists it in `amendments`. Deleting the new spec
   deletes the record; deleting the amended one keeps it.
+- **It supersedes the amended spec.** The current spec is the newest
+  amendment, followed through the amendments made of it. An audit against an
+  amended spec says so in `superseded` and isn't `clean`, and a create that
+  replaces into its run, a fork included, is a `conflict` whose message names
+  the current spec and whose `heads` are that spec's run's heads.
 - **Carrying the run over.** `POST /snapshots/resubmit {from, to}`, with
   `to` a spec that amends `from`, compares each head of `from`'s run with
   `to`, as an audit against `to` would, allowing `to`'s holes to change. A
   head that keeps `to`'s statements is created again: the same code, so the
   same module, replacing `to`, with its labels or the request's `labels`.
-  The heads of a forked run come over forked. A head that changes one of
+  A head comes over forked once `to` has a replacer, an earlier head's or
+  another create's, so the heads of a forked run come over forked. A head that changes one of
   `to`'s statements is listed with its `reasons` and `changes`, and one
   whose record isn't verified with that reason; neither is created.
   `dry_run` only compares. Each create has a key of the resubmit's, so

@@ -632,6 +632,11 @@ export interface components {
              */
             definitions: string[];
         };
+        /** @description An amendment's change to a spec's holes. */
+        AmendedHoles: {
+            after: string[];
+            before: string[];
+        };
         /** @description A spec's amendment of an earlier spec, as its create recorded it. */
         Amendment: {
             /** @description The declarations the amending spec adds. */
@@ -644,6 +649,11 @@ export interface components {
              *     (holes included) and assumptions.
              */
             changes: components["schemas"]["DeclarationChange"][];
+            /**
+             * @description The holes before and after, when the amending spec names other
+             *     holes than the amended spec's, which it otherwise keeps.
+             */
+            holes?: components["schemas"]["AmendedHoles"];
             reason: string;
             /** @description The amending spec. */
             snapshot_id: string;
@@ -831,10 +841,9 @@ export interface components {
         AuditSnapshotsResponse: {
             /**
              * @description With `against`: the amendments of the spec snapshots, both those they
-             *     make and those made of them, as the creates recorded them. They don't
-             *     change `clean`, which judges the run against the specs `against`
-             *     names: `POST /snapshots/resubmit` carries a run over to the spec
-             *     that amends its own.
+             *     make and those made of them, as the creates recorded them.
+             *     `POST /snapshots/resubmit` carries a run over to the spec that amends
+             *     its own.
              */
             amendments?: components["schemas"]["Amendment"][];
             /**
@@ -897,6 +906,12 @@ export interface components {
              */
             review?: components["schemas"]["AuditReview"][];
             summary: components["schemas"]["AuditSummary"];
+            /**
+             * @description With `against`: each spec snapshot that an amendment supersedes, with
+             *     the current spec, the newest amendment's, followed through its own
+             *     amendments. Its run takes no more submissions, and isn't `clean`.
+             */
+            superseded?: components["schemas"]["Superseded"][];
             /**
              * @description With `against`: each declaration of a spec snapshot's module, other
              *     than its assumptions and what Lean generated, on each head reached
@@ -1137,9 +1152,10 @@ export interface components {
              *     builds on. The snapshots that replace it inherit them and may change
              *     them without `allow`, and a [spec audit](AuditSnapshotsResponse)
              *     allows them to change. Not with `replaces`, as a replacement
-             *     inherits the replaced snapshot's, and not empty (`bad_request`); a
-             *     name that isn't such a definition keeps nothing (`check.error` is a
-             *     `bad_request`).
+             *     inherits the replaced snapshot's. With `amends`, the amended spec's
+             *     unless named, and an empty list leaves none; otherwise not empty
+             *     (`bad_request`). A name that isn't such a definition keeps nothing
+             *     (`check.error` is a `bad_request`).
              */
             holes?: string[];
             /**
@@ -2421,6 +2437,15 @@ export interface components {
             name: string;
             signature: string;
         };
+        /** @description A spec that an amendment supersedes, and the spec now current. */
+        Superseded: {
+            /**
+             * @description The current spec: the newest amendment of `spec`, followed through
+             *     the amendments made of it.
+             */
+            by: string;
+            spec: string;
+        };
         /** @description One run of a tactic, with the goals before and after it. */
         TacticInfo: {
             end_pos: components["schemas"]["Pos"];
@@ -2503,6 +2528,7 @@ export type AcceptPair = components['schemas']['AcceptPair'];
 export type AcceptRequest = components['schemas']['AcceptRequest'];
 export type AcceptResponse = components['schemas']['AcceptResponse'];
 export type Allow = components['schemas']['Allow'];
+export type AmendedHoles = components['schemas']['AmendedHoles'];
 export type Amendment = components['schemas']['Amendment'];
 export type Amends = components['schemas']['Amends'];
 export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
@@ -2605,6 +2631,7 @@ export type Sorry = components['schemas']['Sorry'];
 export type StartSessionRequest = components['schemas']['StartSessionRequest'];
 export type State = components['schemas']['State'];
 export type Suggestion = components['schemas']['Suggestion'];
+export type Superseded = components['schemas']['Superseded'];
 export type TacticInfo = components['schemas']['TacticInfo'];
 export type Tarball = components['schemas']['Tarball'];
 export type TermInfo = components['schemas']['TermInfo'];

@@ -173,6 +173,28 @@
         ],
         "type": "object"
       },
+      "AmendedHoles": {
+        "description": "An amendment's change to a spec's holes.",
+        "properties": {
+          "after": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "before": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "before",
+          "after"
+        ],
+        "type": "object"
+      },
       "Amendment": {
         "description": "A spec's amendment of an earlier spec, as its create recorded it.",
         "properties": {
@@ -193,6 +215,10 @@
               "$ref": "#/components/schemas/DeclarationChange"
             },
             "type": "array"
+          },
+          "holes": {
+            "$ref": "#/components/schemas/AmendedHoles",
+            "description": "The holes before and after, when the amending spec names other\nholes than the amended spec's, which it otherwise keeps."
           },
           "reason": {
             "type": "string"
@@ -457,7 +483,7 @@
         "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.\n\nWith `against=<snapshot id>` instead of labels, repeatable, it audits a\nrun against its spec, the snapshots named. From each, it follows the\nsnapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever\ntheir labels, to the run's `heads`, and judges each spec declaration on\neach head it reaches. The counts are then those of the heads' snapshots.\nThe ids are of one version, which the audit uses, and `label` doesn't\ncombine with them. A spec snapshot that doesn't exist is `not_found`.\nThe heads may change a spec snapshot's\n[`holes`](CreateSnapshotRequest::holes), and the definitions\n`allow=<name>`, repeatable, names: those the leader allows later. The\nlinks' own allows, which whoever created them wrote, don't count.",
         "properties": {
           "amendments": {
-            "description": "With `against`: the amendments of the spec snapshots, both those they\nmake and those made of them, as the creates recorded them. They don't\nchange `clean`, which judges the run against the specs `against`\nnames: `POST /snapshots/resubmit` carries a run over to the spec\nthat amends its own.",
+            "description": "With `against`: the amendments of the spec snapshots, both those they\nmake and those made of them, as the creates recorded them.\n`POST /snapshots/resubmit` carries a run over to the spec that amends\nits own.",
             "items": {
               "$ref": "#/components/schemas/Amendment"
             },
@@ -525,6 +551,13 @@
           },
           "summary": {
             "$ref": "#/components/schemas/AuditSummary"
+          },
+          "superseded": {
+            "description": "With `against`: each spec snapshot that an amendment supersedes, with\nthe current spec, the newest amendment's, followed through its own\namendments. Its run takes no more submissions, and isn't `clean`.",
+            "items": {
+              "$ref": "#/components/schemas/Superseded"
+            },
+            "type": "array"
           },
           "targets": {
             "description": "With `against`: each declaration of a spec snapshot's module, other\nthan its assumptions and what Lean generated, on each head reached\nfrom that spec snapshot. A replacement keeps every declaration of what\nit replaces, so every head carries them all.",
@@ -973,7 +1006,7 @@
             "type": "boolean"
           },
           "holes": {
-            "description": "The definitions a spec snapshot leaves for the snapshots that replace\nit to change, its holes, named as [`allow`](Allow) names them:\ndefinitions or inductive types of its module or of a snapshot it\nbuilds on. The snapshots that replace it inherit them and may change\nthem without `allow`, and a [spec audit](AuditSnapshotsResponse)\nallows them to change. Not with `replaces`, as a replacement\ninherits the replaced snapshot's, and not empty (`bad_request`); a\nname that isn't such a definition keeps nothing (`check.error` is a\n`bad_request`).",
+            "description": "The definitions a spec snapshot leaves for the snapshots that replace\nit to change, its holes, named as [`allow`](Allow) names them:\ndefinitions or inductive types of its module or of a snapshot it\nbuilds on. The snapshots that replace it inherit them and may change\nthem without `allow`, and a [spec audit](AuditSnapshotsResponse)\nallows them to change. Not with `replaces`, as a replacement\ninherits the replaced snapshot's. With `amends`, the amended spec's\nunless named, and an empty list leaves none; otherwise not empty\n(`bad_request`). A name that isn't such a definition keeps nothing\n(`check.error` is a `bad_request`).",
             "items": {
               "type": "string"
             },
@@ -3149,6 +3182,23 @@
           "name",
           "kind",
           "signature"
+        ],
+        "type": "object"
+      },
+      "Superseded": {
+        "description": "A spec that an amendment supersedes, and the spec now current.",
+        "properties": {
+          "by": {
+            "description": "The current spec: the newest amendment of `spec`, followed through\nthe amendments made of it.",
+            "type": "string"
+          },
+          "spec": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "spec",
+          "by"
         ],
         "type": "object"
       },

@@ -15,7 +15,7 @@ use pisa_protocol::api::{
     AuditSnapshotsResponse, AuditTarget, AuditUnproved, Declaration, Error, ErrorKind, Export,
     ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildReplaced,
     RebuildSnapshotsResponse, Refutation, Replacement, Replaces, Snapshot, SnapshotDetail,
-    SnapshotId,
+    SnapshotId, Superseded,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::labels::{MAX_LABELS, MAX_LIMIT, check_labels, is_cursor, snapshot_id_error};
@@ -137,6 +137,7 @@ impl Reader {
             reason: a.reason,
             changes: a.changes,
             added: a.added,
+            holes: a.holes,
         }
     }
 
