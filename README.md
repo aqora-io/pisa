@@ -40,10 +40,11 @@ imports it instead of re-checking it.
 | `pisa-worker` | Slot pool cached by import header, process recycling, sandbox, cgroups, verification, documents and tactic sessions on Lean Beam, claiming jobs |
 | `pisa-db` | The database (PostgreSQL, or SQLite for tests and single-process runs), its migrations, the job queue and the workers' registry, and the snapshot catalog, shared by the servers and the workers |
 | `pisa-server` | The server: `pisa-router`'s API and `pisa-search`'s in one process, with a combined `/health` and graceful shutdown |
-| `pisa-router` | The check, session and snapshot API: queueing jobs and waiting for their results |
+| `pisa-router` | The check, session and snapshot API: queueing jobs and waiting for their results, and answering catalog reads |
+| `pisa-snapshots` | What reads the snapshot catalog, for the servers and the workers: snapshots, the comparison of a replacement with what it replaces, audits and their review lists, rebuild plans |
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
-| `pisa-tests` | `fake-repl` (speaks the REPL protocol without Lean) and in-process integration tests |
+| `pisa-tests` | `fake-repl`, `fake-pisa` and `fake-lean` (stand-ins for the REPL, the `pisa` tool and `lean`, without Lean) and in-process integration tests |
 | `pisa-search` | Declaration search over Mathlib and Physlib: corpus, descriptions, index, HTTP API, and the CLI that builds and loads bundles (see [Search](#search)) |
 
 `web/` is a pnpm workspace with the TypeScript client, the React hooks and a
@@ -199,6 +200,32 @@ and the rest of the API works.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that re-checks snapshots by default and answers catalog reads
+on the servers:
+- Back up the database first, then stop the servers and the workers, and
+  start the new release: its first process migrates the catalog, links to a
+  table of their own and module records to columns, in time that grows with
+  the `modules` table. Earlier releases can't read the migrated database.
+- Rebuild the images, and run the servers and the workers of this release
+  together: the catalog's read jobs are gone, as the servers answer reads
+  themselves.
+- The worker image builds the `pisa` tool beside the `Pisa` library, and
+  `PISA_TOOL` (`/opt/pisa/.lake/build/bin/pisa`) replaces `PISA_VERIFIER`.
+- The worker image's entrypoint is `tini -- pisa-worker`. A deployment that
+  sets its own command keeps an init as PID 1: without one, the sandboxes
+  the worker kills stay as zombies in their slots' cgroups until Lean can't
+  start a thread there.
+- Creates re-check their code through the kernel unless the request sends
+  `verify: false`, so they take longer, about 2 s for code on `import
+  Mathlib`, and refuse what the kernel rejects. A
+  re-check that runs out of time keeps code outside the module system with no
+  macros, unverified, and says so in `unverified`; other code is refused as a
+  `timeout` or `out_of_memory`. `POST /snapshots/{id}/verify` takes
+  `?timeout=`, per module.
+- Set `PISA_ALLOWED_AXIOMS` on the servers wherever the workers set it
+  (`allowedAxioms` in the chart sets both). A version that no worker serves
+  now answers reads, a 404 or an empty page, where it answered 429.
 
 To the release that runs tactic sessions on Lean Beam:
 - Earlier sessions and their states are gone, and their ids answer 404. The
