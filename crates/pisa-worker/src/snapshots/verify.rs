@@ -135,9 +135,33 @@ impl Snapshots {
                 None => todo.push(module),
             }
         }
+        // A module whose imports declare one name twice fails before the
+        // kernel sees it, and the chain stops there: the re-check would
+        // describe its names from whichever import came first. Creates refuse
+        // such a header; this catches modules built before they did.
+        let mut clashed = None;
+        for (i, module) in todo.iter().enumerate() {
+            let imports = self.catalog.module(&module.id).await?.imports;
+            if let Some(e) = self.reader.clashes(&imports).await? {
+                let module = snapshot::module(&module.id);
+                clashed = Some((
+                    i,
+                    VerifyFailure {
+                        module,
+                        kind: e.kind,
+                        reason: e.message,
+                    },
+                ));
+                break;
+            }
+        }
+        if let Some((i, _)) = &clashed {
+            todo.truncate(*i);
+        }
+        let clashed = clashed.map(|(_, failure)| failure);
         let mut checked = Vec::new();
         if todo.is_empty() {
-            return Ok((checked, None));
+            return Ok((checked, clashed));
         }
         // No header to prefer: this takes a slot with nothing warm if it can.
         let mut slot = pool.acquire("").await;
@@ -180,10 +204,10 @@ impl Snapshots {
             let verification = slot.policy().judge_decls(false, Some(decls));
             match self.record_recheck(module, &verification).await? {
                 Recheck::Passed => checked.push(name),
-                _ => break,
+                _ => return Ok((checked, None)),
             }
         }
-        Ok((checked, failure))
+        Ok((checked, failure.or(clashed)))
     }
 
     /// Gets a re-check of a module build ready: `Changed` if the module's

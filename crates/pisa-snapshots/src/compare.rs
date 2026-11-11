@@ -47,8 +47,8 @@ pub struct Swapped {
 /// The declarations are compared by their hashes, and a hash names the
 /// constants a type or value uses without saying what they are. When the
 /// replacement builds on every snapshot the replaced module does, each of
-/// those constants is the same, as Lean refuses an import that declares a
-/// name again and Mathlib's are fixed by the version. Otherwise the
+/// those constants is the same, as a create refuses a header whose imports
+/// declare a name twice and Mathlib's are fixed by the version. Otherwise the
 /// comparison follows what the replaced declarations use into the snapshots
 /// it lost (see [`walk`]).
 pub fn compare(

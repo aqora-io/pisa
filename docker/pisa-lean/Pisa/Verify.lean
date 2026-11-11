@@ -90,7 +90,7 @@ def run (modules : Array Name) : IO UInt32 := do
             | some i => s!"`{base.header.moduleNames[i.toNat]!}`"
             | none => "an import"
         return ← reject m
-          s!"`{n}` is also declared by {other}, with another proof: no module can import both"
+          s!"`{n}` is also declared by {other}, with another proof: code that imports both means whichever it imports first"
     for n in data.constNames do
       declaredBy := declaredBy.insert n m
     let ctx : Core.Context := { fileName := "", fileMap := default, maxHeartbeats := 0 }

@@ -201,6 +201,11 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release that refuses imports declaring one name twice:
+- A module built earlier whose header imports two snapshots that declare
+  the same name no longer verifies: its re-check fails with the clash, and
+  it stays as it was.
+
 To the release that re-checks snapshots by default and answers catalog reads
 on the servers:
 - Back up the database first, then stop the servers and the workers, and
@@ -548,7 +553,12 @@ includes `verify: true` on code that is already kept but fails the re-check:
 It also includes a header whose imports Lean reads differently from its lines,
 such as an import after a block comment on the same line: the record would
 miss what the module builds on, so it is a `bad_request` that asks for each
-import on its own line.
+import on its own line. And it includes a header that imports two snapshots
+declaring the same name, a `bad_request` that names a snapshot of each. Lean
+loads both when the name is a theorem of one statement in each, as a
+skeleton and its fill are, and the code then uses whichever comes first in
+its imports, so what it proves would hang on their order. When the two are
+versions of one run, the error names the run's head to import instead.
 
 **Who answers.** The servers read the catalog themselves: `GET` of a
 snapshot, listings, dependents, label edits, audits and their review lists,

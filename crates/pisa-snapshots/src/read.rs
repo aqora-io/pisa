@@ -63,6 +63,66 @@ impl Reader {
         }))
     }
 
+    /// The refusal of code whose header imports `imports`, snapshot
+    /// modules, when two of the modules it would load declare one name.
+    /// Lean loads both when they are theorems of one statement, and the code
+    /// then uses whichever comes first in its imports, while the kernel
+    /// re-check may describe it from the other. Within one module's own
+    /// imports Lean refuses a name declared again, so only two or more
+    /// imports can clash.
+    pub async fn clashes(&self, imports: &[String]) -> Result<Option<Error>, Error> {
+        let imports: BTreeSet<&String> = imports.iter().collect();
+        if imports.len() < 2 {
+            return Ok(None);
+        }
+        let mut closure = BTreeSet::new();
+        for m in imports {
+            closure.extend(ids(&self.catalog.module(m).await?.modules).cloned());
+        }
+        let closure: Vec<String> = closure.into_iter().collect();
+        let records = self.catalog.records(&closure).await?;
+        let declared = closure.iter().filter_map(|m| {
+            let record = records.get(m)?;
+            Some((m.as_str(), record.result.declarations.as_slice()))
+        });
+        let Some((name, modules)) = clash(declared) else {
+            return Ok(None);
+        };
+        let entries = self.catalog.entries_on(&modules, &[]).await?;
+        let named: Vec<String> = modules
+            .iter()
+            .map(|m| match entries.iter().find(|(_, e)| &e.module == m) {
+                Some((e, _)) => format!("{} (snapshot {})", snapshot::module(m), self.id(e)),
+                None => snapshot::module(m),
+            })
+            .collect();
+        let mut message = format!(
+            "{} each declare {name}, so no code can import both: Lean would take the first \
+             import's, and the code would mean one or the other by the order of its imports",
+            named.join(" and ")
+        );
+        // Versions of one run lead to the same heads: one of those is what to
+        // import.
+        let ids: Vec<String> = entries.iter().map(|(e, _)| e.clone()).collect();
+        let run = Run::read(&self.catalog, &ids).await?;
+        let reach = |m: &String| -> BTreeSet<String> {
+            entries
+                .iter()
+                .filter(|(_, e)| &e.module == m)
+                .flat_map(|(e, _)| run.heads_from(e))
+                .collect()
+        };
+        let (first, second) = (reach(&modules[0]), reach(&modules[1]));
+        let heads: Vec<String> = first.intersection(&second).map(|e| self.id(e)).collect();
+        if !heads.is_empty() {
+            message.push_str(&format!(
+                ". They are versions of one run: import its head {} instead",
+                heads.join(" or ")
+            ));
+        }
+        Ok(Some(Error::new(ErrorKind::BadRequest, message)))
+    }
+
     /// The refusal of a create that replaces `entry` when another entry
     /// replaces it already: the error, which names the replacers and the
     /// run's heads from there, and the heads. `None` if `entry` is a head.
@@ -316,4 +376,25 @@ impl Reader {
         let meta = self.catalog.module(&entry_meta.module).await?;
         Ok(self.snapshot(entry, entry_meta, &meta))
     }
+}
+
+/// The first name that two of `modules`, by id with their declarations,
+/// declare, with those modules in order. Names Lean makes for a declaration,
+/// and private names, which carry their module, are left out.
+pub(crate) fn clash<'a>(
+    modules: impl IntoIterator<Item = (&'a str, &'a [Declaration])>,
+) -> Option<(String, Vec<String>)> {
+    let mut by_name: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (m, declarations) in modules {
+        for d in declarations {
+            if d.generated || d.name.starts_with("_private.") {
+                continue;
+            }
+            by_name.entry(&d.name).or_default().insert(m);
+        }
+    }
+    by_name
+        .into_iter()
+        .find(|(_, ms)| ms.len() > 1)
+        .map(|(name, ms)| (name.to_string(), ms.into_iter().map(String::from).collect()))
 }

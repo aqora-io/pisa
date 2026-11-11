@@ -784,3 +784,62 @@ async fn holes_name_definitions_of_the_spec_or_of_what_it_builds_on() {
     let r = create(&c, json!({"code": moved, "replaces": replacing(entry(&s))})).await;
     assert_eq!(r["replacement"]["changed_definitions"], json!(["g"]), "{r}");
 }
+
+/// Code on `a`'s and `b`'s headers, a blank line, then `body`.
+fn on_both(a: &Value, b: &Value, body: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    for s in [a, b] {
+        for line in s["snapshot"]["header"].as_str().unwrap().lines() {
+            if !lines.contains(&line) {
+                lines.push(line);
+            }
+        }
+    }
+    format!("{}\n\n{body}", lines.join("\n"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_header_cant_import_two_snapshots_that_declare_one_name() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let skeleton = create(&c, json!({"code": SKELETON})).await;
+    let proof = create(
+        &c,
+        json!({"code": PROOF, "replaces": replacing(entry(&skeleton))}),
+    )
+    .await;
+    let both = create(
+        &c,
+        json!({"code": on_both(&skeleton, &proof, "theorem u : 1 = 1 := t")}),
+    )
+    .await;
+    assert!(both.get("snapshot").is_none(), "{both}");
+    assert_eq!(both["check"]["error"]["kind"], "bad_request", "{both}");
+    let message = both["check"]["error"]["message"].as_str().unwrap();
+    for m in [module(&skeleton), module(&proof)] {
+        assert!(message.contains(m), "{message}");
+    }
+    assert!(message.contains(" t,"), "{message}");
+    assert!(
+        message.contains(&format!("import its head {}", entry(&proof))),
+        "{message}"
+    );
+
+    // Two snapshots of no one run name no head.
+    let other = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 1 = 1 := by decide"}),
+    )
+    .await;
+    let both = create(
+        &c,
+        json!({"code": on_both(&proof, &other, "theorem u : 1 = 1 := t")}),
+    )
+    .await;
+    assert_eq!(both["check"]["error"]["kind"], "bad_request", "{both}");
+    let message = both["check"]["error"]["message"].as_str().unwrap();
+    assert!(!message.contains("head"), "{message}");
+
+    // Each alone is fine.
+    let one = create(&c, json!({"code": on(&proof, "theorem u : 1 = 1 := t")})).await;
+    assert!(one["snapshot"]["id"].is_string(), "{one}");
+}

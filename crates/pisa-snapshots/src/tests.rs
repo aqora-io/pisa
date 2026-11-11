@@ -1,5 +1,6 @@
 use super::*;
 use crate::audit::Permitted;
+use crate::read::clash;
 use pisa_db::catalog::ModuleRecord;
 use pisa_protocol::api::CheckResult;
 use pisa_protocol::verify::ReportedDeclaration;
@@ -605,5 +606,32 @@ fn a_refuter_proves_the_negation_of_the_targets_statement_on_the_spec() {
             "refutation: the code doesn't build on the spec: import PisaSnap.sspec",
             "refutation: the code isn't verified"
         ]
+    );
+}
+
+#[test]
+fn two_modules_that_declare_one_name_clash() {
+    let t = || decl("t", "T", None, &[]);
+    let found = clash([
+        ("a", &[t()][..]),
+        ("b", &[t(), decl("u", "U", None, &[])][..]),
+    ]);
+    assert_eq!(
+        found,
+        Some(("t".to_string(), vec!["a".to_string(), "b".to_string()]))
+    );
+    assert_eq!(clash([("a", &[t()][..])]), None);
+    // What Lean makes, and a module's private names, are its own.
+    let made = Declaration {
+        generated: true,
+        ..decl("f.eq_1", "E", None, &[])
+    };
+    let private = |m: &str| decl(&format!("_private.PisaSnap.s{m}.0.h"), "H", None, &[]);
+    assert_eq!(
+        clash([
+            ("a", &[made.clone(), private("a")][..]),
+            ("b", &[made, private("b")][..])
+        ]),
+        None
     );
 }

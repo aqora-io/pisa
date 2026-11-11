@@ -968,6 +968,10 @@ fn a_theorem_another_module_declares_is_rejected() {
         let reason = verdicts[1]["reason"].as_str().unwrap();
         let clash = format!("`t` is also declared by `{}`", snapshot::module(first));
         assert!(reason.contains(&clash), "{reason}");
+        assert!(
+            reason.contains("code that imports both means whichever it imports first"),
+            "{reason}"
+        );
     }
     // Alone, each is described from its own proof.
     for (id, axioms) in [(&sorried, vec!["sorryAx"]), (&proved, vec![])] {
@@ -978,6 +982,34 @@ fn a_theorem_another_module_declares_is_rejected() {
             .unwrap();
         assert_eq!(t.axioms, axioms);
     }
+}
+
+/// Code that imports two modules declaring one theorem builds: Lean takes
+/// the first import's, so the code is `sorry` or not by the order of its
+/// imports. A create refuses such a header from the modules' records, which
+/// therefore name the theorem as written in both, not as a name Lean made or
+/// a private one.
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn code_on_two_modules_that_declare_one_theorem_builds() {
+    let s = Snapshots::new();
+    let (sorried, proved) = ("theorem t : 1 = 1 := sorry\n", "theorem t : 1 = 1 := rfl\n");
+    s.tool_build(sorried);
+    s.tool_build(proved);
+    let (sorried, proved) = (snapshot::id(sorried), snapshot::id(proved));
+    for id in [&sorried, &proved] {
+        let t = verdict_declarations(&s.tool_verify(&[id])[0])
+            .into_iter()
+            .find(|d| d.name == "t")
+            .unwrap();
+        assert_eq!((t.kind.as_str(), t.generated), ("theorem", false), "{t:?}");
+    }
+    let both = format!(
+        "import {}\nimport {}\n\ntheorem u : 1 = 1 := t\n",
+        snapshot::module(&sorried),
+        snapshot::module(&proved)
+    );
+    s.tool_build(&both);
 }
 
 /// A failure that is no verdict on the code, here a module whose files

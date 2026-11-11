@@ -186,9 +186,19 @@ impl Snapshots {
             return response;
         }
         let split = split_header(&job.code);
-        if let Err(e) = snapshot::imports(&split.header) {
-            response.check.error = Some(Error::new(ErrorKind::BadRequest, e));
-            return response;
+        let imports = match snapshot::imports(&split.header) {
+            Ok(imports) => imports,
+            Err(e) => {
+                response.check.error = Some(Error::new(ErrorKind::BadRequest, e));
+                return response;
+            }
+        };
+        match self.reader.clashes(&imports).await {
+            Ok(None) => {}
+            Ok(Some(e)) | Err(e) => {
+                response.check.error = Some(e);
+                return response;
+            }
         }
         // Macros are allowed: `build` re-checks them through the kernel unless
         // the request opts out, which marks the snapshot as not verified.
