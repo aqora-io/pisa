@@ -159,7 +159,8 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// axiom it declares, and on the axioms of imported snapshots its line names;
 /// those it declares or imports are its `assumes`. Its "type" is the statement text between the name
 /// and `:=`, and a `def`'s "value" the text after it, which the worker hashes. Its refs are the
-/// words of each that the code or a snapshot it imports declares.
+/// words of each that the code or a snapshot it imports declares. A theorem
+/// of `¬ X`, or `¬ (X)`, "negates" the statement `X`.
 /// The worker's declaration export for `code`: each `theorem`, `def` and
 /// `axiom`, with its statement as the signature, the words of its statement
 /// and of its value as the constants they use, and a `/-- … -/` on the line
@@ -324,9 +325,17 @@ pub fn declarations(code: &str) -> String {
                 "inductive" => vec![format!("{name}.mk")],
                 _ => Vec::new(),
             };
+            let negates = (kind == "theorem")
+                .then(|| statement.strip_prefix(": ¬"))
+                .flatten()
+                .map(|x| {
+                    let x = x.trim();
+                    let x = (x.strip_prefix('(').and_then(|x| x.strip_suffix(')'))).unwrap_or(x);
+                    format!(": {}", x.trim())
+                });
             json!({"name": name, "kind": kind, "axioms": axioms, "assumes": assumes, "type": statement,
                    "value": value_text, "type_refs": refs(&statement), "value_refs": value_refs,
-                   "parent": parent})
+                   "parent": parent, "negates": negates})
         })
         .collect();
     Value::Array(decls).to_string()

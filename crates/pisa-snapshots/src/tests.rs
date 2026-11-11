@@ -539,3 +539,71 @@ async fn an_audit_target_without_its_records_is_not_accepted() {
         assert_eq!(judged(&[left]), (Vec::new(), false), "only {left}");
     }
 }
+
+#[test]
+fn a_target_is_refutable_if_no_other_module_or_head_could_state_it_otherwise() {
+    let cost = decl("cost", "N", Some("sorry"), &[]);
+    let t = using(decl("t", "T", None, &[]), &["cost"], &[]);
+    let w = decl("w", "W", None, &[]);
+    let p = using(
+        decl("p", "P", None, &[]),
+        &["_private.PisaSnap.sx.0.h"],
+        &[],
+    );
+    let made = Declaration {
+        generated: true,
+        ..decl("t.eq_1", "E", None, &[])
+    };
+    let decls = [cost.clone(), t, w, p, made];
+    let holes = vec!["cost".to_string()];
+    assert_eq!(refutable(&decls, &holes, "w").unwrap().name, "w");
+    for (target, says) in [
+        ("cost", "isn't a theorem"),
+        ("nope", "isn't a theorem"),
+        ("t.eq_1", "isn't a theorem"),
+        ("p", "private name"),
+        ("t", "uses the spec's holes"),
+    ] {
+        let e = refutable(&decls, &holes, target).unwrap_err();
+        assert!(e.message.contains(says), "{target}: {}", e.message);
+    }
+    // Without holes, `t` is a target like any.
+    assert!(refutable(&decls, &[], "t").is_ok());
+}
+
+#[test]
+fn a_refuter_proves_the_negation_of_the_targets_statement_on_the_spec() {
+    let target = decl("t", "T", None, &[]);
+    let negating = |name: &str, negates: &str, status: ProofStatus| Declaration {
+        negates: Some(negates.into()),
+        status,
+        ..decl(name, &format!("¬{negates}"), None, &[])
+    };
+    let needs = vec!["spec".to_string(), "own".to_string()];
+    let r = negating("r", "T", ProofStatus::Proved);
+    assert_eq!(
+        refuter(&target, "spec", &needs, true, std::slice::from_ref(&r)),
+        Ok("r".into())
+    );
+    let reasons = |decls: &[Declaration], needs: &[String], verified| {
+        refuter(&target, "spec", needs, verified, decls).unwrap_err()
+    };
+    let sorried = negating("r", "T", ProofStatus::Sorry);
+    assert_eq!(
+        reasons(&[sorried], &needs, true),
+        ["refutation: r states ¬ t, but isn't proved: it is sorry"]
+    );
+    let other = negating("r", "U", ProofStatus::Proved);
+    assert_eq!(
+        reasons(&[other], &needs, true),
+        ["refutation: no theorem states ¬ t, its statement exactly"]
+    );
+    let own = vec!["own".to_string()];
+    assert_eq!(
+        reasons(std::slice::from_ref(&r), &own, false),
+        [
+            "refutation: the code doesn't build on the spec: import PisaSnap.sspec",
+            "refutation: the code isn't verified"
+        ]
+    );
+}

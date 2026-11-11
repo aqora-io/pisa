@@ -22,6 +22,7 @@ pub mod documents;
 pub mod http;
 pub mod jobs;
 mod rebuild;
+mod resubmit;
 pub mod sessions;
 pub mod snapshots;
 

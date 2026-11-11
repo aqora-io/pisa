@@ -11,7 +11,7 @@ _root_.Pisa.reportNew` after code, and `pisa build` for a snapshot module) and
 for the kernel verifier (`pisa verify`), which call the same `describe`.
 
 A description is `{name, kind, axioms, assumes, type, value, type_refs,
-value_refs, generated, parent}`:
+value_refs, generated, parent}`, and `negates` for a theorem of `¬ X`:
 - `axioms`, all the axioms it depends on, and `assumes`, those declared as
   `axiom` in this code or a snapshot;
 - `type`, and for a definition `value`, their canonical text (see
@@ -21,7 +21,9 @@ value_refs, generated, parent}`:
 - `generated`, for what Lean makes on demand, such as equation lemmas, which a
   replacement needn't have;
 - `parent`, the inductive type of the same code that it is one of Lean's
-  declarations for, such as a constructor or a projection (see `parentOf`).
+  declarations for, such as a constructor or a projection (see `parentOf`);
+- `negates`, for a theorem whose type is `¬ X` or `X → False`, the canonical
+  text of `X` with every name written whole (see `negated?`).
 
 Auxiliaries Lean makes, such as the `f._unary` holding the body of a
 well-founded definition or the matcher `f.match_1`, aren't described: what
@@ -250,16 +252,29 @@ def canonical (env : Environment) (e : Expr) : Expr :=
     ((auxiliaryForm env {} m).run forms).2
   canon env forms e
 
-/-- The text of `e`, part of declaration `self` of module `mod`, whose
-universe parameters are `params`, and the constants of this code and of
+/-- The text of `e`, part of declaration `self`, whose universe parameters
+are `params`, with constants named by `name` (`naming mod` for a
+declaration of module `mod`), and the constants of this code and of
 snapshots its canonical form uses, `self` aside. -/
-def text (env : Environment) (mod self : Name) (params : List Name) (e : Expr) :
-    Except String (String × Array Name) := do
+def text (env : Environment) (name : Name → String) (self : Name) (params : List Name)
+    (e : Expr) : Except String (String × Array Name) := do
   let c := canonical env e
   let markers := [sorryMarker.constName!, proofMarker.constName!]
   let refs := c.getUsedConstants.filter fun m => m != self && tracked env m && !markers.contains m
-  let ((), t) ← (discard <| write (naming mod) params c : TextM Unit).run {}
+  let ((), t) ← (discard <| write name params c : TextM Unit).run {}
   return (t.render, refs.qsort Name.lt)
+
+/-- `X`, if `type` is `¬ X` or `X → False`: what a theorem of it refutes.
+Written with every name whole (`nameText`), its text is the `type` of a
+declaration `X` states when no private name is in it, the same from any
+module, and a private name of the refuting module never reads as another
+module's. -/
+def negated? (type : Expr) : Option Expr :=
+  match type.consumeMData with
+  | .app (.const ``Not []) x => some x
+  | .forallE _ x b _ =>
+    if b.consumeMData.isConstOf ``False && !b.hasLooseBVars then some x else none
+  | _ => none
 
 def kindOf : ConstantInfo → String
   | .thmInfo _ => "theorem"
@@ -419,20 +434,25 @@ def describe (mod n : Name) (ci : ConstantInfo) (axioms : Array Name) (own : Nam
   let ofExcept {α} (r : Except String α) : CoreM α := match r with
     | .ok a => pure a
     | .error e => throwError "describing {n}: {e}"
-  let (type, typeRefs) ← ofExcept (text env mod n ci.levelParams ci.type)
+  let (type, typeRefs) ← ofExcept (text env (naming mod) n ci.levelParams ci.type)
   let (value, valueRefs) : Json × Array Name ← match ci with
     | .defnInfo d => do
-      let (v, refs) ← ofExcept (text env mod n ci.levelParams d.value)
+      let (v, refs) ← ofExcept (text env (naming mod) n ci.levelParams d.value)
       pure (Json.str v, refs)
     | .inductInfo i => pure (Json.null, (i.ctors ++ [mkRecName i.name]).toArray)
     | _ => pure (Json.null, #[])
-  return Json.mkObj [
+  let negates : List (String × Json) ← match ci, negated? ci.type with
+    | .thmInfo _, some x => do
+      let (t, _) ← ofExcept (text env nameText n ci.levelParams x)
+      pure [("negates", Json.str t)]
+    | _, _ => pure []
+  return Json.mkObj <| [
     ("name", toJson n), ("kind", toJson (kindOf ci)),
     ("axioms", toJson axioms), ("assumes", toJson assumes),
     ("type", Json.str type), ("value", value),
     ("type_refs", toJson typeRefs), ("value_refs", toJson valueRefs),
     ("generated", toJson (generated env n)),
-    ("parent", toJson (parentOf env own n ci))]
+    ("parent", toJson (parentOf env own n ci))] ++ negates
 
 /-- The descriptions of the declarations `names` of module `mod` that are
 described. `fromKernel` is for an environment made from a kernel environment,

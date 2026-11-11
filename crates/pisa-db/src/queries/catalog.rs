@@ -15,13 +15,13 @@ use pisa_protocol::snapshot;
 use serde_json::Value;
 
 use crate::catalog::{
-    EntryMeta, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleRecord, ModuleSummary,
+    Amendment, EntryMeta, Refutation, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleRecord, ModuleSummary,
     NewEntry, SnapshotDecls, allow_column, closure_order, entry_from_row, now_micros, splice,
     status_of, status_text, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
 use crate::schema::{
-    acceptances, catalogs, changes, described, entries, leases, links, module_imports, modules,
+    acceptances, amendments, catalogs, refutations, changes, described, entries, leases, links, module_imports, modules,
 };
 
 const ENTRY: (
@@ -469,6 +469,49 @@ async fn add(
         ))
         .execute(conn)
         .await?;
+    if let Some(a) = &entry.amends {
+        let kept: bool = diesel::select(exists(entries::table.find((v, &a.amends))))
+            .get_result(conn)
+            .await?;
+        if !kept {
+            return Err(Fail::Api(Error::new(
+                ErrorKind::NotFound,
+                "the amended snapshot was deleted while this one was being built".to_string(),
+            )));
+        }
+        diesel::insert_into(amendments::table)
+            .values((
+                amendments::version.eq(v),
+                amendments::entry.eq(&e),
+                amendments::amends.eq(&a.amends),
+                amendments::reason.eq(&a.reason),
+                amendments::changes.eq(serde_json::to_string(&a.changes)?),
+                amendments::added.eq(serde_json::to_string(&a.added)?),
+            ))
+            .execute(conn)
+            .await?;
+    }
+    if let Some(r) = &entry.refutes {
+        let kept: bool = diesel::select(exists(entries::table.find((v, &r.spec))))
+            .get_result(conn)
+            .await?;
+        if !kept {
+            return Err(Fail::Api(Error::new(
+                ErrorKind::NotFound,
+                "the refuted spec was deleted while this snapshot was being built".to_string(),
+            )));
+        }
+        diesel::insert_into(refutations::table)
+            .values((
+                refutations::version.eq(v),
+                refutations::entry.eq(&e),
+                refutations::spec.eq(&r.spec),
+                refutations::target.eq(&r.target),
+                refutations::theorem.eq(&r.theorem),
+            ))
+            .execute(conn)
+            .await?;
+    }
     if let Some(replaced) = &meta.replaces {
         // The run starts where the replaced entry's starts, or at it.
         let root: Option<String> = links::table
@@ -1240,6 +1283,78 @@ pub(crate) async fn put_acceptance(
     })
     .await?;
     Ok(())
+}
+
+pub(crate) async fn amendments_of(
+    db: &Handle,
+    v: &str,
+    entries: &[String],
+) -> Result<Vec<(String, Amendment)>, Error> {
+    let rows = amendments::table
+        .filter(amendments::version.eq(v))
+        .filter(
+            amendments::entry
+                .eq_any(entries)
+                .or(amendments::amends.eq_any(entries)),
+        )
+        .select((
+            amendments::entry,
+            amendments::amends,
+            amendments::reason,
+            amendments::changes,
+            amendments::added,
+        ))
+        .load::<(String, String, String, String, String)>(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    let read = |rows: Vec<(String, String, String, String, String)>| {
+        rows.into_iter()
+            .map(|(entry, amends, reason, changes, added)| {
+                let amendment = Amendment {
+                    amends,
+                    reason,
+                    changes: serde_json::from_str(&changes)?,
+                    added: serde_json::from_str(&added)?,
+                };
+                Ok((entry, amendment))
+            })
+            .collect::<Result<Vec<_>, serde_json::Error>>()
+    };
+    read(rows).map_err(|e| Error::new(ErrorKind::Internal, format!("an amendment's record: {e}")))
+}
+
+pub(crate) async fn refutations_of(
+    db: &Handle,
+    v: &str,
+    entries: &[String],
+) -> Result<Vec<(String, Refutation)>, Error> {
+    let rows = refutations::table
+        .filter(refutations::version.eq(v))
+        .filter(
+            refutations::entry
+                .eq_any(entries)
+                .or(refutations::spec.eq_any(entries)),
+        )
+        .select((
+            refutations::entry,
+            refutations::spec,
+            refutations::target,
+            refutations::theorem,
+        ))
+        .load::<(String, String, String, String)>(&mut *conn(db).await?)
+        .await
+        .map_err(DbError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|(entry, spec, target, theorem)| {
+            let refutation = Refutation {
+                spec,
+                target,
+                theorem,
+            };
+            (entry, refutation)
+        })
+        .collect())
 }
 
 pub(crate) async fn acceptance(db: &Handle, v: &str, id: &str) -> Result<Option<Value>, Error> {

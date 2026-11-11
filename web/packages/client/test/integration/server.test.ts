@@ -175,6 +175,42 @@ describe("runs", () => {
   });
 });
 
+describe("amendments and refutations", () => {
+  it("amends a spec, carries its run over, and refutes a target", async () => {
+    const runs = new PisaClient({ url, version: "v", timeout: 30 });
+    const spec = (
+      await runs.createSnapshot(
+        "import Foo\ndef ts_fee : Nat := sorry\ntheorem ts_f : ts_fee = ts_fee := sorry\ntheorem ts_w : 1 = 2 := sorry",
+        { holes: ["ts_fee"] },
+      )
+    ).snapshot;
+    if (spec === undefined) throw new Error("no spec");
+    const head = await runs.createSnapshot(
+      "import Foo\ndef ts_fee : Nat := 1\ntheorem ts_f : ts_fee = ts_fee := rfl\ntheorem ts_w : 1 = 2 := sorry",
+      { replaces: { snapshot_id: spec.id } },
+    );
+    const refuted = await runs.createSnapshot(`${spec.header}\ntheorem ts_r : ¬ (1 = 2) := by decide`, {
+      refutes: { snapshot_id: spec.id, target: "ts_w" },
+    });
+    expect(refuted.refutation?.theorem).toBe("ts_r");
+    expect((await runs.auditSnapshots({ against: [spec.id] })).refutations).toEqual([refuted.refutation]);
+
+    const amended = await runs.createSnapshot(
+      "import Foo\ndef ts_fee : Nat := sorry\ntheorem ts_f : ts_fee = ts_fee := sorry",
+      { holes: ["ts_fee"], amends: { snapshot_id: spec.id, reason: "ts_w is false" } },
+    );
+    expect(amended.amendment?.changes[0]?.name).toBe("ts_w");
+    const to = amended.snapshot?.id ?? "";
+    const plan = await runs.resubmitSnapshots(spec.id, to, { dryRun: true });
+    expect([plan.ok, plan.items[0]?.snapshot_id]).toEqual([true, head.snapshot?.id]);
+    const job = await runs.submitResubmitSnapshots(spec.id, to);
+    expect(job.kind).toBe("resubmit_snapshots");
+    const done = await runs.waitJob(job);
+    expect(done.ok).toBe(true);
+    expect(done.items[0]?.new_snapshot_id).toBeDefined();
+  });
+});
+
 describe("the server", () => {
   it("is healthy, with its worker, and doesn't search", async () => {
     expect(await client.health()).toEqual({ status: "ok", workers: 1, search: null });

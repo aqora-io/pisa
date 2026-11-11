@@ -12,9 +12,10 @@ use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     AcceptRequest, AcceptResponse, Accepted, ApiErrors, AuditSnapshotsResponse,
     CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, Detail, ErrorKind,
-    JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, PreferAsync,
-    RebuildSnapshotsRequest, RebuildSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId,
-    Tarball, UpdateSnapshotRequest, VerifySnapshotResponse,
+    JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, PreferAsync,
+    RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
+    ResubmitSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId, Tarball,
+    UpdateSnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -32,6 +33,7 @@ use crate::dispatch::{Prepared, Priority, Route};
 use crate::http::{ApiError, App, Body};
 use crate::jobs::{Params, Prefer, accepted};
 use crate::rebuild;
+use crate::resubmit;
 use crate::sessions::unexpected;
 
 /// The snapshot id `id`, from a path or a body.
@@ -57,6 +59,25 @@ pub async fn create(
     match prepare_create(&app, req) {
         Ok(p) => app.answer(prefer, JobKind::CreateSnapshot, p).await,
         Err(e) => e.into_response(),
+    }
+}
+
+/// Checks that snapshot `id`, which a create's `field` names, is of the
+/// create's `version`, which it sets when the create names none.
+fn same_version(version: &mut Option<String>, field: &str, id: &str) -> Result<(), ApiError> {
+    let named = parse_id(id)?.version;
+    match version {
+        Some(v) if *v != named => Err(ApiError::new(
+            ErrorKind::BadRequest,
+            format!(
+                "{field}.snapshot_id {id} is of version {named}, and the create of version {v}"
+            ),
+        )),
+        Some(_) => Ok(()),
+        None => {
+            *version = Some(named);
+            Ok(())
+        }
     }
 }
 
@@ -91,20 +112,49 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
                 "replaces.allow.definitions is empty: to change no definition, leave allow out",
             ));
         }
-        let replaced = parse_id(&r.snapshot_id)?.version;
-        match &version {
-            Some(v) if *v != replaced => {
-                return Err(ApiError::new(
-                    ErrorKind::BadRequest,
-                    format!(
-                        "replaces.snapshot_id {} is of version {replaced}, and the create of version {v}",
-                        r.snapshot_id
-                    ),
-                ));
-            }
-            Some(_) => {}
-            None => version = Some(replaced),
+        same_version(&mut version, "replaces", &r.snapshot_id)?;
+    }
+    let mut req = req;
+    if let Some(a) = &req.amends {
+        if req.replaces.is_some() {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "a spec that amends another replaces nothing: create the amended spec, then \
+                 resubmit the run's heads to it with POST /snapshots/resubmit",
+            ));
         }
+        if req.verify == Some(false) {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "an amending spec is always re-checked: leave verify out",
+            ));
+        }
+        let chars = a.reason.chars().count();
+        if a.reason.trim().is_empty() || chars > MAX_REASON {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                format!("amends.reason has {chars} characters; it takes 1 to {MAX_REASON}"),
+            ));
+        }
+        same_version(&mut version, "amends", &a.snapshot_id)?;
+        req.verify = Some(true);
+    }
+    if let Some(r) = &req.refutes {
+        if req.replaces.is_some() || req.holes.is_some() || req.amends.is_some() {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "a refutation is a snapshot of its own: it replaces nothing, has no holes and \
+                 amends no spec",
+            ));
+        }
+        if req.verify == Some(false) {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "a refutation is always re-checked: leave verify out",
+            ));
+        }
+        same_version(&mut version, "refutes", &r.snapshot_id)?;
+        req.verify = Some(true);
     }
     let version = version.or_else(|| app.versions.resolve(None));
     let split = split_header(&req.code);
@@ -115,7 +165,11 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         header: None,
         document: None,
     };
-    let replace = req.replaces.is_some();
+    let (replace, amend, refute) = (
+        req.replaces.is_some(),
+        req.amends.is_some(),
+        req.refutes.is_some(),
+    );
     let create = SnapshotCreateJob {
         code: req.code,
         timeout_secs: req.timeout,
@@ -125,10 +179,16 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         replaces: req.replaces,
         fork: req.fork,
         holes: req.holes.unwrap_or_default(),
+        amends: req.amends,
+        refutes: req.refutes,
         detail: req.detail,
     };
     let job = if replace {
         Job::SnapshotReplace(create)
+    } else if amend {
+        Job::SnapshotAmend(create)
+    } else if refute {
+        Job::SnapshotRefute(create)
     } else {
         Job::SnapshotCreate(create)
     };
@@ -673,6 +733,74 @@ pub async fn rebuild(
         }
     });
     accepted(job, JobKind::RebuildSnapshots, JobStatus::Running)
+}
+
+#[utoipa::path(
+    post, path = "/snapshots/resubmit", operation_id = "resubmitSnapshots", tag = "snapshots",
+    summary = "Carry an amended spec's run over to the spec that amends it",
+    description = "Compares each head of the run of `from` with `to`, the spec that amends \
+        it, as an audit against `to` would, allowing `to`'s holes to change, and unless \
+        `dry_run` creates each head that keeps `to`'s statements again: the same code, \
+        replacing `to`, with its head's labels or the request's. The heads of a forked run \
+        come over forked. A head that changes a statement is listed with its changes, and one \
+        whose record the kernel hasn't re-checked with that reason. `from` may be deleted. \
+        Sending the same resubmit again replays the creates that are done. A run can be async; \
+        a dry run answers at once.",
+    params(PreferAsync),
+    request_body = ResubmitSnapshotsRequest,
+    responses((status = 200, description = "The plan, and what the run did", body = ResubmitSnapshotsResponse), Accepted, ApiErrors),
+)]
+/// `POST /snapshots/resubmit`.
+pub async fn resubmit(
+    State(app): State<Arc<App>>,
+    prefer: Prefer,
+    Body(req): Body<ResubmitSnapshotsRequest>,
+) -> Response {
+    let version = match resubmit::version(&req) {
+        Ok(version) => version,
+        Err(e) => return e.into_response(),
+    };
+    if req.dry_run || !prefer.respond_async {
+        return match resubmit::run(&app, &req, &version).await {
+            Ok(r) => Json(r).into_response(),
+            Err(e) => e.into_response(),
+        };
+    }
+    // Refused at once, as the request would be.
+    if let Err(e) = app
+        .snapshots
+        .version(&version)
+        .resubmit_plan(&req.from, &req.to)
+        .await
+    {
+        return ApiError(e).into_response();
+    }
+    let record = Job::SnapshotResubmit(req.clone());
+    let held = match app
+        .dispatcher
+        .hold(JobKind::ResubmitSnapshots, &record)
+        .await
+    {
+        Ok(held) => held,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    let job = held.token.clone();
+    tokio::spawn(async move {
+        let outcome = (resubmit::run(&app, &req, &version).await)
+            .map(Box::new)
+            .map_err(|e| e.0);
+        if let Err(e) = held.finish(&JobResult::SnapshotResubmit(outcome)).await {
+            tracing::warn!("storing a resubmit's answer failed: {e}");
+        }
+    });
+    accepted(job, JobKind::ResubmitSnapshots, JobStatus::Running)
+}
+
+pub(crate) fn resubmitted(done: JobResult) -> Result<ResubmitSnapshotsResponse, ApiError> {
+    match done {
+        JobResult::SnapshotResubmit(r) => r.map(|r| *r).map_err(ApiError),
+        other => Err(unexpected(other)),
+    }
 }
 
 pub(crate) fn rebuilt(done: JobResult) -> Result<RebuildSnapshotsResponse, ApiError> {

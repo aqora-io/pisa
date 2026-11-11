@@ -11,10 +11,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use pisa_db::catalog::{Catalog, EntryMeta, Module, ModuleMeta, ModuleSummary, unknown_module};
 use pisa_db::db::Db;
 use pisa_protocol::api::{
-    Allow, AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditSnapshotsResponse,
-    AuditTarget, AuditUnproved, Declaration, Error, ErrorKind, Export, ListDependentsResponse,
-    ListSnapshotsResponse, RebuildItem, RebuildReplaced, RebuildSnapshotsResponse, Replacement,
-    Replaces, Snapshot, SnapshotDetail, SnapshotId,
+    Allow, Amendment, AuditAssumption, AuditComparison, AuditFork, AuditLink,
+    AuditSnapshotsResponse, AuditTarget, AuditUnproved, Declaration, Error, ErrorKind, Export,
+    ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildReplaced,
+    RebuildSnapshotsResponse, Refutation, Replacement, Replaces, Snapshot, SnapshotDetail,
+    SnapshotId,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::labels::{MAX_LABELS, MAX_LIMIT, check_labels, is_cursor, snapshot_id_error};
@@ -31,6 +32,7 @@ pub mod compare;
 pub mod plan;
 mod read;
 mod records;
+mod resubmit;
 pub mod review;
 mod run;
 #[cfg(test)]
@@ -123,6 +125,27 @@ impl Reader {
             ));
         }
         Ok(parsed.entry)
+    }
+
+    /// Entry `entry`'s amendment `a`, as the API answers it.
+    pub fn amendment(&self, entry: &str, a: pisa_db::catalog::Amendment) -> Amendment {
+        Amendment {
+            snapshot_id: self.id(entry),
+            amends: self.id(&a.amends),
+            reason: a.reason,
+            changes: a.changes,
+            added: a.added,
+        }
+    }
+
+    /// Entry `entry`'s refutation `r`, as the API answers it.
+    pub fn refutation(&self, entry: &str, r: pisa_db::catalog::Refutation) -> Refutation {
+        Refutation {
+            snapshot_id: self.id(entry),
+            spec: self.id(&r.spec),
+            target: r.target,
+            theorem: r.theorem,
+        }
     }
 
     /// Entry `entry`, on the module `meta` records, as the API answers it.

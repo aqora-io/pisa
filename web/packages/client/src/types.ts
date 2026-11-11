@@ -7,6 +7,13 @@
 import type { ErrorKind } from "./openapi.ts";
 
 export type {
+  Amendment,
+  Amends,
+  Refutation,
+  Refutes,
+  ResubmitItem,
+  ResubmitSnapshotsRequest,
+  ResubmitSnapshotsResponse,
   AcceptPair,
   AcceptRequest,
   AcceptResponse,

@@ -216,7 +216,10 @@ pub(crate) async fn run_job(
             }
             JobResult::SessionChecked(checked)
         }
-        Job::SnapshotCreate(j) | Job::SnapshotReplace(j) => {
+        Job::SnapshotCreate(j)
+        | Job::SnapshotReplace(j)
+        | Job::SnapshotAmend(j)
+        | Job::SnapshotRefute(j) => {
             let detail = j.detail.clone();
             let mut created = pool.snapshots().create(pool, j).await;
             answered(&mut created.check.declarations, &detail, pool);
@@ -231,6 +234,9 @@ pub(crate) async fn run_job(
         }
         Job::SnapshotRebuild(_) => JobResult::Failed {
             error: "a rebuild is planned and run by a server".into(),
+        },
+        Job::SnapshotResubmit(_) => JobResult::Failed {
+            error: "a resubmit is planned and run by a server".into(),
         },
         Job::SnapshotAccept(j) => {
             JobResult::SnapshotAccepted(runs::accept(pool, j).await.map(Box::new))

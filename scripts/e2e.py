@@ -409,6 +409,41 @@ def holes():
     step("holes: a spec's holes are filled without allow, and nothing else changes in a clean run")
 
 
+def refute_amend_and_resubmit():
+    false = "theorem e2e_false : ∀ n : Nat, n + 0 = n + 1"
+    true = "theorem e2e_true (n : Nat) : n + 0 = n"
+    spec = create_snapshot(f"def e2e_fee : Nat := sorry\n\n{false} := sorry\n\n{true} := sorry",
+                           holes=["e2e_fee"], verify=True)
+    spec_id = spec["snapshot"]["id"]
+    head = create_snapshot(f"def e2e_fee : Nat := 1\n\n{false} := sorry\n\n{true} := rfl",
+                           replaces={"snapshot_id": spec_id}, verify=True)
+    # `e2e_false` is false: a proof of its negation on the spec refutes it.
+    negation = "theorem e2e_refuted : ¬ type_of% @e2e_false := fun h => by have := h 0; omega"
+    refuter = create_snapshot(f"{spec['snapshot']['header']}\n\n{negation}",
+                              refutes={"snapshot_id": spec_id, "target": "e2e_false"})
+    assert refuter["refutation"]["theorem"] == "e2e_refuted", refuter
+    out = audit_against(spec)
+    assert out["refutations"] == [refuter["refutation"]] and out["clean"] is False, out
+    refuted = [t.get("refuted_by") for t in out["targets"] if t["name"] == "e2e_false"]
+    assert refuted == [[refuter["snapshot"]["id"]]], out
+    step("refute: a proof of ¬ type_of% @t on the spec refutes t, and the run isn't clean")
+
+    amended = create_snapshot(f"def e2e_fee : Nat := sorry\n\n{true} := sorry", holes=["e2e_fee"],
+                              amends={"snapshot_id": spec_id, "reason": "e2e_false is false"})
+    assert [c["name"] for c in amended["amendment"]["changes"]] == ["e2e_false"], amended
+    to = amended["snapshot"]["id"]
+    done = post("/snapshots/resubmit", {"from": spec_id, "to": to, "timeout": 600})
+    assert done["ok"] and done["items"][0]["snapshot_id"] == head["snapshot"]["id"], done
+    carried = done["items"][0]["new_snapshot_id"]
+    out = audit_against(amended)
+    assert out["clean"] is True and out["heads"] == [carried], out
+    assert out["amendments"] == [amended["amendment"]], out
+    for x in [carried, to, refuter["snapshot"]["id"], head["snapshot"]["id"], spec_id]:
+        status, gone = call("DELETE", f"/snapshots/{x}")
+        assert status == 200, gone
+    step("amend: a spec amended during a run, its run resubmitted onto it, is clean")
+
+
 def built_outside(archive):
     """Unpacks a run's export in a worker container and builds and judges it
     there with the commands its README gives: Lean and Lake only, no pisa."""
@@ -793,6 +828,7 @@ if __name__ == "__main__":
     statements_under_replaces()
     allow_by_name()
     holes()
+    refute_amend_and_resubmit()
     # The export of a project with packages fetches them to build.
     comparator(outside=not args.mathlib and not args.no_failover)
     review()

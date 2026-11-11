@@ -30,6 +30,8 @@ import type {
   Query,
   QueryResult,
   RebuildSnapshotsRequest,
+  ResubmitSnapshotsRequest,
+  ResubmitSnapshotsResponse,
   RebuildSnapshotsResponse,
   ResolveResponse,
   Resolution,
@@ -114,7 +116,22 @@ export interface GetDeclarationOptions extends VersionOptions {
 }
 
 export type CreateSnapshotOptions = RunOptions &
-  Pick<CreateSnapshotRequest, "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "detail">;
+  Pick<
+    CreateSnapshotRequest,
+    "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "amends" | "refutes" | "detail"
+  >;
+
+/** A resubmit runs on the version of its `from` and `to`. */
+export interface ResubmitOptions extends RequestOptions {
+  /** Seconds Lean may run for each create. */
+  timeout?: number;
+  /** Only plan: compare each head with the amending spec. */
+  dryRun?: boolean;
+  /** The new snapshots' labels; by default each head's. */
+  labels?: Labels;
+  /** For a run: the kernel re-check for each create. */
+  verify?: boolean;
+}
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -460,6 +477,32 @@ export class PisaClient {
     return body;
   }
 
+  /** Carries the run of spec `from` over to `to`, the spec that amends it:
+   *  the server compares each head of the run with `to`, and unless `dryRun`
+   *  creates each head that keeps `to`'s statements again, replacing `to`.
+   *  Sending it again replays the creates that are done. */
+  resubmitSnapshots(from: SnapshotId, to: SnapshotId, options: ResubmitOptions = {}): Promise<ResubmitSnapshotsResponse> {
+    return this.call("POST", ["snapshots", "resubmit"], this.resubmitRequest(from, to, options), options);
+  }
+
+  /** `resubmitSnapshots` as a job. A dry run isn't one: the server answers
+   *  it at once, which throws here. */
+  submitResubmitSnapshots(
+    from: SnapshotId,
+    to: SnapshotId,
+    options: ResubmitOptions = {},
+  ): Promise<Job<ResubmitSnapshotsResponse>> {
+    return this.submit(["snapshots", "resubmit"], this.resubmitRequest(from, to, options), options);
+  }
+
+  private resubmitRequest(from: SnapshotId, to: SnapshotId, options: ResubmitOptions): ResubmitSnapshotsRequest {
+    const body: ResubmitSnapshotsRequest = { from, to, ...this.timeoutOf(options) };
+    if (options.dryRun) body.dry_run = true;
+    if (options.labels !== undefined) body.labels = options.labels;
+    if (options.verify !== undefined) body.verify = options.verify;
+    return body;
+  }
+
   /** Changes a snapshot's labels as a merge patch: a label set to `null` is
    *  removed, one set to a string takes it, and the rest stay. */
   updateSnapshot(id: SnapshotId, update: UpdateSnapshotRequest, options: RequestOptions = {}): Promise<Snapshot> {
@@ -559,6 +602,8 @@ export class PisaClient {
     if (options.replaces !== undefined) body.replaces = options.replaces;
     if (options.fork !== undefined) body.fork = options.fork;
     if (options.holes !== undefined) body.holes = options.holes;
+    if (options.amends !== undefined) body.amends = options.amends;
+    if (options.refutes !== undefined) body.refutes = options.refutes;
     if (options.detail !== undefined) body.detail = options.detail;
     return body;
   }

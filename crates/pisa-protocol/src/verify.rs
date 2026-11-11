@@ -64,6 +64,12 @@ pub struct Declaration {
     /// the like. A change to it is a change to that type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// For a theorem of `¬ X` (or `X → False`), the SHA-256 of `X`'s
+    /// canonical text with every name written whole: the `type_hash` of a
+    /// declaration that states `X` and mentions no private name, from any
+    /// module.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub negates: Option<String>,
 }
 
 impl Serialize for Declaration {
@@ -97,6 +103,9 @@ impl Serialize for Declaration {
         if let Some(parent) = &self.parent {
             m.serialize_entry("parent", parent)?;
         }
+        if full && let Some(negates) = &self.negates {
+            m.serialize_entry("negates", negates)?;
+        }
         m.end()
     }
 }
@@ -121,6 +130,7 @@ impl Declaration {
             value_refs: Vec::new(),
             generated: false,
             parent: None,
+            negates: None,
         }
     }
 }
@@ -144,6 +154,9 @@ pub struct DescribedDeclaration {
     pub generated: bool,
     #[serde(default)]
     pub parent: Option<String>,
+    /// For a theorem of `¬ X`, the canonical text of `X`, every name whole.
+    #[serde(default)]
+    pub negates: Option<String>,
 }
 
 /// The SHA-256 of `text`, as hex: what a declaration's hashes are.
@@ -156,6 +169,7 @@ impl From<DescribedDeclaration> for ReportedDeclaration {
         ReportedDeclaration {
             type_hash: digest(&d.type_text),
             value_hash: d.value_text.as_deref().map(digest),
+            negates: d.negates.as_deref().map(digest),
             name: d.name,
             kind: d.kind,
             axioms: d.axioms,
@@ -183,6 +197,7 @@ pub struct ReportedDeclaration {
     pub value_refs: Vec<String>,
     pub generated: bool,
     pub parent: Option<String>,
+    pub negates: Option<String>,
 }
 
 impl ReportedDeclaration {
@@ -200,6 +215,7 @@ impl ReportedDeclaration {
             value_refs: self.value_refs,
             generated: self.generated,
             parent: self.parent,
+            negates: self.negates,
         }
     }
 }
@@ -453,6 +469,24 @@ mod tests {
         let back: Declaration =
             serde_json::from_value(serde_json::to_value(&summary).unwrap()).unwrap();
         assert_eq!(back, summary);
+    }
+
+    #[test]
+    fn what_a_theorem_negates_is_hashed_and_written_in_full_only() {
+        let described: DescribedDeclaration = serde_json::from_value(serde_json::json!({
+            "name": "r", "kind": "theorem", "axioms": [], "assumes": [], "type": "¬X",
+            "value": null, "type_refs": [], "value_refs": [], "negates": "X"}))
+        .unwrap();
+        let reported = ReportedDeclaration::from(described);
+        assert_eq!(reported.negates.as_deref(), Some(digest("X").as_str()));
+        let d = reported.with_status(ProofStatus::Proved);
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["negates"], serde_json::json!(digest("X")));
+        let summary = serde_json::to_value(d.summarised(&[])).unwrap();
+        assert!(summary.get("negates").is_none(), "{summary}");
+        // Absent, it isn't written.
+        let json = serde_json::to_value(decl("t", "T", None)).unwrap();
+        assert!(json.get("negates").is_none(), "{json}");
     }
 
     #[test]

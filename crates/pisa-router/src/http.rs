@@ -56,6 +56,7 @@ pub struct App {
         snapshots::verify,
         snapshots::dependents,
         snapshots::rebuild,
+        snapshots::resubmit,
         snapshots::audit,
         snapshots::export,
         snapshots::accept,
@@ -89,6 +90,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/snapshots/{id}/verify", post(snapshots::verify))
         .route("/snapshots/{id}/dependents", get(snapshots::dependents))
         .route("/snapshots/rebuild", post(snapshots::rebuild))
+        .route("/snapshots/resubmit", post(snapshots::resubmit))
         .route("/snapshots/audit", get(snapshots::audit))
         .route("/snapshots/export", get(snapshots::export))
         .route("/snapshots/accept", post(snapshots::accept))

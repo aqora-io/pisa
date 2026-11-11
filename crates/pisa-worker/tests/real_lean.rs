@@ -1023,3 +1023,150 @@ fn the_export_prints_sorry_and_marks_what_is_private() {
     );
     assert_eq!(cost["private"], false);
 }
+
+/// Code whose hashes [`the_hashes_stay_as_they_were`] pins.
+const GOLDEN: &str = "universe u\n\ndef pick {α : Sort u} (a : α) : α := a\n\n\
+                      private def secret : Nat := 7\n\ndef shown : Nat := secret + 1\n\n\
+                      structure Pair where\n  fst : Nat\n  snd : Nat\n\n\
+                      theorem pick_eq {α : Sort u} (a : α) : pick a = a := rfl\n\n\
+                      theorem shown_eq : shown = 8 := rfl\n\n\
+                      theorem no_two : ¬ (1 = 2) := by decide\n";
+
+/// Every stored hash rests on the canonical text staying byte for byte as it
+/// was: these are the hashes `GOLDEN` had when they were pinned.
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_hashes_stay_as_they_were() {
+    let built = Snapshots::new().build(GOLDEN);
+    let hashes: std::collections::BTreeMap<&str, (&str, Option<&str>)> = built
+        .agreed()
+        .iter()
+        .map(|d| {
+            (
+                d.name.as_str(),
+                (d.type_hash.as_str(), d.value_hash.as_deref()),
+            )
+        })
+        .collect();
+    let private = "_private.PisaSnap.s1348e034451a3b4f95e593b020e0b164.0.secret";
+    for (name, type_hash, value_hash) in [
+        (
+            "pick",
+            "63afc3994e34afd7a807f5cc93e87c77dbd337e09bf7d2ed2487352cf8cc7e92",
+            Some("8482dcd182de076b47e37a1f28275127bb72e7e7bcd5bd39f9b0d6560b00ca40"),
+        ),
+        (
+            private,
+            "7f15ccf3a21eb28b2284f9c65ee3d181fc35572ec709c8239fe6c95eb724b5e3",
+            Some("dbc440a75808e6b49fe7d04de96d1ac62f6417bec221ac4a26b483c7c1dda71e"),
+        ),
+        (
+            "shown",
+            "7f15ccf3a21eb28b2284f9c65ee3d181fc35572ec709c8239fe6c95eb724b5e3",
+            Some("6c8b16fe2e38f84e52a99dee154d60a176fd8b00567e9336ad1e50fd8ac6dec4"),
+        ),
+        (
+            "Pair",
+            "a1d150d6c6c6a66c047b10c9d1208e0760e1bc3ca2c16c565bd911954a141b59",
+            None,
+        ),
+        (
+            "Pair.mk",
+            "3af6be296acd3f8c1b7bd372d18084b9b6df0e617998a90f35690ea8805b55de",
+            None,
+        ),
+        (
+            "pick_eq",
+            "5a1a91162dc39fd68c044a0b508bb3266c0fb56ec788d55806f530dc3180ef8d",
+            None,
+        ),
+        (
+            "shown_eq",
+            "5ac646b80a71c18414dec2b077b557fa1c83bfde5388556fc06cbac511826327",
+            None,
+        ),
+        (
+            "no_two",
+            "88d3743d03635be4defedec43ab80c582d27ec4ca94e8a87bdef521b57145803",
+            None,
+        ),
+    ] {
+        assert_eq!(hashes.get(name), Some(&(type_hash, value_hash)), "{name}");
+    }
+}
+
+/// The texts of the declarations of `code`, built on `snapshots` by `pisa
+/// build`, then by `pisa verify`, which must agree, by name: `(type,
+/// negates)`.
+fn texts(
+    snapshots: &Snapshots,
+    code: &str,
+) -> std::collections::BTreeMap<String, (String, Option<String>)> {
+    let read = |decls: &serde_json::Value| -> std::collections::BTreeMap<String, (String, Option<String>)> {
+        let decls = decls.as_array().unwrap();
+        let text = |d: &serde_json::Value, key: &str| d[key].as_str().map(String::from);
+        decls
+            .iter()
+            .map(|d| {
+                let name = text(d, "name").unwrap();
+                (name, (text(d, "type").unwrap(), text(d, "negates")))
+            })
+            .collect()
+    };
+    let built = read(snapshots.tool_build(code).one("PISA_DECLS"));
+    let verified = snapshots.tool_verify(&[&snapshot::id(code)]);
+    assert_eq!(
+        read(&verified[0]["declarations"]),
+        built,
+        "build and verifier"
+    );
+    built
+}
+
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_theorem_of_a_negation_says_what_it_negates() {
+    let snapshots = Snapshots::new();
+    let spec = "universe u\n\ntheorem t : ∀ n : Nat, n + 0 = n + 1 := sorry\n\n\
+                theorem any {α : Sort u} (a b : α) : a = b := sorry\n\n\
+                private def h : Nat := 1\n\ntheorem uses_h : h = 2 := sorry\n";
+    let spec_texts = texts(&snapshots, spec);
+    let refuter = format!(
+        "import {}\n\nuniverse v\n\n\
+         theorem by_not : ¬ ∀ n : Nat, n + 0 = n + 1 := fun h => by have := h 0; omega\n\n\
+         theorem by_false (h : ∀ m : Nat, m + 0 = m + 1) : False := by have := h 0; omega\n\n\
+         theorem by_type_of : ¬ type_of% @t := fun h => by have := h 0; omega\n\n\
+         theorem renamed : ¬ ∀ {{β : Sort v}} (x y : β), x = y := sorry\n\n\
+         theorem fixed : ¬ ∀ {{β : Sort 1}} (x y : β), x = y := sorry\n\n\
+         private def h : Nat := 1\n\ntheorem own_h : ¬ (h = 2) := by decide\n\n\
+         theorem not_one : ¬ (1 = 2) := by decide\n",
+        snapshot::module(&snapshot::id(spec))
+    );
+    let refuter_texts = texts(&snapshots, &refuter);
+    let negates = |name: &str| refuter_texts[name].1.clone();
+    let t = Some(spec_texts["t"].0.clone());
+    for name in ["by_not", "by_false", "by_type_of"] {
+        assert_eq!(negates(name), t, "{name}");
+    }
+    // Universe parameters count by position, so a renamed one matches.
+    let any = Some(spec_texts["any"].0.clone());
+    assert_eq!(negates("renamed"), any);
+    assert!(negates("fixed").is_some() && negates("fixed") != any);
+    // The refuter's own private `h` is written whole, the spec's as its own.
+    let private = spec_texts.keys().find(|n| n.ends_with(".uses_h")).cloned();
+    let uses_h = spec_texts[private.as_deref().unwrap_or("uses_h")].0.clone();
+    assert!(negates("own_h").is_some() && negates("own_h") != Some(uses_h));
+    assert!(negates("not_one").is_some());
+    // What isn't a theorem of a negation says nothing.
+    assert_eq!(spec_texts["t"].1, None);
+    // Hashed, the worker's records agree.
+    let hashes = |code: &str| -> std::collections::BTreeMap<String, Declaration> {
+        let built = snapshots.tool_build(code);
+        let decls = parse_declarations(built.one("PISA_DECLS").clone()).unwrap();
+        let decls = policy().judge_decls(false, Some(decls)).declarations;
+        decls.into_iter().map(|d| (d.name.clone(), d)).collect()
+    };
+    let (spec, refuter) = (hashes(spec), hashes(&refuter));
+    assert_eq!(refuter["by_not"].negates, Some(spec["t"].type_hash.clone()));
+    assert_eq!(spec["t"].negates, None);
+}

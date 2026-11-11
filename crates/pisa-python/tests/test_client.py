@@ -513,3 +513,30 @@ def test_snapshot_labels(url):
     for snapshot_id in [first, second]:
         client.delete_snapshot(snapshot_id)
     assert client.list_snapshots({"suite": "labels"})["snapshots"] == []
+
+
+def test_amend_resubmit_and_refute(url):
+    client = Client(url, timeout=30)
+    spec = client.create_snapshot(
+        "import Foo\ndef py_fee : Nat := sorry\ntheorem py_f : py_fee = py_fee := sorry\ntheorem py_w : 1 = 2 := sorry",
+        holes=["py_fee"])["snapshot"]
+    head = client.create_snapshot(
+        "import Foo\ndef py_fee : Nat := 1\ntheorem py_f : py_fee = py_fee := rfl\ntheorem py_w : 1 = 2 := sorry",
+        replaces={"snapshot_id": spec["id"]})["snapshot"]
+    refuted = client.create_snapshot(spec["header"] + "\ntheorem py_r : ¬ (1 = 2) := by decide",
+                                     refutes={"snapshot_id": spec["id"], "target": "py_w"})
+    assert refuted["refutation"]["theorem"] == "py_r", refuted
+    assert client.audit_snapshots(against=[spec["id"]])["refutations"] == [refuted["refutation"]]
+    with pytest.raises(ValueError):
+        client.create_snapshot("x", amends={"snapshot_id": spec["id"]})
+    amended = client.create_snapshot(
+        "import Foo\ndef py_fee : Nat := sorry\ntheorem py_f : py_fee = py_fee := sorry",
+        holes=["py_fee"], amends={"snapshot_id": spec["id"], "reason": "py_w is false"})
+    assert amended["amendment"]["changes"][0]["name"] == "py_w", amended
+    to = amended["snapshot"]["id"]
+    plan = client.resubmit_snapshots(spec["id"], to, dry_run=True)
+    assert plan["ok"] and plan["items"][0]["snapshot_id"] == head["id"], plan
+    job = client.submit_resubmit_snapshots(spec["id"], to)
+    assert job["kind"] == "resubmit_snapshots"
+    done = client.wait_job(job)
+    assert done["ok"] and "new_snapshot_id" in done["items"][0], done

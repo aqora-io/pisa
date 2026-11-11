@@ -1,5 +1,10 @@
 //! Creating a snapshot: replaying a key, joining kept code, or building it.
 
+use std::collections::HashSet;
+
+use pisa_protocol::api::{self, Declaration, Replaces};
+use pisa_protocol::verify::normalised;
+
 use super::*;
 
 /// What [`Snapshots::build`] kept: the module's record, the new entry, and
@@ -10,6 +15,45 @@ pub(super) type Built = Option<(
     Option<Replacement>,
     Option<VerifyFailure>,
 )>;
+
+/// What a create relates its snapshot to, as found before the build.
+#[derive(Default)]
+pub(super) struct Relations {
+    /// The snapshot it replaces.
+    pub replacing: Option<Replacing>,
+    /// The spec it amends.
+    pub amending: Option<Amending>,
+    /// The spec target it refutes.
+    pub refuting: Option<Refuting>,
+}
+
+/// The spec target a create refutes, as found before the build.
+pub(super) struct Refuting {
+    /// The spec's entry and module.
+    pub spec: String,
+    pub spec_module: String,
+    /// The target, as the spec's module declares it.
+    pub target: Declaration,
+}
+
+impl Refuting {
+    /// The record of what `refuter` found, the theorem that refutes.
+    pub fn record(&self, theorem: String) -> crate::catalog::Refutation {
+        crate::catalog::Refutation {
+            spec: self.spec.clone(),
+            target: self.target.name.clone(),
+            theorem,
+        }
+    }
+}
+
+/// The spec a create amends, as found before the build: compared as a
+/// snapshot that a replacement may change nothing of, holes included, so
+/// that every change is listed.
+pub(super) struct Amending {
+    pub amended: Replacing,
+    pub reason: String,
+}
 
 /// Puts what a create's comparison with `replacing` found into its
 /// response, if the entry the response has records that comparison: a create
@@ -54,6 +98,8 @@ impl Snapshots {
             replacement: None,
             heads: Vec::new(),
             unverified: None,
+            amendment: None,
+            refutation: None,
         }
     }
 
@@ -69,6 +115,8 @@ impl Snapshots {
             replacement: None,
             heads: Vec::new(),
             unverified: None,
+            amendment: None,
+            refutation: None,
         }
     }
 
@@ -77,14 +125,59 @@ impl Snapshots {
     /// already kept gets the new entry without being built again. Failures
     /// are reported in `check`. So is a replaced snapshot that another
     /// replaces already, which is refused as a `conflict` before anything is
-    /// built, with the run's `heads`, unless the job forks.
+    /// built, with the run's `heads`, unless the job forks. A spec that
+    /// amends another, or a refutation, answers what its entry recorded of
+    /// that, a key replay too.
     pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> CreateSnapshotResponse {
+        let (amends, refutes) = (job.amends.is_some(), job.refutes.is_some());
+        let mut done = self.create_checked(pool, job).await;
+        if refutes && let Some(s) = &done.snapshot {
+            let entry = self.reader.parse(&s.id).unwrap_or_default();
+            match self
+                .catalog
+                .refutations_of(std::slice::from_ref(&entry))
+                .await
+            {
+                Ok(found) => {
+                    done.refutation = (found.into_iter())
+                        .find(|(e, _)| *e == entry)
+                        .map(|(e, r)| self.reader.refutation(&e, r));
+                }
+                Err(e) => tracing::warn!(entry, "reading the refutation back failed: {e}"),
+            }
+        }
+        if amends && let Some(s) = &done.snapshot {
+            let entry = self.reader.parse(&s.id).unwrap_or_default();
+            match self
+                .catalog
+                .amendments_of(std::slice::from_ref(&entry))
+                .await
+            {
+                Ok(found) => {
+                    done.amendment = (found.into_iter())
+                        .find(|(e, _)| *e == entry)
+                        .map(|(e, a)| self.reader.amendment(&e, a));
+                }
+                Err(e) => tracing::warn!(entry, "reading the amendment back failed: {e}"),
+            }
+        }
+        done
+    }
+
+    /// [`create`](Self::create), but for reading the amendment back.
+    async fn create_checked(
+        &self,
+        pool: &Arc<Pool>,
+        job: SnapshotCreateJob,
+    ) -> CreateSnapshotResponse {
         let mut response = CreateSnapshotResponse {
             snapshot: None,
             check: CheckResult::default(),
             replacement: None,
             heads: Vec::new(),
             unverified: None,
+            amendment: None,
+            refutation: None,
         };
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
@@ -127,7 +220,44 @@ impl Snapshots {
             },
             None => None,
         };
-        if let Some(r) = replacing.as_ref().filter(|_| !job.fork) {
+        let amending = match &job.amends {
+            Some(a) => {
+                let amended = Replaces {
+                    snapshot_id: a.snapshot_id.clone(),
+                    allow: None,
+                };
+                match self.reader.replacing(&amended).await {
+                    Ok(mut amended) => {
+                        amended.holes.clear();
+                        Some(Amending {
+                            amended,
+                            reason: a.reason.clone(),
+                        })
+                    }
+                    Err(e) => {
+                        response.check.error = Some(e);
+                        return response;
+                    }
+                }
+            }
+            None => None,
+        };
+        let refuting = match &job.refutes {
+            Some(r) => match self.refuting(r).await {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    response.check.error = Some(e);
+                    return response;
+                }
+            },
+            None => None,
+        };
+        let rel = Relations {
+            replacing,
+            amending,
+            refuting,
+        };
+        if let Some(r) = rel.replacing.as_ref().filter(|_| !job.fork) {
             match self.reader.replaced_by(&r.entry).await {
                 Ok(Some((error, heads))) => {
                     response.check.error = Some(error);
@@ -145,11 +275,11 @@ impl Snapshots {
         // again, once.
         for _ in 0..2 {
             let done = self
-                .create_once(pool, &job, &split, replacing.as_ref(), response.clone())
+                .create_once(pool, &job, &split, &rel, response.clone())
                 .await;
             if let Some(mut done) = done {
                 // Another create replaced it while this one was building.
-                if let Some(r) = &replacing
+                if let Some(r) = &rel.replacing
                     && done
                         .check
                         .error
@@ -195,7 +325,7 @@ impl Snapshots {
         pool: &Arc<Pool>,
         job: &SnapshotCreateJob,
         split: &Split,
-        replacing: Option<&Replacing>,
+        rel: &Relations,
         mut response: CreateSnapshotResponse,
     ) -> Option<CreateSnapshotResponse> {
         let id = snapshot::id(&job.code);
@@ -204,9 +334,7 @@ impl Snapshots {
         match self.catalog.module(&id).await {
             Ok(meta) => {
                 drop(building);
-                return self
-                    .add_to_kept(pool, &id, meta, job, replacing, response)
-                    .await;
+                return self.add_to_kept(pool, &id, meta, job, rel, response).await;
             }
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => {
@@ -229,14 +357,12 @@ impl Snapshots {
         }
         let header = snapshot::next_header(&split.header, &id);
         let mut slot = pool.acquire(&header_key(&header)).await;
-        let built = self
-            .build(&mut slot, job, split, replacing, &id, &header)
-            .await;
+        let built = self.build(&mut slot, job, split, rel, &id, &header).await;
         slot.finish_job();
         Some(match built {
             Ok(Some((meta, entry, replacement, unverified))) => {
                 let mut done = self.created(meta, entry);
-                replaced(&mut done, replacing, replacement);
+                replaced(&mut done, rel.replacing.as_ref(), replacement);
                 done.unverified = unverified;
                 done
             }
@@ -263,9 +389,10 @@ impl Snapshots {
         id: &str,
         meta: ModuleMeta,
         job: &SnapshotCreateJob,
-        replacing: Option<&Replacing>,
+        rel: &Relations,
         mut response: CreateSnapshotResponse,
     ) -> Option<CreateSnapshotResponse> {
+        let replacing = rel.replacing.as_ref();
         let module_system = split_header(&job.code).header.lines().next() == Some("module");
         let reported_stands = !module_system && !meta.macros && job.verify.is_none();
         let mut unverified = None;
@@ -308,17 +435,13 @@ impl Snapshots {
         let replacement = match replacing {
             Some(r) => {
                 let needs: Vec<String> = ids(&meta.modules).cloned().collect();
-                let swapped = match self.reader.swapped(r, &needs, id).await {
+                let swapped = match self.swap(r, &needs, id).await {
                     Ok(swapped) => swapped,
                     Err(e) => {
                         response.check.error = Some(e);
                         return Some(response);
                     }
                 };
-                if let Some(e) = allow_error(r, &swapped) {
-                    response.check.error = Some(e);
-                    return Some(response);
-                }
                 match compare(r, &meta.result.declarations, &swapped) {
                     Ok(replacement) => Some(replacement),
                     Err(mut changes) => {
@@ -350,6 +473,36 @@ impl Snapshots {
                 return Some(response);
             }
         }
+        let refutes = match &rel.refuting {
+            Some(r) => {
+                let needs: Vec<String> = ids(&meta.modules).cloned().collect();
+                let decls = &meta.result.declarations;
+                match refuter(&r.target, &r.spec_module, &needs, meta.verified, decls) {
+                    Ok(theorem) => Some(r.record(theorem)),
+                    Err(reasons) => {
+                        let mut refused = self.refused(meta);
+                        refused.check.reasons.extend(reasons);
+                        return Some(refused);
+                    }
+                }
+            }
+            None => None,
+        };
+        let amends = match &rel.amending {
+            Some(a) => {
+                let needs: Vec<String> = ids(&meta.modules).cloned().collect();
+                let own = self.reader.exports_of(&[id.to_string()]).await;
+                let decls = &meta.result.declarations;
+                match self.amendment(a, &needs, id, decls, own).await {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        response.check.error = Some(e);
+                        return Some(response);
+                    }
+                }
+            }
+            None => None,
+        };
         let entry = NewEntry {
             labels: job.labels.clone(),
             key: job.key.clone(),
@@ -357,6 +510,8 @@ impl Snapshots {
             replacement: replacement.clone(),
             fork: job.fork,
             holes: replacing.map_or_else(|| job.holes.clone(), |r| r.holes.clone()),
+            amends,
+            refutes,
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,
@@ -375,5 +530,61 @@ impl Snapshots {
         replaced(&mut done, replacing, replacement);
         done.unverified = unverified;
         Some(done)
+    }
+}
+
+impl Snapshots {
+    /// The target that `r` names, if it can be refuted (see [`refutable`]).
+    pub(super) async fn refuting(&self, r: &api::Refutes) -> Result<Refuting, Error> {
+        let spec = self.reader.parse(&r.snapshot_id)?;
+        let entry = self.catalog.entry(&spec).await?;
+        let meta = self.catalog.module(&entry.module).await?;
+        let target = refutable(&meta.result.declarations, &entry.holes, &r.target)?.clone();
+        Ok(Refuting {
+            spec,
+            spec_module: entry.module,
+            target,
+        })
+    }
+
+    /// What a create for module `id`, which needs the snapshot modules
+    /// `needs` (its own last) and has declarations `decls`, finds of the
+    /// spec it amends: what changed, each type with its signature before and
+    /// now (`own` has the module's own), and the declarations it adds.
+    pub(super) async fn amendment(
+        &self,
+        a: &Amending,
+        needs: &[String],
+        id: &str,
+        decls: &[Declaration],
+        own: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<crate::catalog::Amendment, Error> {
+        let swapped = self.reader.swapped(&a.amended, needs, id).await?;
+        let changes = match compare(&a.amended, decls, &swapped) {
+            Ok(_) => Vec::new(),
+            Err(mut changes) => {
+                let gained: Vec<String> = swapped.gained.iter().map(|(m, _)| m.clone()).collect();
+                let mut now = self.reader.exports_of(&gained).await;
+                now.extend(own);
+                self.reader
+                    .sign(&mut changes, &a.amended, &swapped, &now)
+                    .await;
+                changes
+            }
+        };
+        let had: HashSet<String> = (a.amended.declarations.iter())
+            .map(|d| normalised(&d.name).into_owned())
+            .collect();
+        let added = decls
+            .iter()
+            .filter(|d| !d.generated && !had.contains(normalised(&d.name).as_ref()))
+            .map(|d| d.name.clone())
+            .collect();
+        Ok(crate::catalog::Amendment {
+            amends: a.amended.entry.clone(),
+            reason: a.reason.clone(),
+            changes,
+            added,
+        })
     }
 }

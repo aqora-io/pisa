@@ -265,14 +265,34 @@ impl Reader {
                 });
             }
         }
-        let (targets, accepted) =
+        let (mut targets, mut accepted) =
             self.targets(&specs, &reached, &heads, &records, &permitted, &comparisons);
+        // A target that a snapshot refutes on its spec isn't accepted.
+        let spec_entries: Vec<String> = specs.iter().map(|(e, _)| e.clone()).collect();
+        let mut refutations: Vec<Refutation> = (self.catalog.refutations_of(&spec_entries).await?)
+            .into_iter()
+            .filter(|(_, r)| spec_entries.contains(&r.spec))
+            .map(|(e, r)| self.refutation(&e, r))
+            .collect();
+        refutations.sort_by(|a, b| {
+            (&a.spec, &a.target, &a.snapshot_id).cmp(&(&b.spec, &b.target, &b.snapshot_id))
+        });
+        for t in &mut targets {
+            t.refuted_by = (refutations.iter())
+                .filter(|r| r.spec == t.spec && r.target == t.name)
+                .map(|r| r.snapshot_id.clone())
+                .collect();
+            if !t.refuted_by.is_empty() {
+                t.accepted = false;
+                accepted = false;
+            }
+        }
         // A spec copied from a snapshot that is gone, as a retiring rebuild
         // leaves it, can't be shown to state what the original did.
         // Every head keeps its spec's statements, whether or not the spec has
         // targets, such as one of assumptions only.
         let kept = comparisons.iter().all(|c| c.replacement.is_some());
-        let clean = forks.is_empty() && accepted && kept && !cut;
+        let clean = forks.is_empty() && accepted && kept && !cut && refutations.is_empty();
 
         // Each head stands for its module.
         let mut entries: BTreeMap<String, String> = BTreeMap::new();
@@ -291,6 +311,13 @@ impl Reader {
         audit.targets = targets;
         audit.links = links;
         audit.comparisons = comparisons;
+        audit.refutations = refutations;
+        let mut amendments: Vec<Amendment> = (self.catalog.amendments_of(&spec_entries).await?)
+            .into_iter()
+            .map(|(e, a)| self.amendment(&e, a))
+            .collect();
+        amendments.sort_by(|a, b| (&a.amends, &a.snapshot_id).cmp(&(&b.amends, &b.snapshot_id)));
+        audit.amendments = amendments;
         Ok(AuditedRun { audit, pairs })
     }
 
@@ -420,6 +447,7 @@ impl Reader {
                         status: h.status,
                         verified: head_meta.verified,
                         accepted,
+                        refuted_by: Vec::new(),
                     });
                 }
             }

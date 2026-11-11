@@ -55,14 +55,15 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    self, AcceptPair, AcceptResponse, Allow, ApplyTacticResponse, AtPosition, AuditAssumption,
-    AuditComparison, AuditFork, AuditLink, AuditReview, AuditSnapshotsResponse, AuditSummary,
-    AuditTarget, AuditUnproved, Change, CheckResult, CreateSnapshotResponse, Declaration,
-    DeclarationChange, DeleteSnapshotResponse, Detail, Document, DocumentGoals, DocumentProbes,
-    ErrorKind, Export, GoalsAt, GoalsMode, Health, HealthStatus, JobKind, JobStatus, LeftOut,
-    LeftOutReason, LinePos, ListDependentsResponse, ListSnapshotsResponse, Message, PairError,
-    PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated, RebuildFailed,
-    RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse, Replacement, Replaces,
+    self, AcceptPair, AcceptResponse, Allow, Amendment, Amends, ApplyTacticResponse, AtPosition,
+    AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditReview, AuditSnapshotsResponse,
+    AuditSummary, AuditTarget, AuditUnproved, Change, CheckResult, CreateSnapshotResponse,
+    Declaration, DeclarationChange, DeleteSnapshotResponse, Detail, Document, DocumentGoals,
+    DocumentProbes, ErrorKind, Export, GoalsAt, GoalsMode, Health, HealthStatus, JobKind,
+    JobStatus, LeftOut, LeftOutReason, LinePos, ListDependentsResponse, ListSnapshotsResponse,
+    Message, PairError, PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated,
+    RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse,
+    Refutation, Refutes, Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse,
     ReviewDeclaration, ReviewOrigin, Session, Severity, Snapshot, SnapshotDetail, Sorry, State,
     TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
@@ -151,6 +152,15 @@ pub struct CreateSnapshotOptions {
     /// replace it to change, which those inherit and may change without
     /// `allow`. Not with `replaces`; empty sends none.
     pub holes: Vec<String>,
+    /// The spec this code, a spec of its own, amends, and why: the response's
+    /// `amendment` says what changed. Not with `replaces`;
+    /// [`resubmit_snapshots`](Client::resubmit_snapshots) carries the amended
+    /// spec's run over.
+    pub amends: Option<Amends>,
+    /// A spec's target this code refutes, by proving `¬` its statement on
+    /// the spec: the response's `refutation` names the theorem. Alone among
+    /// `replaces`, `holes` and `amends`.
+    pub refutes: Option<Refutes>,
     /// [`Detail::Declarations`] for every field of the check's declarations.
     pub detail: Vec<Detail>,
 }
@@ -214,6 +224,18 @@ pub struct RebuildOptions {
     /// Once every item is created, delete the old snapshots whose copies
     /// replace them, from the top down. `from` stays.
     pub retire: bool,
+    /// The kernel re-check for each create; see
+    /// [`CreateSnapshotOptions::verify`].
+    pub verify: Option<bool>,
+}
+
+/// Options for [`Client::resubmit_snapshots`].
+#[derive(Debug, Clone, Default)]
+pub struct ResubmitOptions {
+    /// Only plan: compare each head with the amending spec.
+    pub dry_run: bool,
+    /// The new snapshots' labels; by default each head's.
+    pub labels: Option<BTreeMap<String, String>>,
     /// The kernel re-check for each create; see
     /// [`CreateSnapshotOptions::verify`].
     pub verify: Option<bool>,
@@ -637,6 +659,8 @@ impl Client {
             replaces: opts.replaces.clone(),
             fork: opts.fork,
             holes: (!opts.holes.is_empty()).then(|| opts.holes.clone()),
+            amends: opts.amends.clone(),
+            refutes: opts.refutes.clone(),
             detail: opts.detail.clone(),
         }
     }
@@ -822,6 +846,52 @@ impl Client {
         self.endpoint
             .submit(self.endpoint.url("snapshots/rebuild")?, Some(&req))
             .await
+    }
+
+    /// Carries the run of spec `from` over to `to`, the spec that amends it:
+    /// the server compares each head of the run with `to`, and unless
+    /// `opts.dry_run` creates each head that keeps `to`'s statements again,
+    /// replacing `to`. Sending it again replays the creates that are done.
+    /// [`submit_resubmit_snapshots`](Self::submit_resubmit_snapshots) runs it
+    /// as a job.
+    pub async fn resubmit_snapshots(
+        &self,
+        from: &str,
+        to: &str,
+        opts: &ResubmitOptions,
+    ) -> Result<ResubmitSnapshotsResponse, Error> {
+        let req = self.resubmit_request(from, to, opts);
+        self.post("snapshots/resubmit", &req).await
+    }
+
+    /// Like [`Client::resubmit_snapshots`], as a job; a dry run isn't one,
+    /// as for [`submit_rebuild_snapshots`](Self::submit_rebuild_snapshots).
+    pub async fn submit_resubmit_snapshots(
+        &self,
+        from: &str,
+        to: &str,
+        opts: &ResubmitOptions,
+    ) -> Result<Job<ResubmitSnapshotsResponse>, Error> {
+        let req = self.resubmit_request(from, to, opts);
+        self.endpoint
+            .submit(self.endpoint.url("snapshots/resubmit")?, Some(&req))
+            .await
+    }
+
+    fn resubmit_request(
+        &self,
+        from: &str,
+        to: &str,
+        opts: &ResubmitOptions,
+    ) -> api::ResubmitSnapshotsRequest {
+        api::ResubmitSnapshotsRequest {
+            from: from.to_string(),
+            to: to.to_string(),
+            dry_run: opts.dry_run,
+            labels: opts.labels.clone(),
+            verify: opts.verify,
+            timeout: self.timeout,
+        }
     }
 
     fn rebuild_snapshots_request(

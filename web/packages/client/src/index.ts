@@ -9,6 +9,7 @@ export {
   type JobOptions,
   type JobPoll,
   type RebuildOptions,
+  type ResubmitOptions,
   type RequestOptions,
   type RunOptions,
   type VersionOptions,

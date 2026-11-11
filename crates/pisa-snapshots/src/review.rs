@@ -279,6 +279,7 @@ mod tests {
             value_refs: value_refs.iter().map(|s| s.to_string()).collect(),
             generated: false,
             parent: None,
+            negates: None,
         }
     }
 

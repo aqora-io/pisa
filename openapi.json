@@ -173,6 +173,62 @@
         ],
         "type": "object"
       },
+      "Amendment": {
+        "description": "A spec's amendment of an earlier spec, as its create recorded it.",
+        "properties": {
+          "added": {
+            "description": "The declarations the amending spec adds.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "amends": {
+            "description": "The spec it amends, which may be deleted since.",
+            "type": "string"
+          },
+          "changes": {
+            "description": "What changed of the amended spec's declarations, as for a\nreplacement that may change nothing: statements, definitions\n(holes included) and assumptions.",
+            "items": {
+              "$ref": "#/components/schemas/DeclarationChange"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "The amending spec.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "amends",
+          "reason",
+          "changes",
+          "added"
+        ],
+        "type": "object"
+      },
+      "Amends": {
+        "description": "The spec a create amends, and why: a create's\n[`amends`](CreateSnapshotRequest::amends).",
+        "properties": {
+          "reason": {
+            "description": "Why the spec changes, for whoever reviews the run: 1 to\n[`MAX_REASON`] characters.",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "The amended spec snapshot. Of the create's version, and chooses it\nwhen the create names none, as `replaces` does.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "reason"
+        ],
+        "type": "object"
+      },
       "ApplyTacticRequest": {
         "description": "`POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`,\nwith Lean's errors in its message, and leaves no state.",
         "properties": {
@@ -400,6 +456,13 @@
       "AuditSnapshotsResponse": {
         "description": "`GET /snapshots/audit`: what the snapshots that have every label the\nquery names (as in a listing) rest on. Statuses come from the build's\naxiom report, or the kernel re-check once a module is verified, so a\ntrusted audit has no `rejected` or `sorry` and `unverified_modules` 0.\nWhether an assumption is reasonable is for review.\n\nWith `against=<snapshot id>` instead of labels, repeatable, it audits a\nrun against its spec, the snapshots named. From each, it follows the\nsnapshots that [`replace`](CreateSnapshotRequest::replaces) it, whatever\ntheir labels, to the run's `heads`, and judges each spec declaration on\neach head it reaches. The counts are then those of the heads' snapshots.\nThe ids are of one version, which the audit uses, and `label` doesn't\ncombine with them. A spec snapshot that doesn't exist is `not_found`.\nThe heads may change a spec snapshot's\n[`holes`](CreateSnapshotRequest::holes), and the definitions\n`allow=<name>`, repeatable, names: those the leader allows later. The\nlinks' own allows, which whoever created them wrote, don't count.",
         "properties": {
+          "amendments": {
+            "description": "With `against`: the amendments of the spec snapshots, both those they\nmake and those made of them, as the creates recorded them. They don't\nchange `clean`, which judges the run against the specs `against`\nnames: `POST /snapshots/resubmit` carries a run over to the spec\nthat amends its own.",
+            "items": {
+              "$ref": "#/components/schemas/Amendment"
+            },
+            "type": "array"
+          },
           "assumptions": {
             "description": "The assumptions what the snapshots declare uses, by name, wherever\nthey are declared.",
             "items": {
@@ -408,7 +471,7 @@
             "type": "array"
           },
           "clean": {
-            "description": "With `against`: whether the run is done. There is no fork, no spec\nsnapshot was copied from one that is gone (as a rebuild with `retire`\nleaves it), every [comparison](Self::comparisons) found the spec's\nstatements kept, with no definition changed but the spec's holes and\nthose the audit's `allow` names, and every target is\n[accepted](AuditTarget::accepted) on its head.",
+            "description": "With `against`: whether the run is done. There is no fork, no spec\nsnapshot was copied from one that is gone (as a rebuild with `retire`\nleaves it), every [comparison](Self::comparisons) found the spec's\nstatements kept, with no definition changed but the spec's holes and\nthose the audit's `allow` names, every target is\n[accepted](AuditTarget::accepted) on its head, and no target of a\nspec snapshot is [refuted](Self::refutations).",
             "type": "boolean"
           },
           "comparisons": {
@@ -443,6 +506,13 @@
             "description": "The declarations that are `sorry` or `rejected`.",
             "items": {
               "$ref": "#/components/schemas/AuditUnproved"
+            },
+            "type": "array"
+          },
+          "refutations": {
+            "description": "With `against`: the refutations of the spec snapshots' targets, each\na snapshot that proves `¬` a target's statement on the spec. Any one\nmakes the run not `clean`: what it set out to prove is false as\nstated, and the spec needs amending.",
+            "items": {
+              "$ref": "#/components/schemas/Refutation"
             },
             "type": "array"
           },
@@ -521,7 +591,7 @@
         "description": "A spec declaration, as a head of the run declares it.",
         "properties": {
           "accepted": {
-            "description": "What a clean run needs of it: the spec snapshot's module and the\nhead's are verified, so that both records come from the kernel\nre-check rather than from a build's report; the head keeps the spec's\nstatements (see [`AuditSnapshotsResponse::comparisons`]); and the\ntarget is `proved`, or `conditional` on assumptions the spec permits\n(see [`AuditAssumption::in_spec`]).",
+            "description": "What a clean run needs of it: the spec snapshot's module and the\nhead's are verified, so that both records come from the kernel\nre-check rather than from a build's report; the head keeps the spec's\nstatements (see [`AuditSnapshotsResponse::comparisons`]); and the\ntarget is `proved`, or `conditional` on assumptions the spec permits\n(see [`AuditAssumption::in_spec`]), and nothing refutes it.",
             "type": "boolean"
           },
           "head": {
@@ -531,6 +601,13 @@
           "name": {
             "description": "Its name as the spec snapshot's module declares it, so a private\none's names the spec's module. The head's declaration is the one\nwith the same name, a private one's module left out.",
             "type": "string"
+          },
+          "refuted_by": {
+            "description": "The snapshots that refute it, proving `¬` its statement on the spec.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "spec": {
             "description": "The spec snapshot that declares it.",
@@ -797,6 +874,10 @@
       "CreateSnapshotRequest": {
         "description": "`POST /snapshots`: checks code like `/check` and, if Lean accepts it,\nkeeps it as a module that later code can import, with a new snapshot of\nit. Code that is already kept gets a new snapshot of its module without\nbeing built again.",
         "properties": {
+          "amends": {
+            "$ref": "#/components/schemas/Amends",
+            "description": "The spec snapshot this spec amends, during a run, and why. The code\nis a spec of its own, with its own `holes`, which replaces nothing:\nits create compares it with the amended spec and records what changed\nand what it adds, with the reason, in\n[`amendment`](CreateSnapshotResponse::amendment), and an audit of\neither spec lists it. It is always re-checked: `verify: false` is a\n`bad_request`, as is `replaces`. `POST /snapshots/resubmit` carries\nthe amended spec's run over to it."
+          },
           "code": {
             "type": "string"
           },
@@ -832,6 +913,10 @@
             },
             "type": "object"
           },
+          "refutes": {
+            "$ref": "#/components/schemas/Refutes",
+            "description": "A spec's target that this code refutes: a theorem of the spec's\nmodule whose statement mentions none of the spec's holes and no\nprivate name. The code must import the spec's module and prove, with\nno `sorry` and no assumption, a theorem whose statement is `¬` that\nstatement exactly, as `theorem r : ¬ type_of% @t := …` states it. It\nis always re-checked: `verify: false` is a `bad_request`, as are\n`replaces`, `holes` and `amends`. Otherwise nothing is kept, and\n`check.reasons` says why. An audit against the spec then shows the\ntarget refuted, and isn't `clean`."
+          },
           "replaces": {
             "$ref": "#/components/schemas/Replaces",
             "description": "The snapshot this code replaces, e.g. the skeleton a proof fills in.\nThe code is kept only if it still declares everything that snapshot's\nmodule declares, each the same kind of declaration with the same type\nand, for definitions, the same value unless `allow` or that\nsnapshot's [`holes`](Snapshot::holes) name them, and adds no\nassumptions (`axiom`s, its own or a newly imported\nsnapshot's); it may add other declarations and imports. If it no\nlonger builds on a snapshot that module does, what the module's\ndeclarations use from there must be unchanged in what the code builds\non now. Otherwise nothing is kept and `check.reasons` lists the\nchanges. The new snapshot records the link. The replaced snapshot\nmust be a head, one that no snapshot replaces, unless `fork` is set."
@@ -858,6 +943,10 @@
       },
       "CreateSnapshotResponse": {
         "properties": {
+          "amendment": {
+            "$ref": "#/components/schemas/Amendment",
+            "description": "What the snapshot's create recorded of the spec it\n[`amends`](CreateSnapshotRequest::amends), if it amends one."
+          },
           "check": {
             "$ref": "#/components/schemas/CheckResult",
             "description": "The check, as for `/check`. It has no `sorries`, and `time` includes\nimporting the module's imports."
@@ -868,6 +957,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "refutation": {
+            "$ref": "#/components/schemas/Refutation",
+            "description": "What the snapshot's create checked of the target it\n[`refutes`](CreateSnapshotRequest::refutes), if it refutes one."
           },
           "replacement": {
             "$ref": "#/components/schemas/Replacement",
@@ -911,6 +1004,10 @@
             "type": "string"
           },
           "name": {
+            "type": "string"
+          },
+          "negates": {
+            "description": "For a theorem of `¬ X` (or `X → False`), the SHA-256 of `X`'s\ncanonical text with every name written whole: the `type_hash` of a\ndeclaration that states `X` and mentions no private name, from any\nmodule.",
             "type": "string"
           },
           "parent": {
@@ -1589,12 +1686,13 @@
           "create_snapshot",
           "verify_snapshot",
           "rebuild_snapshots",
-          "accept_run"
+          "accept_run",
+          "resubmit_snapshots"
         ],
         "type": "string"
       },
       "JobOutcome": {
-        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a\n`VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`\nand `accept_run` an `AcceptResponse`. An error is the request's own, with\nits status.",
+        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a\n`VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`,\n`accept_run` an `AcceptResponse` and `resubmit_snapshots` a\n`ResubmitSnapshotsResponse`. An error is the request's own, with\nits status.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/CheckResult"
@@ -1616,6 +1714,9 @@
           },
           {
             "$ref": "#/components/schemas/AcceptResponse"
+          },
+          {
+            "$ref": "#/components/schemas/ResubmitSnapshotsResponse"
           }
         ]
       },
@@ -2237,6 +2338,51 @@
         ],
         "type": "object"
       },
+      "Refutation": {
+        "description": "A snapshot's refutation of a spec's target, as its create checked it.",
+        "properties": {
+          "snapshot_id": {
+            "description": "The refuting snapshot.",
+            "type": "string"
+          },
+          "spec": {
+            "description": "The spec, which may be deleted since.",
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "theorem": {
+            "description": "The refuting snapshot's theorem, which proves `¬` the target's\nstatement.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "spec",
+          "target",
+          "theorem"
+        ],
+        "type": "object"
+      },
+      "Refutes": {
+        "description": "The spec target a create refutes: a create's\n[`refutes`](CreateSnapshotRequest::refutes).",
+        "properties": {
+          "snapshot_id": {
+            "description": "The spec snapshot. Of the create's version, and chooses it when the\ncreate names none, as `replaces` does.",
+            "type": "string"
+          },
+          "target": {
+            "description": "The theorem of the spec's module refuted, as the spec names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "target"
+        ],
+        "type": "object"
+      },
       "Replacement": {
         "description": "What a replacement changed, as the comparison with the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) found: its create's, or the\nunion of two, for a link composed when the snapshot between was deleted.",
         "properties": {
@@ -2350,6 +2496,120 @@
         "required": [
           "version",
           "results"
+        ],
+        "type": "object"
+      },
+      "ResubmitItem": {
+        "description": "A head of the amended spec's run, and whether it comes over.",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/DeclarationChange"
+            },
+            "type": "array"
+          },
+          "check": {
+            "$ref": "#/components/schemas/CheckResult",
+            "description": "The create's check, when it kept nothing."
+          },
+          "key": {
+            "description": "The idempotency key its create has, so that sending the resubmit\nagain replays it.",
+            "type": "string"
+          },
+          "module": {
+            "type": "string"
+          },
+          "new_snapshot_id": {
+            "description": "The new snapshot, once created.",
+            "type": "string"
+          },
+          "passes": {
+            "description": "Whether it keeps the statements of `to`, allowing `to`'s holes to\nchange, as an audit against `to` compares them. Only such a head is\ncreated again, as a snapshot of the same code that replaces `to`;\nafter the first, each forks the new run, as the old run was.",
+            "type": "boolean"
+          },
+          "reasons": {
+            "description": "Why it doesn't: the changes, or a record the kernel hasn't re-checked.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "replacement": {
+            "$ref": "#/components/schemas/Replacement",
+            "description": "What it fills and changes of `to`, if it passes."
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "module",
+          "key",
+          "passes"
+        ],
+        "type": "object"
+      },
+      "ResubmitSnapshotsRequest": {
+        "description": "`POST /snapshots/resubmit`: carries the run of a spec over to the spec\nthat [amends](CreateSnapshotRequest::amends) it.",
+        "properties": {
+          "dry_run": {
+            "description": "Only plan: compare each head with `to`, and create nothing.",
+            "type": "boolean"
+          },
+          "from": {
+            "description": "The amended spec, whose run's heads are carried over. It may be\ndeleted since.",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The labels of each new snapshot; by default its head's.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "timeout": {
+            "description": "As [`CreateSnapshotRequest::timeout`], for each create.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "to": {
+            "description": "The spec that amends it, of its version.",
+            "type": "string"
+          },
+          "verify": {
+            "description": "As [`CreateSnapshotRequest::verify`], for each create.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "ResubmitSnapshotsResponse": {
+        "description": "What a resubmit planned and, unless it was a dry run, did. Sending it again\nplans the same items with the same keys, so the creates that are done\nreplay their snapshots.",
+        "properties": {
+          "items": {
+            "description": "The heads of `from`'s run, oldest first.",
+            "items": {
+              "$ref": "#/components/schemas/ResubmitItem"
+            },
+            "type": "array"
+          },
+          "ok": {
+            "description": "For a plan, whether every head keeps `to`'s statements; for a run,\nwhether every head was carried over too.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "items"
         ],
         "type": "object"
       },
@@ -5273,6 +5533,133 @@
           }
         },
         "summary": "Rebuild a snapshot's dependents on its replacement",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
+    "/snapshots/resubmit": {
+      "post": {
+        "description": "Compares each head of the run of `from` with `to`, the spec that amends it, as an audit against `to` would, allowing `to`'s holes to change, and unless `dry_run` creates each head that keeps `to`'s statements again: the same code, replacing `to`, with its head's labels or the request's. The heads of a forked run come over forked. A head that changes a statement is listed with its changes, and one whose record the kernel hasn't re-checked with that reason. `from` may be deleted. Sending the same resubmit again replays the creates that are done. A run can be async; a dry run answers at once.",
+        "operationId": "resubmitSnapshots",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResubmitSnapshotsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResubmitSnapshotsResponse"
+                }
+              }
+            },
+            "description": "The plan, and what the run did"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{id}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Carry an amended spec's run over to the spec that amends it",
         "tags": [
           "snapshots"
         ]

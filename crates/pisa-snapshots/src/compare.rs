@@ -399,3 +399,90 @@ pub fn worst_status(decls: &[Declaration]) -> ProofStatus {
     let statuses = decls.iter().map(|d| d.status);
     statuses.max().unwrap_or(ProofStatus::Proved)
 }
+
+fn refusal(message: String) -> Error {
+    Error::new(ErrorKind::BadRequest, message)
+}
+
+/// The target of a spec, whose module declares `declarations` and which has
+/// `holes`, that a refutation names, if it can be refuted: a theorem the spec
+/// states, not one Lean made, whose statement mentions no private name, which
+/// no other module can state, and none of the spec's holes, which a head may
+/// fill. Names are matched as [`normalised`].
+pub fn refutable<'a>(
+    declarations: &'a [Declaration],
+    holes: &[String],
+    target: &str,
+) -> Result<&'a Declaration, Error> {
+    let found = declarations
+        .iter()
+        .find(|d| d.kind == "theorem" && !d.generated && normalised(&d.name) == normalised(target))
+        .ok_or_else(|| {
+            refusal(format!(
+                "{target} isn't a theorem the spec states: refute one of its targets"
+            ))
+        })?;
+    if let Some(p) = found.type_refs.iter().find(|r| r.starts_with("_private.")) {
+        return Err(refusal(format!(
+            "the statement of {target} mentions {p}, a private name of its module, which no \
+             other module can state"
+        )));
+    }
+    let holes: HashSet<String> = holes.iter().cloned().collect();
+    let (_, theorems) = uses(&holes, declarations);
+    if theorems.contains(&found.name) {
+        return Err(refusal(format!(
+            "{target} uses the spec's holes, which a head may fill: amend the spec to state \
+             what is false"
+        )));
+    }
+    Ok(found)
+}
+
+/// The theorem of a refuter's declarations, `decls`, that refutes `target`,
+/// a theorem of spec module `spec_module`: one Lean didn't make, proved, of
+/// `¬` the target's statement. The refuter must build on the spec module,
+/// as its snapshot modules `needs` say, and be `verified`. Else why not, as
+/// reasons.
+pub fn refuter(
+    target: &Declaration,
+    spec_module: &str,
+    needs: &[String],
+    verified: bool,
+    decls: &[Declaration],
+) -> Result<String, Vec<String>> {
+    let mut reasons = Vec::new();
+    if !needs.iter().any(|m| m == spec_module) {
+        reasons.push(format!(
+            "refutation: the code doesn't build on the spec: import {}",
+            snapshot::module(spec_module)
+        ));
+    }
+    if !verified {
+        reasons.push("refutation: the code isn't verified".to_string());
+    }
+    let negating: Vec<&Declaration> = decls
+        .iter()
+        .filter(|d| d.kind == "theorem" && !d.generated)
+        .filter(|d| d.negates.as_ref() == Some(&target.type_hash))
+        .collect();
+    let proved = negating.iter().find(|d| d.status == ProofStatus::Proved);
+    match (proved, negating.first()) {
+        (Some(d), _) if reasons.is_empty() => return Ok(d.name.clone()),
+        (Some(_), _) => {}
+        (None, Some(d)) => reasons.push(format!(
+            "refutation: {} states ¬ {}, but isn't proved: it is {}",
+            d.name,
+            target.name,
+            serde_json::to_value(d.status)
+                .ok()
+                .and_then(|s| s.as_str().map(String::from))
+                .unwrap_or_default()
+        )),
+        (None, None) => reasons.push(format!(
+            "refutation: no theorem states ¬ {}, its statement exactly",
+            target.name
+        )),
+    }
+    Err(reasons)
+}

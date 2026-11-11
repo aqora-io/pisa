@@ -55,6 +55,22 @@ pub(super) fn modules(parents: &[ModuleMeta], own: Module) -> Vec<Module> {
 }
 
 impl Snapshots {
+    /// What a create for module `id`, which needs the snapshot modules
+    /// `needs` (its own last), swaps of what `r` needs, once `r`'s `allow`
+    /// names only what it may change.
+    pub(super) async fn swap(
+        &self,
+        r: &Replacing,
+        needs: &[String],
+        id: &str,
+    ) -> Result<Swapped, Error> {
+        let swapped = self.reader.swapped(r, needs, id).await?;
+        match allow_error(r, &swapped) {
+            Some(e) => Err(e),
+            None => Ok(swapped),
+        }
+    }
+
     /// Compiles, judges and stores the snapshot with a new entry, once it
     /// compares well with the entry it replaces, if any. Returns its record,
     /// the entry and what the replacement changed, `None` if nothing could be
@@ -65,10 +81,11 @@ impl Snapshots {
         slot: &mut Lease,
         job: &SnapshotCreateJob,
         split: &Split,
-        replacing: Option<&Replacing>,
+        rel: &Relations,
         id: &str,
         header: &str,
     ) -> Result<Built, Box<CheckOutcome>> {
+        let replacing = rel.replacing.as_ref();
         let mut outcome = CheckOutcome {
             time: 0.0,
             error: None,
@@ -94,24 +111,18 @@ impl Snapshots {
         let recheck = module_system || job.verify != Some(false);
         // The snapshots a replacement swaps follow from its imports, so a
         // misnamed `allow` costs no build.
-        let swapped = match replacing {
-            Some(r) => {
-                let mut needs: Vec<String> = Vec::new();
-                for m in parents.iter().flat_map(|p| ids(&p.modules)) {
-                    if !needs.contains(m) {
-                        needs.push(m.clone());
-                    }
-                }
-                needs.push(id.to_string());
-                let swapped = match self.reader.swapped(r, &needs, id).await {
-                    Ok(swapped) => swapped,
-                    Err(e) => return fail(outcome, e),
-                };
-                if let Some(e) = allow_error(r, &swapped) {
-                    return fail(outcome, e);
-                }
-                Some(swapped)
+        let mut needs: Vec<String> = Vec::new();
+        for m in parents.iter().flat_map(|p| ids(&p.modules)) {
+            if !needs.contains(m) {
+                needs.push(m.clone());
             }
+        }
+        needs.push(id.to_string());
+        let swapped = match replacing {
+            Some(r) => match self.swap(r, &needs, id).await {
+                Ok(swapped) => Some(swapped),
+                Err(e) => return fail(outcome, e),
+            },
             None => None,
         };
         // The build imports everything again, so free the slot's memory first.
@@ -310,6 +321,39 @@ impl Snapshots {
                 return fail(outcome, e);
             }
         }
+        let amends = match &rel.amending {
+            Some(a) => {
+                let own = exported.iter().flatten();
+                let own = own.map(|d| (d.name.clone(), d.signature.clone()));
+                let decls = &verification.declarations;
+                match self.amendment(a, &needs, id, decls, own).await {
+                    Ok(a) => Some(a),
+                    Err(e) => {
+                        self.unbuild(slot, id);
+                        outcome.verification = Some(verification);
+                        return fail(outcome, e);
+                    }
+                }
+            }
+            None => None,
+        };
+        let verified = kernel && parents.iter().all(|p| p.verified);
+        let refutes = match &rel.refuting {
+            Some(r) => {
+                let decls = &verification.declarations;
+                match refuter(&r.target, &r.spec_module, &needs, verified, decls) {
+                    Ok(theorem) => Some(r.record(theorem)),
+                    Err(reasons) => {
+                        self.unbuild(slot, id);
+                        verification.ok = false;
+                        verification.reasons.extend(reasons);
+                        outcome.verification = Some(verification);
+                        return Err(Box::new(outcome));
+                    }
+                }
+            }
+            None => None,
+        };
         outcome.verification = Some(verification);
 
         let meta = ModuleMeta {
@@ -318,7 +362,7 @@ impl Snapshots {
             header: header.to_string(),
             code: job.code.clone(),
             status,
-            verified: kernel && parents.iter().all(|p| p.verified),
+            verified,
             macros,
             result: outcome.clone().into(),
             created: now(),
@@ -341,6 +385,8 @@ impl Snapshots {
             replacement: replacement.clone(),
             fork: job.fork,
             holes: replacing.map_or_else(|| job.holes.clone(), |r| r.holes.clone()),
+            amends,
+            refutes,
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)

@@ -21,9 +21,17 @@ pub enum Job {
     /// kind of its own so that a worker that doesn't know the field refuses
     /// it as [`Job::Unsupported`], rather than keeping the code unchecked.
     SnapshotReplace(SnapshotCreateJob),
+    /// A create with [`amends`](SnapshotCreateJob::amends) set, as a
+    /// replacement has its own kind.
+    SnapshotAmend(SnapshotCreateJob),
+    /// A create with [`refutes`](SnapshotCreateJob::refutes) set, as a
+    /// replacement has its own kind.
+    SnapshotRefute(SnapshotCreateJob),
     SnapshotDelete(SnapshotDeleteJob),
     SnapshotVerify(SnapshotVerifyJob),
     SnapshotRebuild(SnapshotRebuildJob),
+    /// The record of a resubmit, which a server runs.
+    SnapshotResubmit(api::ResubmitSnapshotsRequest),
     SnapshotExport(SnapshotExportJob),
     SnapshotAccept(SnapshotAcceptJob),
     DocumentOpen(DocumentOpenJob),
@@ -94,6 +102,12 @@ pub struct SnapshotCreateJob {
     /// A spec's holes; empty with `replaces`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holes: Vec<String>,
+    /// The spec it amends; not with `replaces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amends: Option<api::Amends>,
+    /// The spec target it refutes; alone among these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refutes: Option<api::Refutes>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<api::Detail>,
 }
@@ -248,6 +262,7 @@ pub enum JobResult {
     SnapshotDeleted(Result<api::DeleteSnapshotResponse, api::Error>),
     SnapshotVerified(Result<api::VerifySnapshotResponse, api::Error>),
     SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
+    SnapshotResubmit(Result<Box<api::ResubmitSnapshotsResponse>, api::Error>),
     SnapshotExport(Result<ExportedRun, api::Error>),
     SnapshotAccepted(Result<Box<api::AcceptResponse>, api::Error>),
     /// An opened or edited document.
@@ -338,6 +353,8 @@ mod tests {
             }),
             fork: true,
             holes: Vec::new(),
+            amends: None,
+            refutes: None,
             detail: Vec::new(),
         };
         let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();

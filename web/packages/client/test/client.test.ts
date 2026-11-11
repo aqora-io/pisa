@@ -212,6 +212,22 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("amends, refutes and resubmits", async () => {
+    const { client, sent } = recording((s) =>
+      s.headers["prefer"] ? json({ id: "j", kind: "resubmit_snapshots", status: "queued" }, 202) : json({ ok: true, items: [] }),
+    );
+    await client.createSnapshot("x", { amends: { snapshot_id: "v2~s", reason: "w is false" } });
+    await client.createSnapshot("y", { refutes: { snapshot_id: "v2~s", target: "w" } });
+    await client.resubmitSnapshots("v2~s", "v2~t", { dryRun: true, labels: { run: "b" } });
+    await client.submitResubmitSnapshots("v2~s", "v2~t", { verify: true, timeout: 30 });
+    expect(sent.map((s) => [s.url, s.body])).toEqual([
+      ["/api/snapshots", { code: "x", version: "v1", amends: { snapshot_id: "v2~s", reason: "w is false" } }],
+      ["/api/snapshots", { code: "y", version: "v1", refutes: { snapshot_id: "v2~s", target: "w" } }],
+      ["/api/snapshots/resubmit", { from: "v2~s", to: "v2~t", dry_run: true, labels: { run: "b" } }],
+      ["/api/snapshots/resubmit", { from: "v2~s", to: "v2~t", timeout: 30, verify: true }],
+    ]);
+  });
+
   it("opens, edits, asks and closes a document", async () => {
     const { client, sent } = recording((s) =>
       s.method === "DELETE" ? new Response(null, { status: 204 }) : json({ id: "d", revision: 1, sorries: [], at: [], results: [] }),

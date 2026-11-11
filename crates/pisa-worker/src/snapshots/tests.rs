@@ -60,6 +60,8 @@ fn no_labels() -> NewEntry {
         replacement: None,
         holes: Vec::new(),
         fork: false,
+        amends: None,
+        refutes: None,
     }
 }
 

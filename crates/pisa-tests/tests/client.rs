@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    AcceptOptions, Allow, AuditOptions, CheckOptions, Client, CreateSnapshotOptions,
+    AcceptOptions, Allow, Amends, AuditOptions, CheckOptions, Client, CreateSnapshotOptions,
     DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions, HealthStatus, Job, JobKind,
     JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt, ProofStatus, RebuildOptions,
-    Replaces,
+    Refutes, Replaces, ResubmitOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -835,4 +835,82 @@ async fn client_reviews_exports_and_accepts_a_run() {
     let none: [&str; 0] = [];
     let e = client.accept_run(none, &AcceptOptions::default()).await;
     assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_amends_a_spec_resubmits_its_run_and_refutes_a_target() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let opts = CreateSnapshotOptions {
+        holes: vec!["cost".into()],
+        ..Default::default()
+    };
+    let spec = "import Foo\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry\ntheorem w : 1 = 2 := sorry";
+    let spec = client.create_snapshot_with(spec, &opts).await.unwrap();
+    let spec = spec.snapshot.unwrap();
+    let replaces = Replaces {
+        snapshot_id: spec.id.clone(),
+        allow: None,
+    };
+    let opts = CreateSnapshotOptions {
+        replaces: Some(replaces),
+        ..Default::default()
+    };
+    let head = "import Foo\ndef cost : Nat := 1\ntheorem t : cost = cost := rfl\ntheorem w : 1 = 2 := sorry";
+    let head = client.create_snapshot_with(head, &opts).await.unwrap();
+    let head = head.snapshot.unwrap();
+
+    // `w` is false: refute it, then amend the spec without it.
+    let refuter = format!("{}\ntheorem r : ¬ (1 = 2) := by decide", spec.header);
+    let opts = CreateSnapshotOptions {
+        refutes: Some(Refutes {
+            snapshot_id: spec.id.clone(),
+            target: "w".into(),
+        }),
+        ..Default::default()
+    };
+    let refuted = client.create_snapshot_with(&refuter, &opts).await.unwrap();
+    assert_eq!(refuted.refutation.map(|r| r.theorem).as_deref(), Some("r"));
+    let opts = CreateSnapshotOptions {
+        holes: vec!["cost".into()],
+        amends: Some(Amends {
+            snapshot_id: spec.id.clone(),
+            reason: "w is false".into(),
+        }),
+        ..Default::default()
+    };
+    let amended = "import Foo\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let amended = client.create_snapshot_with(amended, &opts).await.unwrap();
+    let amendment = amended.amendment.unwrap();
+    assert_eq!(amendment.changes[0].name, "w");
+    let to = amended.snapshot.unwrap().id;
+
+    let dry = ResubmitOptions {
+        dry_run: true,
+        ..Default::default()
+    };
+    let plan = client
+        .resubmit_snapshots(&spec.id, &to, &dry)
+        .await
+        .unwrap();
+    assert!(plan.ok && plan.items[0].passes, "{plan:?}");
+    assert_eq!(plan.items[0].snapshot_id, head.id);
+    let job = client
+        .submit_resubmit_snapshots(&spec.id, &to, &ResubmitOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(job.kind, JobKind::ResubmitSnapshots);
+    let done = client.wait_job(&job).await.unwrap();
+    assert!(
+        done.ok && done.items[0].new_snapshot_id.is_some(),
+        "{done:?}"
+    );
+    let again = client
+        .resubmit_snapshots(&spec.id, &to, &ResubmitOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        again.items[0].new_snapshot_id,
+        done.items[0].new_snapshot_id
+    );
 }

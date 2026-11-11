@@ -68,6 +68,27 @@ diesel::table! {
 }
 
 diesel::table! {
+    amendments (version, entry) {
+        version -> Text,
+        entry -> Text,
+        amends -> Text,
+        reason -> Text,
+        changes -> Text,
+        added -> Text,
+    }
+}
+
+diesel::table! {
+    refutations (version, entry) {
+        version -> Text,
+        entry -> Text,
+        spec -> Text,
+        target -> Text,
+        theorem -> Text,
+    }
+}
+
+diesel::table! {
     acceptances (version, id) {
         version -> Text,
         id -> Text,

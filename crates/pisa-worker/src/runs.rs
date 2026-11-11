@@ -691,6 +691,7 @@ mod tests {
             value_refs: Vec::new(),
             generated: false,
             parent: None,
+            negates: None,
         }
     }
 

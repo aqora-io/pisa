@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::db::{DbError, retry};
 use crate::records::{DocumentRow, StateRow};
 use crate::schema::{
-    catalogs, described, documents, entries, leases, links, module_imports, modules, sessions,
+    amendments, catalogs, described, documents, refutations, entries, leases, links, module_imports, modules, sessions,
     states,
 };
 
@@ -294,6 +294,22 @@ pub(crate) async fn rows(db: &Handle, v: &str) -> Result<Vec<Vec<String>>, DbErr
         .await?
     {
         rows.push(named("described", vec![m, name]));
+    }
+    for e in amendments::table
+        .filter(amendments::version.eq(v))
+        .select(amendments::entry)
+        .load::<String>(c)
+        .await?
+    {
+        rows.push(named("amendments", vec![e]));
+    }
+    for e in refutations::table
+        .filter(refutations::version.eq(v))
+        .select(refutations::entry)
+        .load::<String>(c)
+        .await?
+    {
+        rows.push(named("refutations", vec![e]));
     }
     for id in catalogs::table
         .filter(catalogs::version.eq(v))

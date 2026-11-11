@@ -181,8 +181,18 @@ async fn create(
         replaces: item.replaces.clone(),
         fork: false,
         holes: None,
+        amends: None,
+        refutes: None,
         detail: Vec::new(),
     };
+    create_retrying(app, create).await
+}
+
+/// Sends `create` as a create job, again while no worker takes it in time.
+pub(crate) async fn create_retrying(
+    app: &App,
+    create: CreateSnapshotRequest,
+) -> Result<CreateSnapshotResponse, Error> {
     let p = prepare_create(app, create).map_err(|e| e.0)?;
     let mut tries = 0;
     loop {

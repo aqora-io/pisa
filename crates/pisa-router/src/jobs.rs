@@ -96,6 +96,7 @@ pub(crate) fn respond(kind: JobKind, outcome: Result<JobResult, DispatchError>) 
         JobKind::VerifySnapshot => answer(outcome.and_then(snapshots::verified)),
         JobKind::RebuildSnapshots => answer(outcome.and_then(snapshots::rebuilt)),
         JobKind::AcceptRun => answer(outcome.and_then(snapshots::judged)),
+        JobKind::ResubmitSnapshots => answer(outcome.and_then(snapshots::resubmitted)),
     }
 }
 

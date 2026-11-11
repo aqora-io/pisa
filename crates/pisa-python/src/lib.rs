@@ -155,7 +155,13 @@ fn replaces_of(replaces: &Bound<'_, PyAny>) -> PyResult<pisa_client::Replaces> {
     })
 }
 
+/// A dict as `T`, or a `ValueError` saying it should be `shape`.
+fn dict_of<T: serde::de::DeserializeOwned>(value: &Bound<'_, PyAny>, shape: &str) -> PyResult<T> {
+    serde_json::from_value(from_py(value)?).map_err(|_| PyValueError::new_err(shape.to_string()))
+}
+
 /// A create's options, as its keyword arguments give them.
+#[allow(clippy::too_many_arguments)]
 fn create_snapshot_options(
     verify: Option<bool>,
     labels: Option<BTreeMap<String, String>>,
@@ -163,8 +169,16 @@ fn create_snapshot_options(
     replaces: Option<Bound<'_, PyAny>>,
     fork: bool,
     holes: Option<Vec<String>>,
+    amends: Option<Bound<'_, PyAny>>,
+    refutes: Option<Bound<'_, PyAny>>,
     detail: Vec<String>,
 ) -> PyResult<pisa_client::CreateSnapshotOptions> {
+    let amends = amends
+        .as_ref()
+        .map(|a| dict_of(a, "amends must be {\"snapshot_id\": ..., \"reason\": ...}"));
+    let refutes = refutes
+        .as_ref()
+        .map(|r| dict_of(r, "refutes must be {\"snapshot_id\": ..., \"target\": ...}"));
     Ok(pisa_client::CreateSnapshotOptions {
         verify,
         labels: labels.unwrap_or_default(),
@@ -172,6 +186,8 @@ fn create_snapshot_options(
         replaces: replaces.as_ref().map(replaces_of).transpose()?,
         fork,
         holes: holes.unwrap_or_default(),
+        amends: amends.transpose()?,
+        refutes: refutes.transpose()?,
         detail: parse_detail(detail)?,
     })
 }
@@ -276,7 +292,7 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, detail = Vec::new()))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, amends = None, refutes = None, detail = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
     fn create_snapshot<'py>(
         &self,
@@ -288,15 +304,19 @@ impl Client {
         replaces: Option<Bound<'py, PyAny>>,
         fork: bool,
         holes: Option<Vec<String>>,
+        amends: Option<Bound<'py, PyAny>>,
+        refutes: Option<Bound<'py, PyAny>>,
         detail: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes, detail)?;
+        let opts = create_snapshot_options(
+            verify, labels, key, replaces, fork, holes, amends, refutes, detail,
+        )?;
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, detail = Vec::new()))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, amends = None, refutes = None, detail = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
     fn submit_create_snapshot<'py>(
         &self,
@@ -308,9 +328,13 @@ impl Client {
         replaces: Option<Bound<'py, PyAny>>,
         fork: bool,
         holes: Option<Vec<String>>,
+        amends: Option<Bound<'py, PyAny>>,
+        refutes: Option<Bound<'py, PyAny>>,
         detail: Vec<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let opts = create_snapshot_options(verify, labels, key, replaces, fork, holes, detail)?;
+        let opts = create_snapshot_options(
+            verify, labels, key, replaces, fork, holes, amends, refutes, detail,
+        )?;
         call(py, async move {
             let job = self.inner.submit_create_snapshot_with(&code, &opts).await?;
             Ok(queued(job))
@@ -597,6 +621,50 @@ impl Client {
             let job = self
                 .inner
                 .submit_rebuild_snapshots(&from_, &to, &labels, &opts)
+                .await?;
+            Ok(queued(job))
+        })
+    }
+
+    #[pyo3(signature = (from_, to, *, dry_run = false, labels = None, verify = None))]
+    fn resubmit_snapshots<'py>(
+        &self,
+        py: Python<'py>,
+        from_: String,
+        to: String,
+        dry_run: bool,
+        labels: Option<BTreeMap<String, String>>,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::ResubmitOptions {
+            dry_run,
+            labels,
+            verify,
+        };
+        call(py, async move {
+            self.inner.resubmit_snapshots(&from_, &to, &opts).await
+        })
+    }
+
+    #[pyo3(signature = (from_, to, *, dry_run = false, labels = None, verify = None))]
+    fn submit_resubmit_snapshots<'py>(
+        &self,
+        py: Python<'py>,
+        from_: String,
+        to: String,
+        dry_run: bool,
+        labels: Option<BTreeMap<String, String>>,
+        verify: Option<bool>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let opts = pisa_client::ResubmitOptions {
+            dry_run,
+            labels,
+            verify,
+        };
+        call(py, async move {
+            let job = self
+                .inner
+                .submit_resubmit_snapshots(&from_, &to, &opts)
                 .await?;
             Ok(queued(job))
         })

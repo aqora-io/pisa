@@ -33,7 +33,7 @@ use pisa_protocol::api::{
     Allow, CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces, SnapshotId,
 };
 use pisa_protocol::snapshot;
-use pisa_protocol::verify::normalised;
+use pisa_protocol::verify::{DeclarationChange, normalised};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -320,7 +320,33 @@ pub struct Logged {
 /// How long [`Change`]s are kept; see [`Catalog::prune_log`].
 pub const LOG_RETENTION: Duration = Duration::from_secs(24 * 3600);
 
+/// A spec's amendment of an earlier spec: what its create found.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Amendment {
+    /// The entry of the spec it amends, which may be gone since.
+    pub amends: String,
+    /// Why, as the request says.
+    pub reason: String,
+    /// What changed of the amended spec's declarations.
+    pub changes: Vec<DeclarationChange>,
+    /// The new spec's declarations that the amended one doesn't have.
+    pub added: Vec<String>,
+}
+
+/// A snapshot's refutation of a spec's target, as its create checked it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Refutation {
+    /// The spec's entry, which may be gone since.
+    pub spec: String,
+    /// The refuted target: a theorem of the spec's module.
+    pub target: String,
+    /// The refuting snapshot's theorem, which proves the negation of the
+    /// target's statement.
+    pub theorem: String,
+}
+
 /// What a new entry is given.
+#[derive(Default)]
 pub struct NewEntry {
     pub labels: BTreeMap<String, String>,
     pub key: Option<String>,
@@ -333,6 +359,12 @@ pub struct NewEntry {
     /// Whether it may replace an entry that another entry replaces already,
     /// making a fork. It isn't stored.
     pub fork: bool,
+    /// The spec it amends, if it is a spec that amends another, which must
+    /// still be there.
+    pub amends: Option<Amendment>,
+    /// The spec target it refutes, if it refutes one, whose spec must still
+    /// be there.
+    pub refutes: Option<Refutation>,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -833,6 +865,24 @@ impl Catalog {
         dispatch!(&self.db, put_acceptance(&self.version, id, &result))
     }
 
+    /// The amendments that `entries` make or are subject to, by the entry
+    /// that amends, in no order.
+    pub async fn amendments_of(
+        &self,
+        entries: &[String],
+    ) -> Result<Vec<(String, Amendment)>, Error> {
+        dispatch!(&self.db, amendments_of(&self.version, entries))
+    }
+
+    /// The refutations of the targets of `entries`, and those `entries`
+    /// make, by the refuting entry, in no order.
+    pub async fn refutations_of(
+        &self,
+        entries: &[String],
+    ) -> Result<Vec<(String, Refutation)>, Error> {
+        dispatch!(&self.db, refutations_of(&self.version, entries))
+    }
+
     /// Acceptance `id`'s stored result, if it has one.
     pub async fn acceptance(&self, id: &str) -> Result<Option<Value>, Error> {
         dispatch!(&self.db, acceptance(&self.version, id))
@@ -969,6 +1019,8 @@ mod tests {
             replacement: None,
             holes: Vec::new(),
             fork: false,
+            amends: None,
+            refutes: None,
         }
     }
 
@@ -983,6 +1035,8 @@ mod tests {
             replacement: None,
             holes: Vec::new(),
             fork: false,
+            amends: None,
+            refutes: None,
         }
     }
 
@@ -994,6 +1048,8 @@ mod tests {
             replacement: None,
             holes: Vec::new(),
             fork: false,
+            amends: None,
+            refutes: None,
         }
     }
 
@@ -1939,6 +1995,129 @@ mod tests {
             // An ended lease goes to whoever asks.
             catalog.take_lease("l", "a", Duration::ZERO).await.unwrap();
             assert!(catalog.take_lease("l", "b", ttl).await.unwrap().is_some());
+        }
+    }
+
+    /// An amendment is stored with the entry that makes it, which needs the
+    /// amended entry still there; it goes with that entry, and outlives the
+    /// amended one.
+    #[tokio::test]
+    async fn an_amendment_goes_with_the_spec_that_makes_it() {
+        use pisa_protocol::verify::Change;
+        for catalog in catalogs().await {
+            let (old, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let amendment = Amendment {
+                amends: old.clone(),
+                reason: "t was false".into(),
+                changes: vec![DeclarationChange::new("t", Change::Type)],
+                added: vec!["u".into()],
+            };
+            let amending = |a: &Amendment| NewEntry {
+                amends: Some(a.clone()),
+                ..no_labels()
+            };
+            let (new, _) = catalog
+                .add_entry("x", amending(&amendment))
+                .await
+                .unwrap()
+                .unwrap();
+            let made = vec![(new.clone(), amendment.clone())];
+            assert_eq!(
+                catalog
+                    .amendments_of(std::slice::from_ref(&old))
+                    .await
+                    .unwrap(),
+                made
+            );
+            assert_eq!(
+                catalog
+                    .amendments_of(std::slice::from_ref(&new))
+                    .await
+                    .unwrap(),
+                made
+            );
+            let gone = Amendment {
+                amends: "0".repeat(32),
+                ..amendment.clone()
+            };
+            let e = catalog.add_entry("x", amending(&gone)).await.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::NotFound);
+            catalog.remove_entry(&old).await.unwrap();
+            assert_eq!(
+                catalog
+                    .amendments_of(std::slice::from_ref(&new))
+                    .await
+                    .unwrap(),
+                made
+            );
+            catalog.remove_entry(&new).await.unwrap();
+            assert!(catalog.amendments_of(&[new, old]).await.unwrap().is_empty());
+        }
+    }
+
+    /// A refutation is stored with the entry that makes it, which needs the
+    /// spec still there; it goes with that entry, and outlives the spec.
+    #[tokio::test]
+    async fn a_refutation_goes_with_the_snapshot_that_makes_it() {
+        for catalog in catalogs().await {
+            let (spec, _, _) = catalog
+                .commit("x", &meta("x"), None, no_labels())
+                .await
+                .unwrap();
+            let refutation = Refutation {
+                spec: spec.clone(),
+                target: "t".into(),
+                theorem: "r".into(),
+            };
+            let refuting = |r: &Refutation| NewEntry {
+                refutes: Some(r.clone()),
+                ..no_labels()
+            };
+            let (by, _) = catalog
+                .add_entry("x", refuting(&refutation))
+                .await
+                .unwrap()
+                .unwrap();
+            let made = vec![(by.clone(), refutation.clone())];
+            assert_eq!(
+                catalog
+                    .refutations_of(std::slice::from_ref(&spec))
+                    .await
+                    .unwrap(),
+                made
+            );
+            assert_eq!(
+                catalog
+                    .refutations_of(std::slice::from_ref(&by))
+                    .await
+                    .unwrap(),
+                made
+            );
+            let gone = Refutation {
+                spec: "0".repeat(32),
+                ..refutation.clone()
+            };
+            let e = catalog.add_entry("x", refuting(&gone)).await.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::NotFound);
+            catalog.remove_entry(&spec).await.unwrap();
+            assert_eq!(
+                catalog
+                    .refutations_of(std::slice::from_ref(&by))
+                    .await
+                    .unwrap(),
+                made
+            );
+            catalog.remove_entry(&by).await.unwrap();
+            assert!(
+                catalog
+                    .refutations_of(&[by, spec])
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 

@@ -18,6 +18,7 @@
 //! | `GET /snapshots/{id}` | → [`SnapshotDetail`] |
 //! | `GET /snapshots/{id}/dependents` | `?label=key:value` → [`ListDependentsResponse`] |
 //! | `POST /snapshots/rebuild` | [`RebuildSnapshotsRequest`] → [`RebuildSnapshotsResponse`] |
+//! | `POST /snapshots/resubmit` | [`ResubmitSnapshotsRequest`] → [`ResubmitSnapshotsResponse`] |
 //! | `GET /snapshots/audit` | `?label=key:value` or `?against=<id>` → [`AuditSnapshotsResponse`] |
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
@@ -214,6 +215,8 @@ pub enum JobKind {
     RebuildSnapshots,
     /// `POST /snapshots/accept`
     AcceptRun,
+    /// `POST /snapshots/resubmit`, run rather than planned
+    ResubmitSnapshots,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -243,8 +246,9 @@ pub struct JobWait {
 /// would have. By `kind`: `check` and `check_session` a `CheckResult`,
 /// `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
 /// `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
-/// `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`
-/// and `accept_run` an `AcceptResponse`. An error is the request's own, with
+/// `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`,
+/// `accept_run` an `AcceptResponse` and `resubmit_snapshots` a
+/// `ResubmitSnapshotsResponse`. An error is the request's own, with
 /// its status.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(untagged)]
@@ -256,6 +260,7 @@ pub enum JobOutcome {
     VerifySnapshot(VerifySnapshotResponse),
     RebuildSnapshots(Box<RebuildSnapshotsResponse>),
     AcceptRun(Box<AcceptResponse>),
+    ResubmitSnapshots(Box<ResubmitSnapshotsResponse>),
 }
 
 /// `GET /health`: 200, or 503 once the server is stopping.
@@ -807,9 +812,89 @@ pub struct CreateSnapshotRequest {
     /// `bad_request`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub holes: Option<Vec<String>>,
+    /// The spec snapshot this spec amends, during a run, and why. The code
+    /// is a spec of its own, with its own `holes`, which replaces nothing:
+    /// its create compares it with the amended spec and records what changed
+    /// and what it adds, with the reason, in
+    /// [`amendment`](CreateSnapshotResponse::amendment), and an audit of
+    /// either spec lists it. It is always re-checked: `verify: false` is a
+    /// `bad_request`, as is `replaces`. `POST /snapshots/resubmit` carries
+    /// the amended spec's run over to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amends: Option<Amends>,
+    /// A spec's target that this code refutes: a theorem of the spec's
+    /// module whose statement mentions none of the spec's holes and no
+    /// private name. The code must import the spec's module and prove, with
+    /// no `sorry` and no assumption, a theorem whose statement is `¬` that
+    /// statement exactly, as `theorem r : ¬ type_of% @t := …` states it. It
+    /// is always re-checked: `verify: false` is a `bad_request`, as are
+    /// `replaces`, `holes` and `amends`. Otherwise nothing is kept, and
+    /// `check.reasons` says why. An audit against the spec then shows the
+    /// target refuted, and isn't `clean`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refutes: Option<Refutes>,
     /// Only `declarations` applies, to `check`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<Detail>,
+}
+
+/// The spec a create amends, and why: a create's
+/// [`amends`](CreateSnapshotRequest::amends).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Amends {
+    /// The amended spec snapshot. Of the create's version, and chooses it
+    /// when the create names none, as `replaces` does.
+    pub snapshot_id: String,
+    /// Why the spec changes, for whoever reviews the run: 1 to
+    /// [`MAX_REASON`] characters.
+    pub reason: String,
+}
+
+/// The spec target a create refutes: a create's
+/// [`refutes`](CreateSnapshotRequest::refutes).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Refutes {
+    /// The spec snapshot. Of the create's version, and chooses it when the
+    /// create names none, as `replaces` does.
+    pub snapshot_id: String,
+    /// The theorem of the spec's module refuted, as the spec names it.
+    pub target: String,
+}
+
+/// A snapshot's refutation of a spec's target, as its create checked it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Refutation {
+    /// The refuting snapshot.
+    pub snapshot_id: String,
+    /// The spec, which may be deleted since.
+    pub spec: String,
+    pub target: String,
+    /// The refuting snapshot's theorem, which proves `¬` the target's
+    /// statement.
+    pub theorem: String,
+}
+
+/// The most characters an amendment's [`reason`](Amends::reason) has.
+pub const MAX_REASON: usize = 4096;
+
+/// A spec's amendment of an earlier spec, as its create recorded it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Amendment {
+    /// The amending spec.
+    pub snapshot_id: String,
+    /// The spec it amends, which may be deleted since.
+    pub amends: String,
+    pub reason: String,
+    /// What changed of the amended spec's declarations, as for a
+    /// replacement that may change nothing: statements, definitions
+    /// (holes included) and assumptions.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub changes: Vec<DeclarationChange>,
+    /// The declarations the amending spec adds.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub added: Vec<String>,
 }
 
 /// A snapshot that a create replaces, and what the replacement may change:
@@ -937,6 +1022,14 @@ pub struct CreateSnapshotResponse {
     /// code isn't kept when its re-check doesn't finish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<VerifyFailure>,
+    /// What the snapshot's create recorded of the spec it
+    /// [`amends`](CreateSnapshotRequest::amends), if it amends one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amendment: Option<Amendment>,
+    /// What the snapshot's create checked of the target it
+    /// [`refutes`](CreateSnapshotRequest::refutes), if it refutes one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refutation: Option<Refutation>,
 }
 
 /// `GET /snapshots/{id}`: a snapshot with its module's code, check and
@@ -1034,6 +1127,72 @@ pub struct RebuildSnapshotsRequest {
     /// As [`CreateSnapshotRequest::timeout`], for each create.
     #[serde(default = "default_timeout")]
     pub timeout: u64,
+}
+
+/// `POST /snapshots/resubmit`: carries the run of a spec over to the spec
+/// that [amends](CreateSnapshotRequest::amends) it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResubmitSnapshotsRequest {
+    /// The amended spec, whose run's heads are carried over. It may be
+    /// deleted since.
+    pub from: String,
+    /// The spec that amends it, of its version.
+    pub to: String,
+    /// Only plan: compare each head with `to`, and create nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// The labels of each new snapshot; by default its head's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<BTreeMap<String, String>>,
+    /// As [`CreateSnapshotRequest::verify`], for each create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<bool>,
+    /// As [`CreateSnapshotRequest::timeout`], for each create.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+}
+
+/// What a resubmit planned and, unless it was a dry run, did. Sending it again
+/// plans the same items with the same keys, so the creates that are done
+/// replay their snapshots.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct ResubmitSnapshotsResponse {
+    /// For a plan, whether every head keeps `to`'s statements; for a run,
+    /// whether every head was carried over too.
+    pub ok: bool,
+    /// The heads of `from`'s run, oldest first.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub items: Vec<ResubmitItem>,
+}
+
+/// A head of the amended spec's run, and whether it comes over.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ResubmitItem {
+    pub snapshot_id: String,
+    pub module: String,
+    /// The idempotency key its create has, so that sending the resubmit
+    /// again replays it.
+    pub key: String,
+    /// Whether it keeps the statements of `to`, allowing `to`'s holes to
+    /// change, as an audit against `to` compares them. Only such a head is
+    /// created again, as a snapshot of the same code that replaces `to`;
+    /// after the first, each forks the new run, as the old run was.
+    pub passes: bool,
+    /// Why it doesn't: the changes, or a record the kernel hasn't re-checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<DeclarationChange>,
+    /// What it fills and changes of `to`, if it passes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<Replacement>,
+    /// The new snapshot, once created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_snapshot_id: Option<String>,
+    /// The create's check, when it kept nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<CheckResult>,
 }
 
 /// What a rebuild planned and, unless it was a dry run, did. Sending the same
@@ -1221,8 +1380,9 @@ pub struct AuditSnapshotsResponse {
     /// snapshot was copied from one that is gone (as a rebuild with `retire`
     /// leaves it), every [comparison](Self::comparisons) found the spec's
     /// statements kept, with no definition changed but the spec's holes and
-    /// those the audit's `allow` names, and every target is
-    /// [accepted](AuditTarget::accepted) on its head.
+    /// those the audit's `allow` names, every target is
+    /// [accepted](AuditTarget::accepted) on its head, and no target of a
+    /// spec snapshot is [refuted](Self::refutations).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clean: Option<bool>,
     /// With `against`: the snapshots the run ends at, which nothing
@@ -1266,6 +1426,19 @@ pub struct AuditSnapshotsResponse {
     /// `clean`. Verify each with `POST /snapshots/{id}/verify`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unverified: Vec<String>,
+    /// With `against`: the amendments of the spec snapshots, both those they
+    /// make and those made of them, as the creates recorded them. They don't
+    /// change `clean`, which judges the run against the specs `against`
+    /// names: `POST /snapshots/resubmit` carries a run over to the spec
+    /// that amends its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub amendments: Vec<Amendment>,
+    /// With `against`: the refutations of the spec snapshots' targets, each
+    /// a snapshot that proves `¬` a target's statement on the spec. Any one
+    /// makes the run not `clean`: what it set out to prove is false as
+    /// stated, and the spec needs amending.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refutations: Vec<Refutation>,
 }
 
 /// A head compared with a spec snapshot it is reached from.
@@ -1523,8 +1696,11 @@ pub struct AuditTarget {
     /// re-check rather than from a build's report; the head keeps the spec's
     /// statements (see [`AuditSnapshotsResponse::comparisons`]); and the
     /// target is `proved`, or `conditional` on assumptions the spec permits
-    /// (see [`AuditAssumption::in_spec`]).
+    /// (see [`AuditAssumption::in_spec`]), and nothing refutes it.
     pub accepted: bool,
+    /// The snapshots that refute it, proving `¬` its statement on the spec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refuted_by: Vec<String>,
 }
 
 /// A link that let definitions change: `snapshot_id` replaces another

@@ -289,12 +289,13 @@ pnpm -C web generate
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}`; see [Tactic sessions](#sessions) |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid, and a failing tactic is a 422 |
 | `POST /sessions/{id}/check` | `{code, timeout?, detail?}` → check result, also requiring the session's original statements and imports; a `lean` error if the axiom report can't describe a declaration of the session's code, whose statement it couldn't guard |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, detail?}` → `{snapshot?, check, replacement?, heads?, unverified?}`; see [Snapshots](#snapshots), [Replacing](#replacing) and [Verifying](#verifying) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, detail?}` → `{snapshot?, check, replacement?, heads?, unverified?, amendment?, refutation?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending) and [Refuting a target](#refuting) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
+| `POST /snapshots/resubmit` | `{from, to, dry_run?, labels?, verify?, timeout?}` → `{ok, items: [{snapshot_id, module, key, passes, reasons?, changes?, replacement?, new_snapshot_id?, check?}]}`; async with `Prefer: respond-async`; see [Amending a spec](#amending) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added}], refutations?: [{snapshot_id, spec, target, theorem}]}`; see [Statuses](#statuses) and [Auditing a run](#spec-audit) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60) → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -316,7 +317,7 @@ takes a comma-separated list of origins, or `*`. It is empty by default.
 
 <a id="async-requests"></a>
 **Async requests.** A check, a session's start, tactic or check, a
-snapshot's create or verify, a rebuild, and a run's acceptance can take minutes: a wait for a worker, loading the
+snapshot's create or verify, a rebuild, a resubmit, and a run's acceptance can take minutes: a wait for a worker, loading the
 imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
 requests off at 60 s, or over a network that drops, send them with
 `Prefer: respond-async`. The server then answers `202 {id, kind, status:
@@ -719,7 +720,9 @@ theorem t_nonvacuous : ∃ x, Pre x := sorry
 `replaces` freezes the witness like any statement, so every replacement keeps
 it, and it is a target of the [spec audit](#spec-audit) like `t`. If a change
 that `allow` lets through makes `Pre` impossible, the witness can no longer be
-proved: the audit shows it unproved, and the run isn't `clean`.
+proved: the audit shows it unproved, and the run isn't `clean`. A witness is
+an ordinary target in every way, so it can be [refuted](#refuting) like one:
+a proof of `¬ ∃ x, Pre x` shows the spec's hypotheses can't hold.
 
 <a id="existential-targets"></a>
 **Existential targets.** Where what an agent constructs isn't itself the
@@ -828,7 +831,8 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   assumptions only has no targets, but statements all the same), and every
   target is `accepted` on its head: the
   spec snapshot and the head are verified, their comparison found the
-  spec's statements kept, and the target is `proved`, or `conditional` only
+  spec's statements kept, nothing [refutes](#refuting) the target (its
+  `refuted_by`), and the target is `proved`, or `conditional` only
   on assumptions the spec permits, those declared in a spec snapshot's module
   or in a module it builds on. The records of a module the kernel hasn't
   re-checked come from its build's report, which the code being judged could
@@ -836,6 +840,11 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   and heads, and their comparison's `reasons` say to verify each with
   `POST /snapshots/{id}/verify`. Each of `assumptions` says whether the spec
   permits it (`in_spec`).
+- **Amendments and refutations.** `amendments` lists the
+  [amendments](#amending) of the spec snapshots, both those they make and
+  those made of them, which don't change `clean`. `refutations` lists the
+  snapshots that [refute](#refuting) a spec snapshot's target: any one makes
+  the run not `clean`.
 - **Links.** For review, `links` lists every link that let definitions change
   (with an `allow`, or filling holes): those on the way to the heads, and those of each spec
   snapshot's own chain back through what it replaced, as far as those
@@ -1033,6 +1042,65 @@ accepting a run takes both:
   delete (see [Retention](#retention)). The agent finds the run's heads with
   `audit?against=<its spec id>` (see [Auditing a run](#spec-audit)) and goes
   on as for a `conflict`.
+- **On a false target.** An agent that finds a target false proves it:
+  `theorem r : ¬ type_of% @t := …` on the spec, created with `refutes` (see
+  [Refuting a target](#refuting)). The audit shows the target refuted, and
+  the run isn't `clean`. The leader then [amends](#amending) the spec, with
+  the reason, and resubmits the run onto the new spec.
+
+<a id="amending"></a>
+**Amending a spec.** A spec can be wrong: a target false as stated, a
+hypothesis missing, a hole that should be a definition. A leader fixes it
+during a run by creating the corrected spec with `amends: {snapshot_id,
+reason}`, the spec it amends and why (1 to 4,096 characters):
+- **The new spec** is a spec of its own, with its own `holes`, that
+  replaces nothing (`replaces` with `amends` is a 400). It is always
+  re-checked through the kernel (`verify: false` is a 400).
+- **The record.** Its create compares it with the amended spec as a
+  replacement that may change nothing would be compared (see
+  [Replacing](#replacing)), holes included, and records what changed
+  (`changes`, as a refused replacement's) and the declarations it adds
+  (`added`), with the reason. The response's `amendment` has it, and an
+  audit against either spec lists it in `amendments`. Deleting the new spec
+  deletes the record; deleting the amended one keeps it.
+- **Carrying the run over.** `POST /snapshots/resubmit {from, to}`, with
+  `to` a spec that amends `from`, compares each head of `from`'s run with
+  `to`, as an audit against `to` would, allowing `to`'s holes to change. A
+  head that keeps `to`'s statements is created again: the same code, so the
+  same module, replacing `to`, with its labels or the request's `labels`.
+  The heads of a forked run come over forked. A head that changes one of
+  `to`'s statements is listed with its `reasons` and `changes`, and one
+  whose record isn't verified with that reason; neither is created.
+  `dry_run` only compares. Each create has a key of the resubmit's, so
+  sending it again replays what is done. `from` may be deleted by then.
+  Agents then work on `to`'s run, and the leader audits and accepts against
+  `to`.
+
+<a id="refuting"></a>
+**Refuting a target.** A run can show that a target is false, and a
+snapshot records it: a create with `refutes: {snapshot_id, target}`, the
+spec snapshot and its target.
+- **What it must be.** The code imports the spec's module and proves, with
+  no `sorry` and no assumption, a theorem whose statement is `¬` the
+  target's statement exactly: `theorem r : ¬ type_of% @t := …` states it so.
+  The theorem's `negates` is the hash of that statement's canonical text,
+  every name written whole, which equals the target's `type_hash`; a
+  universe parameter counts by its position, and a private name of the
+  refuter never reads as the spec's. It is always re-checked through the
+  kernel (`verify: false` is a 400), and it is a snapshot of its own:
+  `replaces`, `holes` and `amends` are 400s.
+- **What it can't be.** A target whose statement uses one of the spec's
+  holes, which a head may fill, or a private name of the spec, which no
+  other module can state, can't be refuted (`check.error` is a
+  `bad_request`).
+- **Otherwise** nothing is kept, and `check.reasons` says why: the code
+  doesn't build on the spec, no theorem states `¬` the target exactly, or
+  the one that does isn't proved.
+- **The record.** The response's `refutation` names the theorem. An audit
+  against the spec lists it in `refutations`, marks the target
+  `refuted_by` the snapshot and not `accepted`, and isn't `clean`, so
+  neither is an acceptance. Deleting the refuting snapshot deletes the
+  record. The way on is to [amend](#amending) the spec.
 
 <a id="rebuilding"></a>
 **Rebuilding dependents.** A module's name is a hash of its code, imports

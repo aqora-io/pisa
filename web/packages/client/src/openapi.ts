@@ -396,6 +396,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots/resubmit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Carry an amended spec's run over to the spec that amends it
+         * @description Compares each head of the run of `from` with `to`, the spec that amends it, as an audit against `to` would, allowing `to`'s holes to change, and unless `dry_run` creates each head that keeps `to`'s statements again: the same code, replacing `to`, with its head's labels or the request's. The heads of a forked run come over forked. A head that changes a statement is listed with its changes, and one whose record the kernel hasn't re-checked with that reason. `from` may be deleted. Sending the same resubmit again replays the creates that are done. A run can be async; a dry run answers at once.
+         */
+        post: operations["resubmitSnapshots"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots/{id}": {
         parameters: {
             query?: never;
@@ -592,6 +612,38 @@ export interface components {
              */
             definitions: string[];
         };
+        /** @description A spec's amendment of an earlier spec, as its create recorded it. */
+        Amendment: {
+            /** @description The declarations the amending spec adds. */
+            added: string[];
+            /** @description The spec it amends, which may be deleted since. */
+            amends: string;
+            /**
+             * @description What changed of the amended spec's declarations, as for a
+             *     replacement that may change nothing: statements, definitions
+             *     (holes included) and assumptions.
+             */
+            changes: components["schemas"]["DeclarationChange"][];
+            reason: string;
+            /** @description The amending spec. */
+            snapshot_id: string;
+        };
+        /**
+         * @description The spec a create amends, and why: a create's
+         *     [`amends`](CreateSnapshotRequest::amends).
+         */
+        Amends: {
+            /**
+             * @description Why the spec changes, for whoever reviews the run: 1 to
+             *     [`MAX_REASON`] characters.
+             */
+            reason: string;
+            /**
+             * @description The amended spec snapshot. Of the create's version, and chooses it
+             *     when the create names none, as `replaces` does.
+             */
+            snapshot_id: string;
+        };
         /**
          * @description `POST /states/{id}/tactic`. A failing tactic is a 422 with kind `lean`,
          *     with Lean's errors in its message, and leaves no state.
@@ -758,6 +810,14 @@ export interface components {
          */
         AuditSnapshotsResponse: {
             /**
+             * @description With `against`: the amendments of the spec snapshots, both those they
+             *     make and those made of them, as the creates recorded them. They don't
+             *     change `clean`, which judges the run against the specs `against`
+             *     names: `POST /snapshots/resubmit` carries a run over to the spec
+             *     that amends its own.
+             */
+            amendments?: components["schemas"]["Amendment"][];
+            /**
              * @description The assumptions what the snapshots declare uses, by name, wherever
              *     they are declared.
              */
@@ -767,8 +827,9 @@ export interface components {
              *     snapshot was copied from one that is gone (as a rebuild with `retire`
              *     leaves it), every [comparison](Self::comparisons) found the spec's
              *     statements kept, with no definition changed but the spec's holes and
-             *     those the audit's `allow` names, and every target is
-             *     [accepted](AuditTarget::accepted) on its head.
+             *     those the audit's `allow` names, every target is
+             *     [accepted](AuditTarget::accepted) on its head, and no target of a
+             *     spec snapshot is [refuted](Self::refutations).
              */
             clean?: boolean;
             /**
@@ -802,6 +863,13 @@ export interface components {
             links?: components["schemas"]["AuditLink"][];
             /** @description The declarations that are `sorry` or `rejected`. */
             not_proved: components["schemas"]["AuditUnproved"][];
+            /**
+             * @description With `against`: the refutations of the spec snapshots' targets, each
+             *     a snapshot that proves `¬` a target's statement on the spec. Any one
+             *     makes the run not `clean`: what it set out to prove is false as
+             *     stated, and the spec needs amending.
+             */
+            refutations?: components["schemas"]["Refutation"][];
             /**
              * @description With `against` and `review=true`: for each spec snapshot and head it
              *     reaches, what a reviewer reads to know what the spec's statements say
@@ -851,7 +919,7 @@ export interface components {
              *     re-check rather than from a build's report; the head keeps the spec's
              *     statements (see [`AuditSnapshotsResponse::comparisons`]); and the
              *     target is `proved`, or `conditional` on assumptions the spec permits
-             *     (see [`AuditAssumption::in_spec`]).
+             *     (see [`AuditAssumption::in_spec`]), and nothing refutes it.
              */
             accepted: boolean;
             /** @description The head, reached from `spec`, whose declaration this is. */
@@ -862,6 +930,8 @@ export interface components {
              *     with the same name, a private one's module left out.
              */
             name: string;
+            /** @description The snapshots that refute it, proving `¬` its statement on the spec. */
+            refuted_by?: string[];
             /** @description The spec snapshot that declares it. */
             spec: string;
             /** @description Its status on the head. */
@@ -974,6 +1044,17 @@ export interface components {
          *     being built again.
          */
         CreateSnapshotRequest: {
+            /**
+             * @description The spec snapshot this spec amends, during a run, and why. The code
+             *     is a spec of its own, with its own `holes`, which replaces nothing:
+             *     its create compares it with the amended spec and records what changed
+             *     and what it adds, with the reason, in
+             *     [`amendment`](CreateSnapshotResponse::amendment), and an audit of
+             *     either spec lists it. It is always re-checked: `verify: false` is a
+             *     `bad_request`, as is `replaces`. `POST /snapshots/resubmit` carries
+             *     the amended spec's run over to it.
+             */
+            amends?: components["schemas"]["Amends"];
             code: string;
             /** @description Only `declarations` applies, to `check`. */
             detail?: components["schemas"]["Detail"][];
@@ -1018,6 +1099,18 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description A spec's target that this code refutes: a theorem of the spec's
+             *     module whose statement mentions none of the spec's holes and no
+             *     private name. The code must import the spec's module and prove, with
+             *     no `sorry` and no assumption, a theorem whose statement is `¬` that
+             *     statement exactly, as `theorem r : ¬ type_of% @t := …` states it. It
+             *     is always re-checked: `verify: false` is a `bad_request`, as are
+             *     `replaces`, `holes` and `amends`. Otherwise nothing is kept, and
+             *     `check.reasons` says why. An audit against the spec then shows the
+             *     target refuted, and isn't `clean`.
+             */
+            refutes?: components["schemas"]["Refutes"];
+            /**
              * @description The snapshot this code replaces, e.g. the skeleton a proof fills in.
              *     The code is kept only if it still declares everything that snapshot's
              *     module declares, each the same kind of declaration with the same type
@@ -1056,6 +1149,11 @@ export interface components {
         };
         CreateSnapshotResponse: {
             /**
+             * @description What the snapshot's create recorded of the spec it
+             *     [`amends`](CreateSnapshotRequest::amends), if it amends one.
+             */
+            amendment?: components["schemas"]["Amendment"];
+            /**
              * @description The check, as for `/check`. It has no `sorries`, and `time` includes
              *     importing the module's imports.
              */
@@ -1066,6 +1164,11 @@ export interface components {
              *     following what replaces it, oldest first.
              */
             heads?: string[];
+            /**
+             * @description What the snapshot's create checked of the target it
+             *     [`refutes`](CreateSnapshotRequest::refutes), if it refutes one.
+             */
+            refutation?: components["schemas"]["Refutation"];
             /**
              * @description What the replacement changed, if the request named a snapshot it
              *     replaces and the code was kept. Absent on a key replay, which doesn't
@@ -1112,6 +1215,13 @@ export interface components {
             generated?: boolean;
             kind: string;
             name: string;
+            /**
+             * @description For a theorem of `¬ X` (or `X → False`), the SHA-256 of `X`'s
+             *     canonical text with every name written whole: the `type_hash` of a
+             *     declaration that states `X` and mentions no private name, from any
+             *     module.
+             */
+            negates?: string;
             /**
              * @description The inductive type it is made from, when it is one of the
              *     declarations Lean makes for one: a constructor, the recursor,
@@ -1458,17 +1568,18 @@ export interface components {
          * @description The endpoint an async request ran.
          * @enum {string}
          */
-        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots" | "accept_run";
+        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots" | "accept_run" | "resubmit_snapshots";
         /**
          * @description What `GET /jobs/{id}` answers once the job is done: what its request
          *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
          *     `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
          *     `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
-         *     `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`
-         *     and `accept_run` an `AcceptResponse`. An error is the request's own, with
+         *     `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`,
+         *     `accept_run` an `AcceptResponse` and `resubmit_snapshots` a
+         *     `ResubmitSnapshotsResponse`. An error is the request's own, with
          *     its status.
          */
-        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"];
+        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"] | components["schemas"]["ResubmitSnapshotsResponse"];
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
         /**
@@ -1845,6 +1956,32 @@ export interface components {
              */
             skipped?: components["schemas"]["RebuildSkipped"][];
         };
+        /** @description A snapshot's refutation of a spec's target, as its create checked it. */
+        Refutation: {
+            /** @description The refuting snapshot. */
+            snapshot_id: string;
+            /** @description The spec, which may be deleted since. */
+            spec: string;
+            target: string;
+            /**
+             * @description The refuting snapshot's theorem, which proves `¬` the target's
+             *     statement.
+             */
+            theorem: string;
+        };
+        /**
+         * @description The spec target a create refutes: a create's
+         *     [`refutes`](CreateSnapshotRequest::refutes).
+         */
+        Refutes: {
+            /**
+             * @description The spec snapshot. Of the create's version, and chooses it when the
+             *     create names none, as `replaces` does.
+             */
+            snapshot_id: string;
+            /** @description The theorem of the spec's module refuted, as the spec names it. */
+            target: string;
+        };
         /**
          * @description What a replacement changed, as the comparison with the snapshot it
          *     [`replaces`](CreateSnapshotRequest::replaces) found: its create's, or the
@@ -1912,6 +2049,72 @@ export interface components {
             results: components["schemas"]["Resolution"][];
             /** @description The version the index was built from. */
             version: string;
+        };
+        /** @description A head of the amended spec's run, and whether it comes over. */
+        ResubmitItem: {
+            changes?: components["schemas"]["DeclarationChange"][];
+            /** @description The create's check, when it kept nothing. */
+            check?: components["schemas"]["CheckResult"];
+            /**
+             * @description The idempotency key its create has, so that sending the resubmit
+             *     again replays it.
+             */
+            key: string;
+            module: string;
+            /** @description The new snapshot, once created. */
+            new_snapshot_id?: string;
+            /**
+             * @description Whether it keeps the statements of `to`, allowing `to`'s holes to
+             *     change, as an audit against `to` compares them. Only such a head is
+             *     created again, as a snapshot of the same code that replaces `to`;
+             *     after the first, each forks the new run, as the old run was.
+             */
+            passes: boolean;
+            /** @description Why it doesn't: the changes, or a record the kernel hasn't re-checked. */
+            reasons?: string[];
+            /** @description What it fills and changes of `to`, if it passes. */
+            replacement?: components["schemas"]["Replacement"];
+            snapshot_id: string;
+        };
+        /**
+         * @description `POST /snapshots/resubmit`: carries the run of a spec over to the spec
+         *     that [amends](CreateSnapshotRequest::amends) it.
+         */
+        ResubmitSnapshotsRequest: {
+            /** @description Only plan: compare each head with `to`, and create nothing. */
+            dry_run?: boolean;
+            /**
+             * @description The amended spec, whose run's heads are carried over. It may be
+             *     deleted since.
+             */
+            from: string;
+            /** @description The labels of each new snapshot; by default its head's. */
+            labels?: {
+                [key: string]: string;
+            };
+            /**
+             * Format: int64
+             * @description As [`CreateSnapshotRequest::timeout`], for each create.
+             */
+            timeout?: number;
+            /** @description The spec that amends it, of its version. */
+            to: string;
+            /** @description As [`CreateSnapshotRequest::verify`], for each create. */
+            verify?: boolean;
+        };
+        /**
+         * @description What a resubmit planned and, unless it was a dry run, did. Sending it again
+         *     plans the same items with the same keys, so the creates that are done
+         *     replay their snapshots.
+         */
+        ResubmitSnapshotsResponse: {
+            /** @description The heads of `from`'s run, oldest first. */
+            items: components["schemas"]["ResubmitItem"][];
+            /**
+             * @description For a plan, whether every head keeps `to`'s statements; for a run,
+             *     whether every head was carried over too.
+             */
+            ok: boolean;
         };
         ReviewDeclaration: {
             /** @description One of the spec's holes, or a definition the audit's `allow` names. */
@@ -2193,6 +2396,8 @@ export type AcceptPair = components['schemas']['AcceptPair'];
 export type AcceptRequest = components['schemas']['AcceptRequest'];
 export type AcceptResponse = components['schemas']['AcceptResponse'];
 export type Allow = components['schemas']['Allow'];
+export type Amendment = components['schemas']['Amendment'];
+export type Amends = components['schemas']['Amends'];
 export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
 export type ApplyTacticResponse = components['schemas']['ApplyTacticResponse'];
 export type AtPosition = components['schemas']['AtPosition'];
@@ -2264,11 +2469,16 @@ export type RebuildReplaced = components['schemas']['RebuildReplaced'];
 export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];
 export type RebuildSnapshotsResponse = components['schemas']['RebuildSnapshotsResponse'];
+export type Refutation = components['schemas']['Refutation'];
+export type Refutes = components['schemas']['Refutes'];
 export type Replacement = components['schemas']['Replacement'];
 export type Replaces = components['schemas']['Replaces'];
 export type Resolution = components['schemas']['Resolution'];
 export type ResolveRequest = components['schemas']['ResolveRequest'];
 export type ResolveResponse = components['schemas']['ResolveResponse'];
+export type ResubmitItem = components['schemas']['ResubmitItem'];
+export type ResubmitSnapshotsRequest = components['schemas']['ResubmitSnapshotsRequest'];
+export type ResubmitSnapshotsResponse = components['schemas']['ResubmitSnapshotsResponse'];
 export type ReviewDeclaration = components['schemas']['ReviewDeclaration'];
 export type ReviewOrigin = components['schemas']['ReviewOrigin'];
 export type SearchHealth = components['schemas']['SearchHealth'];
@@ -4191,6 +4401,109 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RebuildSnapshotsResponse"];
+                };
+            };
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{id}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    resubmitSnapshots: {
+        parameters: {
+            query?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{id}`, rather than the answer.
+                 */
+                Prefer?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResubmitSnapshotsRequest"];
+            };
+        };
+        responses: {
+            /** @description The plan, and what the run did */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResubmitSnapshotsResponse"];
                 };
             };
             /** @description Queued: wait for its answer at `/jobs/{id}`. */

@@ -40,6 +40,9 @@ class Declaration(TypedDict):
     value_refs: NotRequired[list[str]]
     generated: NotRequired[bool]
     parent: NotRequired[str]
+    negates: NotRequired[str]
+    """For a theorem of `¬ X`, the hash of `X`: the `type_hash` of a
+    declaration that states `X`."""
 
 Change = Literal[
     "missing", "kind", "type", "value", "derived", "added_assumption", "assumption", "ambiguous"
@@ -136,6 +139,33 @@ class Snapshot(TypedDict):
     verified: bool
     created: int
 
+class Amends(TypedDict):
+    """The spec a create amends, and why (1 to 4096 characters)."""
+    snapshot_id: str
+    reason: str
+
+class Amendment(TypedDict):
+    """A spec's amendment of an earlier spec: what changed of it, and what
+    the amending spec adds."""
+    snapshot_id: str
+    amends: str
+    reason: str
+    changes: list[DeclarationChange]
+    added: list[str]
+
+class Refutes(TypedDict):
+    """The spec target a create refutes."""
+    snapshot_id: str
+    target: str
+
+class Refutation(TypedDict):
+    """A snapshot whose `theorem` proves `¬` the statement of the spec's
+    `target`."""
+    snapshot_id: str
+    spec: str
+    target: str
+    theorem: str
+
 class CreateSnapshotResponse(TypedDict):
     snapshot: NotRequired[Snapshot]
     check: CheckResult
@@ -143,6 +173,8 @@ class CreateSnapshotResponse(TypedDict):
     heads: NotRequired[list[str]]
     # A re-check out of time or memory that kept plain code unverified.
     unverified: NotRequired[VerifyFailure]
+    amendment: NotRequired[Amendment]
+    refutation: NotRequired[Refutation]
 
 class Description(TypedDict):
     title: str
@@ -206,6 +238,7 @@ class AuditTarget(TypedDict):
     status: ProofStatus
     verified: bool
     accepted: bool
+    refuted_by: NotRequired[list[str]]
 
 class AuditLink(TypedDict):
     """A link that let definitions change: the snapshot, its `replaces` as
@@ -257,6 +290,9 @@ class AuditSnapshotsResponse(TypedDict):
     comparisons: NotRequired[list[AuditComparison]]
     review: NotRequired[list[AuditReview]]
     unverified: NotRequired[list[str]]
+    amendments: NotRequired[list[Amendment]]
+    # A refuted target makes the run not clean.
+    refutations: NotRequired[list[Refutation]]
 
 class PairError(TypedDict):
     kind: Literal["refused", "build_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge"]
@@ -380,6 +416,23 @@ class RebuildSnapshotsResponse(TypedDict):
     not_deleted: NotRequired[list[RebuildNotDeleted]]
     retired: NotRequired[list[str]]
 
+class ResubmitItem(TypedDict):
+    """A head of the amended spec's run: whether it keeps the amending spec's
+    statements, and the snapshot that carries it over once created."""
+    snapshot_id: str
+    module: str
+    key: str
+    passes: bool
+    reasons: NotRequired[list[str]]
+    changes: NotRequired[list[DeclarationChange]]
+    replacement: NotRequired[Replacement]
+    new_snapshot_id: NotRequired[str]
+    check: NotRequired[CheckResult]
+
+class ResubmitSnapshotsResponse(TypedDict):
+    ok: bool
+    items: list[ResubmitItem]
+
 class VerifyFailure(TypedDict):
     module: str
     # `lean` when the kernel rejected the module; `timeout`, `out_of_memory`
@@ -395,6 +448,7 @@ class VerifySnapshotResponse(TypedDict):
 JobKind = Literal[
     "check", "start_session", "apply_tactic", "check_session",
     "create_snapshot", "verify_snapshot", "rebuild_snapshots", "accept_run",
+    "resubmit_snapshots",
 ]
 JobStatus = Literal["queued", "running", "done", "cancelled"]
 
@@ -420,7 +474,7 @@ class Health(TypedDict):
 
 class JobDone(TypedDict):
     done: Literal[True]
-    answer: CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse | AcceptResponse
+    answer: CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse | AcceptResponse | ResubmitSnapshotsResponse
 
 class JobPending(TypedDict):
     done: Literal[False]
@@ -491,6 +545,8 @@ class Client:
         replaces: Replaces | None = None,
         fork: bool = False,
         holes: list[str] | None = None,
+        amends: Amends | None = None,
+        refutes: Refutes | None = None,
         detail: list[Literal["declarations"]] = [],
     ) -> CreateSnapshotResponse:
         """Check code like `check` and, unless Lean reports errors, keep it as
@@ -542,7 +598,16 @@ class Client:
         module or of a snapshot it builds on, else `check["error"]` is a
         `bad_request`. Snapshots that replace it inherit them and may change
         them without `allow`, and an audit against it allows them to change.
-        Not with `replaces` (a `PisaError` of kind `bad_request`)."""
+        Not with `replaces` (a `PisaError` of kind `bad_request`).
+
+        `amends` makes this a spec that amends the spec `snapshot_id`, for
+        `reason`: `amendment` says what changed and what it adds, and
+        `resubmit_snapshots` carries the amended spec's run over. `refutes`
+        keeps the code only if it builds on the spec and proves `¬` the
+        statement of its theorem `target`, as `theorem r : ¬ type_of% @t`
+        states it: `refutation` names the theorem, and an audit against the
+        spec isn't clean. Each is always re-checked, and neither goes with
+        `replaces`."""
     def submit_create_snapshot(
         self,
         code: str,
@@ -553,6 +618,8 @@ class Client:
         replaces: Replaces | None = None,
         fork: bool = False,
         holes: list[str] | None = None,
+        amends: Amends | None = None,
+        refutes: Refutes | None = None,
         detail: list[Literal["declarations"]] = [],
     ) -> Job:
         """Like `create_snapshot`, as a job."""
@@ -703,6 +770,29 @@ class Client:
         """Like `rebuild_snapshots`, as a job. A dry run isn't one: the
         server answers it at once, which raises a `PisaError` here, of kind
         `internal` and status 200; use `rebuild_snapshots` for one."""
+    def resubmit_snapshots(
+        self,
+        from_: str,
+        to: str,
+        *,
+        dry_run: bool = False,
+        labels: dict[str, str] | None = None,
+        verify: bool | None = None,
+    ) -> ResubmitSnapshotsResponse:
+        """Carry the run of spec `from_` over to `to`, the spec that amends
+        it: each head of the run that keeps `to`'s statements is created
+        again, replacing `to`, with its labels or `labels`. A dry run only
+        compares. Sending it again replays the creates that are done."""
+    def submit_resubmit_snapshots(
+        self,
+        from_: str,
+        to: str,
+        *,
+        dry_run: bool = False,
+        labels: dict[str, str] | None = None,
+        verify: bool | None = None,
+    ) -> Job:
+        """Like `resubmit_snapshots`, as a job; a dry run isn't one."""
     def submit_check(
         self,
         code: str,
