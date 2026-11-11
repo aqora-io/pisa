@@ -1,9 +1,9 @@
 //! Per-process resource limits with cgroup v2.
 //!
-//! The worker needs a delegated subtree. It moves itself into `<root>/agent`
-//! (cgroup v2 forbids processes in a cgroup that has controllers enabled for
-//! its children), enables the memory and pids controllers, and puts each REPL
-//! in `<root>/repl-<slot>`. A child joins its cgroup between fork and exec, so
+//! The worker needs a delegated subtree. It moves the processes in it, itself
+//! among them, into `<root>/agent` (cgroup v2 forbids processes in a cgroup
+//! that has controllers enabled for its children), enables the memory and
+//! pids controllers, and puts each REPL in `<root>/repl-<slot>`. A child joins its cgroup between fork and exec, so
 //! everything it starts is limited too.
 
 use std::ffi::CString;
@@ -25,7 +25,15 @@ impl Cgroups {
     pub fn init(root: &Path, memory_max: Option<u64>, pids_max: Option<u64>) -> io::Result<Self> {
         let agent = root.join("agent");
         std::fs::create_dir_all(&agent)?;
-        std::fs::write(agent.join("cgroup.procs"), std::process::id().to_string())?;
+        // Every process in the root moves, not only the worker: the init
+        // that runs it as PID 1 too.
+        for pid in std::fs::read_to_string(root.join("cgroup.procs"))?.split_whitespace() {
+            match std::fs::write(agent.join("cgroup.procs"), pid) {
+                // Gone since it was listed.
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {}
+                moved => moved?,
+            }
+        }
         std::fs::write(root.join("cgroup.subtree_control"), "+memory +pids")?;
         Ok(Cgroups {
             root: root.to_path_buf(),
