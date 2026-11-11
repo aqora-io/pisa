@@ -1,6 +1,162 @@
 {
   "components": {
     "schemas": {
+      "AcceptPair": {
+        "properties": {
+          "accepted": {
+            "type": "boolean"
+          },
+          "config": {
+            "description": "Its comparator configuration in the export.",
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/PairError",
+            "description": "Why it isn't accepted, if it isn't."
+          },
+          "exit_code": {
+            "description": "Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it\nran past `timeout`, or didn't run.",
+            "format": "int32",
+            "type": "integer"
+          },
+          "head": {
+            "description": "The head.",
+            "type": "string"
+          },
+          "left_out": {
+            "description": "What the configuration leaves out of what it would name, and why.",
+            "items": {
+              "$ref": "#/components/schemas/LeftOut"
+            },
+            "type": "array"
+          },
+          "output": {
+            "description": "The end of what it printed.",
+            "type": "string"
+          },
+          "spec": {
+            "description": "The spec snapshot.",
+            "type": "string"
+          },
+          "theorems": {
+            "description": "How many of the spec's theorems the configuration names.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "spec",
+          "head",
+          "config",
+          "accepted",
+          "output",
+          "theorems"
+        ],
+        "type": "object"
+      },
+      "AcceptRequest": {
+        "description": "`POST /snapshots/accept`: judges a run in one operation. It audits the run\nagainst its spec, as `GET /snapshots/audit` does, and runs\n`lake comparator`, which shares no code with the audit, on exactly the\npairs the audit compared, each spec snapshot against each head it\nreaches, in the Lake project `GET /snapshots/export` gives. The result is\nstored: `GET /snapshots/accept/{id}` reads it again.",
+        "properties": {
+          "against": {
+            "description": "The spec's snapshot ids, as for the audit.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allow": {
+            "description": "The definitions the heads may change besides the spec's holes, as for\nthe audit.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "paranoid": {
+            "description": "Also run the external kernels Lean bundles: `leanchecker-paranoid`,\n`lean4lean`, `nanoda`, `con-leche` and `con-ron`.",
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "The time limit in seconds for each spec snapshot and head, in which\ncomparator builds and exports both and checks the head.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "against"
+        ],
+        "type": "object"
+      },
+      "AcceptResponse": {
+        "description": "A run's acceptance, as `POST /snapshots/accept` judged it and stored it.",
+        "properties": {
+          "accepted": {
+            "description": "The audit is `clean`, comparator accepted every pair, and there is at\nleast one.",
+            "type": "boolean"
+          },
+          "against": {
+            "description": "What it judged: the request's spec snapshots, `allow` and `paranoid`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "allow": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "audit": {
+            "$ref": "#/components/schemas/AuditSnapshotsResponse",
+            "description": "The audit, as `GET /snapshots/audit?against=…` answers it."
+          },
+          "clean": {
+            "description": "The audit's verdict.",
+            "type": "boolean"
+          },
+          "created": {
+            "description": "When it was judged, in seconds since the Unix epoch.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "heads": {
+            "description": "The heads the audit and comparator judged.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "description": "This result's id, `<version>~<32 hex>`, for\n`GET /snapshots/accept/{id}`.",
+            "type": "string"
+          },
+          "pairs": {
+            "description": "Each spec snapshot with each head it reaches, as comparator judged\nthem, in the order of the audit's `comparisons`.",
+            "items": {
+              "$ref": "#/components/schemas/AcceptPair"
+            },
+            "type": "array"
+          },
+          "paranoid": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "created",
+          "against",
+          "paranoid",
+          "accepted",
+          "clean",
+          "heads",
+          "audit",
+          "pairs"
+        ],
+        "type": "object"
+      },
       "Allow": {
         "description": "What a replacement may change besides adding declarations: the values of\nthe named definitions.",
         "properties": {
@@ -623,109 +779,6 @@
         },
         "required": [
           "code"
-        ],
-        "type": "object"
-      },
-      "ComparatorPair": {
-        "properties": {
-          "accepted": {
-            "type": "boolean"
-          },
-          "config": {
-            "description": "Its comparator configuration in the export.",
-            "type": "string"
-          },
-          "exit_code": {
-            "description": "Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it\nran past `timeout`.",
-            "format": "int32",
-            "type": "integer"
-          },
-          "head": {
-            "description": "The head.",
-            "type": "string"
-          },
-          "output": {
-            "description": "The end of what it printed.",
-            "type": "string"
-          },
-          "skipped": {
-            "description": "Targets, holes and assumptions the configuration leaves out because\nthey are private, which comparator can't name across two modules.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "spec": {
-            "description": "The spec snapshot.",
-            "type": "string"
-          }
-        },
-        "required": [
-          "spec",
-          "head",
-          "config",
-          "accepted",
-          "output"
-        ],
-        "type": "object"
-      },
-      "ComparatorRequest": {
-        "description": "`POST /snapshots/comparator`: judges a run with `lake comparator`,\nwhich shares no code with the audit, on the Lake project\n`GET /snapshots/export` gives: each spec snapshot against each head it\nreaches.",
-        "properties": {
-          "against": {
-            "description": "The spec's snapshot ids, as for the audit.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "allow": {
-            "description": "The definitions the heads may change besides the spec's holes, as for\nthe audit.",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "paranoid": {
-            "description": "Also run the external kernels Lean bundles: `leanchecker-paranoid`,\n`lean4lean`, `nanoda`, `con-leche` and `con-ron`.",
-            "type": "boolean"
-          },
-          "timeout": {
-            "description": "The time limit in seconds for each spec snapshot and head, in which\ncomparator builds and exports both and checks the head.",
-            "format": "int64",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "against"
-        ],
-        "type": "object"
-      },
-      "ComparatorResponse": {
-        "properties": {
-          "accepted": {
-            "description": "There is no fork, and comparator accepted every pair.",
-            "type": "boolean"
-          },
-          "forks": {
-            "description": "As in the audit.",
-            "items": {
-              "$ref": "#/components/schemas/AuditFork"
-            },
-            "type": "array"
-          },
-          "pairs": {
-            "description": "Each spec snapshot with each head it reaches.",
-            "items": {
-              "$ref": "#/components/schemas/ComparatorPair"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "accepted",
-          "pairs"
         ],
         "type": "object"
       },
@@ -1504,12 +1557,12 @@
           "create_snapshot",
           "verify_snapshot",
           "rebuild_snapshots",
-          "comparator"
+          "accept_run"
         ],
         "type": "string"
       },
       "JobOutcome": {
-        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a\n`VerifySnapshotResponse` and `rebuild_snapshots` a\n`RebuildSnapshotsResponse`. An error is the request's own, with its\nstatus.",
+        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a\n`VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`\nand `accept_run` an `AcceptResponse`. An error is the request's own, with\nits status.",
         "oneOf": [
           {
             "$ref": "#/components/schemas/CheckResult"
@@ -1528,6 +1581,9 @@
           },
           {
             "$ref": "#/components/schemas/RebuildSnapshotsResponse"
+          },
+          {
+            "$ref": "#/components/schemas/AcceptResponse"
           }
         ]
       },
@@ -1537,6 +1593,30 @@
           "running",
           "done",
           "cancelled"
+        ],
+        "type": "string"
+      },
+      "LeftOut": {
+        "description": "A target, hole or assumption that a pair's comparator configuration\nleaves out, and why.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/LeftOutReason"
+          }
+        },
+        "required": [
+          "name",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "LeftOutReason": {
+        "enum": [
+          "private",
+          "not_a_definition_in_spec",
+          "not_a_definition_in_head"
         ],
         "type": "string"
       },
@@ -1636,6 +1716,34 @@
           "code"
         ],
         "type": "object"
+      },
+      "PairError": {
+        "description": "Why comparator didn't accept a pair: its verdict, or what kept it from\ngiving one.",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/PairErrorKind"
+          },
+          "message": {
+            "description": "What comparator said, e.g. its last error.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ],
+        "type": "object"
+      },
+      "PairErrorKind": {
+        "enum": [
+          "refused",
+          "build_failed",
+          "timeout",
+          "out_of_memory",
+          "cannot_run",
+          "nothing_to_judge"
+        ],
+        "type": "string"
       },
       "Pos": {
         "description": "A position in the submitted code: lines count from 1, and columns from 0\nin Unicode code points, not UTF-16 units.",
@@ -4538,6 +4646,226 @@
         ]
       }
     },
+    "/snapshots/accept": {
+      "post": {
+        "description": "Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches, in the run's export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.",
+        "operationId": "acceptRun",
+        "parameters": [
+          {
+            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
+            "in": "header",
+            "name": "Prefer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptResponse"
+                }
+              }
+            },
+            "description": "The audit and comparator's verdict on each pair"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            },
+            "description": "Queued: wait for its answer at `/jobs/{id}`.",
+            "headers": {
+              "Location": {
+                "description": "`/jobs/{id}`, relative to the server's root",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Preference-Applied": {
+                "description": "`respond-async`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "Judge a run and store the verdict",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
+    "/snapshots/accept/{id}": {
+      "get": {
+        "description": "What `POST /snapshots/accept` answered, as it was stored.",
+        "operationId": "getAcceptance",
+        "parameters": [
+          {
+            "description": "The acceptance's id, `<version>~<32 hex>`",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptResponse"
+                }
+              }
+            },
+            "description": "The acceptance"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "A stored acceptance",
+        "tags": [
+          "snapshots"
+        ]
+      }
+    },
     "/snapshots/audit": {
       "get": {
         "description": "For the snapshots with every label: their declarations by status, each assumption (an axiom declared in snapshot code) with what uses it, wherever it is declared, and the declarations that are `sorry` or `rejected`. With `against` instead, for a run: the snapshots it reaches from the spec snapshots through the snapshots that replace them, to its heads, with the forks on the way, each head compared with its spec, allowing only the spec's holes and the definitions `allow` names to change, each spec declaration's status on each head, the links that allowed changes, and whether the run is `clean`. The server reads the records itself, so the audit needs no worker.",
@@ -4676,136 +5004,9 @@
         ]
       }
     },
-    "/snapshots/comparator": {
-      "post": {
-        "description": "Runs `lake comparator` on the run's export (`GET /snapshots/export`), for each spec snapshot and head it reaches: the head is accepted if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. Comparator shares no code with the audit, so accept a run when the audit is `clean` and comparator `accepted`. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.",
-        "operationId": "judgeRun",
-        "parameters": [
-          {
-            "description": "`respond-async` for a job at once (202), to wait for at\n`/jobs/{id}`, rather than the answer.",
-            "in": "header",
-            "name": "Prefer",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ComparatorRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ComparatorResponse"
-                }
-              }
-            },
-            "description": "Comparator's verdict on each pair"
-          },
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            },
-            "description": "Queued: wait for its answer at `/jobs/{id}`.",
-            "headers": {
-              "Location": {
-                "description": "`/jobs/{id}`, relative to the server's root",
-                "schema": {
-                  "type": "string"
-                }
-              },
-              "Preference-Applied": {
-                "description": "`respond-async`",
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`bad_request`: the request breaks the API's rules."
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`capacity`: no worker took the job in time; retry later."
-          },
-          "500": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`internal`."
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
-          }
-        },
-        "summary": "Judge a run with lake comparator",
-        "tags": [
-          "snapshots"
-        ]
-      }
-    },
     "/snapshots/export": {
       "get": {
-        "description": "The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/comparator` runs comparator on it.",
+        "description": "The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/accept` runs comparator on it.",
         "operationId": "exportRun",
         "parameters": [
           {

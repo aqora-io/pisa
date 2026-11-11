@@ -821,6 +821,19 @@ impl Catalog {
         )
     }
 
+    /// Stores `result`, what `POST /snapshots/accept` answered, as
+    /// acceptance `id`, a new random id. Refused like a record that is too
+    /// large.
+    pub async fn put_acceptance(&self, id: &str, result: &impl Serialize) -> Result<(), Error> {
+        let result = to_record(result).map_err(Error::from)?;
+        dispatch!(&self.db, put_acceptance(&self.version, id, &result))
+    }
+
+    /// Acceptance `id`'s stored result, if it has one.
+    pub async fn acceptance(&self, id: &str) -> Result<Option<Value>, Error> {
+        dispatch!(&self.db, acceptance(&self.version, id))
+    }
+
     /// This version's catalog's id: random, made the first time it is asked
     /// for, and the same from then on. The object store's marker repeats it,
     /// so that a worker sweeps only a store its own catalog wrote.
@@ -1921,6 +1934,18 @@ mod tests {
             // An ended lease goes to whoever asks.
             catalog.take_lease("l", "a", Duration::ZERO).await.unwrap();
             assert!(catalog.take_lease("l", "b", ttl).await.unwrap().is_some());
+        }
+    }
+
+    /// An acceptance's result reads back as it was stored, under its id.
+    #[tokio::test]
+    async fn an_acceptance_reads_back() {
+        for catalog in catalogs().await {
+            let result =
+                serde_json::json!({"accepted": true, "pairs": [{"spec": "s", "head": "h"}]});
+            catalog.put_acceptance("a1", &result).await.unwrap();
+            assert_eq!(catalog.acceptance("a1").await.unwrap(), Some(result));
+            assert_eq!(catalog.acceptance("a2").await.unwrap(), None);
         }
     }
 

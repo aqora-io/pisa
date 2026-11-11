@@ -299,7 +299,7 @@ class VerifySnapshotResponse(TypedDict):
 
 JobKind = Literal[
     "check", "start_session", "apply_tactic", "check_session",
-    "create_snapshot", "verify_snapshot", "rebuild_snapshots",
+    "create_snapshot", "verify_snapshot", "rebuild_snapshots", "accept_run",
 ]
 JobStatus = Literal["queued", "running", "done", "cancelled"]
 

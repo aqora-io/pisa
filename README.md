@@ -212,6 +212,14 @@ on the servers:
   themselves.
 - The worker image builds the `pisa` tool beside the `Pisa` library, and
   `PISA_TOOL` (`/opt/pisa/.lake/build/bin/pisa`) replaces `PISA_VERIFIER`.
+- `POST /snapshots/comparator` is gone: `POST /snapshots/accept` audits the
+  run and runs comparator on the same pairs, stores the result, and answers
+  `accepted` only when the audit is `clean` too. Its pairs' `skipped` is now
+  `left_out`, with a reason each, and a pair not accepted has an `error`
+  with its kind. The async job kind `comparator` is `accept_run`.
+- Accept classifies comparator's failures by the messages Lake prints, as of
+  Lean 4.36.0-rc2. On a toolchain bump, check `classify` in
+  `crates/pisa-worker/src/runs.rs` against Lake's `CLI/Check.lean`.
 - Snapshots of plain code made before the upgrade keep the `verified` they
   had, which is false unless they were verified on request, and an audit
   against a spec isn't `clean` until its spec snapshots and heads are. The
@@ -290,8 +298,9 @@ pnpm -C web generate
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60) → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
-| `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting with comparator](#comparator) |
-| `POST /snapshots/comparator` | `{against, allow?, paranoid?, timeout?}` → `{accepted, forks?, pairs: [{spec, head, config, accepted, exit_code?, output, skipped?}]}`; async with `Prefer: respond-async` |
+| `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting a run](#comparator) |
+| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, pairs: [{spec, head, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
+| `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept` |
 | `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
@@ -307,7 +316,7 @@ takes a comma-separated list of origins, or `*`. It is empty by default.
 
 <a id="async-requests"></a>
 **Async requests.** A check, a session's start, tactic or check, a
-snapshot's create or verify, a rebuild, and a comparator run can take minutes: a wait for a worker, loading the
+snapshot's create or verify, a rebuild, and a run's acceptance can take minutes: a wait for a worker, loading the
 imports, Lean's `timeout`, a kernel re-check. Behind a proxy that cuts
 requests off at 60 s, or over a network that drops, send them with
 `Prefer: respond-async`. The server then answers `202 {id, kind, status:
@@ -864,8 +873,9 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   `clean`: rebuild a run's spec snapshots without `retire`.
 
 <a id="comparator"></a>
-**Accepting with comparator.** The audit's comparison is pisa's own code.
-`lake comparator`, which Lean ships, judges a run with none of it:
+**Accepting a run.** The audit's comparison is pisa's own code.
+`lake comparator`, which Lean ships, judges a run with none of it, and
+accepting a run takes both:
 - **The export.** `GET /snapshots/export?against=<id>` (repeated, with
   `allow=` as for the audit) answers the run as a Lake project in
   `pisa-run/`, as a tar.gz:
@@ -890,23 +900,58 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   holes, an assumption keeps its statement, and the proofs use no other
   axiom. It replays them in Lean's kernel and, with `--paranoid`, in the
   external kernels Lean bundles.
-- **Running it.** `POST /snapshots/comparator {"against": [...]}` runs
-  `lake comparator --paranoid` on a worker, on each pair in turn, in one
-  export so that each module builds once. `paranoid: false` uses Lean's
+- **Running it.** `POST /snapshots/accept {"against": [...]}` audits the run,
+  as `audit?against=` does with the same `allow`, and runs
+  `lake comparator --paranoid` on a worker on exactly the pairs the audit
+  compared, each in turn, in one export so that each module builds once. The worker keeps the last 4 runs it
+  judged as they were built, by their modules and Lake configuration, so
+  judging the same run again, with another `allow` too, doesn't build it again. `paranoid: false` uses Lean's
   kernel only, and `timeout` (default 600) is each pair's limit in seconds.
-  Each pair has comparator's `exit_code` (0 accepted, 1 refused, 2 couldn't
-  start, none past `timeout`) and the end of its `output`. The run is
-  `accepted` when every pair is and there is no fork. A pair that imports
+  Each pair has comparator's `exit_code` (0 accepted, 1 refused or failed, 2
+  couldn't start, none past `timeout`) and the end of its `output`. A pair
+  not accepted says why in `error.kind`: `refused`, comparator's verdict;
+  `build_failed`, a module that didn't build in its sandbox; `timeout`;
+  `out_of_memory`; `cannot_run`, comparator couldn't start or run its checks;
+  or `nothing_to_judge`, a spec that names no theorem comparator can judge,
+  for which it doesn't run. Only `refused` is a verdict on the proofs. The run
+  is `accepted` when the audit is `clean` (`clean`, with the whole `audit`
+  and the `heads` both judged), comparator accepted every pair, and there is
+  one at least. The result is stored with an `id`, and
+  `GET /snapshots/accept/{id}` reads it again. A pair that imports
   Mathlib takes about 25 s, or 45 s paranoid, so send it with
   `Prefer: respond-async`. Or untar the export and run `lake comparator
   --paranoid --config comparator/1.json` there: it needs `bwrap`.
-- **What it doesn't see.** Private names differ between two modules, so a
-  configuration leaves out private theorems, holes and assumptions and lists
-  them in `skipped`. A definition that no theorem's statement uses isn't
-  compared, as the audit compares it. Comparator also refuses some heads
-  that keep the spec's statements, such as code that opens `Classical` in its
-  header, or whose auxiliary declarations differ. So it adds to the audit,
-  and doesn't replace it.
+- **Where the audit and comparator differ.** Each pair's `left_out` and
+  `theorems` say what its configuration couldn't name. The full list:
+  - *Private names* differ between two modules, so a configuration leaves out
+    private theorems, holes and assumptions (`private`). The audit compares
+    them.
+  - *Holes that aren't plain definitions.* Comparator takes as a hole only a
+    `def` that both sides declare. A hole or `allow` name that is an inductive
+    type, a structure or an `opaque` is left out
+    (`not_a_definition_in_spec`), and so is one the head no longer builds on
+    (`not_a_definition_in_head`). The audit allows them.
+  - *Definitions no statement uses.* Comparator compares what the theorems'
+    statements reach; the audit compares every declaration of the spec.
+  - *A spec of definitions only* has no theorem for comparator to judge: the
+    pair is `nothing_to_judge`, and the run isn't accepted. The audit
+    compares its statements.
+  - *Heads it refuses that keep the statements*, such as code that opens
+    `Classical` in its header, or whose auxiliary declarations differ: the
+    audit is `clean` and the pair `refused`.
+  - *Axioms.* Comparator permits the standard three and the spec's
+    assumptions; the audit's `not_proved` uses `PISA_ALLOWED_AXIOMS`.
+  - *Links' `allow`s* count for neither: both compare under the spec's holes
+    and the request's `allow`.
+
+  So comparator adds to the audit, and doesn't replace it.
+- **The export, outside pisa.** Its `README.md` gives the toolchain, says to
+  run `lake exe cache get` first when the project requires Mathlib (comparator
+  builds in a sandbox without network, and would compile Mathlib from
+  source), and lists each pair with its theorems and what it leaves out, and
+  each file with the snapshots on its module and their labels. Then
+  `lake build` and `lake comparator --paranoid --config comparator/<n>.json`
+  judge it as pisa does.
 - **The worker.** Comparator runs on a REPL slot, in its cgroup and outside
   pisa's sandbox, as it sandboxes the code it judges itself with `bwrap`,
   with only `PATH`, `HOME`, `ELAN_HOME`, `LANG` and `TMPDIR` of the worker's
@@ -947,12 +992,12 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   again and it copies the agent's version. The run doesn't fork, and no
   submission is lost. `retire` would delete versions agents hold, so their
   submissions would answer `not_found` without `heads`.
-- **Accepting.** The run is accepted when `audit?against=` its spec ids is
-  `clean` (see [Auditing a run](#spec-audit)), with `allow=` each definition
-  the leader decided later may change, such as one its own base edit
-  changed; the spec's holes may change already. Then comparator, which
-  shares no code with the audit, accepts it with the same `allow` (see
-  [Accepting with comparator](#comparator)). What the agents' links
+- **Accepting.** `POST /snapshots/accept` with the run's spec ids accepts
+  the run when its audit is `clean` (see [Auditing a run](#spec-audit)) and
+  comparator, which shares no code with the audit, accepts every pair the
+  audit compared (see [Accepting a run](#comparator)), with `allow` each
+  definition the leader decided later may change, such as one its own base
+  edit changed; the spec's holes may change already. What the agents' links
   allowed doesn't count; `comparisons` and `links` show what each head
   changed, and `review=true` what the targets' statements depend on, each
   hole with its value, for the leader to read before accepting.

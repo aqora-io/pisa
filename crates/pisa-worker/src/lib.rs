@@ -232,8 +232,8 @@ pub(crate) async fn run_job(
         Job::SnapshotRebuild(_) => JobResult::Failed {
             error: "a rebuild is planned and run by a server".into(),
         },
-        Job::SnapshotComparator(j) => {
-            JobResult::SnapshotComparator(runs::comparator(pool, j).await)
+        Job::SnapshotAccept(j) => {
+            JobResult::SnapshotAccepted(runs::accept(pool, j).await.map(Box::new))
         }
         Job::SnapshotExport(j) => {
             let project = pool.launcher().project();

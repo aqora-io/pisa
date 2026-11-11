@@ -268,6 +268,9 @@ impl Launcher {
         // again from the store, so nothing stale survives a restart.
         let snapshot_root = work_dir.join("snapshots").join(version);
         let _ = std::fs::remove_dir_all(&snapshot_root);
+        // Runs comparator judged, kept for the next judgment of the same run;
+        // see `runs`.
+        let _ = std::fs::remove_dir_all(work_dir.join("runs"));
         std::fs::create_dir_all(snapshot_root.join(pisa_protocol::snapshot::ROOT))
             .with_context(|| format!("creating {}", snapshot_root.display()))?;
         let base = env
@@ -323,6 +326,12 @@ impl Launcher {
     /// The Lake project the REPL imports from, if there is one.
     pub fn project(&self) -> Option<&Path> {
         self.project.as_deref()
+    }
+
+    /// Where runs exported for comparator are kept between judgments, each
+    /// built once.
+    pub fn runs_dir(&self) -> PathBuf {
+        self.work_dir.join("runs")
     }
 
     /// A private writable directory for the slot, visible inside the sandbox

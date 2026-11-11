@@ -25,7 +25,7 @@ pub enum Job {
     SnapshotVerify(SnapshotVerifyJob),
     SnapshotRebuild(SnapshotRebuildJob),
     SnapshotExport(SnapshotExportJob),
-    SnapshotComparator(SnapshotComparatorJob),
+    SnapshotAccept(SnapshotAcceptJob),
     DocumentOpen(DocumentOpenJob),
     DocumentEdit(DocumentEditJob),
     DocumentGoals(DocumentGoalsJob),
@@ -133,9 +133,9 @@ pub struct SnapshotExportJob {
     pub allow: Vec<String>,
 }
 
-/// `POST /snapshots/comparator`.
+/// `POST /snapshots/accept`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotComparatorJob {
+pub struct SnapshotAcceptJob {
     pub against: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
@@ -170,10 +170,11 @@ pub struct ExportedPair {
     pub head: String,
     /// Its comparator configuration's path in the project.
     pub config: String,
-    /// Targets, holes and assumptions it leaves out because they are
-    /// private, which comparator can't name across two modules.
+    /// How many of the spec's theorems it names.
+    pub theorems: u64,
+    /// What it leaves out of what it would name, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<String>,
+    pub left_out: Vec<api::LeftOut>,
 }
 
 /// `POST /snapshots/rebuild`, as a plan, and as the record of a run the
@@ -248,7 +249,7 @@ pub enum JobResult {
     SnapshotVerified(Result<api::VerifySnapshotResponse, api::Error>),
     SnapshotRebuild(Result<api::RebuildSnapshotsResponse, api::Error>),
     SnapshotExport(Result<ExportedRun, api::Error>),
-    SnapshotComparator(Result<api::ComparatorResponse, api::Error>),
+    SnapshotAccepted(Result<Box<api::AcceptResponse>, api::Error>),
     /// An opened or edited document.
     Document(Result<api::Document, api::Error>),
     DocumentGoals(Result<api::DocumentGoals, api::Error>),
@@ -389,7 +390,11 @@ mod tests {
                 spec: "v~s".into(),
                 head: "v~h".into(),
                 config: "comparator/1.json".into(),
-                skipped: Vec::new(),
+                theorems: 1,
+                left_out: vec![api::LeftOut {
+                    name: "Gate".into(),
+                    reason: api::LeftOutReason::NotADefinitionInSpec,
+                }],
             }],
             forks: Vec::new(),
         };

@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -402,7 +403,23 @@ def holes():
     step("holes: a spec's holes are filled without allow, and nothing else changes in a clean run")
 
 
-def comparator():
+def built_outside(archive):
+    """Unpacks a run's export in a worker container and builds and judges it
+    there with the commands its README gives: Lean and Lake only, no pisa."""
+    worker = worker_containers()[0]
+    with tempfile.NamedTemporaryFile(suffix=".tar.gz") as f:
+        f.write(archive)
+        f.flush()
+        docker("cp", f.name, f"{worker}:/tmp/e2e-run.tar.gz")
+    script = ("set -e; rm -rf /tmp/e2e-run; mkdir /tmp/e2e-run; cd /tmp/e2e-run; "
+              "tar xzf /tmp/e2e-run.tar.gz; cd pisa-run; lake build; "
+              "lake comparator --paranoid --config comparator/1.json")
+    out = subprocess.run(["docker", "exec", worker, "bash", "-c", script], capture_output=True, text=True)
+    docker("exec", worker, "rm", "-rf", "/tmp/e2e-run", "/tmp/e2e-run.tar.gz")
+    assert out.returncode == 0, (out.stdout[-3000:], out.stderr[-3000:])
+
+
+def comparator(outside):
     spec = ("def cost : Nat := {}\n\ndef good (n : Nat) : Prop := {}\n\n"
             "theorem t : good cost := {}\n\ntheorem t_nonvacuous : ∃ n, good n := {}")
     skeleton = create_snapshot(spec.format("sorry", "n ≤ 10", "sorry", "sorry"), holes=["cost"], verify=True)
@@ -423,10 +440,16 @@ def comparator():
     head_file = filled["snapshot"]["module"].replace(".", "/")
     assert f"pisa-run/{head_file}.lean" in names and "pisa-run/lakefile.toml" in names, names
     step("comparator: a run exports as a Lake project")
+    if outside:
+        built_outside(archive)
+        step("comparator: an unpacked export builds and is accepted as its README says, outside pisa")
 
-    verdict = post("/snapshots/comparator", {"against": [spec_id]})
-    assert verdict["accepted"] and verdict["pairs"][0]["exit_code"] == 0, verdict
-    step("comparator: a head that fills the spec's holes is accepted, paranoid")
+    verdict = post("/snapshots/accept", {"against": [spec_id]})
+    assert verdict["accepted"] and verdict["clean"] and verdict["pairs"][0]["exit_code"] == 0, verdict
+    assert verdict["heads"] == [filled["snapshot"]["id"]], verdict
+    status, stored = call("GET", f"/snapshots/accept/{verdict['id']}")
+    assert status == 200 and stored["id"] == verdict["id"] and stored["accepted"], stored
+    step("accept: a head that fills the spec's holes is accepted, paranoid, and the verdict is kept")
     delete_snapshots([filled])
 
     # `good` isn't a hole: changed under the head's own `allow`, the audit
@@ -434,12 +457,13 @@ def comparator():
     replaces = {"snapshot_id": spec_id, "allow": {"definitions": ["good"]}}
     cheat = create_snapshot(spec.format("3", "True", "trivial", "⟨0, trivial⟩"), replaces=replaces, verify=True)
     assert audit_against(skeleton)["clean"] is False
-    verdict = post("/snapshots/comparator", {"against": [spec_id], "paranoid": False})
+    verdict = post("/snapshots/accept", {"against": [spec_id], "paranoid": False})
     pair = verdict["pairs"][0]
-    assert not verdict["accepted"] and pair["exit_code"] == 1, verdict
+    assert not verdict["accepted"] and not verdict["clean"] and pair["exit_code"] == 1, verdict
+    assert pair["error"]["kind"] == "refused", pair
     assert "does not match" in pair["output"] and "good" in pair["output"], pair
     delete_snapshots([cheat, skeleton])
-    step("comparator: a head that changes what a statement means is refused")
+    step("accept: a head that changes what a statement means is refused by the audit and comparator")
 
 
 def circuit(program, budget="3", promise="n < 4", accepts="n < c.length + 2", gates="",
@@ -475,7 +499,7 @@ def review():
     assert program["hole"] and "Gate.cnot" in program["value"] and "[" not in program["value"], program
     assert not listed["budget"].get("hole") and "value" not in listed["budget"], listed["budget"]
     assert {"List", "Nat"} <= set(review_list["library"]), review_list
-    assert post("/snapshots/comparator", {"against": [spec_id], "paranoid": False})["accepted"]
+    assert post("/snapshots/accept", {"against": [spec_id], "paranoid": False})["accepted"]
     delete_snapshots([honest])
     step("review: a head lists what the spec's statements use, its hole by value, and is accepted")
 
@@ -493,7 +517,7 @@ def review():
         out = audit_against(spec)
         reasons = out["comparisons"][0].get("reasons", [])
         assert out["clean"] is False and any(name in r for r in reasons), (name, out)
-        verdict = post("/snapshots/comparator", {"against": [spec_id], "paranoid": False})
+        verdict = post("/snapshots/accept", {"against": [spec_id], "paranoid": False})
         assert not verdict["accepted"], (name, verdict)
         delete_snapshots([head])
     delete_snapshots([spec])
@@ -507,7 +531,7 @@ def review():
     assert out["clean"] is True, out
     budget = {d["name"]: d for d in out["review"][0]["declarations"]}["budget"]
     assert budget["hole"] and "cost" in budget["value"] and "program" in budget["value"], budget
-    assert post("/snapshots/comparator", {"against": [loose["snapshot"]["id"]], "paranoid": False})["accepted"]
+    assert post("/snapshots/accept", {"against": [loose["snapshot"]["id"]], "paranoid": False})["accepted"]
     delete_snapshots([gamed, loose])
     step("review: a budget left as a hole and set to the candidate's own cost is clean, and the review shows its value")
 
@@ -761,7 +785,8 @@ if __name__ == "__main__":
     statements_under_replaces()
     allow_by_name()
     holes()
-    comparator()
+    # The export of a project with packages fetches them to build.
+    comparator(outside=not args.mathlib and not args.no_failover)
     review()
     allow_through_a_lost_snapshot()
     labels()

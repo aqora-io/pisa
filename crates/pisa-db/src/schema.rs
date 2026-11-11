@@ -68,6 +68,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    acceptances (version, id) {
+        version -> Text,
+        id -> Text,
+        created_micros -> BigInt,
+        result -> Jsonb,
+    }
+}
+
+diesel::table! {
     catalogs (version) {
         version -> Text,
         id -> Text,

@@ -10,7 +10,7 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    Accepted, ApiErrors, AuditSnapshotsResponse, ComparatorRequest, ComparatorResponse,
+    AcceptRequest, AcceptResponse, Accepted, ApiErrors, AuditSnapshotsResponse,
     CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, Detail, ErrorKind,
     JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, PreferAsync,
     RebuildSnapshotsRequest, RebuildSnapshotsResponse, Snapshot, SnapshotDetail, SnapshotId,
@@ -22,7 +22,7 @@ use pisa_protocol::labels::{
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
-    ExportedRun, Job, JobResult, SnapshotComparatorJob, SnapshotCreateJob, SnapshotDeleteJob,
+    ExportedRun, Job, JobResult, SnapshotAcceptJob, SnapshotCreateJob, SnapshotDeleteJob,
     SnapshotExportJob, SnapshotRebuildJob, SnapshotVerifyJob,
 };
 use serde::Deserialize;
@@ -433,7 +433,7 @@ fn run_version(against: &[String]) -> Result<String, ApiError> {
         project's toolchain, manifest and requirements, and a configuration in `comparator/` \
         for each spec snapshot and head it reaches. Each names the spec's theorems, its holes \
         and `allow` as definition holes, and the standard axioms and the spec's assumptions as \
-        permitted. `POST /snapshots/comparator` runs comparator on it.",
+        permitted. `POST /snapshots/accept` runs comparator on it.",
     params(
         ("against" = Vec<String>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version"),
         ("allow" = Option<Vec<String>>, Query, description = "A definition the run's heads may change besides the spec's holes, as for the audit; repeatable"),
@@ -495,24 +495,27 @@ fn tarball(run: &ExportedRun) -> std::io::Result<Vec<u8>> {
 }
 
 #[utoipa::path(
-    post, path = "/snapshots/comparator", operation_id = "judgeRun", tag = "snapshots",
-    summary = "Judge a run with lake comparator",
-    description = "Runs `lake comparator` on the run's export (`GET /snapshots/export`), for \
-        each spec snapshot and head it reaches: the head is accepted if each theorem of the spec \
+    post, path = "/snapshots/accept", operation_id = "acceptRun", tag = "snapshots",
+    summary = "Judge a run and store the verdict",
+    description = "Audits the run that the spec snapshots start, as `GET /snapshots/audit` \
+        does, and runs `lake comparator`, which shares no code with the audit, on exactly the \
+        pairs the audit compared, each spec snapshot against each head it reaches, in the run's \
+        export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec \
         is proved there with the same statement, the definitions those statements use are the \
         same but for the spec's holes and `allow`, and the proofs use only the standard axioms \
-        and the spec's assumptions. Comparator shares no code with the audit, so accept a run \
-        when the audit is `clean` and comparator `accepted`. A Mathlib-sized pair takes about \
-        half a minute, or a minute paranoid: send it with `Prefer: respond-async`.",
+        and the spec's assumptions. The run is `accepted` when the audit is `clean` and \
+        comparator accepted every pair. The result is stored, and \
+        `GET /snapshots/accept/{id}` reads it again. A Mathlib-sized pair takes about half a \
+        minute, or a minute paranoid: send it with `Prefer: respond-async`.",
     params(PreferAsync),
-    request_body = ComparatorRequest,
-    responses((status = 200, description = "Comparator's verdict on each pair", body = ComparatorResponse), Accepted, ApiErrors),
+    request_body = AcceptRequest,
+    responses((status = 200, description = "The audit and comparator's verdict on each pair", body = AcceptResponse), Accepted, ApiErrors),
 )]
-/// `POST /snapshots/comparator`.
-pub async fn comparator(
+/// `POST /snapshots/accept`.
+pub async fn accept(
     State(app): State<Arc<App>>,
     prefer: Prefer,
-    Body(req): Body<ComparatorRequest>,
+    Body(req): Body<AcceptRequest>,
 ) -> Response {
     let version = match run_version(&req.against) {
         Ok(version) => version,
@@ -525,21 +528,51 @@ pub async fn comparator(
         );
         return e.into_response();
     }
-    let job = Job::SnapshotComparator(SnapshotComparatorJob {
+    let job = Job::SnapshotAccept(SnapshotAcceptJob {
         against: req.against,
         allow: req.allow,
         paranoid: req.paranoid,
         timeout_secs: req.timeout,
     });
     let p = prepare(job, Some(version), Priority::Batch);
-    app.answer(prefer, JobKind::Comparator, p).await
+    app.answer(prefer, JobKind::AcceptRun, p).await
 }
 
-pub(crate) fn compared(done: JobResult) -> Result<ComparatorResponse, ApiError> {
+pub(crate) fn judged(done: JobResult) -> Result<AcceptResponse, ApiError> {
     match done {
-        JobResult::SnapshotComparator(r) => r.map_err(ApiError),
+        JobResult::SnapshotAccepted(r) => r.map(|r| *r).map_err(ApiError),
         other => Err(unexpected(other)),
     }
+}
+
+#[utoipa::path(
+    get, path = "/snapshots/accept/{id}", operation_id = "getAcceptance", tag = "snapshots",
+    summary = "A stored acceptance",
+    description = "What `POST /snapshots/accept` answered, as it was stored.",
+    params(("id" = String, Path, description = "The acceptance's id, `<version>~<32 hex>`")),
+    responses((status = 200, description = "The acceptance", body = AcceptResponse), ApiErrors),
+)]
+/// `GET /snapshots/accept/{id}`.
+pub async fn acceptance(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> Result<Json<AcceptResponse>, ApiError> {
+    let parsed = SnapshotId::parse(&id).ok_or_else(|| {
+        ApiError::new(
+            ErrorKind::BadRequest,
+            format!("{id} isn't an acceptance's id, `<version>~<32 hex>`"),
+        )
+    })?;
+    let reader = app.snapshots.version(&parsed.version);
+    let Some(stored) = reader.catalog().acceptance(&parsed.entry).await? else {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no acceptance {id}"),
+        ));
+    };
+    serde_json::from_value(stored)
+        .map(Json)
+        .map_err(|e| ApiError::new(ErrorKind::Internal, format!("a stored acceptance: {e}")))
 }
 
 #[utoipa::path(

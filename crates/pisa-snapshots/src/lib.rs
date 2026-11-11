@@ -26,6 +26,7 @@ use pisa_protocol::verify::{
 use pisa_protocol::wire::SnapshotRebuildJob;
 
 mod audit;
+pub use audit::{AuditedRun, RunPair};
 pub mod compare;
 pub mod plan;
 mod read;

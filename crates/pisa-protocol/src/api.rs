@@ -23,7 +23,8 @@
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
 //! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
 //! | `GET /snapshots/export` | `?against=<id>&allow=<name>` → a Lake project, as a tar.gz |
-//! | `POST /snapshots/comparator` | [`ComparatorRequest`] → [`ComparatorResponse`] |
+//! | `POST /snapshots/accept` | [`AcceptRequest`] → [`AcceptResponse`] |
+//! | `GET /snapshots/accept/{id}` | → [`AcceptResponse`] |
 //! | `POST /documents` | [`OpenDocumentRequest`] → [`Document`] |
 //! | `PATCH /documents/{id}` | [`EditDocumentRequest`] → [`Document`] |
 //! | `POST /documents/{id}/goals` | [`DocumentGoalsRequest`] → [`DocumentGoals`] |
@@ -211,8 +212,8 @@ pub enum JobKind {
     VerifySnapshot,
     /// `POST /snapshots/rebuild`, run rather than planned
     RebuildSnapshots,
-    /// `POST /snapshots/comparator`
-    Comparator,
+    /// `POST /snapshots/accept`
+    AcceptRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -242,9 +243,9 @@ pub struct JobWait {
 /// would have. By `kind`: `check` and `check_session` a `CheckResult`,
 /// `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
 /// `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
-/// `VerifySnapshotResponse` and `rebuild_snapshots` a
-/// `RebuildSnapshotsResponse`. An error is the request's own, with its
-/// status.
+/// `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`
+/// and `accept_run` an `AcceptResponse`. An error is the request's own, with
+/// its status.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum JobOutcome {
@@ -254,6 +255,7 @@ pub enum JobOutcome {
     CreateSnapshot(Box<CreateSnapshotResponse>),
     VerifySnapshot(VerifySnapshotResponse),
     RebuildSnapshots(Box<RebuildSnapshotsResponse>),
+    AcceptRun(Box<AcceptResponse>),
 }
 
 /// `GET /health`: 200, or 503 once the server is stopping.
@@ -1262,12 +1264,14 @@ pub struct AuditComparison {
 #[schema(value_type = String, format = Binary)]
 pub struct Tarball(pub Vec<u8>);
 
-/// `POST /snapshots/comparator`: judges a run with `lake comparator`,
-/// which shares no code with the audit, on the Lake project
-/// `GET /snapshots/export` gives: each spec snapshot against each head it
-/// reaches.
+/// `POST /snapshots/accept`: judges a run in one operation. It audits the run
+/// against its spec, as `GET /snapshots/audit` does, and runs
+/// `lake comparator`, which shares no code with the audit, on exactly the
+/// pairs the audit compared, each spec snapshot against each head it
+/// reaches, in the Lake project `GET /snapshots/export` gives. The result is
+/// stored: `GET /snapshots/accept/{id}` reads it again.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct ComparatorRequest {
+pub struct AcceptRequest {
     /// The spec's snapshot ids, as for the audit.
     pub against: Vec<String>,
     /// The definitions the heads may change besides the spec's holes, as for
@@ -1280,7 +1284,7 @@ pub struct ComparatorRequest {
     pub paranoid: bool,
     /// The time limit in seconds for each spec snapshot and head, in which
     /// comparator builds and exports both and checks the head.
-    #[serde(default = "comparator_timeout")]
+    #[serde(default = "accept_timeout")]
     pub timeout: u64,
 }
 
@@ -1288,23 +1292,39 @@ fn paranoid_default() -> bool {
     true
 }
 
-fn comparator_timeout() -> u64 {
+fn accept_timeout() -> u64 {
     600
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ComparatorResponse {
-    /// There is no fork, and comparator accepted every pair.
-    pub accepted: bool,
-    /// As in the audit.
+/// A run's acceptance, as `POST /snapshots/accept` judged it and stored it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AcceptResponse {
+    /// This result's id, `<version>~<32 hex>`, for
+    /// `GET /snapshots/accept/{id}`.
+    pub id: String,
+    /// When it was judged, in seconds since the Unix epoch.
+    pub created: u64,
+    /// What it judged: the request's spec snapshots, `allow` and `paranoid`.
+    pub against: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub forks: Vec<AuditFork>,
-    /// Each spec snapshot with each head it reaches.
-    pub pairs: Vec<ComparatorPair>,
+    pub allow: Vec<String>,
+    pub paranoid: bool,
+    /// The audit is `clean`, comparator accepted every pair, and there is at
+    /// least one.
+    pub accepted: bool,
+    /// The audit's verdict.
+    pub clean: bool,
+    /// The heads the audit and comparator judged.
+    pub heads: Vec<String>,
+    /// The audit, as `GET /snapshots/audit?against=…` answers it.
+    pub audit: AuditSnapshotsResponse,
+    /// Each spec snapshot with each head it reaches, as comparator judged
+    /// them, in the order of the audit's `comparisons`.
+    pub pairs: Vec<AcceptPair>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ComparatorPair {
+pub struct AcceptPair {
     /// The spec snapshot.
     pub spec: String,
     /// The head.
@@ -1312,16 +1332,70 @@ pub struct ComparatorPair {
     /// Its comparator configuration in the export.
     pub config: String,
     pub accepted: bool,
+    /// Why it isn't accepted, if it isn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<PairError>,
     /// Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it
-    /// ran past `timeout`.
+    /// ran past `timeout`, or didn't run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// The end of what it printed.
     pub output: String,
-    /// Targets, holes and assumptions the configuration leaves out because
-    /// they are private, which comparator can't name across two modules.
+    /// How many of the spec's theorems the configuration names.
+    pub theorems: u64,
+    /// What the configuration leaves out of what it would name, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skipped: Vec<String>,
+    pub left_out: Vec<LeftOut>,
+}
+
+/// Why comparator didn't accept a pair: its verdict, or what kept it from
+/// giving one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PairError {
+    pub kind: PairErrorKind,
+    /// What comparator said, e.g. its last error.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairErrorKind {
+    /// Comparator judged the head and refused it: a statement or a
+    /// definition differs, an axiom isn't permitted, or a kernel rejected it.
+    Refused,
+    /// A module didn't build or export in comparator's sandbox, which is no
+    /// verdict on the proofs.
+    BuildFailed,
+    /// It ran past the request's `timeout`.
+    Timeout,
+    /// The worker's memory limit killed it.
+    OutOfMemory,
+    /// Comparator couldn't start or run its checks: a missing `bwrap`, a
+    /// configuration it couldn't read, a kernel it couldn't run.
+    CannotRun,
+    /// The spec names no theorem comparator can judge, so it didn't run.
+    NothingToJudge,
+}
+
+/// A target, hole or assumption that a pair's comparator configuration
+/// leaves out, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LeftOut {
+    pub name: String,
+    pub reason: LeftOutReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LeftOutReason {
+    /// A private name, which comparator can't name across two modules.
+    Private,
+    /// A hole or `allow` name that isn't a definition (`def`) in the spec or
+    /// what it builds on, such as an inductive type or an `opaque`, which
+    /// comparator can't take as a definition hole.
+    NotADefinitionInSpec,
+    /// The same of the head, e.g. a name the head no longer builds on.
+    NotADefinitionInHead,
 }
 
 /// What a spec snapshot's statements depend on, on one head it reaches: the

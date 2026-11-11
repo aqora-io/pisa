@@ -40,7 +40,7 @@ impl Snapshots {
         self.dir().join(format!("s{id}.{ext}"))
     }
 
-    pub(super) fn lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn lock(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.locks
             .lock()
             .unwrap()

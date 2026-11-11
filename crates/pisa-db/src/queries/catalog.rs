@@ -21,7 +21,7 @@ use crate::catalog::{
 };
 use crate::db::{DbError, retry};
 use crate::schema::{
-    catalogs, changes, described, entries, leases, links, module_imports, modules,
+    acceptances, catalogs, changes, described, entries, leases, links, module_imports, modules,
 };
 
 const ENTRY: (
@@ -1218,6 +1218,38 @@ pub(crate) async fn changes(
             change: crate::catalog::Change { entry, module },
         })
         .collect())
+}
+
+pub(crate) async fn put_acceptance(
+    db: &Handle,
+    v: &str,
+    id: &str,
+    result: &Value,
+) -> Result<(), Error> {
+    retry(|| async {
+        diesel::insert_into(acceptances::table)
+            .values((
+                acceptances::version.eq(v),
+                acceptances::id.eq(id),
+                acceptances::created_micros.eq(now_micros() as i64),
+                acceptances::result.eq(result),
+            ))
+            .execute(&mut *conn(db).await?)
+            .await?;
+        Ok::<_, DbError>(())
+    })
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn acceptance(db: &Handle, v: &str, id: &str) -> Result<Option<Value>, Error> {
+    Ok(acceptances::table
+        .find((v, id))
+        .select(acceptances::result)
+        .first::<Value>(&mut *conn(db).await?)
+        .await
+        .optional()
+        .map_err(DbError::from)?)
 }
 
 pub(crate) async fn identity(db: &Handle, v: &str) -> Result<String, Error> {

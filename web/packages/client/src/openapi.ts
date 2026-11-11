@@ -296,6 +296,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/snapshots/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Judge a run and store the verdict
+         * @description Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches, in the run's export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
+         */
+        post: operations["acceptRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/snapshots/accept/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A stored acceptance
+         * @description What `POST /snapshots/accept` answered, as it was stored.
+         */
+        get: operations["getAcceptance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/snapshots/audit": {
         parameters: {
             query?: never;
@@ -316,26 +356,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/snapshots/comparator": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Judge a run with lake comparator
-         * @description Runs `lake comparator` on the run's export (`GET /snapshots/export`), for each spec snapshot and head it reaches: the head is accepted if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. Comparator shares no code with the audit, so accept a run when the audit is `clean` and comparator `accepted`. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
-         */
-        post: operations["judgeRun"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/snapshots/export": {
         parameters: {
             query?: never;
@@ -345,7 +365,7 @@ export interface paths {
         };
         /**
          * A run as a Lake project
-         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/comparator` runs comparator on it.
+         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/accept` runs comparator on it.
          */
         get: operations["exportRun"];
         put?: never;
@@ -465,6 +485,93 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AcceptPair: {
+            accepted: boolean;
+            /** @description Its comparator configuration in the export. */
+            config: string;
+            /** @description Why it isn't accepted, if it isn't. */
+            error?: components["schemas"]["PairError"];
+            /**
+             * Format: int32
+             * @description Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it
+             *     ran past `timeout`, or didn't run.
+             */
+            exit_code?: number;
+            /** @description The head. */
+            head: string;
+            /** @description What the configuration leaves out of what it would name, and why. */
+            left_out?: components["schemas"]["LeftOut"][];
+            /** @description The end of what it printed. */
+            output: string;
+            /** @description The spec snapshot. */
+            spec: string;
+            /**
+             * Format: int64
+             * @description How many of the spec's theorems the configuration names.
+             */
+            theorems: number;
+        };
+        /**
+         * @description `POST /snapshots/accept`: judges a run in one operation. It audits the run
+         *     against its spec, as `GET /snapshots/audit` does, and runs
+         *     `lake comparator`, which shares no code with the audit, on exactly the
+         *     pairs the audit compared, each spec snapshot against each head it
+         *     reaches, in the Lake project `GET /snapshots/export` gives. The result is
+         *     stored: `GET /snapshots/accept/{id}` reads it again.
+         */
+        AcceptRequest: {
+            /** @description The spec's snapshot ids, as for the audit. */
+            against: string[];
+            /**
+             * @description The definitions the heads may change besides the spec's holes, as for
+             *     the audit.
+             */
+            allow?: string[];
+            /**
+             * @description Also run the external kernels Lean bundles: `leanchecker-paranoid`,
+             *     `lean4lean`, `nanoda`, `con-leche` and `con-ron`.
+             */
+            paranoid?: boolean;
+            /**
+             * Format: int64
+             * @description The time limit in seconds for each spec snapshot and head, in which
+             *     comparator builds and exports both and checks the head.
+             */
+            timeout?: number;
+        };
+        /** @description A run's acceptance, as `POST /snapshots/accept` judged it and stored it. */
+        AcceptResponse: {
+            /**
+             * @description The audit is `clean`, comparator accepted every pair, and there is at
+             *     least one.
+             */
+            accepted: boolean;
+            /** @description What it judged: the request's spec snapshots, `allow` and `paranoid`. */
+            against: string[];
+            allow?: string[];
+            /** @description The audit, as `GET /snapshots/audit?against=…` answers it. */
+            audit: components["schemas"]["AuditSnapshotsResponse"];
+            /** @description The audit's verdict. */
+            clean: boolean;
+            /**
+             * Format: int64
+             * @description When it was judged, in seconds since the Unix epoch.
+             */
+            created: number;
+            /** @description The heads the audit and comparator judged. */
+            heads: string[];
+            /**
+             * @description This result's id, `<version>~<32 hex>`, for
+             *     `GET /snapshots/accept/{id}`.
+             */
+            id: string;
+            /**
+             * @description Each spec snapshot with each head it reaches, as comparator judged
+             *     them, in the order of the audit's `comparisons`.
+             */
+            pairs: components["schemas"]["AcceptPair"][];
+            paranoid: boolean;
+        };
         /**
          * @description What a replacement may change besides adding declarations: the values of
          *     the named definitions.
@@ -847,62 +954,6 @@ export interface components {
             detail?: components["schemas"]["Detail"][];
             /** Format: int64 */
             timeout?: number;
-        };
-        ComparatorPair: {
-            accepted: boolean;
-            /** @description Its comparator configuration in the export. */
-            config: string;
-            /**
-             * Format: int32
-             * @description Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it
-             *     ran past `timeout`.
-             */
-            exit_code?: number;
-            /** @description The head. */
-            head: string;
-            /** @description The end of what it printed. */
-            output: string;
-            /**
-             * @description Targets, holes and assumptions the configuration leaves out because
-             *     they are private, which comparator can't name across two modules.
-             */
-            skipped?: string[];
-            /** @description The spec snapshot. */
-            spec: string;
-        };
-        /**
-         * @description `POST /snapshots/comparator`: judges a run with `lake comparator`,
-         *     which shares no code with the audit, on the Lake project
-         *     `GET /snapshots/export` gives: each spec snapshot against each head it
-         *     reaches.
-         */
-        ComparatorRequest: {
-            /** @description The spec's snapshot ids, as for the audit. */
-            against: string[];
-            /**
-             * @description The definitions the heads may change besides the spec's holes, as for
-             *     the audit.
-             */
-            allow?: string[];
-            /**
-             * @description Also run the external kernels Lean bundles: `leanchecker-paranoid`,
-             *     `lean4lean`, `nanoda`, `con-leche` and `con-ron`.
-             */
-            paranoid?: boolean;
-            /**
-             * Format: int64
-             * @description The time limit in seconds for each spec snapshot and head, in which
-             *     comparator builds and exports both and checks the head.
-             */
-            timeout?: number;
-        };
-        ComparatorResponse: {
-            /** @description There is no fork, and comparator accepted every pair. */
-            accepted: boolean;
-            /** @description As in the audit. */
-            forks?: components["schemas"]["AuditFork"][];
-            /** @description Each spec snapshot with each head it reaches. */
-            pairs: components["schemas"]["ComparatorPair"][];
         };
         /**
          * @description `POST /snapshots`: checks code like `/check` and, if Lean accepts it,
@@ -1378,19 +1429,29 @@ export interface components {
          * @description The endpoint an async request ran.
          * @enum {string}
          */
-        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots" | "comparator";
+        JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots" | "accept_run";
         /**
          * @description What `GET /jobs/{id}` answers once the job is done: what its request
          *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
          *     `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
          *     `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
-         *     `VerifySnapshotResponse` and `rebuild_snapshots` a
-         *     `RebuildSnapshotsResponse`. An error is the request's own, with its
-         *     status.
+         *     `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`
+         *     and `accept_run` an `AcceptResponse`. An error is the request's own, with
+         *     its status.
          */
-        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"];
+        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"];
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
+        /**
+         * @description A target, hole or assumption that a pair's comparator configuration
+         *     leaves out, and why.
+         */
+        LeftOut: {
+            name: string;
+            reason: components["schemas"]["LeftOutReason"];
+        };
+        /** @enum {string} */
+        LeftOutReason: "private" | "not_a_definition_in_spec" | "not_a_definition_in_head";
         /**
          * @description A position in a document's code, as for [`Pos`]. Without `column`, it is
          *     the line's first tactic: its first character that isn't blank, after a
@@ -1451,6 +1512,17 @@ export interface components {
             timeout?: number;
             version?: string;
         };
+        /**
+         * @description Why comparator didn't accept a pair: its verdict, or what kept it from
+         *     giving one.
+         */
+        PairError: {
+            kind: components["schemas"]["PairErrorKind"];
+            /** @description What comparator said, e.g. its last error. */
+            message: string;
+        };
+        /** @enum {string} */
+        PairErrorKind: "refused" | "build_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge";
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
          *     in Unicode code points, not UTF-16 units.
@@ -2085,6 +2157,9 @@ export interface components {
     headers: never;
     pathItems: never;
 }
+export type AcceptPair = components['schemas']['AcceptPair'];
+export type AcceptRequest = components['schemas']['AcceptRequest'];
+export type AcceptResponse = components['schemas']['AcceptResponse'];
 export type Allow = components['schemas']['Allow'];
 export type ApplyTacticRequest = components['schemas']['ApplyTacticRequest'];
 export type ApplyTacticResponse = components['schemas']['ApplyTacticResponse'];
@@ -2105,9 +2180,6 @@ export type CheckBatchResponse = components['schemas']['CheckBatchResponse'];
 export type CheckRequest = components['schemas']['CheckRequest'];
 export type CheckResult = components['schemas']['CheckResult'];
 export type CheckSessionRequest = components['schemas']['CheckSessionRequest'];
-export type ComparatorPair = components['schemas']['ComparatorPair'];
-export type ComparatorRequest = components['schemas']['ComparatorRequest'];
-export type ComparatorResponse = components['schemas']['ComparatorResponse'];
 export type CreateSnapshotRequest = components['schemas']['CreateSnapshotRequest'];
 export type CreateSnapshotResponse = components['schemas']['CreateSnapshotResponse'];
 export type Declaration = components['schemas']['Declaration'];
@@ -2137,11 +2209,15 @@ export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
 export type JobStatus = components['schemas']['JobStatus'];
+export type LeftOut = components['schemas']['LeftOut'];
+export type LeftOutReason = components['schemas']['LeftOutReason'];
 export type LinePos = components['schemas']['LinePos'];
 export type ListDependentsResponse = components['schemas']['ListDependentsResponse'];
 export type ListSnapshotsResponse = components['schemas']['ListSnapshotsResponse'];
 export type Message = components['schemas']['Message'];
 export type OpenDocumentRequest = components['schemas']['OpenDocumentRequest'];
+export type PairError = components['schemas']['PairError'];
+export type PairErrorKind = components['schemas']['PairErrorKind'];
 export type Pos = components['schemas']['Pos'];
 export type ProbeAt = components['schemas']['ProbeAt'];
 export type ProbeResult = components['schemas']['ProbeResult'];
@@ -3695,33 +3771,45 @@ export interface operations {
             };
         };
     };
-    auditSnapshots: {
+    acceptRun: {
         parameters: {
-            query?: {
-                /** @description `key:value`, split on the first `:`; repeatable */
-                label?: string[];
-                /** @description A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label` */
-                against?: string[];
-                /** @description With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change */
-                allow?: string[];
-                /** @description The version whose snapshots to audit; when absent, the server's default, or else the one version the live workers serve. With `against`, the ids' version, which it must be if given. */
-                version?: string;
-                /** @description With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value */
-                review?: boolean;
+            query?: never;
+            header?: {
+                /**
+                 * @description `respond-async` for a job at once (202), to wait for at
+                 *     `/jobs/{id}`, rather than the answer.
+                 */
+                Prefer?: string;
             };
-            header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptRequest"];
+            };
+        };
         responses: {
-            /** @description The audit */
+            /** @description The audit and comparator's verdict on each pair */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AuditSnapshotsResponse"];
+                    "application/json": components["schemas"]["AcceptResponse"];
+                };
+            };
+            /** @description Queued: wait for its answer at `/jobs/{id}`. */
+            202: {
+                headers: {
+                    /** @description `/jobs/{id}`, relative to the server's root */
+                    Location?: string;
+                    /** @description `respond-async` */
+                    "Preference-Applied"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */
@@ -3786,45 +3874,116 @@ export interface operations {
             };
         };
     };
-    judgeRun: {
+    getAcceptance: {
         parameters: {
             query?: never;
-            header?: {
-                /**
-                 * @description `respond-async` for a job at once (202), to wait for at
-                 *     `/jobs/{id}`, rather than the answer.
-                 */
-                Prefer?: string;
+            header?: never;
+            path: {
+                /** @description The acceptance's id, `<version>~<32 hex>` */
+                id: string;
             };
-            path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ComparatorRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description Comparator's verdict on each pair */
+            /** @description The acceptance */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ComparatorResponse"];
+                    "application/json": components["schemas"]["AcceptResponse"];
                 };
             };
-            /** @description Queued: wait for its answer at `/jobs/{id}`. */
-            202: {
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
                 headers: {
-                    /** @description `/jobs/{id}`, relative to the server's root */
-                    Location?: string;
-                    /** @description `respond-async` */
-                    "Preference-Applied"?: string;
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Job"];
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    auditSnapshots: {
+        parameters: {
+            query?: {
+                /** @description `key:value`, split on the first `:`; repeatable */
+                label?: string[];
+                /** @description A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version, and not with `label` */
+                against?: string[];
+                /** @description With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change */
+                allow?: string[];
+                /** @description The version whose snapshots to audit; when absent, the server's default, or else the one version the live workers serve. With `against`, the ids' version, which it must be if given. */
+                version?: string;
+                /** @description With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value */
+                review?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The audit */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditSnapshotsResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

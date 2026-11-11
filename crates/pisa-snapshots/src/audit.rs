@@ -33,6 +33,25 @@ impl Permitted {
     }
 }
 
+/// An audit against a spec, with the pairs it compared: what comparator
+/// judges of the same run.
+pub struct AuditedRun {
+    pub audit: AuditSnapshotsResponse,
+    /// One per comparison, in the same order.
+    pub pairs: Vec<RunPair>,
+}
+
+/// A spec snapshot and a head it reaches, as entries and their modules.
+#[derive(Debug, Clone)]
+pub struct RunPair {
+    pub spec: String,
+    pub head: String,
+    pub spec_module: String,
+    pub head_module: String,
+    /// The spec's holes.
+    pub holes: Vec<String>,
+}
+
 impl Reader {
     /// What the entries with every label in `labels` rest on; see
     /// [`AuditSnapshotsResponse`]. It reads records only.
@@ -75,6 +94,15 @@ impl Reader {
         against: &[String],
         allow: &[String],
     ) -> Result<AuditSnapshotsResponse, Error> {
+        Ok(self.audit_run(against, allow).await?.audit)
+    }
+
+    /// [`audit_against`](Self::audit_against), with the pairs it compared.
+    pub async fn audit_run(
+        &self,
+        against: &[String],
+        allow: &[String],
+    ) -> Result<AuditedRun, Error> {
         let mut wanted: Vec<String> = Vec::new();
         for id in against {
             let entry = self.parse(id)?;
@@ -193,6 +221,7 @@ impl Reader {
         }
         let module_of: HashMap<&String, &String> = heads.iter().map(|(e, m)| (e, m)).collect();
         let mut comparisons = Vec::new();
+        let mut pairs = Vec::new();
         // Snapshots whose records the kernel hasn't re-checked, in order.
         let mut unverified: Vec<String> = Vec::new();
         // The links' allows are what their creates asked for, by whoever
@@ -227,6 +256,13 @@ impl Reader {
                     changes,
                     replacement,
                 });
+                pairs.push(RunPair {
+                    spec: spec.clone(),
+                    head: head.clone(),
+                    spec_module: spec_meta.module.clone(),
+                    head_module: head_module.clone(),
+                    holes: spec_meta.holes.clone(),
+                });
             }
         }
         let (targets, accepted) =
@@ -255,7 +291,7 @@ impl Reader {
         audit.targets = targets;
         audit.links = links;
         audit.comparisons = comparisons;
-        Ok(audit)
+        Ok(AuditedRun { audit, pairs })
     }
 
     /// Compares head module `head` with spec module `spec` from their

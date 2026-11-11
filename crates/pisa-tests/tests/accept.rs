@@ -1,14 +1,15 @@
 //! A run as a Lake project for `lake comparator`: the modules its spec
 //! snapshots and heads need, and a comparator configuration for each spec
-//! snapshot and head it reaches.
+//! snapshot and head it reaches; and its acceptance, which audits it and
+//! runs comparator on the pairs the audit compared, and is stored.
 
 mod common;
 
 use std::time::Duration;
 
 use common::Cluster;
-use pisa_protocol::api::ComparatorResponse;
-use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotComparatorJob, SnapshotExportJob};
+use pisa_protocol::api::{AcceptResponse, LeftOut, LeftOutReason, PairErrorKind};
+use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotAcceptJob, SnapshotExportJob};
 use pisa_worker::queue::{NewJob, Poll};
 use serde_json::{Value, json};
 
@@ -136,30 +137,40 @@ async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
     // No project here: a lakefile that requires nothing, and a manifest.
     assert!(text(&run, "lakefile.toml").contains("autoImplicit = false"));
     assert!(text(&run, "lake-manifest.json").contains("\"pisa_run\""));
-    assert!(text(&run, "README.md").contains(&format!("| `comparator/1.json` | `{}` |", id(&s))));
+    let readme = text(&run, "README.md");
+    let row = format!("| `comparator/1.json` | `{}` | `{}` | 1 |", id(&s), id(&p));
+    assert!(readme.contains(&row), "{readme}");
+    // Each file says which snapshots are on its module.
+    assert!(
+        readme.contains(&format!("| `{head_file}` | `{}` |", id(&p))),
+        "{readme}"
+    );
+    // No project here: no toolchain, no Mathlib.
+    assert!(!readme.contains("lake exe cache get"), "{readme}");
     assert!(run.forks.is_empty());
 }
 
-async fn comparator(
+async fn accept(
     c: &Cluster,
     against: &[&str],
+    allow: &[&str],
     paranoid: bool,
     timeout_secs: u64,
-) -> ComparatorResponse {
-    let job = Job::SnapshotComparator(SnapshotComparatorJob {
+) -> AcceptResponse {
+    let job = Job::SnapshotAccept(SnapshotAcceptJob {
         against: against.iter().map(|s| s.to_string()).collect(),
-        allow: Vec::new(),
+        allow: allow.iter().map(|s| s.to_string()).collect(),
         paranoid,
         timeout_secs,
     });
     match run(c, job).await {
-        JobResult::SnapshotComparator(Ok(r)) => r,
+        JobResult::SnapshotAccepted(Ok(r)) => *r,
         other => panic!("{other:?}"),
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn comparator_judges_each_spec_snapshot_against_its_head() {
+async fn accept_judges_each_spec_snapshot_against_its_head() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let s = create(
         &c,
@@ -167,14 +178,18 @@ async fn comparator_judges_each_spec_snapshot_against_its_head() {
     )
     .await;
     // Nothing replaces it yet: it is its own head, and its sorry is refused.
-    let r = comparator(&c, &[&id(&s)], true, 60).await;
-    assert!(!r.accepted, "{r:?}");
+    let r = accept(&c, &[&id(&s)], &[], true, 60).await;
+    assert!(!r.accepted && !r.clean, "{r:?}");
+    assert_eq!(r.heads, [id(&s)]);
     let pair = &r.pairs[0];
     assert_eq!(
         (&pair.spec, &pair.head, pair.exit_code),
         (&id(&s), &id(&s), Some(1))
     );
     assert!(pair.output.contains("sorryAx"), "{}", pair.output);
+    let error = pair.error.as_ref().unwrap();
+    assert_eq!(error.kind, PairErrorKind::Refused);
+    assert_eq!(error.message, "Illegal axiom detected: 'sorryAx'");
     assert!(
         pair.output
             .contains("comparator --config comparator/1.json --paranoid"),
@@ -187,11 +202,21 @@ async fn comparator_judges_each_spec_snapshot_against_its_head() {
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
     .await;
-    let r = comparator(&c, &[&id(&s)], false, 60).await;
-    assert!(r.accepted, "{r:?}");
+    let r = accept(&c, &[&id(&s)], &[], false, 60).await;
+    assert!(r.accepted && r.clean, "{r:?}");
+    assert_eq!((&r.heads, r.audit.clean), (&vec![id(&p)], Some(true)));
     let pair = &r.pairs[0];
     assert_eq!((&pair.head, pair.exit_code), (&id(&p), Some(0)));
     assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
+    assert!(pair.output.contains("Built PisaSnap.s"), "{}", pair.output);
+    // Judged again, the run isn't built again.
+    let again = accept(&c, &[&id(&s)], &[], false, 60).await;
+    let output = &again.pairs[0].output;
+    assert!(again.accepted, "{again:?}");
+    assert!(
+        output.contains("Replayed PisaSnap.s") && !output.contains("Built"),
+        "{output}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -210,20 +235,24 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
         )
         .await;
     }
-    let r = comparator(&c, &[&id(&s)], false, 60).await;
+    let r = accept(&c, &[&id(&s)], &[], false, 60).await;
     assert_eq!(r.pairs.len(), 2, "{r:?}");
     assert!(r.pairs.iter().all(|p| p.accepted), "{r:?}");
-    assert_eq!(r.forks[0].snapshot_id, id(&s));
-    assert!(!r.accepted, "a fork isn't accepted");
+    assert_eq!(r.audit.forks[0].snapshot_id, id(&s));
+    assert!(!r.accepted && !r.clean, "a fork isn't accepted");
 
     let slow = create(
         &c,
         json!({"code": "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl"}),
     )
     .await;
-    let r = comparator(&c, &[&id(&slow)], false, 1).await;
+    let r = accept(&c, &[&id(&slow)], &[], false, 1).await;
     assert!(!r.accepted, "{r:?}");
     assert_eq!(r.pairs[0].exit_code, None);
+    assert_eq!(
+        r.pairs[0].error.as_ref().unwrap().kind,
+        PairErrorKind::Timeout
+    );
     assert!(
         r.pairs[0].output.contains("more than 1s"),
         "{}",
@@ -287,7 +316,7 @@ async fn the_api_exports_a_run_and_judges_it() {
     // As a job to read back later.
     let r = c
         .client
-        .post(c.url("/snapshots/comparator"))
+        .post(c.url("/snapshots/accept"))
         .header("prefer", "respond-async")
         .json(&json!({"against": [id(&s)], "paranoid": false}))
         .send()
@@ -295,7 +324,7 @@ async fn the_api_exports_a_run_and_judges_it() {
         .unwrap();
     assert_eq!(r.status(), 202);
     let job: Value = r.json().await.unwrap();
-    assert_eq!(job["kind"], "comparator");
+    assert_eq!(job["kind"], "accept_run");
     let r = c
         .client
         .get(c.url(&format!("/jobs/{}?wait=30", job["id"].as_str().unwrap())))
@@ -306,6 +335,18 @@ async fn the_api_exports_a_run_and_judges_it() {
     let verdict: Value = r.json().await.unwrap();
     assert_eq!(verdict["accepted"], true, "{verdict}");
     assert_eq!(verdict["pairs"][0]["head"], json!(id(&p)), "{verdict}");
+    // It is kept.
+    let id = verdict["id"].as_str().unwrap();
+    assert!(id.starts_with(&format!("{}~", c.version("v"))), "{id}");
+    let r = c
+        .client
+        .get(c.url(&format!("/snapshots/accept/{id}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let stored: Value = r.json().await.unwrap();
+    assert_eq!(stored, verdict);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -335,11 +376,109 @@ async fn a_run_is_named_by_spec_snapshots_of_one_version() {
         json!({"against": []}),
         json!({"against": [format!("{v}~{hex}")], "allow": [""]}),
     ] {
-        let (status, e) = c.post("/snapshots/comparator", body.clone()).await;
+        let (status, e) = c.post("/snapshots/accept", body.clone()).await;
         assert_eq!(
             (status, &e["error"]["kind"]),
             (400, &json!("bad_request")),
             "{body}: {e}"
         );
     }
+    // A stored acceptance is named like a snapshot, and comparator alone
+    // has no path any more.
+    for (path, status) in [
+        ("/snapshots/accept/nope".to_string(), 400),
+        (format!("/snapshots/accept/{v}~{hex}"), 404),
+    ] {
+        let r = c.client.get(c.url(&path)).send().await.unwrap();
+        assert_eq!(r.status(), status, "{path}");
+    }
+    let old = c
+        .client
+        .post(c.url("/snapshots/comparator"))
+        .json(&json!({"against": [format!("{v}~{hex}")]}))
+        .send()
+        .await
+        .unwrap();
+    // `/snapshots/{id}` takes no POST.
+    assert_eq!(old.status(), 405);
+}
+
+/// A pair not accepted says why: what comparator refused, a module that
+/// didn't build, comparator that couldn't run, or a spec with nothing to
+/// judge, for which it doesn't run.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pair_not_accepted_says_why() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let kind = |r: &AcceptResponse| r.pairs[0].error.as_ref().map(|e| e.kind);
+    let spec = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    for (marker, expected) in [
+        ("BUILD_FAIL", PairErrorKind::BuildFailed),
+        ("CANNOT_RUN", PairErrorKind::CannotRun),
+    ] {
+        let code = format!("import Foo\n\n-- {marker}\ntheorem t : 2 = 2 := rfl");
+        let head = create(
+            &c,
+            json!({"code": code, "replaces": {"snapshot_id": id(&spec)}}),
+        )
+        .await;
+        let r = accept(&c, &[&id(&spec)], &[], false, 60).await;
+        // The audit is clean: only comparator didn't accept.
+        assert!(r.clean && !r.accepted, "{r:?}");
+        assert_eq!(kind(&r), Some(expected), "{r:?}");
+        let deleted = c
+            .client
+            .delete(c.url(&format!("/snapshots/{}", id(&head))))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), 200);
+    }
+
+    // A spec of definitions only names no theorem.
+    let defs = create(&c, json!({"code": "import Foo\n\ndef d : Nat := 1"})).await;
+    let r = accept(&c, &[&id(&defs)], &[], false, 60).await;
+    assert!(!r.accepted, "{r:?}");
+    assert_eq!(kind(&r), Some(PairErrorKind::NothingToJudge));
+    assert_eq!((r.pairs[0].theorems, r.pairs[0].exit_code), (0, None));
+}
+
+/// A hole that isn't a plain definition, and an `allow` name the head
+/// doesn't have, are left out of what comparator compares, and listed: the
+/// pair is judged on the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_comparator_cant_take_as_a_hole_is_left_out() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let base = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let spec = on(
+        &base,
+        "structure S where\n  x : Nat\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry",
+    );
+    let s = create(&c, json!({"code": spec, "holes": ["cost", "S"]})).await;
+    // The head no longer builds on `g`'s snapshot.
+    let filled = "import Foo\n\nstructure S where\n  x : Nat\ndef cost : Nat := 3\n\
+                  theorem t : cost = cost := rfl";
+    create(
+        &c,
+        json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let r = accept(&c, &[&id(&s)], &["g"], false, 60).await;
+    let pair = &r.pairs[0];
+    assert!(pair.accepted, "{r:?}");
+    let left_out = |name: &str, reason| LeftOut {
+        name: name.into(),
+        reason,
+    };
+    assert_eq!(
+        pair.left_out,
+        [
+            left_out("S", LeftOutReason::NotADefinitionInSpec),
+            left_out("g", LeftOutReason::NotADefinitionInHead),
+        ]
+    );
+    assert_eq!(pair.theorems, 1);
 }
