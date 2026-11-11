@@ -423,12 +423,16 @@ impl Reader {
         let entry_meta = self.catalog.entry(&entry).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
         let exports = self.exports(&entry_meta.module).await?;
-        let snapshot = self.snapshot(entry, entry_meta, &meta);
+        let source = entry_meta.source.clone();
+        let mut snapshot = [self.snapshot(entry, entry_meta, &meta)];
+        self.name_runs(&mut snapshot).await?;
+        let [snapshot] = snapshot;
         Ok(SnapshotDetail {
             snapshot,
             code: meta.code,
             check: meta.result,
             exports,
+            source,
         })
     }
 
@@ -520,13 +524,15 @@ impl Reader {
         modules.sort();
         modules.dedup();
         let summaries = self.catalog.summaries(&modules).await?;
-        Ok(found
+        let mut snapshots: Vec<Snapshot> = found
             .into_iter()
             .filter_map(|(entry, entry_meta)| {
                 let summary = summaries.get(&entry_meta.module)?;
                 Some(self.snapshot_of(entry, entry_meta, summary))
             })
-            .collect())
+            .collect();
+        self.name_runs(&mut snapshots).await?;
+        Ok(snapshots)
     }
 
     /// Edits an entry's labels with a merge patch; see
@@ -539,7 +545,10 @@ impl Reader {
         let entry = self.parse(entry)?;
         let entry_meta = self.catalog.set_labels(&entry, labels).await?;
         let meta = self.catalog.module(&entry_meta.module).await?;
-        Ok(self.snapshot(entry, entry_meta, &meta))
+        let mut snapshot = [self.snapshot(entry, entry_meta, &meta)];
+        self.name_runs(&mut snapshot).await?;
+        let [snapshot] = snapshot;
+        Ok(snapshot)
     }
 }
 

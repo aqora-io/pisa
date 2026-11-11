@@ -560,3 +560,17 @@ def test_status_through_links_and_settle(url):
     assert client.wait_job(job)["ok"]
     assert client.audit_snapshots(against=specs)["clean"]
     assert client.verify_snapshot(spec_t["id"], again=True)["checked"]
+
+
+def test_run_names(url):
+    client = Client(url, timeout=30)
+    spec = client.create_snapshot("import Foo\ntheorem py_lemma : 1 = 1 := sorry", name="py.lemma")["snapshot"]
+    assert spec["run"] == "py.lemma", spec
+    code = "import PisaRun.py.lemma\n\nneeds py_lemma\ntheorem py_t : 1 = 1 := py_lemma"
+    checked = client.check(code)
+    assert checked["ok"] and checked["runs"] == [
+        {"name": "py.lemma", "module": spec["module"], "snapshot_id": spec["id"]}], checked
+    made = client.create_snapshot(code)
+    assert made["runs"] == checked["runs"], made
+    detail = client.get_snapshot(made["snapshot"]["id"])
+    assert detail["source"] == code and spec["module"] in detail["code"], detail

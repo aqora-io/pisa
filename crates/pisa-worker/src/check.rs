@@ -26,6 +26,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         error: None,
         response: None,
         verification: None,
+        runs: job.runs.clone(),
     };
 
     // Before waiting for a slot: refused code needs none.
@@ -263,6 +264,7 @@ mod tests {
             timeout_secs: 1,
             detail: detail.to_vec(),
             at: vec![api::Pos { line: 1, column: 0 }; at],
+            runs: Vec::new(),
         };
         assert_eq!(infotree(&job(&[], 0)), None);
         assert_eq!(infotree(&job(&[Detail::Tactics], 0)), Some("original"));

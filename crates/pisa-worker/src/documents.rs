@@ -524,6 +524,7 @@ impl Documents {
             revision: open.revision,
             messages: open.messages.clone(),
             sorries: open.sorries.iter().map(|(s, _)| s.clone()).collect(),
+            runs: Vec::new(),
         }
     }
 
@@ -792,8 +793,14 @@ pub async fn run(documents: Option<&Documents>, job: Job) -> JobResult {
         };
     };
     match job {
-        Job::DocumentOpen(j) => JobResult::Document(d.open(j).await),
-        Job::DocumentEdit(j) => JobResult::Document(d.edit(j).await),
+        Job::DocumentOpen(j) => {
+            let runs = j.runs.clone();
+            JobResult::Document(d.open(j).await.map(|doc| api::Document { runs, ..doc }))
+        }
+        Job::DocumentEdit(j) => {
+            let runs = j.runs.clone();
+            JobResult::Document(d.edit(j).await.map(|doc| api::Document { runs, ..doc }))
+        }
         Job::DocumentGoals(j) => JobResult::DocumentGoals(d.goals(j).await),
         Job::DocumentProbe(j) => JobResult::DocumentProbes(d.probe(j).await),
         Job::DocumentClose(j) => JobResult::DocumentClosed(d.close(j).await),

@@ -53,7 +53,16 @@ pub async fn start(
     prefer: Prefer,
     Body(req): Body<StartSessionRequest>,
 ) -> Response {
-    let version = app.versions.resolve(req.version.as_deref());
+    let mut version = app.versions.resolve(req.version.as_deref());
+    // The session keeps what its imports by run name resolve to now.
+    let (code, runs) = match app.resolve_runs(req.version.as_deref(), &req.code).await {
+        Ok(None) => (req.code, Vec::new()),
+        Ok(Some(r)) => {
+            version = Some(r.version);
+            (r.code, r.runs)
+        }
+        Err(e) => return ApiError(e).into_response(),
+    };
     if let Err(e) = serving(&app, version.as_deref()).await {
         return e.into_response();
     }
@@ -65,8 +74,9 @@ pub async fn start(
     };
     let job = Job::SessionStart(SessionStartJob {
         document,
-        code: req.code,
+        code,
         timeout_secs: req.timeout,
+        runs,
     });
     let p = Prepared {
         job,
@@ -154,9 +164,15 @@ pub async fn check(
         Ok(session) => session,
         Err(e) => return e.into_response(),
     };
+    // The worker resolves imports by run name as the session did; routing
+    // by what they resolve to now finds the warm workers.
+    let header_key = match app.resolve_runs(Some(&session.version), &req.code).await {
+        Ok(Some(r)) => split_header(&r.code).header_key,
+        _ => split_header(&req.code).header_key,
+    };
     let route = Route {
         version: Some(session.version),
-        header_key: Some(split_header(&req.code).header_key),
+        header_key: Some(header_key),
         ..Route::default()
     };
     let job = Job::SessionCheck(SessionCheckJob {

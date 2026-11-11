@@ -1282,6 +1282,8 @@ async fn a_rebuild_plans_past_a_thousand_items() {
             fork: false,
             amends: None,
             refutes: None,
+            name: None,
+            source: None,
         };
         catalog.commit(&id, &meta, None, entry).await.unwrap();
     }

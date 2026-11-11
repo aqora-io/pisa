@@ -101,6 +101,7 @@ export type {
   ResubmitSnapshotsResponse,
   ReviewDeclaration,
   ReviewOrigin,
+  RunImport,
   SearchHealth,
   SearchRequest,
   SearchResponse,

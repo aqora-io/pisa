@@ -499,6 +499,56 @@ def through_links_and_settle():
     step("replaces: a refused build is kept, so creating its code again builds nothing")
 
 
+def run_names(outside):
+    lemma = "theorem e2e_named_lemma (n : Nat) : n + 0 = n"
+    spec = create_snapshot(f"{lemma} := sorry", verify=True, name="e2e.lemma")
+    assert spec["snapshot"]["run"] == "e2e.lemma", spec
+    main = "theorem e2e_named_main (n : Nat) : n + 0 + 0 = n"
+    target = create_snapshot(f"import PisaRun.e2e.lemma\n\n{main} := sorry", verify=True, name="e2e.main")
+    target_id = target["snapshot"]["id"]
+    proof = f"import PisaRun.e2e.lemma\n\n{main} := (e2e_named_lemma (n + 0)).trans (e2e_named_lemma n)"
+    checked = check(proof)
+    legend = [{"name": "e2e.lemma", "module": spec["snapshot"]["module"], "snapshot_id": spec["snapshot"]["id"]}]
+    # Proved but for the lemma, still `sorry` there.
+    assert "error" not in checked and checked["runs"] == legend, checked
+    head = create_snapshot(proof, replaces={"snapshot_id": target_id}, verify=True)
+    lemma_head = create_snapshot(f"{lemma} := rfl", replaces={"snapshot_id": spec["snapshot"]["id"]}, verify=True)
+    checked = check(proof)
+    assert checked["ok"] and checked["runs"][0]["snapshot_id"] == lemma_head["snapshot"]["id"], checked
+    step("run names: code imports a run by name, which follows the run's head")
+
+    # The same text, after a conflict, replacing the head the answer names.
+    refused = post("/snapshots", {"code": proof, "replaces": {"snapshot_id": target_id}, "timeout": 600})
+    assert refused["check"]["error"]["kind"] == "conflict", refused
+    assert refused["heads"] == [head["snapshot"]["id"]], refused
+    resent = create_snapshot(proof, replaces={"snapshot_id": head["snapshot"]["id"]}, verify=True)
+    assert resent["snapshot"]["run"] == "e2e.main", resent
+    status, detail = call("GET", f"/snapshots/{resent['snapshot']['id']}")
+    assert status == 200 and detail["source"] == proof, detail
+    out = audit_against(target)
+    assert out["clean"] is True and out["heads"] == [resent["snapshot"]["id"]], out
+    step("run names: a conflict is resent unchanged, and the run is clean on the proved lemma")
+
+    query = urllib.parse.urlencode([("against", target_id)])
+    with urllib.request.urlopen(BASE + f"/snapshots/export?{query}", timeout=900) as r:
+        archive = r.read()
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
+        names = tar.getnames()
+        config = json.load(tar.extractfile("pisa-run/comparator/1.json"))
+    for path in ["PisaRun/e2e/main.lean", "PisaSpec/e2e/main.lean", "PisaRun/e2e/lemma.lean",
+                 "PisaSpec/e2e/lemma.lean"]:
+        assert f"pisa-run/{path}" in names, names
+    assert (config["challenge_module"], config["solution_module"]) == ("PisaSpec.e2e.main", "PisaRun.e2e.main"), config
+    verdict = post("/snapshots/accept", {"against": [target_id]})
+    assert verdict["accepted"] and verdict["clean"], verdict
+    if outside:
+        built_outside(archive)
+    step("run names: the export names files by run, builds and is accepted")
+    for x in [resent, head, target, lemma_head, spec]:
+        status, gone = call("DELETE", f"/snapshots/{x['snapshot']['id']}")
+        assert status == 200, gone
+
+
 def built_outside(archive):
     """Unpacks a run's export in a worker container and builds and judges it
     there with the commands its README gives: Lean and Lake only, no pisa."""
@@ -885,6 +935,7 @@ if __name__ == "__main__":
     holes()
     refute_amend_and_resubmit()
     through_links_and_settle()
+    run_names(outside=not args.mathlib and not args.no_failover)
     # The export of a project with packages fetches them to build.
     comparator(outside=not args.mathlib and not args.no_failover)
     review()

@@ -150,6 +150,63 @@ async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
     assert!(run.forks.is_empty());
 }
 
+/// A named run's modules are named by the run: its head `PisaRun.<name>`,
+/// its spec `PisaSpec.<name>`, and they import each other by those names.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_run_exports_its_files_by_name() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let base = create(
+        &c,
+        json!({"code": "import Foo\n\ndef g : Nat := 1", "name": "base"}),
+    )
+    .await;
+    let spec = "import PisaRun.base\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let s = create(&c, json!({"code": spec, "holes": ["cost"], "name": "main"})).await;
+    let filled = "import PisaRun.base\n\ndef cost : Nat := g\ntheorem t : cost = cost := rfl";
+    let replaces = json!({"snapshot_id": id(&s)});
+    let p = create(&c, json!({"code": filled, "replaces": replaces})).await;
+
+    let run = export(&c, &[&id(&s)], &[]).await;
+    let mut paths: Vec<&str> = run
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|p| p.ends_with(".lean"))
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "PisaRun/base.lean",
+            "PisaRun/main.lean",
+            "PisaSpec/main.lean"
+        ]
+    );
+    assert_eq!(text(&run, "PisaSpec/main.lean"), spec);
+    assert_eq!(text(&run, "PisaRun/main.lean"), filled);
+    let config: Value = serde_json::from_str(text(&run, &run.pairs[0].config)).unwrap();
+    assert_eq!(
+        (&config["challenge_module"], &config["solution_module"]),
+        (&json!("PisaSpec.main"), &json!("PisaRun.main"))
+    );
+    let lakefile = text(&run, "lakefile.toml");
+    assert!(
+        lakefile.contains("defaultTargets = [\"PisaRun\", \"PisaSpec\"]"),
+        "{lakefile}"
+    );
+    assert!(!lakefile.contains("PisaSnap"), "{lakefile}");
+    let readme = text(&run, "README.md");
+    let row = format!("| `PisaRun/main.lean` | `{}` |", id(&p));
+    assert!(readme.contains(&row), "{readme}");
+    assert!(
+        readme.contains(&format!("| `PisaRun/base.lean` | `{}` |", id(&base))),
+        "{readme}"
+    );
+    // Acceptance runs comparator on these files.
+    let verdict = accept(&c, &[&id(&s)], &[], true, 60).await;
+    assert!(verdict.pairs[0].accepted, "{verdict:?}");
+}
+
 async fn accept(
     c: &Cluster,
     against: &[&str],

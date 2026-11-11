@@ -87,6 +87,13 @@ class AtPosition(TypedDict):
     tactic: NotRequired[TacticInfo]
     term: NotRequired[TermInfo]
 
+class RunImport(TypedDict):
+    """What `import PisaRun.<name>` resolved to: the module of the run's
+    head, imported in its place."""
+    name: str
+    module: str
+    snapshot_id: str
+
 class CheckResult(TypedDict):
     ok: bool
     time: float
@@ -98,6 +105,7 @@ class CheckResult(TypedDict):
     declarations: list[Declaration]
     tactics: NotRequired[list[TacticInfo]]
     at: NotRequired[list[AtPosition]]
+    runs: NotRequired[list[RunImport]]
 
 class State(TypedDict):
     id: str
@@ -109,6 +117,9 @@ class Session(TypedDict):
     id: str
     states: list[State]
     messages: list[Message]
+    runs: NotRequired[list[RunImport]]
+    """What the code's imports by run name resolved to, which the session's
+    final check keeps."""
 
 class ApplyTacticResponse(TypedDict):
     state: State
@@ -147,6 +158,8 @@ class Snapshot(TypedDict):
     status: ProofStatus
     verified: bool
     created: int
+    run: NotRequired[str]
+    """The name of the run it is in, if the run has one."""
 
 class Amends(TypedDict):
     """The spec a create amends, and why (1 to 4096 characters)."""
@@ -201,6 +214,7 @@ class CreateSnapshotResponse(TypedDict):
     refutation: NotRequired[Refutation]
     # A create into a run: the refutations of the run's targets.
     refutations: NotRequired[list[Refutation]]
+    runs: NotRequired[list[RunImport]]
 
 class Description(TypedDict):
     title: str
@@ -218,6 +232,8 @@ class Export(TypedDict):
 
 class SnapshotDetail(Snapshot):
     code: str
+    source: NotRequired[str]
+    """The code as its create sent it, where it imported runs by name."""
     check: CheckResult
     exports: NotRequired[list[Export]]
 
@@ -402,6 +418,7 @@ class Document(TypedDict):
     revision: int
     messages: list[Message]
     sorries: list[Sorry]
+    runs: NotRequired[list[RunImport]]
 
 class GoalsAt(TypedDict):
     pos: Pos
@@ -624,6 +641,7 @@ class Client:
         amends: Amends | None = None,
         refutes: Refutes | None = None,
         detail: list[Literal["declarations"]] = [],
+        name: str | None = None,
     ) -> CreateSnapshotResponse:
         """Check code like `check` and, unless Lean reports errors, keep it as
         a module that later code can import, with a new `snapshot` carrying
@@ -683,7 +701,14 @@ class Client:
         statement of its theorem `target`, as `theorem r : ¬ type_of% @t`
         states it: `refutation` names the theorem, and an audit against the
         spec isn't clean. Each is always re-checked, and neither goes with
-        `replaces`."""
+        `replaces`.
+
+        `name` names the run the snapshot starts, unique in its version, so
+        that code can `import PisaRun.<name>`, which imports the run's head
+        (the answer's `runs` says what each such import resolved to). Not
+        with `replaces`. A name another run has is a `conflict` in
+        `check["error"]`, unless the create amends that run's spec, which
+        takes the name over."""
     def submit_create_snapshot(
         self,
         code: str,
@@ -697,6 +722,7 @@ class Client:
         amends: Amends | None = None,
         refutes: Refutes | None = None,
         detail: list[Literal["declarations"]] = [],
+        name: str | None = None,
     ) -> Job:
         """Like `create_snapshot`, as a job."""
     def get_snapshot(

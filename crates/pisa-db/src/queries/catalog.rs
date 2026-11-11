@@ -17,11 +17,12 @@ use serde_json::Value;
 use crate::catalog::{
     Amendment, EntryMeta, Refutation, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleRecord, ModuleSummary,
     NewEntry, SnapshotDecls, allow_column, closure_order, entry_from_row, now_micros, splice,
-    status_of, status_text, to_record, unknown_entry, unknown_module,
+    name_taken, status_of, status_text, to_record, unknown_entry, unknown_module,
 };
 use crate::db::{DbError, retry};
 use crate::schema::{
     acceptance_specs, acceptances, amendments, catalogs, refutations, changes, described, entries, leases, links, module_imports, modules,
+    run_names,
 };
 
 const ENTRY: (
@@ -31,6 +32,7 @@ const ENTRY: (
     entries::idempotency_key,
     entries::created_micros,
     entries::holes,
+    entries::source,
 ) = (
     entries::id,
     entries::module,
@@ -38,6 +40,7 @@ const ENTRY: (
     entries::idempotency_key,
     entries::created_micros,
     entries::holes,
+    entries::source,
 );
 
 const LINK: (links::entry, links::replaces, links::allow, links::replacement) = (
@@ -476,6 +479,7 @@ async fn add(
         replaces: entry.replaces.clone(),
         replacement: entry.replacement.clone(),
         holes: entry.holes.clone(),
+        source: entry.source.clone(),
     };
     let holes = (!meta.holes.is_empty())
         .then(|| serde_json::to_string(&meta.holes))
@@ -489,6 +493,7 @@ async fn add(
             entries::idempotency_key.eq(meta.key.as_deref()),
             entries::created_micros.eq(meta.created_micros as i64),
             entries::holes.eq(holes),
+            entries::source.eq(meta.source.as_deref()),
         ))
         .execute(conn)
         .await?;
@@ -538,6 +543,16 @@ async fn add(
             .execute(conn)
             .await?;
     }
+    if let Some(name) = &entry.name {
+        if meta.replaces.is_some() {
+            return Err(Fail::Api(Error::new(
+                ErrorKind::BadRequest,
+                "a run is named by the snapshot that starts it: name nothing with replaces",
+            )));
+        }
+        let amends = entry.amends.as_ref().map(|a| a.amends.as_str());
+        name_run(conn, v, name, &e, amends).await?;
+    }
     if let Some(replaced) = &meta.replaces {
         // The run starts where the replaced entry's starts, or at it.
         let root: Option<String> = links::table
@@ -560,6 +575,90 @@ async fn add(
             .await?;
     }
     Ok((e, meta))
+}
+
+/// The root of the run entry `e` is in: its link's, or `e` itself.
+async fn run_root_of(conn: &mut Conn, v: &str, e: &str) -> Result<String, Fail> {
+    let root: Option<String> = links::table
+        .find((v, e))
+        .select(links::run_root)
+        .first(conn)
+        .await
+        .optional()?;
+    Ok(root.unwrap_or_else(|| e.to_string()))
+}
+
+/// Whether the run that starts at `root` has an entry: the root itself, or
+/// one its links put in the run.
+async fn run_has_entries(conn: &mut Conn, v: &str, root: &str) -> Result<bool, Fail> {
+    let kept: bool = diesel::select(exists(entries::table.find((v, root))))
+        .get_result(conn)
+        .await?;
+    if kept {
+        return Ok(true);
+    }
+    Ok(diesel::select(exists(
+        links::table
+            .filter(links::version.eq(v))
+            .filter(links::run_root.eq(root)),
+    ))
+    .get_result(conn)
+    .await?)
+}
+
+/// Names the run that the new entry `e` starts `name`. A name another run
+/// has is refused while that run has entries, unless `e` amends the entry
+/// `amends`, of that run: the name then moves to `e`'s run.
+async fn name_run(
+    conn: &mut Conn,
+    v: &str,
+    name: &str,
+    e: &str,
+    amends: Option<&str>,
+) -> Result<(), Fail> {
+    let held: Option<String> = run_names::table
+        .find((v, name))
+        .select(run_names::root)
+        .first(conn)
+        .await
+        .optional()?;
+    let Some(root) = held else {
+        diesel::insert_into(run_names::table)
+            .values((
+                run_names::version.eq(v),
+                run_names::name.eq(name),
+                run_names::root.eq(e),
+            ))
+            .execute(conn)
+            .await?;
+        return Ok(());
+    };
+    let amended = match amends {
+        Some(a) => Some(run_root_of(conn, v, a).await?),
+        None => None,
+    };
+    if amended.as_deref() != Some(root.as_str()) && run_has_entries(conn, v, &root).await? {
+        return Err(Fail::Api(name_taken(v, name, &root)));
+    }
+    diesel::update(run_names::table.find((v, name)))
+        .set(run_names::root.eq(e))
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Removes the name of the run that starts at `root` once it has no entry.
+async fn unname_if_empty(conn: &mut Conn, v: &str, root: &str) -> Result<(), Fail> {
+    if !run_has_entries(conn, v, root).await? {
+        diesel::delete(
+            run_names::table
+                .filter(run_names::version.eq(v))
+                .filter(run_names::root.eq(root)),
+        )
+        .execute(conn)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Removes module `m` if no entry references it and no module imports it,
@@ -825,6 +924,7 @@ pub(crate) async fn remove_entry(
             let Some(meta) = entry_in(conn, v, e).await? else {
                 return Err(Fail::Api(unknown_entry(v, e)));
             };
+            let root = run_root_of(conn, v, e).await?;
             let mut repointed = Vec::new();
             // Load-bearing even for a root: under SERIALIZABLE this read makes
             // the delete conflict with a create replacing the entry.
@@ -847,6 +947,7 @@ pub(crate) async fn remove_entry(
             diesel::delete(entries::table.find((v, e)))
                 .execute(conn)
                 .await?;
+            unname_if_empty(conn, v, &root).await?;
             let module = clean(conn, v, &meta.module).await?;
             log(conn, v, Some(e), Some(&meta.module)).await?;
             log_replaced(conn, v, meta.replaces.as_ref()).await?;
@@ -872,6 +973,7 @@ pub(crate) async fn remove_branch(
             let Some(first) = entry_in(conn, v, e).await? else {
                 return Err(Fail::Api(unknown_entry(v, e)));
             };
+            let root = run_root_of(conn, v, e).await?;
             // The branch: `e`, then what replaces each entry found, with the
             // module of each.
             let mut ids = vec![e.to_string()];
@@ -893,6 +995,7 @@ pub(crate) async fn remove_branch(
                 .execute(conn)
                 .await?;
             }
+            unname_if_empty(conn, v, &root).await?;
             let mut modules: Vec<String> = Vec::new();
             for (entry, module) in ids.iter().zip(owners) {
                 log(conn, v, Some(entry), Some(&module)).await?;
@@ -1816,4 +1919,92 @@ pub(crate) async fn put_described(
     })
     .await?;
     Ok(stored)
+}
+
+/// The root of the run each of `names` names, by name.
+pub(crate) async fn run_roots(
+    db: &Handle,
+    v: &str,
+    names: &[String],
+) -> Result<HashMap<String, String>, Error> {
+    let mut c = conn(db).await?;
+    let mut found = HashMap::new();
+    for chunk in names.chunks(REPLACED_CHUNK) {
+        let rows = run_names::table
+            .filter(run_names::version.eq(v))
+            .filter(run_names::name.eq_any(chunk))
+            .select((run_names::name, run_names::root))
+            .load::<(String, String)>(&mut *c)
+            .await
+            .map_err(DbError::from)?;
+        found.extend(rows);
+    }
+    Ok(found)
+}
+
+/// The name of the run each of `entries` is in, for those whose run has one.
+pub(crate) async fn run_names_of(
+    db: &Handle,
+    v: &str,
+    entries: &[String],
+) -> Result<HashMap<String, String>, Error> {
+    let mut c = conn(db).await?;
+    let c = &mut *c;
+    let mut roots: HashMap<String, String> =
+        entries.iter().map(|e| (e.clone(), e.clone())).collect();
+    for chunk in entries.chunks(REPLACED_CHUNK) {
+        let linked = links::table
+            .filter(links::version.eq(v))
+            .filter(links::entry.eq_any(chunk))
+            .select((links::entry, links::run_root))
+            .load::<(String, String)>(c)
+            .await
+            .map_err(DbError::from)?;
+        roots.extend(linked);
+    }
+    let wanted: Vec<String> = roots.values().cloned().collect::<HashSet<_>>().into_iter().collect();
+    let mut names: HashMap<String, String> = HashMap::new();
+    for chunk in wanted.chunks(REPLACED_CHUNK) {
+        let rows = run_names::table
+            .filter(run_names::version.eq(v))
+            .filter(run_names::root.eq_any(chunk))
+            .select((run_names::root, run_names::name))
+            .load::<(String, String)>(c)
+            .await
+            .map_err(DbError::from)?;
+        names.extend(rows);
+    }
+    Ok(roots
+        .into_iter()
+        .filter_map(|(e, root)| Some((e, names.get(&root)?.clone())))
+        .collect())
+}
+
+/// The root of the run named `name`, and whether that run has entries.
+pub(crate) async fn run_named(
+    db: &Handle,
+    v: &str,
+    name: &str,
+) -> Result<Option<(String, bool)>, Error> {
+    let found = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        read_tx!(conn, {
+            let root: Option<String> = run_names::table
+                .find((v, name))
+                .select(run_names::root)
+                .first(conn)
+                .await
+                .optional()?;
+            match root {
+                Some(root) => {
+                    let live = run_has_entries(conn, v, &root).await?;
+                    Ok(Some((root, live)))
+                }
+                None => Ok(None),
+            }
+        })
+    })
+    .await?;
+    Ok(found)
 }

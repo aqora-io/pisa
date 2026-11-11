@@ -273,6 +273,12 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("names the run a create starts", async () => {
+    const { client, sent } = recording(() => json({ check: { ok: true } }));
+    await client.createSnapshot("x", { name: "proj.lemma", holes: ["f"] });
+    expect(sent.map((s) => s.body)).toEqual([{ code: "x", version: "v1", holes: ["f"], name: "proj.lemma" }]);
+  });
+
   it("settles a run and verifies again", async () => {
     const { client, sent } = recording((s) =>
       s.headers["prefer"] ? json({ id: "j", kind: "rebuild_snapshots", status: "queued" }, 202) : json({ ok: true, plan: [] }),

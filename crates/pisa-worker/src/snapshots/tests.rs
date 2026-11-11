@@ -63,6 +63,8 @@ fn no_labels() -> NewEntry {
         fork: false,
         amends: None,
         refutes: None,
+        name: None,
+        source: None,
     }
 }
 

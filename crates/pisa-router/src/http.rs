@@ -1,6 +1,8 @@
 //! Client-facing HTTP API; the types and conventions are in
 //! `pisa_protocol::api`.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,8 +16,8 @@ use pisa_db::catalog::Catalog;
 use pisa_db::queue::LIVE;
 use pisa_protocol::api::{
     self, Accepted, ApiErrors, CheckBatchRequest, CheckBatchResponse, CheckRequest, CheckResult,
-    Detail, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, MAX_BATCH, Pos,
-    PreferAsync, SweepRefused,
+    Detail, Error, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, MAX_BATCH, Pos,
+    PreferAsync, RunImport, SweepRefused,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::snapshot;
@@ -201,6 +203,34 @@ impl App {
         }
     }
 
+    /// `code` with its imports by run name (`import PisaRun.<name>`)
+    /// resolved to the runs' heads, on the version `requested` reads as
+    /// [`read_version`](Self::read_version) has it; `None` for code that
+    /// imports no run by name, which needs no read.
+    pub(crate) async fn resolve_runs(
+        &self,
+        requested: Option<&str>,
+        code: &str,
+    ) -> Result<Option<ResolvedRuns>, Error> {
+        let header = split_header(code).header;
+        let names =
+            snapshot::run_imports(&header).map_err(|e| Error::new(ErrorKind::BadRequest, e))?;
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let version = self.read_version(requested).await.map_err(|e| e.0)?;
+        let resolved = self
+            .snapshots
+            .version(&version)
+            .resolve_runs(code, &[])
+            .await?;
+        Ok(Some(ResolvedRuns {
+            code: resolved.code,
+            runs: resolved.runs,
+            version,
+        }))
+    }
+
     /// The API's health: up, or 503 once draining, with the number of live
     /// workers on the queue, those without limits, and the versions whose
     /// sweeps are refused, each `null` if it can't be read.
@@ -258,6 +288,29 @@ impl App {
     }
 }
 
+/// A request's code with its imports by run name resolved.
+pub(crate) struct ResolvedRuns {
+    /// The code, importing the runs' heads in their place.
+    pub code: String,
+    /// What each name resolved to.
+    pub runs: Vec<RunImport>,
+    /// The version the names were read on.
+    pub version: String,
+}
+
+/// What a header's imports by run name resolve to, with the version read,
+/// if it has any.
+type Resolution = Result<Option<(Vec<RunImport>, String)>, Error>;
+
+/// A check whose code can't be resolved: its result, with the failure
+/// in-band, as other failures of the code's imports are.
+fn unresolved(e: Error) -> CheckResult {
+    CheckResult {
+        error: Some(e),
+        ..Default::default()
+    }
+}
+
 #[utoipa::path(
     post, path = "/check", operation_id = "check", tag = "checks",
     summary = "Check Lean code",
@@ -273,8 +326,16 @@ async fn check(
     Body(req): Body<CheckRequest>,
 ) -> Result<Response, ApiError> {
     check_positions(&req.detail, &req.at)?;
-    let version = app.versions.resolve(req.version.as_deref());
-    let p = prepare_check(req.code, req.timeout, req.detail, req.at, version);
+    let (code, runs, version) = match app.resolve_runs(req.version.as_deref(), &req.code).await {
+        Ok(None) => (
+            req.code,
+            Vec::new(),
+            app.versions.resolve(req.version.as_deref()),
+        ),
+        Ok(Some(r)) => (r.code, r.runs, Some(r.version)),
+        Err(e) => return Ok(Json(unresolved(e)).into_response()),
+    };
+    let p = prepare_check(code, req.timeout, req.detail, req.at, version, runs);
     Ok(app.answer(prefer, JobKind::Check, p).await)
 }
 
@@ -299,12 +360,32 @@ async fn check_batch(
         return Err(ApiError::new(ErrorKind::BadRequest, message));
     }
     let version = app.versions.resolve(req.version.as_deref());
+    // Each header's imports by run name, resolved once for the batch.
+    let mut resolved: HashMap<String, Resolution> = HashMap::new();
+    for item in &req.items {
+        if let Entry::Vacant(at) = resolved.entry(split_header(&item.code).header) {
+            let r = app.resolve_runs(req.version.as_deref(), &item.code).await;
+            at.insert(r.map(|r| r.map(|r| (r.runs, r.version))));
+        }
+    }
     let items = req.items.into_iter().map(|item| {
         let app = &app;
-        let version = version.clone();
+        let header = split_header(&item.code).header;
+        let (code, version, runs) = match &resolved[&header] {
+            Ok(None) => (item.code, version.clone(), Vec::new()),
+            Ok(Some((runs, v))) => (
+                pisa_snapshots::resolve_with(&item.code, runs),
+                Some(v.clone()),
+                runs.clone(),
+            ),
+            Err(e) => {
+                let e = e.clone();
+                return futures::future::Either::Left(async move { unresolved(e) });
+            }
+        };
         let (detail, at) = (req.detail.clone(), req.at.clone());
-        async move {
-            let checked = check_one(app, item.code, req.timeout, detail, at, version).await;
+        futures::future::Either::Right(async move {
+            let checked = check_one(app, code, req.timeout, detail, at, version, runs).await;
             match checked {
                 Ok(r) => r,
                 Err(e) => CheckResult {
@@ -312,7 +393,7 @@ async fn check_batch(
                     ..Default::default()
                 },
             }
-        }
+        })
     });
     let results = futures::stream::iter(items).buffered(BATCH_WINDOW);
     Ok(Json(CheckBatchResponse {
@@ -343,8 +424,9 @@ async fn check_one(
     detail: Vec<Detail>,
     at: Vec<Pos>,
     version: Option<String>,
+    runs: Vec<RunImport>,
 ) -> Result<CheckResult, DispatchError> {
-    let p = prepare_check(code, timeout_secs, detail, at, version);
+    let p = prepare_check(code, timeout_secs, detail, at, version, runs);
     Ok(check_result(app.dispatcher.submit(p).await?))
 }
 
@@ -354,6 +436,7 @@ fn prepare_check(
     detail: Vec<Detail>,
     at: Vec<Pos>,
     version: Option<String>,
+    runs: Vec<RunImport>,
 ) -> Prepared {
     let split = split_header(&code);
     let route = Route {
@@ -367,6 +450,7 @@ fn prepare_check(
         timeout_secs,
         detail,
         at,
+        runs,
     });
     Prepared {
         job,

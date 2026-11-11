@@ -14,8 +14,8 @@ use pisa_protocol::api::{
     Allow, Amendment, AuditAssumption, AuditComparison, AuditFork, AuditLink,
     AuditSnapshotsResponse, AuditTarget, AuditUnproved, Declaration, Error, ErrorKind, Export,
     ListDependentsResponse, ListSnapshotsResponse, RebuildItem, RebuildReplaced,
-    RebuildSnapshotsResponse, Refutation, Replacement, Replaces, Snapshot, SnapshotDetail,
-    SnapshotId, Superseded,
+    RebuildSnapshotsResponse, Refutation, Replacement, Replaces, RunImport, Snapshot,
+    SnapshotDetail, SnapshotId, Superseded,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::labels::{MAX_LABELS, MAX_LIMIT, check_labels, is_cursor, snapshot_id_error};
@@ -28,7 +28,9 @@ use pisa_protocol::wire::SnapshotRebuildJob;
 
 mod audit;
 mod links;
+mod names;
 pub use audit::{AuditedRun, RunPair};
+pub use names::{Resolved, resolve_with};
 pub mod compare;
 pub mod plan;
 mod read;
@@ -180,6 +182,7 @@ impl Reader {
             status: meta.status,
             verified: meta.verified,
             created: entry_meta.created_micros / 1_000_000,
+            run: None,
         }
     }
 }

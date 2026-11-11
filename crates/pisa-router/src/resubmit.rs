@@ -77,6 +77,7 @@ pub(crate) async fn run(
                 amends: None,
                 refutes: None,
                 detail: Vec::new(),
+                name: None,
             };
             create_retrying(app, create).await
         };

@@ -1033,3 +1033,31 @@ async fn client_reads_a_run_through_links_and_settles_it() {
     let again = client.verify_snapshot_again(&spec_t.id).await.unwrap();
     assert!(!again.checked.is_empty(), "{again:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_names_a_run_and_imports_it_by_name() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let opts = CreateSnapshotOptions {
+        name: Some("cl.lemma".into()),
+        ..Default::default()
+    };
+    let spec = "import Foo\ntheorem cl_lemma : 1 = 1 := sorry";
+    let spec = client.create_snapshot_with(spec, &opts).await.unwrap();
+    let spec = spec.snapshot.unwrap();
+    assert_eq!(spec.run.as_deref(), Some("cl.lemma"));
+
+    let code = "import PisaRun.cl.lemma\n\nneeds cl_lemma\ntheorem cl_t : 1 = 1 := cl_lemma";
+    let checked = client.check(code).await.unwrap();
+    assert!(checked.ok, "{checked:?}");
+    assert_eq!(checked.runs[0].module, spec.module);
+    assert_eq!(checked.runs[0].snapshot_id, spec.id);
+    let made = client.create_snapshot(code).await.unwrap();
+    assert_eq!(made.runs, checked.runs);
+    let detail = client
+        .get_snapshot(&made.snapshot.unwrap().id)
+        .await
+        .unwrap();
+    assert_eq!(detail.source.as_deref(), Some(code));
+    assert!(detail.code.contains(&spec.module), "{}", detail.code);
+}

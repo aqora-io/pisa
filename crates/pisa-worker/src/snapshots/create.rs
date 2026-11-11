@@ -2,7 +2,8 @@
 
 use std::collections::HashSet;
 
-use pisa_protocol::api::{self, Declaration, Replaces};
+use pisa_db::catalog::name_taken;
+use pisa_protocol::api::{self, Amends, Declaration, Replaces};
 use pisa_protocol::verify::normalised;
 
 use super::*;
@@ -115,6 +116,7 @@ impl Snapshots {
             amendment: None,
             refutation: None,
             refutations: Vec::new(),
+            runs: Vec::new(),
         }
     }
 
@@ -133,6 +135,7 @@ impl Snapshots {
             amendment: None,
             refutation: None,
             refutations: Vec::new(),
+            runs: Vec::new(),
         }
     }
 
@@ -147,7 +150,14 @@ impl Snapshots {
     pub async fn create(&self, pool: &Arc<Pool>, job: SnapshotCreateJob) -> CreateSnapshotResponse {
         let (amends, refutes) = (job.amends.is_some(), job.refutes.is_some());
         let replaces = job.replaces.is_some();
+        let runs = job.runs.clone();
         let mut done = self.create_checked(pool, job).await;
+        done.runs = runs;
+        if let Some(s) = done.snapshot.as_mut()
+            && let Err(e) = self.reader.name_runs(std::slice::from_mut(s)).await
+        {
+            tracing::warn!(snapshot = %s.id, "reading its run's name failed: {e}");
+        }
         if refutes && let Some(s) = &done.snapshot {
             let entry = self.reader.parse(&s.id).unwrap_or_default();
             match self
@@ -204,6 +214,7 @@ impl Snapshots {
             amendment: None,
             refutation: None,
             refutations: Vec::new(),
+            runs: Vec::new(),
         };
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
@@ -237,7 +248,8 @@ impl Snapshots {
             return response;
         }
         if let Some(key) = &job.key {
-            match self.replay(key, &snapshot::id(&job.code)).await {
+            let id = snapshot::id(&job.code);
+            match self.replay(key, &id, job.source.as_deref()).await {
                 Ok(Some(done)) => return done,
                 Ok(None) => {}
                 Err(e) => {
@@ -245,6 +257,12 @@ impl Snapshots {
                     return response;
                 }
             }
+        }
+        if let Some(name) = &job.name
+            && let Err(e) = self.name_free(name, job.amends.as_ref()).await
+        {
+            response.check.error = Some(e);
+            return response;
         }
         let replacing = match &job.replaces {
             Some(r) => match self.reader.replacing(r).await {
@@ -365,21 +383,44 @@ impl Snapshots {
     }
 
     /// The response to a create whose idempotency key an entry already has:
-    /// that entry, unchanged, if it is on module `id`, else an error. `None` if
-    /// no entry has the key.
+    /// that entry, unchanged, if it is on module `id`, or if it was sent as
+    /// `source` too, its imports by run name resolving to other heads since;
+    /// else an error. `None` if no entry has the key.
     pub(super) async fn replay(
         &self,
         key: &str,
         id: &str,
+        source: Option<&str>,
     ) -> Result<Option<CreateSnapshotResponse>, Error> {
         let Some((entry, entry_meta)) = self.catalog.keyed(key).await? else {
             return Ok(None);
         };
-        if entry_meta.module != id {
+        let sent_again = source.is_some() && entry_meta.source.as_deref() == source;
+        if entry_meta.module != id && !sent_again {
             return Err(key_in_use());
         }
-        let meta = self.catalog.module(id).await?;
+        let meta = self.catalog.module(&entry_meta.module).await?;
         Ok(Some(self.created(meta, (entry, entry_meta))))
+    }
+
+    /// Refuses `name` for the run a create starts while another run that has
+    /// snapshots has it, unless the create amends that run's spec, as `amends`
+    /// says: the name then moves.
+    async fn name_free(&self, name: &str, amends: Option<&Amends>) -> Result<(), Error> {
+        let Some((root, true)) = self.catalog.run_named(name).await? else {
+            return Ok(());
+        };
+        if let Some(a) = amends {
+            let amended = self.reader.parse(&a.snapshot_id)?;
+            let names = self
+                .catalog
+                .run_names_of(std::slice::from_ref(&amended))
+                .await?;
+            if names.get(&amended).map(String::as_str) == Some(name) {
+                return Ok(());
+            }
+        }
+        Err(name_taken(&self.version, name, &root))
     }
 
     /// [`create`](Self::create) after validation. `None` if the module was
@@ -580,6 +621,8 @@ impl Snapshots {
             holes: replacing.map_or_else(|| spec_holes(job, rel), |r| r.holes.clone()),
             amends,
             refutes,
+            name: job.name.clone(),
+            source: job.source.clone(),
         };
         let added = match self.catalog.add_entry(id, entry).await {
             Ok(Some(added)) => added,

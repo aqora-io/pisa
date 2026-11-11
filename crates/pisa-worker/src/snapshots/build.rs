@@ -94,6 +94,7 @@ impl Snapshots {
             error: None,
             response: None,
             verification: None,
+            runs: Vec::new(),
         };
         let fail = |mut outcome: CheckOutcome, error: Error| {
             outcome.error = Some(error);
@@ -412,6 +413,8 @@ impl Snapshots {
             holes: replacing.map_or_else(|| spec_holes(job, rel), |r| r.holes.clone()),
             amends,
             refutes,
+            name: job.name.clone(),
+            source: job.source.clone(),
         };
         match self
             .commit(&own, &contents, &meta, search.as_ref(), entry)

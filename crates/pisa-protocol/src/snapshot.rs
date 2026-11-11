@@ -11,6 +11,199 @@ use crate::header::{import_parts, split_header};
 /// The root of every snapshot module name.
 pub const ROOT: &str = "PisaSnap";
 
+/// The root of the module names that name a run: code may import
+/// `PisaRun.<name>`, which the server resolves to the run's head.
+pub const RUNS: &str = "PisaRun";
+
+/// The root of a named run's spec module in an export, beside [`RUNS`] for
+/// its head.
+pub const SPECS: &str = "PisaSpec";
+
+/// Lean's keywords, which a component of a run name can't be: an import
+/// line couldn't name it.
+pub const KEYWORDS: &[&str] = &[
+    "abbrev",
+    "at",
+    "attribute",
+    "axiom",
+    "by",
+    "calc",
+    "class",
+    "def",
+    "deriving",
+    "do",
+    "else",
+    "end",
+    "example",
+    "export",
+    "extends",
+    "for",
+    "from",
+    "fun",
+    "have",
+    "if",
+    "import",
+    "in",
+    "inductive",
+    "infix",
+    "infixl",
+    "infixr",
+    "instance",
+    "let",
+    "local",
+    "macro",
+    "match",
+    "meta",
+    "module",
+    "mutual",
+    "namespace",
+    "noncomputable",
+    "notation",
+    "opaque",
+    "open",
+    "partial",
+    "postfix",
+    "prefix",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "section",
+    "set_option",
+    "show",
+    "structure",
+    "syntax",
+    "then",
+    "theorem",
+    "universe",
+    "unsafe",
+    "variable",
+    "where",
+    "with",
+    "Prop",
+    "Sort",
+    "Type",
+];
+
+/// The longest run name, in bytes.
+pub const MAX_RUN_NAME: usize = 128;
+
+/// Checks a run name: 1 to [`MAX_RUN_NAME`] bytes of components joined by
+/// `.`, each a letter or `_` then letters, digits and `_`, and none of
+/// Lean's [`KEYWORDS`]. The error says which rule it breaks.
+pub fn check_run_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > MAX_RUN_NAME {
+        return Err(format!(
+            "run name {name:?} must be 1 to {MAX_RUN_NAME} bytes"
+        ));
+    }
+    for part in name.split('.') {
+        let mut chars = part.chars();
+        let first = chars.next();
+        let ok = first.is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !ok {
+            return Err(format!(
+                "run name {name:?} must be dotted parts, each a letter or '_' then letters,                  digits and '_'"
+            ));
+        }
+        if KEYWORDS.contains(&part) {
+            return Err(format!(
+                "run name {name:?} has {part:?}, a Lean keyword, which an import can't name"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The run a module name `PisaRun.<name>` names, `None` for other modules,
+/// and an error for a malformed name under [`RUNS`].
+pub fn parse_run(module: &str) -> Result<Option<String>, String> {
+    let plain: String = module.chars().filter(|c| !matches!(c, '«' | '»')).collect();
+    let Some(name) = plain.strip_prefix(RUNS) else {
+        return Ok(None);
+    };
+    let Some(name) = name.strip_prefix('.') else {
+        return if name.is_empty() {
+            Err(format!("{module} names no run: import {RUNS}.<name>"))
+        } else {
+            Ok(None)
+        };
+    };
+    check_run_name(name).map_err(|e| format!("{module} is not a run's module: {e}"))?;
+    Ok(Some(name.to_string()))
+}
+
+/// The runs a normalised header imports by name, in order, once each.
+pub fn run_imports(header: &str) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for (_, modules) in header.lines().filter_map(import_parts) {
+        for m in modules {
+            if let Some(name) = parse_run(m)?
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    Ok(names)
+}
+
+/// `code` with each module its import lines name that `rename` maps to
+/// another name swapped for it, in place: the rest of the line, its comment
+/// included, and every other line stay as they were.
+fn rename_modules(code: &str, rename: impl Fn(&str) -> Option<String>) -> String {
+    let header_lines = split_header(code).header_lines as usize;
+    let lines = code.split('\n').enumerate().map(|(i, line)| {
+        let (import, comment) = match line.find("--") {
+            Some(at) => line.split_at(at),
+            None => (line, ""),
+        };
+        if i >= header_lines || import_parts(import).is_none() {
+            return line.to_string();
+        }
+        let mut out = String::new();
+        let mut word = String::new();
+        let flush = |word: &mut String, out: &mut String| {
+            if !word.is_empty() {
+                out.push_str(&rename(word).unwrap_or_else(|| word.clone()));
+                word.clear();
+            }
+        };
+        for c in import.chars() {
+            if c.is_whitespace() {
+                flush(&mut word, &mut out);
+                out.push(c);
+            } else {
+                word.push(c);
+            }
+        }
+        flush(&mut word, &mut out);
+        out + comment
+    });
+    lines.collect::<Vec<_>>().join("\n")
+}
+
+/// `code` with each run its import lines name that `map` has (name → the
+/// id of the run's head) imported as that snapshot instead, each on its own
+/// line: lines stay where they were, and columns after it on its line
+/// move.
+pub fn resolve_imports(code: &str, map: &BTreeMap<String, String>) -> String {
+    rename_modules(code, |m| {
+        let name = parse_run(m).ok()??;
+        map.get(&name).map(|id| module(id))
+    })
+}
+
+/// `code` with each snapshot its import lines name that `names` has (id →
+/// module name) imported by that name instead, as an export names its files.
+pub fn rename_imports(code: &str, names: &BTreeMap<String, String>) -> String {
+    rename_modules(code, |m| {
+        let id = parse_module(m).ok()??;
+        names.get(&id).cloned()
+    })
+}
+
 /// The module name of snapshot `id`, e.g. `PisaSnap.s1a2b…`.
 pub fn module(id: &str) -> String {
     format!("{ROOT}.s{id}")
@@ -207,6 +400,74 @@ mod tests {
             Ok(vec![N.to_string(), B.to_string()])
         );
         assert_eq!(rewrite_imports(&code, &BTreeMap::new()), code);
+    }
+
+    #[test]
+    fn run_names_are_dotted_identifiers_that_arent_keywords() {
+        for good in ["lemma1", "projA.lemma_1", "_x", "a.b.c", &"x".repeat(128)] {
+            assert_eq!(check_run_name(good), Ok(()), "{good}");
+        }
+        for bad in [
+            "",
+            "1x",
+            "a..b",
+            "a.",
+            ".a",
+            "a-b",
+            "a b",
+            "é",
+            "end",
+            "x.theorem",
+            &"x".repeat(129),
+        ] {
+            assert!(check_run_name(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            parse_run("PisaRun.projA.lemma"),
+            Ok(Some("projA.lemma".into()))
+        );
+        assert_eq!(parse_run("«PisaRun».«lemma»"), Ok(Some("lemma".into())));
+        assert_eq!(parse_run("Mathlib"), Ok(None));
+        assert_eq!(parse_run("PisaRuns.x"), Ok(None));
+        assert!(parse_run("PisaRun").is_err());
+        assert!(parse_run("PisaRun.end").is_err());
+        let header = format!(
+            "import Mathlib\nimport PisaRun.b PisaSnap.s{A}\npublic import all PisaRun.a PisaRun.b"
+        );
+        assert_eq!(
+            run_imports(&header),
+            Ok(vec!["b".to_string(), "a".to_string()])
+        );
+        assert!(run_imports("import PisaRun.1x").is_err());
+    }
+
+    #[test]
+    fn resolve_imports_swaps_run_names_on_their_own_lines() {
+        let code = format!(
+            "module\npublic import Mathlib\nimport all PisaRun.a.b  PisaSnap.s{A} -- PisaRun.a.b\n\
+             import «PisaRun».c\nimport PisaRun.unknown\n\n-- import PisaRun.a.b\ntheorem t : True := trivial"
+        );
+        let map = BTreeMap::from([
+            ("a.b".to_string(), B.to_string()),
+            ("c".to_string(), A.to_string()),
+        ]);
+        assert_eq!(
+            resolve_imports(&code, &map),
+            format!(
+                "module\npublic import Mathlib\nimport all PisaSnap.s{B}  PisaSnap.s{A} -- PisaRun.a.b\n\
+                 import PisaSnap.s{A}\nimport PisaRun.unknown\n\n-- import PisaRun.a.b\ntheorem t : True := trivial"
+            )
+        );
+        assert_eq!(resolve_imports(&code, &BTreeMap::new()), code);
+        let names = BTreeMap::from([(A.to_string(), "PisaRun.a.b".to_string())]);
+        let renamed = rename_imports(
+            &format!("import PisaSnap.s{A} PisaSnap.s{B}\n\ndef x := 1"),
+            &names,
+        );
+        assert_eq!(
+            renamed,
+            format!("import PisaRun.a.b PisaSnap.s{B}\n\ndef x := 1")
+        );
     }
 
     #[test]

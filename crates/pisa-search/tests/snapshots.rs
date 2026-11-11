@@ -371,6 +371,8 @@ fn labelled(labels: &[(&str, &str)]) -> NewEntry {
         holes: Vec::new(),
         amends: None,
         refutes: None,
+        name: None,
+        source: None,
     }
 }
 

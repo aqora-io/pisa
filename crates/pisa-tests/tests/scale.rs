@@ -79,6 +79,8 @@ async fn a_chain_of_1500_modules_reads_and_plans() {
             fork: false,
             amends: None,
             refutes: None,
+            name: None,
+            source: None,
         };
         catalog.commit(&id, &meta, None, entry).await.unwrap();
         chain.push(id.clone());

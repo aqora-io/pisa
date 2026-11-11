@@ -617,6 +617,8 @@ async fn assumptions_permitted_by_the_spec() {
         holes: Vec::new(),
         amends: None,
         refutes: None,
+        name: None,
+        source: None,
     };
     let (linked, _) = catalog
         .add_entry(module.strip_prefix("PisaSnap.s").unwrap(), entry)

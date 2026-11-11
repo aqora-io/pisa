@@ -54,6 +54,7 @@ async fn open(c: &Cluster, document: &str, code: &str) -> api::Document {
         document: document.into(),
         code: code.into(),
         timeout_secs: 10,
+        runs: Vec::new(),
     });
     match run(c, document, job).await {
         JobResult::Document(Ok(d)) => d,
@@ -375,6 +376,7 @@ async fn an_edit_is_to_a_revision_and_a_closed_document_is_gone() {
             code: "theorem t : 1 = 1 := by\n  rfl\n".into(),
             revision,
             timeout_secs: 10,
+            runs: Vec::new(),
         })
     };
     let JobResult::Document(Ok(d)) = run(&c, &id, edit(1)).await else {

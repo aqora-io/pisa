@@ -172,6 +172,7 @@ fn create_snapshot_options(
     amends: Option<Bound<'_, PyAny>>,
     refutes: Option<Bound<'_, PyAny>>,
     detail: Vec<String>,
+    name: Option<String>,
 ) -> PyResult<pisa_client::CreateSnapshotOptions> {
     let amends = amends
         .as_ref()
@@ -189,6 +190,7 @@ fn create_snapshot_options(
         amends: amends.transpose()?,
         refutes: refutes.transpose()?,
         detail: parse_detail(detail)?,
+        name,
     })
 }
 
@@ -292,7 +294,7 @@ impl Client {
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, amends = None, refutes = None, detail = Vec::new()))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, amends = None, refutes = None, detail = Vec::new(), name = None))]
     #[allow(clippy::too_many_arguments)]
     fn create_snapshot<'py>(
         &self,
@@ -307,16 +309,17 @@ impl Client {
         amends: Option<Bound<'py, PyAny>>,
         refutes: Option<Bound<'py, PyAny>>,
         detail: Vec<String>,
+        name: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = create_snapshot_options(
-            verify, labels, key, replaces, fork, holes, amends, refutes, detail,
+            verify, labels, key, replaces, fork, holes, amends, refutes, detail, name,
         )?;
         call(py, async move {
             self.inner.create_snapshot_with(&code, &opts).await
         })
     }
 
-    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, amends = None, refutes = None, detail = Vec::new()))]
+    #[pyo3(signature = (code, *, verify = None, labels = None, key = None, replaces = None, fork = false, holes = None, amends = None, refutes = None, detail = Vec::new(), name = None))]
     #[allow(clippy::too_many_arguments)]
     fn submit_create_snapshot<'py>(
         &self,
@@ -331,9 +334,10 @@ impl Client {
         amends: Option<Bound<'py, PyAny>>,
         refutes: Option<Bound<'py, PyAny>>,
         detail: Vec<String>,
+        name: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let opts = create_snapshot_options(
-            verify, labels, key, replaces, fork, holes, amends, refutes, detail,
+            verify, labels, key, replaces, fork, holes, amends, refutes, detail, name,
         )?;
         call(py, async move {
             let job = self.inner.submit_create_snapshot_with(&code, &opts).await?;

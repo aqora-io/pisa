@@ -56,6 +56,10 @@ pub struct CheckJob {
     /// Positions in `code`, not in its body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<api::Pos>,
+    /// What the router resolved the code's imports by run name to; the
+    /// code imports those modules already.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<api::RunImport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +70,10 @@ pub struct SessionStartJob {
     pub document: String,
     pub code: String,
     pub timeout_secs: u64,
+    /// What the router resolved the code's imports by run name to; the
+    /// code imports those modules already.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<api::RunImport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,6 +121,17 @@ pub struct SnapshotCreateJob {
     pub refutes: Option<api::Refutes>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<api::Detail>,
+    /// The name for the run it starts; not with `replaces`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The code as the request sent it, when the router resolved imports by
+    /// run name in `code`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// What the router resolved the code's imports by run name to; the
+    /// code imports those modules already.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<api::RunImport>,
 }
 
 /// `POST /snapshots/{id}/verify`.
@@ -225,6 +244,10 @@ pub struct DocumentOpenJob {
     pub document: String,
     pub code: String,
     pub timeout_secs: u64,
+    /// What the router resolved the code's imports by run name to; the
+    /// code imports those modules already.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<api::RunImport>,
 }
 
 /// `PATCH /documents/{id}`.
@@ -235,6 +258,10 @@ pub struct DocumentEditJob {
     /// The revision the edit replaces.
     pub revision: u64,
     pub timeout_secs: u64,
+    /// What the router resolved the code's imports by run name to; the
+    /// code imports those modules already.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<api::RunImport>,
 }
 
 /// `POST /documents/{id}/goals`, its positions checked by the router.
@@ -305,6 +332,9 @@ pub struct CheckOutcome {
     pub response: Option<CommandResponse>,
     #[serde(default)]
     pub verification: Option<Verification>,
+    /// What the code's imports by run name resolved to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<api::RunImport>,
 }
 
 impl From<CheckOutcome> for api::CheckResult {
@@ -331,6 +361,7 @@ impl From<CheckOutcome> for api::CheckResult {
             declarations,
             tactics,
             at,
+            runs: o.runs,
         }
     }
 }
@@ -375,6 +406,9 @@ mod tests {
             amends: None,
             refutes: None,
             detail: Vec::new(),
+            name: None,
+            source: None,
+            runs: Vec::new(),
         };
         let job = serde_json::to_value(Job::SnapshotReplace(create)).unwrap();
         assert_eq!(job["kind"], "snapshot_replace");

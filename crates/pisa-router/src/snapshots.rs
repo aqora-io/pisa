@@ -12,12 +12,12 @@ use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     ACCEPT_BUILD_TIMEOUT, ACCEPT_TIMEOUT, AcceptRequest, AcceptResponse, Accepted, ApiErrors,
-    AuditSnapshotsResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse,
-    Detail, ErrorKind, JobKind, JobStatus, ListAcceptancesResponse, ListDependentsResponse,
-    ListSnapshotsResponse, MAX_REASON, PreferAsync, RebuildSnapshotsRequest,
-    RebuildSnapshotsResponse, ResubmitSnapshotsRequest, ResubmitSnapshotsResponse,
-    SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest,
-    VerifySnapshotResponse,
+    AuditSnapshotsResponse, CheckResult, CreateSnapshotRequest, CreateSnapshotResponse,
+    DeleteSnapshotResponse, Detail, Error, ErrorKind, JobKind, JobStatus, ListAcceptancesResponse,
+    ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, PreferAsync,
+    RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
+    ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
+    UpdateSnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -58,10 +58,54 @@ pub async fn create(
     prefer: Prefer,
     Body(req): Body<CreateSnapshotRequest>,
 ) -> Response {
-    match prepare_create(&app, req) {
-        Ok(p) => app.answer(prefer, JobKind::CreateSnapshot, p).await,
-        Err(e) => e.into_response(),
+    let mut p = match prepare_create(&app, req) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = resolve_create(&app, &mut p).await {
+        // In-band, as a create's other failures of its imports are.
+        let refused = CreateSnapshotResponse {
+            snapshot: None,
+            check: CheckResult {
+                error: Some(e),
+                ..Default::default()
+            },
+            replacement: None,
+            heads: Vec::new(),
+            unverified: None,
+            amendment: None,
+            refutation: None,
+            refutations: Vec::new(),
+            runs: Vec::new(),
+        };
+        return Json(refused).into_response();
     }
+    app.answer(prefer, JobKind::CreateSnapshot, p).await
+}
+
+/// Resolves the imports by run name of the create `p` prepares, on its
+/// version, keeping the code as sent, and routes it by the resolved code.
+async fn resolve_create(app: &App, p: &mut Prepared) -> Result<(), Error> {
+    let (Job::SnapshotCreate(job)
+    | Job::SnapshotReplace(job)
+    | Job::SnapshotAmend(job)
+    | Job::SnapshotRefute(job)) = &mut p.job
+    else {
+        return Ok(());
+    };
+    let Some(resolved) = app
+        .resolve_runs(p.route.version.as_deref(), &job.code)
+        .await?
+    else {
+        return Ok(());
+    };
+    job.source = Some(std::mem::replace(&mut job.code, resolved.code));
+    job.runs = resolved.runs;
+    let split = split_header(&job.code);
+    let next = snapshot::next_header(&split.header, &snapshot::id(&job.code));
+    p.route.header_key = Some(header_key(&next));
+    p.route.version = Some(resolved.version);
+    Ok(())
 }
 
 /// Checks that snapshot `id`, which a create's `field` names, is of the
@@ -167,6 +211,16 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         same_version(&mut version, "refutes", &r.snapshot_id)?;
         req.verify = Some(true);
     }
+    if let Some(name) = &req.name {
+        if req.replaces.is_some() {
+            return Err(ApiError::new(
+                ErrorKind::BadRequest,
+                "a run is named by the snapshot that starts it: a replacement is in the run of \
+                 what it replaces, so it takes no name",
+            ));
+        }
+        snapshot::check_run_name(name).map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    }
     let version = version.or_else(|| app.versions.resolve(None));
     let split = split_header(&req.code);
     let next = snapshot::next_header(&split.header, &snapshot::id(&req.code));
@@ -198,6 +252,9 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
         amends: req.amends,
         refutes: req.refutes,
         detail: req.detail,
+        name: req.name,
+        source: None,
+        runs: Vec::new(),
     };
     let job = if replace {
         Job::SnapshotReplace(create)

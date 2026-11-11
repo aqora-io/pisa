@@ -96,6 +96,7 @@ impl Documents {
             code: j.code.clone(),
             declarations: None,
             created: now,
+            runs: j.runs.clone(),
         };
         let open = doc.as_ref().unwrap();
         let stored = async {
@@ -132,6 +133,7 @@ impl Documents {
                 id: format!("{}~{id}", self.version),
                 states,
                 messages: open.messages.clone(),
+                runs: j.runs,
             }),
             Err(e) => {
                 self.unload(&mut doc, id).await;

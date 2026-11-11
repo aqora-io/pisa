@@ -164,6 +164,12 @@ pub struct CreateSnapshotOptions {
     pub refutes: Option<Refutes>,
     /// [`Detail::Declarations`] for every field of the check's declarations.
     pub detail: Vec<Detail>,
+    /// A name for the run this snapshot starts, unique in its version, so
+    /// that code can `import PisaRun.<name>`, which imports the run's head.
+    /// Not with `replaces`. A name another run has is a `conflict` in the
+    /// check's error, unless the create amends that run's spec, which takes
+    /// the name over.
+    pub name: Option<String>,
 }
 
 /// Options for [`Client::delete_snapshot_with`].
@@ -690,6 +696,7 @@ impl Client {
             amends: opts.amends.clone(),
             refutes: opts.refutes.clone(),
             detail: opts.detail.clone(),
+            name: opts.name.clone(),
         }
     }
 

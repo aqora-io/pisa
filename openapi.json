@@ -960,6 +960,13 @@
             },
             "type": "array"
           },
+          "runs": {
+            "description": "What each module the code imports by run name (`import\nPisaRun.<name>`) resolved to.",
+            "items": {
+              "$ref": "#/components/schemas/RunImport"
+            },
+            "type": "array"
+          },
           "sorries": {
             "items": {
               "$ref": "#/components/schemas/Sorry"
@@ -1055,6 +1062,10 @@
             },
             "type": "object"
           },
+          "name": {
+            "description": "A name for the run this snapshot starts, unique in its version: code\nmay then `import PisaRun.<name>`, which imports the run's head. Dotted\nparts, each a letter or `_` then letters, digits and `_`, none a Lean\nkeyword, up to 128 bytes (else a 400), e.g. `projA.lemma1`. Not with\n`replaces` (400): a replacement is in the run of what it replaces. A\nname another run has, while that run has snapshots, keeps nothing\n(`check.error` is a `conflict`), unless the create\n[`amends`](Self::amends) that run's spec: the name then moves to this\none's run. A key replay ignores it.",
+            "type": "string"
+          },
           "refutes": {
             "$ref": "#/components/schemas/Refutes",
             "description": "A spec's target that this code refutes: a theorem of the spec's\nmodule whose statement mentions none of the spec's holes and no\nprivate name. The code must import the spec's module and prove, with\nno `sorry` and no assumption, a theorem whose statement is `¬` that\nstatement exactly, as `theorem r : ¬ type_of% @t := …` states it. It\nis always re-checked: `verify: false` is a `bad_request`, as are\n`replaces`, `holes` and `amends`. Otherwise nothing is kept, and\n`check.reasons` says why. An audit against the spec then shows the\ntarget refuted, and isn't `clean`."
@@ -1114,6 +1125,13 @@
           "replacement": {
             "$ref": "#/components/schemas/Replacement",
             "description": "What the replacement changed, if the request named a snapshot it\nreplaces and the code was kept. Absent on a key replay, which doesn't\ncompare again."
+          },
+          "runs": {
+            "description": "What each module the code imports by run name (`import\nPisaRun.<name>`) resolved to.",
+            "items": {
+              "$ref": "#/components/schemas/RunImport"
+            },
+            "type": "array"
           },
           "snapshot": {
             "$ref": "#/components/schemas/Snapshot",
@@ -1396,6 +1414,13 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "runs": {
+            "description": "What each module the code imports by run name (`import\nPisaRun.<name>`) resolved to.",
+            "items": {
+              "$ref": "#/components/schemas/RunImport"
+            },
+            "type": "array"
           },
           "sorries": {
             "description": "The code's `sorry`s in source order, each with its goals.",
@@ -2902,6 +2927,29 @@
         ],
         "type": "string"
       },
+      "RunImport": {
+        "description": "What an import by run name resolved to: `import PisaRun.<name>` imports\nthe module of the run's head in its place, on the same line.",
+        "properties": {
+          "module": {
+            "description": "The module imported in its place, `PisaSnap.s<32 hex>`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The run's name.",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "description": "The run's head on that module.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "module",
+          "snapshot_id"
+        ],
+        "type": "object"
+      },
       "SearchHealth": {
         "description": "Search's state in a server's `GET /health`.",
         "properties": {
@@ -2984,6 +3032,13 @@
             "description": "Lean's errors and warnings about the code.",
             "items": {
               "$ref": "#/components/schemas/Message"
+            },
+            "type": "array"
+          },
+          "runs": {
+            "description": "What each module the code imports by run name resolved to. The\nsession keeps these: its final check imports the same modules.",
+            "items": {
+              "$ref": "#/components/schemas/RunImport"
             },
             "type": "array"
           },
@@ -3095,6 +3150,10 @@
             "$ref": "#/components/schemas/Replaces",
             "description": "The snapshot it replaced, if it was created to. If that one was\ndeleted, and it replaced one, the snapshot that one replaced, with the\ntwo links composed."
           },
+          "run": {
+            "description": "The name of the run it is in, if the run has one\n([`name`](CreateSnapshotRequest::name)).",
+            "type": "string"
+          },
           "status": {
             "$ref": "#/components/schemas/ProofStatus",
             "description": "The worst status among its module's declarations, by the build's\nreport or, once `verified`, the kernel re-check."
@@ -3141,6 +3200,10 @@
                   "$ref": "#/components/schemas/Export"
                 },
                 "type": "array"
+              },
+              "source": {
+                "description": "The code as its create sent it, where it imported runs by name:\n`code` imports their heads at the time in their place.",
+                "type": "string"
               }
             },
             "required": [

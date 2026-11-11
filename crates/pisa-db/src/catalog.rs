@@ -204,6 +204,9 @@ pub struct EntryMeta {
     /// a spec's own, or those of the entry it replaces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holes: Vec<String>,
+    /// The code as its create sent it, where it imported runs by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl EntryMeta {
@@ -394,6 +397,12 @@ pub struct NewEntry {
     /// The spec target it refutes, if it refutes one, whose spec must still
     /// be there.
     pub refutes: Option<Refutation>,
+    /// The name of the run it starts; not with `replaces`. A name another run
+    /// has is refused while that run has entries, unless it amends that
+    /// run's spec, which moves the name to its run.
+    pub name: Option<String>,
+    /// The code as its create sent it, where it imported runs by name.
+    pub source: Option<String>,
 }
 
 /// The most bytes of JSON a record can have, so that rows, and the requests
@@ -483,9 +492,17 @@ fn has_nul(value: &Value) -> bool {
     }
 }
 
-/// An entry's id, module, labels, key, creation time and holes (JSON text),
-/// as selected.
-pub(crate) type EntryRow = (String, String, Value, Option<String>, i64, Option<String>);
+/// An entry's id, module, labels, key, creation time, holes (JSON text) and
+/// the code as sent, as selected.
+pub(crate) type EntryRow = (
+    String,
+    String,
+    Value,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+);
 
 /// A link: the entry that replaces, the entry it replaces, what it allowed
 /// (JSON text) and the comparison (JSON text), as selected.
@@ -496,7 +513,7 @@ pub(crate) fn entry_from_row(
     row: EntryRow,
     link: Option<LinkRow>,
 ) -> Result<(String, EntryMeta), Fail> {
-    let (e, module, labels, key, created, holes) = row;
+    let (e, module, labels, key, created, holes, source) = row;
     let (replaces, replacement) = match link {
         Some((_, replaced, allow, replacement)) => (
             Some(Replaces {
@@ -518,6 +535,7 @@ pub(crate) fn entry_from_row(
             .map(|text| serde_json::from_str(&text))
             .transpose()?
             .unwrap_or_default(),
+        source,
     };
     Ok((e, meta))
 }
@@ -587,6 +605,21 @@ pub(crate) fn unknown_entry(v: &str, e: &str) -> Error {
         entry: e.to_string(),
     };
     Error::new(ErrorKind::NotFound, format!("unknown snapshot {id}"))
+}
+
+/// The refusal of a run name that another run has.
+pub fn name_taken(v: &str, name: &str, root: &str) -> Error {
+    let id = SnapshotId {
+        version: v.to_string(),
+        entry: root.to_string(),
+    };
+    Error::new(
+        ErrorKind::Conflict,
+        format!(
+            "the run name {name} is taken by the run that {id} starts: name this run otherwise, \
+             or amend that spec to take its name over"
+        ),
+    )
 }
 
 pub(crate) fn now_micros() -> u64 {
@@ -798,6 +831,24 @@ impl Catalog {
     /// first.
     pub async fn replacers(&self, entry: &str) -> Result<Vec<(String, EntryMeta)>, Error> {
         dispatch!(&self.db, replacers(&self.version, entry))
+    }
+
+    /// The root of the run each of `names` names, by name; a name no run has
+    /// is missing.
+    pub async fn run_roots(&self, names: &[String]) -> Result<HashMap<String, String>, Error> {
+        dispatch!(&self.db, run_roots(&self.version, names))
+    }
+
+    /// The name of the run each of `entries` (bare hex) is in, for those
+    /// whose run has one.
+    pub async fn run_names_of(&self, entries: &[String]) -> Result<HashMap<String, String>, Error> {
+        dispatch!(&self.db, run_names_of(&self.version, entries))
+    }
+
+    /// The root of the run named `name`, if a run has it, and whether that
+    /// run has an entry left: a name whose run has none is free.
+    pub async fn run_named(&self, name: &str) -> Result<Option<(String, bool)>, Error> {
+        dispatch!(&self.db, run_named(&self.version, name))
     }
 
     /// Every entry of the runs that `entries` (bare hex) are on, by id, with
@@ -1128,6 +1179,8 @@ mod tests {
             fork: false,
             amends: None,
             refutes: None,
+            name: None,
+            source: None,
         }
     }
 
@@ -1144,6 +1197,8 @@ mod tests {
             fork: false,
             amends: None,
             refutes: None,
+            name: None,
+            source: None,
         }
     }
 
@@ -1157,6 +1212,8 @@ mod tests {
             fork: false,
             amends: None,
             refutes: None,
+            name: None,
+            source: None,
         }
     }
 
@@ -1419,6 +1476,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_is_named_by_its_root_and_keeps_the_name_while_it_has_entries() {
+        for catalog in catalogs().await {
+            let named = |name: &str| NewEntry {
+                name: Some(name.into()),
+                source: Some("import PisaRun.base".into()),
+                ..no_labels()
+            };
+            let replacing = |entry: &str| NewEntry {
+                replaces: Some(Replaces {
+                    snapshot_id: entry.into(),
+                    allow: None,
+                }),
+                replacement: Some(Replacement::default()),
+                ..no_labels()
+            };
+            let (s, ..) = catalog
+                .commit("s", &meta("s"), None, named("proj.lemma"))
+                .await
+                .unwrap();
+            assert_eq!(
+                catalog.entry(&s).await.unwrap().source.as_deref(),
+                Some("import PisaRun.base")
+            );
+            let (p, _) = catalog
+                .add_entry("s", replacing(&s))
+                .await
+                .unwrap()
+                .unwrap();
+            let names = ["proj.lemma".to_string(), "other".to_string()];
+            assert_eq!(
+                catalog.run_roots(&names).await.unwrap(),
+                HashMap::from([("proj.lemma".to_string(), s.clone())])
+            );
+            assert_eq!(
+                catalog.run_names_of(&[s.clone(), p.clone()]).await.unwrap(),
+                HashMap::from([
+                    (s.clone(), "proj.lemma".to_string()),
+                    (p.clone(), "proj.lemma".to_string())
+                ])
+            );
+            assert_eq!(
+                catalog.run_named("proj.lemma").await.unwrap(),
+                Some((s.clone(), true))
+            );
+            // Another run can't take it, nor can a replacement name its run.
+            let taken = catalog
+                .add_entry("s", named("proj.lemma"))
+                .await
+                .unwrap_err();
+            assert_eq!(taken.kind, ErrorKind::Conflict, "{taken:?}");
+            let renamed = NewEntry {
+                name: Some("x".into()),
+                ..replacing(&p)
+            };
+            let refused = catalog.add_entry("s", renamed).await.unwrap_err();
+            assert_eq!(refused.kind, ErrorKind::BadRequest, "{refused:?}");
+            // The root goes, and the run with its name stays.
+            catalog.remove_entry(&s).await.unwrap();
+            assert_eq!(
+                catalog.run_named("proj.lemma").await.unwrap(),
+                Some((s.clone(), true))
+            );
+            assert_eq!(
+                catalog
+                    .run_names_of(std::slice::from_ref(&p))
+                    .await
+                    .unwrap(),
+                HashMap::from([(p.clone(), "proj.lemma".to_string())])
+            );
+            // A spec that amends the run's takes its name over.
+            let amending = NewEntry {
+                amends: Some(Amendment {
+                    amends: p.clone(),
+                    reason: "r".into(),
+                    changes: Vec::new(),
+                    added: Vec::new(),
+                    holes: None,
+                }),
+                ..named("proj.lemma")
+            };
+            let (a, _) = catalog.add_entry("s", amending).await.unwrap().unwrap();
+            assert_eq!(
+                catalog.run_named("proj.lemma").await.unwrap(),
+                Some((a.clone(), true))
+            );
+            assert!(
+                catalog
+                    .run_names_of(std::slice::from_ref(&p))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            // Once its run has no entry, the name goes.
+            catalog.remove_entry(&a).await.unwrap();
+            assert_eq!(catalog.run_named("proj.lemma").await.unwrap(), None);
+            catalog.remove_entry(&p).await.unwrap();
+            assert!(catalog.db.rows(&catalog.version).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
     async fn replacers_lists_every_entry_that_replaces_one() {
         for catalog in catalogs().await {
             let (a, _, _) = catalog
@@ -1559,6 +1717,7 @@ mod tests {
             replaces,
             replacement,
             holes: Vec::new(),
+            source: None,
         };
         let root = entry(None, None);
         let top = entry(link("p1", &["f"]), Some(replacement(&[], &["f"], &[])));
@@ -1772,6 +1931,7 @@ mod tests {
             replaces,
             replacement,
             holes: Vec::new(),
+            source: None,
         };
         // The comparisons are what the creates' builds reported; the allows
         // are what the links' authors declared, which an audit reads.

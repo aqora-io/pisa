@@ -450,6 +450,22 @@ pub struct CheckResult {
     /// With `at`, what Lean recorded at each position, in request order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<AtPosition>,
+    /// What each module the code imports by run name (`import
+    /// PisaRun.<name>`) resolved to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunImport>,
+}
+
+/// What an import by run name resolved to: `import PisaRun.<name>` imports
+/// the module of the run's head in its place, on the same line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RunImport {
+    /// The run's name.
+    pub name: String,
+    /// The module imported in its place, `PisaSnap.s<32 hex>`.
+    pub module: String,
+    /// The run's head on that module.
+    pub snapshot_id: String,
 }
 
 /// What Lean recorded at a position asked about in `at`. Each part is
@@ -522,6 +538,10 @@ pub struct Session {
     #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
+    /// What each module the code imports by run name resolved to. The
+    /// session keeps these: its final check imports the same modules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunImport>,
 }
 
 /// A proof state: the goals still to prove. A state stays valid after
@@ -632,6 +652,10 @@ pub struct Document {
     #[schema(required = true)]
     #[serde(default)]
     pub sorries: Vec<Sorry>,
+    /// What each module the code imports by run name (`import
+    /// PisaRun.<name>`) resolved to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunImport>,
 }
 
 /// A position in a document's code, as for [`Pos`]. Without `column`, it is
@@ -873,6 +897,17 @@ pub struct CreateSnapshotRequest {
     /// target refuted, and isn't `clean`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refutes: Option<Refutes>,
+    /// A name for the run this snapshot starts, unique in its version: code
+    /// may then `import PisaRun.<name>`, which imports the run's head. Dotted
+    /// parts, each a letter or `_` then letters, digits and `_`, none a Lean
+    /// keyword, up to 128 bytes (else a 400), e.g. `projA.lemma1`. Not with
+    /// `replaces` (400): a replacement is in the run of what it replaces. A
+    /// name another run has, while that run has snapshots, keeps nothing
+    /// (`check.error` is a `conflict`), unless the create
+    /// [`amends`](Self::amends) that run's spec: the name then moves to this
+    /// one's run. A key replay ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Only `declarations` applies, to `check`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detail: Vec<Detail>,
@@ -1051,6 +1086,10 @@ pub struct Snapshot {
     pub verified: bool,
     /// When it was created, in seconds since the Unix epoch.
     pub created: u64,
+    /// The name of the run it is in, if the run has one
+    /// ([`name`](CreateSnapshotRequest::name)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1099,6 +1138,10 @@ pub struct CreateSnapshotResponse {
     /// refuted is false, and no head can be accepted on it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refutations: Vec<Refutation>,
+    /// What each module the code imports by run name (`import
+    /// PisaRun.<name>`) resolved to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunImport>,
 }
 
 /// `GET /snapshots/{id}`: a snapshot with its module's code, check and
@@ -1108,6 +1151,10 @@ pub struct SnapshotDetail {
     #[serde(flatten)]
     pub snapshot: Snapshot,
     pub code: String,
+    /// The code as its create sent it, where it imported runs by name:
+    /// `code` imports their heads at the time in their place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// The module's check, as in [`CreateSnapshotResponse::check`], with the
     /// kernel re-check's axioms once it is verified.
     pub check: CheckResult,

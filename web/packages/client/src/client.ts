@@ -145,7 +145,7 @@ export type CheckSessionOptions = Omit<RunOptions, "version"> & { detail?: Detai
 export type CreateSnapshotOptions = RunOptions &
   Pick<
     CreateSnapshotRequest,
-    "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "amends" | "refutes" | "detail"
+    "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "amends" | "refutes" | "detail" | "name"
   >;
 
 export interface VerifyOptions extends RequestOptions {
@@ -711,6 +711,7 @@ export class PisaClient {
     if (options.amends !== undefined) body.amends = options.amends;
     if (options.refutes !== undefined) body.refutes = options.refutes;
     if (options.detail !== undefined) body.detail = options.detail;
+    if (options.name !== undefined) body.name = options.name;
     return body;
   }
 

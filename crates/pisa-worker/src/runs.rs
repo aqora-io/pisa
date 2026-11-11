@@ -80,13 +80,21 @@ async fn audited_export(
         Ok(meta)
     };
     let mut needed = BTreeSet::new();
+    for pair in &run.pairs {
+        for m in [&pair.spec_module, &pair.head_module] {
+            needed.extend(record(m).await?.modules.iter().map(|m| m.id.clone()));
+        }
+    }
+    // A named run's modules are named by the run, the others by their hash.
+    let modules: Vec<String> = needed.iter().cloned().collect();
+    let names = snapshots.reader().readable_names(&modules).await?;
+    let named = |m: &str| names.get(m).cloned().unwrap_or_else(|| snapshot::module(m));
+    let path = |m: &str| format!("{}.lean", named(m).replace('.', "/"));
     let mut files = Vec::new();
     let mut pairs = Vec::new();
     for (n, (compared, pair)) in run.audit.comparisons.iter().zip(&run.pairs).enumerate() {
         let spec_meta = record(&pair.spec_module).await?;
         let head_meta = record(&pair.head_module).await?;
-        needed.extend(spec_meta.modules.iter().map(|m| m.id.clone()));
-        needed.extend(head_meta.modules.iter().map(|m| m.id.clone()));
         // What the spec permits: the axioms its module, and what it builds
         // on, declare. And the definitions each side declares, which are
         // all comparator takes as holes.
@@ -118,8 +126,8 @@ async fn audited_export(
         }
         let holes: Vec<String> = pair.holes.iter().chain(allow).cloned().collect();
         let named = config(
-            &pair.spec_module,
-            &pair.head_module,
+            &named(&pair.spec_module),
+            &named(&pair.head_module),
             &spec_meta.result.declarations,
             &holes,
             &assumptions,
@@ -140,10 +148,9 @@ async fn audited_export(
     }
     for m in &needed {
         let code = record(m).await?.code;
-        files.push(file(&format!("{}/s{m}.lean", snapshot::ROOT), code));
+        files.push(file(&path(m), snapshot::rename_imports(&code, &names)));
     }
     // The snapshots on each module, for the README's table.
-    let modules: Vec<String> = needed.iter().cloned().collect();
     let mut on: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for (entry, entry_meta) in catalog.entries_on(&modules, &[]).await? {
         let labels: Vec<String> = entry_meta
@@ -155,7 +162,15 @@ async fn audited_export(
             .or_default()
             .push((snapshots.id(&entry), labels.join(", ")));
     }
-    let project_files = project_files(project)?;
+    let mut roots: Vec<&str> = (modules.iter())
+        .map(|m| match names.get(m) {
+            Some(name) => name.split('.').next().unwrap_or(snapshot::ROOT),
+            None => snapshot::ROOT,
+        })
+        .collect();
+    roots.sort();
+    roots.dedup();
+    let project_files = project_files(project, &roots)?;
     let toolchain = project_files
         .iter()
         .find(|f| f.path == "lean-toolchain")
@@ -166,10 +181,7 @@ async fn audited_export(
     files.extend(project_files);
     let table: Vec<(String, Vec<(String, String)>)> = modules
         .iter()
-        .map(|m| {
-            let path = format!("{}/s{m}.lean", snapshot::ROOT);
-            (path, on.remove(m).unwrap_or_default())
-        })
+        .map(|m| (path(m), on.remove(m).unwrap_or_default()))
         .collect();
     let about = About {
         toolchain,
@@ -467,7 +479,7 @@ fn file(path: &str, text: String) -> ExportedFile {
 
 /// The Lake configuration: the project's toolchain and manifest, and a
 /// lakefile with its requirements.
-fn project_files(project: Option<&Path>) -> Result<Vec<ExportedFile>, Error> {
+fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedFile>, Error> {
     let Some(project) = project else {
         // As in tests, which build nothing.
         let manifest = json!({"version": "1.3.0", "packagesDir": ".lake/packages",
@@ -475,7 +487,7 @@ fn project_files(project: Option<&Path>) -> Result<Vec<ExportedFile>, Error> {
                               "fixedToolchain": false});
         return Ok(vec![
             file("lake-manifest.json", pretty(&manifest)),
-            file("lakefile.toml", lakefile(&manifest)),
+            file("lakefile.toml", lakefile(&manifest, roots)),
         ]);
     };
     let read = |name: &str| {
@@ -495,7 +507,7 @@ fn project_files(project: Option<&Path>) -> Result<Vec<ExportedFile>, Error> {
     manifest["name"] = NAME.into();
     Ok(vec![
         file("lean-toolchain", read("lean-toolchain")?),
-        file("lakefile.toml", lakefile(&manifest)),
+        file("lakefile.toml", lakefile(&manifest, roots)),
         file("lake-manifest.json", pretty(&manifest)),
     ])
 }
@@ -512,14 +524,15 @@ fn toml(s: &str) -> String {
 }
 
 /// A lakefile that requires what `manifest` requires directly, at the
-/// revisions it names, with the snapshot modules as a library built with
-/// `autoImplicit` off, as the worker builds them.
-fn lakefile(manifest: &Value) -> String {
+/// revisions it names, with the snapshot modules as libraries, one for each
+/// of `roots`, built with `autoImplicit` off, as the worker builds them.
+fn lakefile(manifest: &Value, roots: &[&str]) -> String {
+    let targets: Vec<String> = roots.iter().map(|r| toml(r)).collect();
     let mut out = format!(
         "# A pisa run, for `lake comparator`: see README.md.\nname = {}\n\
          defaultTargets = [{}]\n\n[leanOptions]\nautoImplicit = false\n",
         toml(NAME),
-        toml(snapshot::ROOT)
+        targets.join(", ")
     );
     let packages = manifest["packages"].as_array().into_iter().flatten();
     for p in packages.filter(|p| p["inherited"] == false) {
@@ -540,11 +553,13 @@ fn lakefile(manifest: &Value) -> String {
             _ => {}
         }
     }
-    out.push_str(&format!(
-        "\n[[lean_lib]]\nname = {}\nglobs = [{}]\n",
-        toml(snapshot::ROOT),
-        toml(&format!("{}.+", snapshot::ROOT))
-    ));
+    for root in roots {
+        out.push_str(&format!(
+            "\n[[lean_lib]]\nname = {}\nglobs = [{}]\n",
+            toml(root),
+            toml(&format!("{root}.+"))
+        ));
+    }
     out
 }
 
@@ -556,8 +571,8 @@ struct Named {
     left_out: Vec<LeftOut>,
 }
 
-/// Comparator's configuration for spec module `spec` (the challenge) and
-/// head module `head` (the solution): the spec's theorems among
+/// Comparator's configuration for the spec's module named `spec` (the
+/// challenge) and the head's named `head` (the solution): the spec's theorems among
 /// `declarations`, `holes` as its definition holes, and the standard axioms
 /// and `assumptions` as permitted. Left out, and listed with why: private
 /// names, which differ between the two modules, and holes that aren't plain
@@ -628,8 +643,8 @@ fn config(
     let standard: Vec<String> = STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
     let axioms = name(&mut standard.iter().chain(kept_axioms), false);
     let config = json!({
-        "challenge_module": snapshot::module(spec),
-        "solution_module": snapshot::module(head),
+        "challenge_module": spec,
+        "solution_module": head,
         "theorem_names": theorems,
         "definition_names": holes,
         "permitted_axioms": axioms,
@@ -699,8 +714,9 @@ fn readme(pairs: &[ExportedPair], about: &About) -> String {
     }
     out.push_str(
         "\n`lake build` builds every module, with `autoImplicit` off as pisa built them. A \
-         module's file is named by its code's hash, `PisaSnap/s<hash>.lean`, and imports the \
-         others by those names.\n\n\
+         named run's head is `PisaRun/<name>.lean`, and its spec, if it isn't the head, \
+         `PisaSpec/<name>.lean`. Other modules are named by their code's hash, \
+         `PisaSnap/s<hash>.lean`. Each imports the others by those names.\n\n\
          ## Judging it\n\n\
          Judge each pair with `lake comparator --paranoid --config comparator/<n>.json`, which \
          needs `bwrap`. It accepts a pair when each theorem of the spec is proved in the head \
@@ -796,12 +812,13 @@ mod tests {
             {"type": "path", "name": "local", "dir": "../local", "inherited": false},
         ]});
         assert_eq!(
-            lakefile(&manifest),
+            lakefile(&manifest, &["PisaRun", "PisaSnap"]),
             "# A pisa run, for `lake comparator`: see README.md.\nname = \"pisa_run\"\n\
-             defaultTargets = [\"PisaSnap\"]\n\n[leanOptions]\nautoImplicit = false\n\n\
+             defaultTargets = [\"PisaRun\", \"PisaSnap\"]\n\n[leanOptions]\nautoImplicit = false\n\n\
              [[require]]\nname = \"Physlib\"\ngit = \"https://example.com/physlib.git\"\n\
              rev = \"lean-v4.36.0-rc2\"\n\n\
              [[require]]\nname = \"local\"\npath = \"../local\"\n\n\
+             [[lean_lib]]\nname = \"PisaRun\"\nglobs = [\"PisaRun.+\"]\n\n\
              [[lean_lib]]\nname = \"PisaSnap\"\nglobs = [\"PisaSnap.+\"]\n"
         );
     }
@@ -833,8 +850,8 @@ mod tests {
         let head_defs: HashSet<String> = ["cost".to_string()].into();
         let head_axioms: HashSet<String> = ["lit".to_string()].into();
         let named = config(
-            "a",
-            "b",
+            "PisaSnap.sa",
+            "PisaSnap.sb",
             &declarations,
             &holes,
             &assumptions,
@@ -1114,7 +1131,7 @@ mod tests {
 
     #[test]
     fn without_a_project_the_lakefile_requires_nothing() {
-        let files = project_files(None).unwrap();
+        let files = project_files(None, &["PisaSnap"]).unwrap();
         let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["lake-manifest.json", "lakefile.toml"]);
         assert!(!files[1].text.contains("[[require]]"), "{}", files[1].text);

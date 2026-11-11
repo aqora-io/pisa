@@ -1124,6 +1124,11 @@ export interface components {
             ok: boolean;
             /** @description Why `ok` is false, e.g. "axiom: t uses sorryAx". */
             reasons: string[];
+            /**
+             * @description What each module the code imports by run name (`import
+             *     PisaRun.<name>`) resolved to.
+             */
+            runs?: components["schemas"]["RunImport"][];
             sorries: components["schemas"]["Sorry"][];
             /**
              * @description With `detail: ["tactics"]`, one entry each time a tactic in the code
@@ -1216,6 +1221,18 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description A name for the run this snapshot starts, unique in its version: code
+             *     may then `import PisaRun.<name>`, which imports the run's head. Dotted
+             *     parts, each a letter or `_` then letters, digits and `_`, none a Lean
+             *     keyword, up to 128 bytes (else a 400), e.g. `projA.lemma1`. Not with
+             *     `replaces` (400): a replacement is in the run of what it replaces. A
+             *     name another run has, while that run has snapshots, keeps nothing
+             *     (`check.error` is a `conflict`), unless the create
+             *     [`amends`](Self::amends) that run's spec: the name then moves to this
+             *     one's run. A key replay ignores it.
+             */
+            name?: string;
+            /**
              * @description A spec's target that this code refutes: a theorem of the spec's
              *     module whose statement mentions none of the spec's holes and no
              *     private name. The code must import the spec's module and prove, with
@@ -1298,6 +1315,11 @@ export interface components {
              *     compare again.
              */
             replacement?: components["schemas"]["Replacement"];
+            /**
+             * @description What each module the code imports by run name (`import
+             *     PisaRun.<name>`) resolved to.
+             */
+            runs?: components["schemas"]["RunImport"][];
             /**
              * @description The snapshot this create added, or on a
              *     [`key`](CreateSnapshotRequest::key) replay the one the key is on.
@@ -1496,6 +1518,11 @@ export interface components {
              * @description 1 when opened, then one more for each edit.
              */
             revision: number;
+            /**
+             * @description What each module the code imports by run name (`import
+             *     PisaRun.<name>`) resolved to.
+             */
+            runs?: components["schemas"]["RunImport"][];
             /** @description The code's `sorry`s in source order, each with its goals. */
             sorries: components["schemas"]["Sorry"][];
         };
@@ -2327,6 +2354,18 @@ export interface components {
          * @enum {string}
          */
         ReviewOrigin: "spec" | "head" | "snapshot";
+        /**
+         * @description What an import by run name resolved to: `import PisaRun.<name>` imports
+         *     the module of the run's head in its place, on the same line.
+         */
+        RunImport: {
+            /** @description The module imported in its place, `PisaSnap.s<32 hex>`. */
+            module: string;
+            /** @description The run's name. */
+            name: string;
+            /** @description The run's head on that module. */
+            snapshot_id: string;
+        };
         /** @description Search's state in a server's `GET /health`. */
         SearchHealth: {
             /** @description Why the index isn't open yet. */
@@ -2365,6 +2404,11 @@ export interface components {
             id: string;
             /** @description Lean's errors and warnings about the code. */
             messages: components["schemas"]["Message"][];
+            /**
+             * @description What each module the code imports by run name resolved to. The
+             *     session keeps these: its final check imports the same modules.
+             */
+            runs?: components["schemas"]["RunImport"][];
             /** @description One per `sorry`, in source order. */
             states: components["schemas"]["State"][];
         };
@@ -2435,6 +2479,11 @@ export interface components {
              */
             replaces?: components["schemas"]["Replaces"];
             /**
+             * @description The name of the run it is in, if the run has one
+             *     ([`name`](CreateSnapshotRequest::name)).
+             */
+            run?: string;
+            /**
              * @description The worst status among its module's declarations, by the build's
              *     report or, once `verified`, the kernel re-check.
              */
@@ -2457,6 +2506,11 @@ export interface components {
             code: string;
             /** @description The declarations that code importing the module sees, in order. */
             exports?: components["schemas"]["Export"][];
+            /**
+             * @description The code as its create sent it, where it imported runs by name:
+             *     `code` imports their heads at the time in their place.
+             */
+            source?: string;
         };
         /**
          * @description Which snapshot modules a query searches: `"none"`, `"all"` (those with a
@@ -2708,6 +2762,7 @@ export type ResubmitSnapshotsRequest = components['schemas']['ResubmitSnapshotsR
 export type ResubmitSnapshotsResponse = components['schemas']['ResubmitSnapshotsResponse'];
 export type ReviewDeclaration = components['schemas']['ReviewDeclaration'];
 export type ReviewOrigin = components['schemas']['ReviewOrigin'];
+export type RunImport = components['schemas']['RunImport'];
 export type SearchHealth = components['schemas']['SearchHealth'];
 export type SearchRequest = components['schemas']['SearchRequest'];
 export type SearchResponse = components['schemas']['SearchResponse'];

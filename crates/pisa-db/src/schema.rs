@@ -34,6 +34,15 @@ diesel::table! {
         idempotency_key -> Nullable<Text>,
         created_micros -> BigInt,
         holes -> Nullable<Text>,
+        source -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
+    run_names (version, name) {
+        version -> Text,
+        name -> Text,
+        root -> Text,
     }
 }
 

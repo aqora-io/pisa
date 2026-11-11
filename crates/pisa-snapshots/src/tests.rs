@@ -497,6 +497,7 @@ async fn an_audit_target_without_its_records_is_not_accepted() {
         replaces: None,
         replacement: None,
         holes: Vec::new(),
+        source: None,
     };
     // Each module declares `t`, proved and verified.
     let module = |_: &str| ModuleRecord {
@@ -643,4 +644,117 @@ fn two_modules_that_declare_one_name_clash() {
         ]),
         None
     );
+}
+
+#[tokio::test]
+async fn a_run_name_resolves_to_the_runs_head() {
+    let s = Reader::new(Db::memory().await, "v".into(), Vec::new());
+    let kept = |id: &str| ModuleMeta {
+        imports: Vec::new(),
+        modules: vec![Module {
+            id: id.into(),
+            build: "b".into(),
+            files: Vec::new(),
+        }],
+        header: String::new(),
+        code: String::new(),
+        status: ProofStatus::Proved,
+        verified: false,
+        macros: false,
+        result: CheckResult::default(),
+        created: 0,
+    };
+    let new = |name: Option<&str>, replaces: Option<&str>| pisa_db::catalog::NewEntry {
+        name: name.map(Into::into),
+        replaces: replaces.map(|r| Replaces {
+            snapshot_id: r.into(),
+            allow: None,
+        }),
+        replacement: replaces.map(|_| Replacement::default()),
+        fork: true,
+        ..Default::default()
+    };
+    let (a, b, c) = (snapshot::id("a"), snapshot::id("b"), snapshot::id("c"));
+    let (root, ..) = s
+        .catalog
+        .commit(&a, &kept(&a), None, new(Some("proj.lemma"), None))
+        .await
+        .unwrap();
+    let code = "import Foo\nimport PisaRun.proj.lemma -- the lemma\n\ntheorem t : True := trivial";
+    let resolved = s.resolve_runs(code, &[]).await.unwrap();
+    assert_eq!(
+        resolved.code,
+        format!(
+            "import Foo\nimport {} -- the lemma\n\ntheorem t : True := trivial",
+            snapshot::module(&a)
+        )
+    );
+    let run = |module: &str, entry: &str| RunImport {
+        name: "proj.lemma".into(),
+        module: snapshot::module(module),
+        snapshot_id: s.id(entry),
+    };
+    assert_eq!(resolved.runs, [run(&a, &root)]);
+
+    // A replacement moves it, and of two heads on one module the newest is
+    // the one named.
+    let (head, ..) = s
+        .catalog
+        .commit(&b, &kept(&b), None, new(None, Some(&root)))
+        .await
+        .unwrap();
+    assert_eq!(
+        s.resolve_runs(code, &[]).await.unwrap().runs,
+        [run(&b, &head)]
+    );
+    let (twin, _) = s
+        .catalog
+        .add_entry(&b, new(None, Some(&root)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.resolve_runs(code, &[]).await.unwrap().runs,
+        [run(&b, &twin)]
+    );
+    let listed = s.list(&[], 10, None, false).await.unwrap().snapshots;
+    assert!(
+        listed
+            .iter()
+            .all(|x| x.run.as_deref() == Some("proj.lemma")),
+        "{listed:?}"
+    );
+
+    // Heads on two modules are a fork, which a pin doesn't see.
+    let (fork, ..) = s
+        .catalog
+        .commit(&c, &kept(&c), None, new(None, Some(&root)))
+        .await
+        .unwrap();
+    let forked = s.resolve_runs(code, &[]).await.unwrap_err();
+    assert_eq!(forked.kind, ErrorKind::Conflict, "{forked:?}");
+    assert!(forked.message.contains(&s.id(&fork)), "{forked:?}");
+    let pinned = [run(&a, &root)];
+    assert_eq!(s.resolve_runs(code, &pinned).await.unwrap().runs, pinned);
+
+    // A deleted root leaves the run, and its name, to what replaced it.
+    s.catalog.remove_entry(&fork).await.unwrap();
+    s.catalog.remove_entry(&root).await.unwrap();
+    assert_eq!(
+        s.resolve_runs(code, &[]).await.unwrap().runs,
+        [run(&b, &twin)]
+    );
+    // Once the run is gone, so is its name.
+    s.catalog.remove_entry(&twin).await.unwrap();
+    s.catalog.remove_entry(&head).await.unwrap();
+    let gone = s.resolve_runs(code, &[]).await.unwrap_err();
+    assert_eq!(gone.kind, ErrorKind::NotFound, "{gone:?}");
+
+    let plain = "import Foo\n\ntheorem t : True := trivial";
+    let unchanged = s.resolve_runs(plain, &[]).await.unwrap();
+    assert_eq!((unchanged.code.as_str(), unchanged.runs.len()), (plain, 0));
+    let bad = s
+        .resolve_runs("import PisaRun.end\n\ndef x := 1", &[])
+        .await;
+    assert_eq!(bad.unwrap_err().kind, ErrorKind::BadRequest);
 }

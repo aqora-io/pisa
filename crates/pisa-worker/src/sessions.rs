@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pisa_protocol::api::{DocumentId, Error, ErrorKind};
+use pisa_protocol::api::{DocumentId, Error, ErrorKind, RunImport};
 use pisa_protocol::header::split_header;
 use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
 use pisa_protocol::wire::{CheckJob, CheckOutcome, SessionCheckJob, SessionChecked};
@@ -26,6 +26,10 @@ pub struct SessionMeta {
     /// check keeps. The first check works them out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declarations: Option<Vec<Declaration>>,
+    /// What the code's imports by run name resolved to when it started:
+    /// a final check's resolve the same.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunImport>,
     /// Seconds since the Unix epoch.
     pub created: u64,
 }
@@ -46,6 +50,7 @@ impl Sessions {
                 error: Some(error),
                 response: None,
                 verification: None,
+                runs: Vec::new(),
             },
             statement_reasons: Vec::new(),
             statement_changes: Vec::new(),
@@ -72,7 +77,7 @@ impl Sessions {
             }
             Err(e) => return failed(e.into()),
         };
-        let check = |code: String| {
+        let check = |code: String, runs: Vec<RunImport>| {
             run_check(
                 pool,
                 CheckJob {
@@ -80,13 +85,14 @@ impl Sessions {
                     timeout_secs: job.timeout_secs,
                     detail: Vec::new(),
                     at: Vec::new(),
+                    runs,
                 },
             )
         };
         let original = match session.declarations.clone() {
             Some(declarations) => declarations,
             None => {
-                let started = check(session.code.clone()).await;
+                let started = check(session.code.clone(), Vec::new()).await;
                 if let Some(e) = started.error {
                     return failed(e);
                 }
@@ -113,9 +119,15 @@ impl Sessions {
                 session.declarations.clone().unwrap_or_default()
             }
         };
+        // Imports by run name resolve as they did when the session started.
+        let reader = pool.snapshots().reader();
+        let resolved = match reader.resolve_runs(&job.code, &session.runs).await {
+            Ok(resolved) => resolved,
+            Err(e) => return failed(e),
+        };
         let same_imports =
-            split_header(&job.code).header_key == split_header(&session.code).header_key;
-        let outcome = check(job.code).await;
+            split_header(&resolved.code).header_key == split_header(&session.code).header_key;
+        let outcome = check(resolved.code, resolved.runs).await;
         let now = outcome
             .verification
             .as_ref()

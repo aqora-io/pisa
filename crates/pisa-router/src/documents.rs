@@ -107,12 +107,20 @@ pub async fn open(
     State(app): State<Arc<App>>,
     Body(req): Body<OpenDocumentRequest>,
 ) -> Result<Json<Document>, ApiError> {
-    let version = app.versions.resolve(req.version.as_deref());
+    let (code, runs, version) = match app.resolve_runs(req.version.as_deref(), &req.code).await? {
+        Some(r) => (r.code, r.runs, Some(r.version)),
+        None => (
+            req.code,
+            Vec::new(),
+            app.versions.resolve(req.version.as_deref()),
+        ),
+    };
     let id = uuid::Uuid::new_v4().simple().to_string();
     let job = Job::DocumentOpen(DocumentOpenJob {
         document: id.clone(),
-        code: req.code,
+        code,
         timeout_secs: req.timeout,
+        runs,
     });
     document(submit(&app, version, id, job).await?)
 }
@@ -137,11 +145,17 @@ pub async fn edit(
     Body(req): Body<EditDocumentRequest>,
 ) -> Result<Json<Document>, ApiError> {
     let id = parse_id(&id)?;
+    // Each revision resolves imports by run name afresh.
+    let (code, runs) = match app.resolve_runs(Some(&id.version), &req.code).await? {
+        Some(r) => (r.code, r.runs),
+        None => (req.code, Vec::new()),
+    };
     let job = Job::DocumentEdit(DocumentEditJob {
         document: id.id.clone(),
-        code: req.code,
+        code,
         revision: req.revision,
         timeout_secs: req.timeout,
+        runs,
     });
     document(submit(&app, Some(id.version), id.id, job).await?)
 }

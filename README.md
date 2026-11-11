@@ -286,6 +286,9 @@ on the servers:
 - A build that a create's link refuses is kept, with no snapshot, for a day;
   the hourly sweep removes modules only once they are a day old, a module a
   stopped delete left included.
+- The first process of this release adds the table `run_names` and the
+  column `entries.source` to the catalog (see [Naming a run](#run-names)).
+  Earlier snapshots have neither: name new runs as they start.
 
 To the release that runs tactic sessions on Lean Beam:
 - Earlier sessions and their states are gone, and their ids answer 404. The
@@ -323,12 +326,12 @@ pnpm -C web generate
 | --- | --- |
 | `POST /check` | `{code, version?, timeout?, detail?, at?}` → check result |
 | `POST /check/batch` | `{items: [{code}], version?, timeout?, detail?, at?}`, up to 128 items, 32 queued at a time → `{results: [...]}`, in order |
-| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages}`; see [Tactic sessions](#sessions) |
+| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages, runs?}`; see [Tactic sessions](#sessions) and [Naming a run](#run-names) |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid, and a failing tactic is a 422 |
 | `POST /sessions/{id}/check` | `{code, timeout?, detail?}` → check result, also requiring the session's original statements and imports; a `lean` error if the axiom report can't describe a declaration of the session's code, whose statement it couldn't guard |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, detail?}` → `{snapshot?, check, replacement?, heads?, unverified?, amendment?, refutation?, refutations?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending) and [Refuting a target](#refuting) |
-| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created}], next?}`, newest first; see [Labels](#labels) |
-| `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `check` and `exports?` |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, name?, detail?}` → `{snapshot?, check, replacement?, heads?, unverified?, amendment?, refutation?, refutations?, runs?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending), [Refuting a target](#refuting) and [Naming a run](#run-names) |
+| `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created, run?}], next?}`, newest first; see [Labels](#labels) |
+| `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `source?`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/settle` | `{against, allow?, dry_run?, verify?, timeout?}` → as `POST /snapshots/rebuild`; async with `Prefer: respond-async`; see [Settling a run](#settling) |
@@ -341,7 +344,7 @@ pnpm -C web generate
 | `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
 | `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
-| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
+| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries, runs?}`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
 | `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened}` |
@@ -376,7 +379,7 @@ would have:
 - `/check/batch`, and the snapshot reads and edits, answer at once whatever
   `Prefer` says: send a batch's items to `/check` instead.
 
-A check result is `{ok, time, error?, messages, sorries, reasons, changes?, declarations}`:
+A check result is `{ok, time, error?, messages, sorries, reasons, changes?, declarations, runs?}`:
 - `ok` is the verdict.
 - `messages` are Lean's, each `{severity, pos, end_pos?, text}`.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
@@ -392,6 +395,8 @@ A check result is `{ok, time, error?, messages, sorries, reasons, changes?, decl
   `type_refs`, `value_refs`, `generated?`, `parent?`). `/sessions/{id}/check`
   and `POST /snapshots` take the same `detail`, and `GET /snapshots/{id}`
   takes `?detail=declarations`.
+- `runs` says what each import by run name resolved to (see
+  [Naming a run](#run-names)).
 
 With `detail: ["tactics"]`, a check result also has `tactics`, the goals at
 every step of the proof. Each entry is one run of a tactic, in the order Lean
@@ -772,6 +777,48 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   [spec audit](#spec-audit) compares again from verified records. A key
   replay returns the snapshot as it is, without `replacement`.
 
+<a id="run-names"></a>
+**Naming a run.** A module's name is a hash of its code, so a proof that
+replaces a lemma is a new module, and code that imports the lemma by hash
+would have to move. A create that starts a run, one without `replaces`, may
+name it instead: `"name": "projA.lemma1"`. Code may then `import
+PisaRun.projA.lemma1`, with any of `public`, `meta` and `all`, and the server
+resolves it to the run's head before anything runs:
+
+```text
+POST /snapshots {"code": "import Foo\n\ntheorem lemma1 : 1 = 1 := sorry", "name": "projA.lemma1"}
+POST /check {"code": "import PisaRun.projA.lemma1\n\ntheorem t : 1 = 1 := lemma1"}
+  → {"ok": true, …, "runs": [{"name": "projA.lemma1", "module": "PisaSnap.s3c…", "snapshot_id": "…~9c0e…"}]}
+```
+
+- **Names.** Dotted parts, each a letter or `_` then letters, digits and
+  `_`, none a Lean keyword, up to 128 bytes; one name per run, unique in its
+  version, so dots give projects namespaces. A name another run has, while
+  that run has snapshots, keeps nothing (`check.error` is a `conflict` that
+  names that run's first snapshot), unless the create [amends](#amending)
+  that run's spec: the name then moves to the amending spec's run, and a
+  resubmit carries the run there. `name` with `replaces`, or a malformed
+  name, is a 400. Snapshots show the name of their run as `run`.
+- **Resolving.** Each `PisaRun.<name>` import becomes the module of the run's
+  head, on the same line, so positions after the header don't move; a
+  message on that import line has columns of the resolved line. Answers list
+  what each name resolved to in `runs`. A run whose heads are on several
+  modules, a fork, is a `conflict` that names them; a name no run has is a
+  `not_found`. For `/check`, a batch and a create these are in `check.error`
+  (a batch resolves each header once); for sessions and documents they are
+  HTTP errors.
+- **When.** `/check`, creates and each revision of a document resolve at the
+  request. A session resolves when it starts, and its final check imports
+  the same modules, so a run that moved on doesn't change its imports.
+- **What is kept.** A create's module is the code as resolved, so its hash,
+  and all of pisa's records, name modules as before. The snapshot keeps the
+  code as sent as `source` (`GET /snapshots/{id}`), and a create with a
+  `key` sent again after the run moved returns the first snapshot. Copies
+  made by a rebuild, a settle or a resubmit import modules, and have no
+  `source`.
+- **Retention.** A run keeps its name while it has snapshots, its first one
+  deleted or not; the name goes with the run's last snapshot.
+
 <a id="witnesses"></a>
 **Witnesses.** A target whose hypotheses can't hold together can be proved
 vacuously, and an allowed definition change can make them so. By convention,
@@ -1019,8 +1066,11 @@ accepting a run takes both:
 - **The export.** `GET /snapshots/export?against=<id>` (repeated, with
   `allow=` as for the audit) answers the run as a Lake project in
   `pisa-run/`, as a tar.gz:
-  - every module the spec snapshots and their heads need, as
-    `PisaSnap/s….lean` with its stored code;
+  - every module the spec snapshots and their heads need, with its stored
+    code. A [named run](#run-names)'s head is `PisaRun/<name>.lean` and its
+    spec, if it isn't the head, `PisaSpec/<name>.lean`; other modules are
+    `PisaSnap/s….lean`. Each file imports the others by those names, and the
+    configurations name the modules the same way;
   - the worker project's `lean-toolchain` and `lake-manifest.json`, and a
     `lakefile.toml` that requires what the project requires and builds the
     modules with `autoImplicit` off, as pisa builds them;
@@ -1121,19 +1171,23 @@ accepting a run takes both:
   in definitions as well as proofs, with those definitions as `holes` (see
   [Replacing](#replacing)), labels the
   run (see [Labels](#labels)) and holds the spec ids. They stay valid through
-  [rebuilds](#rebuilding) without `retire`.
+  [rebuilds](#rebuilding) without `retire`. It names each spec's run (see
+  [Naming a run](#run-names)), so that agents can import a lemma's run by
+  name.
 - **Agents.** Each gets its target's spec id and labels every snapshot with
   the run's labels. Scratch work goes to `/check` (see
   [Snapshots](#snapshots)), which keeps no snapshot. To submit, an agent
   creates its code with `replaces` the snapshot it last submitted for the
-  target, or the spec snapshot at first. [Search](#snapshot-search) shows
+  target, or the spec snapshot at first. It imports another target's run as
+  `import PisaRun.<name>`, which builds on that run's head. [Search](#snapshot-search) shows
   heads only, so what an agent imports from a hit is a head.
 - **On a `conflict`** (see [Replacing](#replacing)). The run moved under the
   agent: a rebuild copied its last version onto a new base, or another agent
   extended it. Nothing was built. The agent takes a head from the answer's
-  `heads`, moves its code onto it, its imports becoming those of the head's
-  `code` (`GET /snapshots/{id}`, see [Snapshots](#snapshots)), and submits
-  again, replacing that head.
+  `heads` and submits again, replacing that head. Code that imports runs by
+  name is sent as it is, since each name resolves to its run's head again.
+  Code that imports modules by hash moves onto the head's imports first,
+  those of its `code` (`GET /snapshots/{id}`, see [Snapshots](#snapshots)).
 - **Parallel attempts.** Agents on one target pass `"fork": true` on their
   first submission and extend their own branches. The leader keeps one and
   drops the others with `DELETE /snapshots/{id}?with_replacers=true`, on the
