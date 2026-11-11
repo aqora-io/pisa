@@ -7,36 +7,12 @@
 import type { ErrorKind } from "./openapi.ts";
 
 export type {
-  Amendment,
-  Amends,
-  Refutation,
-  Refutes,
-  ResubmitItem,
-  ResubmitSnapshotsRequest,
-  ResubmitSnapshotsResponse,
   AcceptPair,
   AcceptRequest,
   AcceptResponse,
-  AuditReview,
-  Document,
-  DocumentGoals,
-  DocumentGoalsRequest,
-  DocumentProbes,
-  DocumentProbesRequest,
-  EditDocumentRequest,
-  GoalsAt,
-  GoalsMode,
-  LeftOut,
-  LeftOutReason,
-  LinePos,
-  OpenDocumentRequest,
-  PairError,
-  PairErrorKind,
-  ProbeAt,
-  ProbeResult,
-  ReviewDeclaration,
-  ReviewOrigin,
   Allow,
+  Amendment,
+  Amends,
   ApplyTacticRequest,
   ApplyTacticResponse,
   AtPosition,
@@ -44,15 +20,16 @@ export type {
   AuditComparison,
   AuditFork,
   AuditLink,
+  AuditReview,
   AuditSnapshotsResponse,
   AuditSummary,
   AuditTarget,
   AuditUnproved,
+  Change,
   CheckBatchItem,
   CheckBatchRequest,
   CheckBatchResponse,
   CheckRequest,
-  Change,
   CheckResult,
   CheckSessionRequest,
   CreateSnapshotRequest,
@@ -63,11 +40,19 @@ export type {
   DeleteSnapshotResponse,
   Description,
   Detail,
+  Document,
+  DocumentGoals,
+  DocumentGoalsRequest,
+  DocumentProbes,
+  DocumentProbesRequest,
+  EditDocumentRequest,
   ErrorKind,
   ErrorResponse,
   Export,
   Flags,
   GetDeclarationResponse,
+  GoalsAt,
+  GoalsMode,
   Health,
   HealthStatus,
   Hit,
@@ -75,10 +60,18 @@ export type {
   JobKind,
   JobOutcome,
   JobStatus,
+  LeftOut,
+  LeftOutReason,
+  LinePos,
   ListDependentsResponse,
   ListSnapshotsResponse,
   Message,
+  OpenDocumentRequest,
+  PairError,
+  PairErrorKind,
   Pos,
+  ProbeAt,
+  ProbeResult,
   ProofStatus,
   Query,
   QueryResult,
@@ -90,11 +83,18 @@ export type {
   RebuildSkipped,
   RebuildSnapshotsRequest,
   RebuildSnapshotsResponse,
+  Refutation,
+  Refutes,
   Replacement,
   Replaces,
   Resolution,
   ResolveRequest,
   ResolveResponse,
+  ResubmitItem,
+  ResubmitSnapshotsRequest,
+  ResubmitSnapshotsResponse,
+  ReviewDeclaration,
+  ReviewOrigin,
   SearchHealth,
   SearchRequest,
   SearchResponse,
@@ -108,6 +108,7 @@ export type {
   State,
   Suggestion,
   TacticInfo,
+  Tarball,
   TermInfo,
   UpdateSnapshotRequest,
   VerifyFailure,
@@ -117,6 +118,9 @@ export type {
 /** An error's `kind` and `message`; the schema's `Error`, renamed so it
  *  doesn't hide JavaScript's. */
 export type { Error as ApiError } from "./openapi.ts";
+/** Code kept open on Lean Beam, at a revision; the schema's `Document`,
+ *  renamed so it doesn't hide the DOM's. */
+export type { Document as LeanDocument } from "./openapi.ts";
 
 // ===================== Identifiers =====================
 
@@ -124,9 +128,12 @@ export type { Error as ApiError } from "./openapi.ts";
  *  tactic on the same state gives the same state, and the same id. A state
  *  stays valid after tactics are applied to it, so a session is a tree. */
 export type StateId = string;
-/** A tactic session, `<version>~<32 hex>`: also its open document's id, for
- *  the `/documents` endpoints. */
+/** A tactic session, `<version>~<32 hex>`: also its open document's id
+ *  (a `DocumentId`), for the `/documents` endpoints. */
 export type SessionId = string;
+/** Code kept open on Lean Beam, `<version>~<32 hex>`. A session's id is
+ *  one. */
+export type DocumentId = string;
 /** A snapshot's id, `<version>~<32 lowercase hex>`. */
 export type SnapshotId = string;
 /** A snapshot module, `PisaSnap.s<32 hex>`, shared by every snapshot of the

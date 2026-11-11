@@ -6,6 +6,7 @@ import type {
   AuditSnapshotsResponse,
   CheckBatchResponse,
   CheckResult,
+  CheckSessionRequest,
   CreateSnapshotRequest,
   CreateSnapshotResponse,
   DeclarationDetail,
@@ -14,27 +15,28 @@ import type {
   Document,
   DocumentGoals,
   DocumentProbes,
-  GoalsMode,
-  LinePos,
-  ProbeAt,
   ErrorKind,
   GetDeclarationResponse,
+  GoalsMode,
   Health,
   Job as JobSchema,
   Labels,
+  LeanDocument,
+  LinePos,
   ListDependentsResponse,
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ModuleName,
   Pos,
+  ProbeAt,
   Query,
   QueryResult,
   RebuildSnapshotsRequest,
+  RebuildSnapshotsResponse,
+  Resolution,
+  ResolveResponse,
   ResubmitSnapshotsRequest,
   ResubmitSnapshotsResponse,
-  RebuildSnapshotsResponse,
-  ResolveResponse,
-  Resolution,
   SearchResponse,
   Session,
   SessionId,
@@ -115,6 +117,24 @@ export interface GetDeclarationOptions extends VersionOptions {
   module?: ModuleName;
 }
 
+/** What `auditSnapshots` audits: a project by its `labels`, or a run
+ *  `against` its spec snapshots. */
+export interface AuditParams {
+  labels?: Labels;
+  against?: SnapshotId[];
+  /** With `against`: definitions the run may change. */
+  allow?: string[];
+  /** With `against`: also list each head's declarations, with its holes'
+   *  values, for a reader to compare with the spec. */
+  review?: boolean;
+}
+
+/** A session's check takes no version: the session's id carries it. Of
+ *  `detail`, only `declarations` applies. */
+export type CheckSessionOptions = Omit<RunOptions, "version"> & { detail?: Detail[] };
+
+/** With `replaces` and no `version`, the snapshot is built on the replaced
+ *  snapshot's version, not the client's: a different one is refused. */
 export type CreateSnapshotOptions = RunOptions &
   Pick<
     CreateSnapshotRequest,
@@ -147,6 +167,16 @@ export type JobPoll<T> = { done: true; answer: T } | { done: false; job: JobSche
 export interface JobOptions extends RequestOptions {
   /** Seconds to wait for the job to finish, at most 60; by default none. */
   wait?: number;
+}
+
+export interface WaitJobOptions extends RequestOptions {
+  /** Seconds each look waits, 1–60; 60 by default. A job that finishes is
+   *  answered at once, whatever this is, so it only sets how soon a job's
+   *  progress is seen. */
+  wait?: number;
+  /** Called with the job each time a look finds it `queued` or
+   *  `running`. */
+  onPending?: (job: JobSchema) => void;
 }
 
 /** How long each look of `waitJob` waits: the server's longest. */
@@ -245,22 +275,17 @@ export class PisaClient {
 
   /** Checks the completed code of a session from scratch. `detail:
    *  ["declarations"]` gives every field of its declarations. */
-  checkSession(
-    session: SessionId,
-    code: string,
-    options: Omit<RunOptions, "version"> & { detail?: Detail[] } = {},
-  ): Promise<CheckResult> {
-    const body = { code, ...this.timeoutOf(options), ...(options.detail ? { detail: options.detail } : {}) };
-    return this.call("POST", ["sessions", session, "check"], body, options);
+  checkSession(session: SessionId, code: string, options: CheckSessionOptions = {}): Promise<CheckResult> {
+    return this.call("POST", ["sessions", session, "check"], this.checkSessionRequest(code, options), options);
   }
 
   /** `checkSession` as a job. */
   submitCheckSession(
     session: SessionId,
     code: string,
-    options: Omit<RunOptions, "version"> = {},
+    options: CheckSessionOptions = {},
   ): Promise<Job<CheckResult>> {
-    return this.submit(["sessions", session, "check"], { code, ...this.timeoutOf(options) }, options);
+    return this.submit(["sessions", session, "check"], this.checkSessionRequest(code, options), options);
   }
 
   /** Checks code and keeps it as a snapshot that later code can import
@@ -306,10 +331,7 @@ export class PisaClient {
    *  carry the version, and `labels` doesn't combine with them. An empty
    *  `against` is refused (`bad_request`) without sending it, as it would be
    *  a label audit. */
-  auditSnapshots(
-    params: { labels?: Labels; against?: SnapshotId[]; allow?: string[]; review?: boolean } = {},
-    options: VersionOptions = {},
-  ): Promise<AuditSnapshotsResponse> {
+  auditSnapshots(params: AuditParams = {}, options: VersionOptions = {}): Promise<AuditSnapshotsResponse> {
     if (params.against?.length === 0) {
       const message = "against names no snapshot: audit a run against its spec snapshots, or a project by its labels";
       return Promise.reject(new PisaError("bad_request", message));
@@ -453,14 +475,17 @@ export class PisaClient {
     return this.call("POST", ["snapshots", "rebuild"], this.rebuildSnapshotsRequest(from, to, labels, options), options);
   }
 
-  /** `rebuildSnapshots` as a job. A dry run isn't one: the server answers it
-   *  at once, which throws here. */
+  /** `rebuildSnapshots` as a job, for a run. A dry run is never one: the
+   *  server answers it at once, so it is refused here unsent. */
   submitRebuildSnapshots(
     from: SnapshotId,
     to: SnapshotId,
     labels: Labels,
-    options: RebuildOptions = {},
+    options: Omit<RebuildOptions, "dryRun"> = {},
   ): Promise<Job<RebuildSnapshotsResponse>> {
+    if ((options as RebuildOptions).dryRun) {
+      return Promise.reject(new PisaError("bad_request", "a dry run is answered at once: call rebuildSnapshots"));
+    }
     return this.submit(["snapshots", "rebuild"], this.rebuildSnapshotsRequest(from, to, labels, options), options);
   }
 
@@ -546,12 +571,14 @@ export class PisaClient {
   /** Waits for `job` to finish, however long it takes, and returns what its
    *  request would have, or throws what it would have thrown. A few network
    *  failures in a row are tried again. */
-  async waitJob<T>(job: Job<T>, options: RequestOptions = {}): Promise<T> {
+  async waitJob<T>(job: Job<T>, options: WaitJobOptions = {}): Promise<T> {
+    const { wait = JOB_WAIT, onPending, ...request } = options;
     let dropped = 0;
     for (;;) {
       try {
-        const polled = await this.pollJob(job, { ...options, wait: JOB_WAIT });
+        const polled = await this.pollJob(job, { ...request, wait });
         if (polled.done) return polled.answer;
+        onPending?.(polled.job);
         dropped = 0;
       } catch (e) {
         if (!isPisaError(e, "network") || dropped >= 3) throw e;
@@ -594,8 +621,15 @@ export class PisaClient {
     return r.declaration;
   }
 
+  private checkSessionRequest(code: string, options: CheckSessionOptions): CheckSessionRequest {
+    return { code, ...this.timeoutOf(options), ...(options.detail ? { detail: options.detail } : {}) };
+  }
+
   private createSnapshotRequest(code: string, options: CreateSnapshotOptions): CreateSnapshotRequest {
-    const body: CreateSnapshotRequest = { code, ...this.run(options) };
+    // The server takes a replacement's version from the snapshot it replaces.
+    const replacing = options.replaces !== undefined && options.version === undefined;
+    const run = replacing ? this.timeoutOf(options) : this.run(options);
+    const body: CreateSnapshotRequest = { code, ...run };
     if (options.verify !== undefined) body.verify = options.verify;
     if (options.labels !== undefined) body.labels = options.labels;
     if (options.key !== undefined) body.key = options.key;

@@ -1,6 +1,8 @@
 export {
   PisaClient,
+  type AuditParams,
   type CheckOptions,
+  type CheckSessionOptions,
   type ClientOptions,
   type CreateSnapshotOptions,
   type DeleteSnapshotOptions,
@@ -13,6 +15,7 @@ export {
   type RequestOptions,
   type RunOptions,
   type VersionOptions,
+  type WaitJobOptions,
 } from "./client.ts";
 export {
   PisaError,

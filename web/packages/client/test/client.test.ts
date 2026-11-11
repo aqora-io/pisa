@@ -103,6 +103,12 @@ describe("PisaClient", () => {
     expect(sent[2]?.body).toMatchObject({ detail: ["declarations"] });
   });
 
+  it("asks a session check as a job for declarations in full", async () => {
+    const { client, sent } = recording(() => json({ id: "j", kind: "check_session", status: "queued" }, 202));
+    await client.submitCheckSession("v2~h~s", "def f := 1", { detail: ["declarations"] });
+    expect(sent[0]?.body).toEqual({ code: "def f := 1", detail: ["declarations"] });
+  });
+
   it("sends what a snapshot replaces", async () => {
     const { client, sent } = recording(() => json({ check: {} }));
     await client.createSnapshot("theorem t : 1 = 1 := rfl", { replaces: { snapshot_id: "v1~e1" }, key: "k" });
@@ -110,10 +116,21 @@ describe("PisaClient", () => {
     await client.createSnapshot("theorem t : 1 = 1 := by simp", { replaces: { snapshot_id: "v1~e1" }, fork: true });
     await client.createSnapshot("def f := sorry", { holes: ["f"] });
     expect(sent.map((s) => s.body)).toEqual([
-      { code: "theorem t : 1 = 1 := rfl", version: "v1", key: "k", replaces: { snapshot_id: "v1~e1" } },
-      { code: "def f := 2", version: "v1", replaces: { snapshot_id: "v1~e2", allow: { definitions: ["f"] } } },
-      { code: "theorem t : 1 = 1 := by simp", version: "v1", replaces: { snapshot_id: "v1~e1" }, fork: true },
+      // A replacement runs on the replaced snapshot's version unless asked.
+      { code: "theorem t : 1 = 1 := rfl", key: "k", replaces: { snapshot_id: "v1~e1" } },
+      { code: "def f := 2", replaces: { snapshot_id: "v1~e2", allow: { definitions: ["f"] } } },
+      { code: "theorem t : 1 = 1 := by simp", replaces: { snapshot_id: "v1~e1" }, fork: true },
       { code: "def f := sorry", version: "v1", holes: ["f"] },
+    ]);
+  });
+
+  it("sends a replacement's version only when asked", async () => {
+    const { client, sent } = recording(() => json({ id: "j", kind: "create_snapshot", status: "queued" }, 202));
+    await client.submitCreateSnapshot("def f := 3", { replaces: { snapshot_id: "w~e" } });
+    await client.submitCreateSnapshot("def f := 3", { replaces: { snapshot_id: "w~e" }, version: "w" });
+    expect(sent.map((s) => s.body)).toEqual([
+      { code: "def f := 3", replaces: { snapshot_id: "w~e" } },
+      { code: "def f := 3", version: "w", replaces: { snapshot_id: "w~e" } },
     ]);
   });
 
@@ -171,6 +188,16 @@ describe("PisaClient", () => {
     // No ids would be a label audit: it isn't sent.
     await expect(client.auditSnapshots({ against: [] })).rejects.toMatchObject({ name: "PisaError", kind: "bad_request" });
     expect(sent).toHaveLength(1);
+  });
+
+  it("asks an audit against a spec for its review list", async () => {
+    const { client, sent } = recording(() => json({ summary: {}, assumptions: [], not_proved: [], clean: true }));
+    await client.auditSnapshots({ against: ["v2~s0"], review: true });
+    await client.auditSnapshots({ against: ["v2~s0"], review: false });
+    expect(sent.map((s) => s.url)).toEqual([
+      "/api/snapshots/audit?against=v2%7Es0&review=true",
+      "/api/snapshots/audit?against=v2%7Es0",
+    ]);
   });
 
   it("sends the definitions an audit against a spec allows to change", async () => {
@@ -377,6 +404,32 @@ describe("PisaClient", () => {
       `/api/jobs/${job.id}?wait=60`,
     ]);
     expect((await client.cancelJob(submitted)).status).toBe("cancelled");
+  });
+
+  it("doesn't submit a dry run as a job: the server answers one at once", async () => {
+    const { client, sent } = recording(() => json({ ok: true, changes: [], plan: [] }));
+    const dry = { dryRun: true } as Parameters<typeof client.submitRebuildSnapshots>[3];
+    await expect(client.submitRebuildSnapshots("v2~a", "v2~b", { p: "1" }, dry)).rejects.toMatchObject({
+      kind: "bad_request",
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("reports a job's progress while it waits, as often as asked", async () => {
+    const job = { id: "c".repeat(32), kind: "rebuild_snapshots" as const, status: "queued" as const };
+    const statuses = ["queued", "running"];
+    const { client, sent } = recording(() => {
+      const status = statuses.shift();
+      return status === undefined ? json({ ok: true }) : json({ ...job, status }, 202);
+    });
+    const seen: string[] = [];
+    await client.waitJob(job, { wait: 5, onPending: (j) => seen.push(j.status) });
+    expect(seen).toEqual(["queued", "running"]);
+    expect(sent.map((s) => s.url)).toEqual([
+      `/api/jobs/${job.id}?wait=5`,
+      `/api/jobs/${job.id}?wait=5`,
+      `/api/jobs/${job.id}?wait=5`,
+    ]);
   });
 
   it("throws a job's error as its request would have, and a server that won't queue it", async () => {

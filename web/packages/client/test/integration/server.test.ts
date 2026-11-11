@@ -2,6 +2,7 @@
 // ignores fields it doesn't know, so each request field is checked by its
 // effect: a misspelled one would pass silently otherwise.
 
+
 import { describe, expect, inject, it } from "vitest";
 
 import { PisaClient, isPisaError } from "../../src/index.ts";
@@ -124,6 +125,20 @@ describe("snapshots", () => {
       kind: "bad_request",
     });
   });
+
+  it("builds a replacement on its snapshot's version, whatever the client's", async () => {
+    const created = await client.createSnapshot("import Foo\ntheorem web_replaced : 1 = 1 := sorry", {
+      verify: false,
+    });
+    const base = created.snapshot;
+    if (base === undefined) throw new Error(`not kept: ${JSON.stringify(created)}`);
+    const elsewhere = new PisaClient({ url, version: "other", timeout: 5 });
+    const replaced = await elsewhere.createSnapshot("import Foo\ntheorem web_replaced : 1 = 1 := rfl", {
+      replaces: { snapshot_id: base.id },
+      verify: false,
+    });
+    expect(replaced.snapshot?.version).toBe("v");
+  });
 });
 
 describe("documents", () => {
@@ -145,6 +160,18 @@ describe("documents", () => {
     await docs.closeDocument(d.id);
     const closed = await docs.documentGoals(d.id, [{ line: 4 }]).catch((e: unknown) => e);
     expect(isPisaError(closed, "not_found")).toBe(true);
+  });
+
+  it("works on a session's code, which doesn't change, and closing it ends the session", async () => {
+    const session = await client.startSession("theorem web_doc_session : 1 = 1 := by sorry");
+    const root = session.states[0];
+    const at = root?.pos ?? { line: 1, column: 0 };
+    expect((await client.documentGoals(session.id, [at])).at[0]?.pos).toEqual(at);
+    const edit = await client.editDocument(session.id, 1, "def f := 1").catch((e: unknown) => e);
+    expect(edit).toMatchObject({ kind: "bad_request", status: 400 });
+    await client.closeDocument(session.id);
+    const gone = await client.applyTactic(root?.id ?? "", "rfl").catch((e: unknown) => e);
+    expect(gone).toMatchObject({ kind: "not_found" });
   });
 });
 

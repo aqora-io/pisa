@@ -22,3 +22,13 @@ it("generates its types from the committed openapi.json", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+it("names every schema the API has", () => {
+  const generated = readFileSync(join(import.meta.dirname, "../src/openapi.ts"), "utf8");
+  const types = readFileSync(join(import.meta.dirname, "../src/types.ts"), "utf8");
+  const schemas = [...generated.matchAll(/^export type (\w+) = components\['schemas'\]/gm)].map((m) => m[1] ?? "");
+  // Re-exported under another name where the schema's would hide a global.
+  const renamed: Record<string, string> = { Error: "ApiError", Document: "LeanDocument" };
+  const missing = schemas.filter((s) => !new RegExp(`\\b${renamed[s] ?? s}\\b`).test(types));
+  expect(missing).toEqual([]);
+});
