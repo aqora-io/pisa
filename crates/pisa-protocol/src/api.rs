@@ -1429,8 +1429,8 @@ pub struct ReviewDeclaration {
     /// A snapshot of its module, for one from below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
-    /// As the build printed it, with notation. A private declaration has
-    /// none, as the build's export leaves private names out.
+    /// As the build printed it, with notation. None from a build before
+    /// private declarations were exported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     /// Its type, with full names and no notation.
@@ -1439,11 +1439,15 @@ pub struct ReviewDeclaration {
     /// One of the spec's holes, or a definition the audit's `allow` names.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hole: bool,
-    /// A hole's value on the head, as the build printed it with full names
-    /// and no notation, cut at 4,000 characters. None from a build before
-    /// values were printed.
+    /// A hole's value on the head, and the value of each definition the
+    /// head adds that a hole's value reaches, as the build printed it with
+    /// full names and no notation, each `sorry` as `sorry`, cut at 4,000
+    /// characters. None from a build before values were printed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// The other holes its value names, which a reviewer reads with it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<String>,
 }
 
 /// Where a reviewed declaration is declared.

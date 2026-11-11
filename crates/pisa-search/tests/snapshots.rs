@@ -351,6 +351,7 @@ fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
         docstring: Some(doc.into()),
         deprecated_to: None,
         value: None,
+        private: false,
         uses_sorry: false,
         status: ProofStatus::Proved,
     }

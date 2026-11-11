@@ -22,7 +22,10 @@ module's files. Then it prints:
   as axioms to the modules it imports, so only the verifier, which loads them
   whole, can describe it;
 - `PISA_EXPORT [exports]`, as `Pisa.exportDecls` gives them, for what the
-  module exports.
+  module exports: for module-system code, the names its importers see, each
+  described as the module declares it, theorems as theorems and definitions
+  with their values, as importers would see a theorem as an axiom and an
+  unexposed definition without its value.
 
 It exits with 1 when Lean reported errors, as `lean` does.
 -/
@@ -116,13 +119,13 @@ def run (args : List String) : IO UInt32 := do
     let (decls, _) ←
       (describeAll mainModule names (fromKernel := true)).toIO ctx { env := .ofKernelEnv kenv }
     emit "PISA_DECLS" (Json.arr decls)
-  -- What importers see: a module-system module's exported part.
-  let (names, seen) := if isModule then (parts[0]!.constNames, env.setExporting true)
-    else (own, env)
+  -- What importers see of a module-system module: its exported part's names,
+  -- described from the module's own view.
+  let names := if isModule then parts[0]!.constNames else own
   let ctx : Core.Context := {
     fileName := file.toString, fileMap := default, options := opts
     maxHeartbeats := Core.getMaxHeartbeats opts }
-  let (exports, _, _) ← (exportDecls names a.valueChars).toIO ctx { env := seen }
+  let (exports, _, _) ← (exportDecls names a.valueChars).toIO ctx { env }
   emit "PISA_EXPORT" (Json.arr exports)
   return 0
 

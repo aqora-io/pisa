@@ -235,6 +235,10 @@ pub struct SnapshotDecl {
     /// declarations, and in records from before the export printed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// A private declaration, which the review list shows and search leaves
+    /// out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private: bool,
     /// Depends on `sorry`, by the module's check result.
     #[serde(default)]
     pub uses_sorry: bool,
@@ -951,6 +955,7 @@ mod tests {
             docstring: None,
             deprecated_to: None,
             value: None,
+            private: false,
             uses_sorry: false,
             status: ProofStatus::Proved,
         }

@@ -1887,12 +1887,14 @@ export interface components {
         ReviewDeclaration: {
             /** @description One of the spec's holes, or a definition the audit's `allow` names. */
             hole?: boolean;
+            /** @description The other holes its value names, which a reviewer reads with it. */
+            holes?: string[];
             kind: string;
             name: string;
             origin: components["schemas"]["ReviewOrigin"];
             /**
-             * @description As the build printed it, with notation. A private declaration has
-             *     none, as the build's export leaves private names out.
+             * @description As the build printed it, with notation. None from a build before
+             *     private declarations were exported.
              */
             signature?: string;
             /** @description A snapshot of its module, for one from below. */
@@ -1900,9 +1902,10 @@ export interface components {
             /** @description Its type, with full names and no notation. */
             type?: string;
             /**
-             * @description A hole's value on the head, as the build printed it with full names
-             *     and no notation, cut at 4,000 characters. None from a build before
-             *     values were printed.
+             * @description A hole's value on the head, and the value of each definition the
+             *     head adds that a hole's value reaches, as the build printed it with
+             *     full names and no notation, each `sorry` as `sorry`, cut at 4,000
+             *     characters. None from a build before values were printed.
              */
             value?: string;
         };

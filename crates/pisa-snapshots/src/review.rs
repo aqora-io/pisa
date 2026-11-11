@@ -138,6 +138,14 @@ pub async fn review(
             .map(|h| normalised(h).into_owned())
             .collect();
         let reached = closure(&start, &records);
+        // What the holes' values reach: the head's own definitions there are
+        // shown by value too, as a hole's value can hide behind one.
+        let hole_names: Vec<String> = start
+            .iter()
+            .filter(|n| holes.contains(normalised(n).as_ref()))
+            .cloned()
+            .collect();
+        let from_holes: HashSet<String> = closure(&hole_names, &records).into_iter().collect();
         // The snapshot that stands for each module below the head that the
         // walk reaches.
         let mut unnamed: Vec<String> = reached
@@ -165,6 +173,12 @@ pub async fn review(
             let d = &records[name];
             let m = module_of[name];
             let exported = exports.get(m).and_then(|e| e.get(name));
+            // What Lean derives of a declaration, such as a recursor or
+            // `casesOn`, which the export leaves out.
+            let module_exported = exports.get(m).is_some_and(|e| !e.is_empty());
+            if d.parent.is_some() && module_exported && exported.is_none() {
+                continue;
+            }
             let origin = if m != head.module {
                 ReviewOrigin::Snapshot
             } else if spec_names.contains(normalised(name).as_ref()) {
@@ -177,6 +191,10 @@ pub async fn review(
                 _ => None,
             };
             let hole = holes.contains(normalised(name).as_ref());
+            let by_value = hole
+                || (origin == ReviewOrigin::Head
+                    && from_holes.contains(name)
+                    && follows_value(&d.kind));
             if let Some(e) = exported {
                 let mut uses: Vec<&String> = e.type_refs.iter().collect();
                 if follows_value(&d.kind) {
@@ -196,7 +214,16 @@ pub async fn review(
                 signature: exported.map(|e| e.signature.clone()),
                 type_full: exported.map(|e| e.type_pp_full.clone()),
                 hole,
-                value: exported.filter(|_| hole).and_then(|e| e.value.clone()),
+                value: exported.filter(|_| by_value).and_then(|e| e.value.clone()),
+                holes: match by_value {
+                    true => d
+                        .value_refs
+                        .iter()
+                        .filter(|r| *r != name && holes.contains(normalised(r).as_ref()))
+                        .cloned()
+                        .collect(),
+                    false => Vec::new(),
+                },
             });
         }
         // The spec's, then the head's, then those below by module, each in

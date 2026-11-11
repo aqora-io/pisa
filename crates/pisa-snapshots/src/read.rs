@@ -215,7 +215,8 @@ impl Reader {
         };
         let mut described: HashMap<String, serde_json::Value> =
             self.catalog.described(m).await?.into_iter().collect();
-        let exports = decls.decls.into_iter().map(|d| Export {
+        let public = decls.decls.into_iter().filter(|d| !d.private);
+        let exports = public.map(|d| Export {
             description: described
                 .remove(&d.name)
                 .and_then(|r| serde_json::from_value::<Informal>(r.get("informal")?.clone()).ok())

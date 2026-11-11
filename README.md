@@ -834,14 +834,18 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
     doesn't follow theorems' proofs, so a candidate built inside a proof
     adds only its statement, and axioms are leaves.
   - **The declarations.** Each is `{name, kind, origin, snapshot_id?,
-    signature?, type?, hole?, value?}`. `origin` is `spec` (the spec's own,
-    as the head keeps them), `head` (new in the head, such as what a hole's
-    value now uses), or `snapshot` (a snapshot below, with its id).
-    `signature` has notation, and `type` has full names and no notation; a
-    private declaration has neither. A hole, or a definition `allow` names,
-    has `hole` and its `value` on the head, printed with full names and no
-    notation, which the code can't dress up, and cut at 4,000 characters.
-    Snapshots built before values were printed have none.
+    signature?, type?, hole?, value?, holes?}`. `origin` is `spec` (the
+    spec's own, as the head keeps them), `head` (new in the head, such as
+    what a hole's value now uses), or `snapshot` (a snapshot below, with its
+    id). `signature` has notation, and `type` has full names and no notation.
+    A hole, or a definition `allow` names, has `hole` and its `value` on the
+    head, printed with full names and no notation, which the code can't
+    dress up, each `sorry` as `sorry`, and cut at 4,000 characters. So has
+    each definition the head adds that a hole's value reaches, as the value
+    can hide behind one. `holes` names the other holes a value mentions, to
+    read with it. What Lean derives of a declaration, such as a recursor or
+    `casesOn`, isn't listed. Snapshots built before values were printed, or
+    before private declarations were exported, have none of those.
   - **`library`** names the constants of Lean, Mathlib and the like that
     they use, which the version fixes.
   - **Trust.** The text is what the builds printed, for reading.
@@ -1620,7 +1624,10 @@ the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
   leader reads that log every 2 s. A snapshot is searchable by name, signature and
   docstring seconds after it is created, with a vector of its docstring;
   its description, and a vector of that, follow when the LLM and the
-  embedder answer. Module-system snapshots have no docstrings in the export.
+  embedder answer. A module-system snapshot's declarations are exported as
+  its module declares them, theorems as theorems and definitions with their
+  values and docstrings, though importers see a theorem as an axiom and an
+  unexposed definition without its value.
 - **Descriptions.** With `PISA_SEARCH_DESCRIBE_MODEL` set to a Claude model
   (with `ANTHROPIC_API_KEY`) or an OpenAI one (with `OPENAI_API_KEY`), the
   leader describes every snapshot declaration as `informalize` describes the

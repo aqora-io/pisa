@@ -7,13 +7,16 @@ public import Lean.Linter.Deprecated
 /-!
 What the search service indexes of a snapshot module's declarations, and the
 audit's review list shows of them: for each, `{name, kind, signature,
-type_pp_full, type_refs, value_refs, docstring, deprecated_to, value}`.
+type_pp_full, type_refs, value_refs, docstring, deprecated_to, value,
+private}`.
 
-It skips what `search/exporter/PisaExport.lean` skips: internal, private and
-auto-generated names. A definition's `value` is printed with full names and no
-notation, which code can't dress up with notation of its own, and cut at
-`chars` characters. Each declaration gets its own heartbeat budget, and one
-that fails to print is left out.
+It skips what `search/exporter/PisaExport.lean` skips, internal and
+auto-generated names, but not private ones, which the review list shows and
+search leaves out (`private: true`). A definition's `value` is printed with
+full names and no notation, which code can't dress up with notation of its
+own, each `sorry` in it as `sorry`, and cut at `chars` characters. Each
+declaration gets its own heartbeat budget, and one that fails to print is left
+out.
 -/
 
 public section
@@ -25,7 +28,7 @@ open Lean Meta
 def exportDecl (n : Name) (chars : Nat) : MetaM (Option Json) := do
   let env ← getEnv
   let some ci := env.find? n | return none
-  if n.isInternalDetail || isPrivateName n then return none
+  if (privateToUserName n).isInternalDetail then return none
   if n matches .str _ "inj" || n matches .str _ "injEq" || n matches .str _ "noConfusionType" then
     return none
   if isAuxRecursor env n || isNoConfusion env n then return none
@@ -41,10 +44,15 @@ def exportDecl (n : Name) (chars : Nat) : MetaM (Option Json) := do
         | .defnInfo d => some d.value
         | .opaqueInfo d => some d.value
         | _ => none
-      let value? : Option String ← match valueExpr? with
+      -- Without notation a `sorry` prints as `sorryAx` with its type and
+      -- label, so each is marked with a constant that prints as `sorry`.
+      let mark := `Pisa.Export.sorryMark
+      let unsorried := valueExpr?.map fun v =>
+        v.replace fun e => if e.isSorry then some (mkConst mark) else none
+      let value? : Option String ← match unsorried with
         | some v => withOptions (fun o => o |>.setBool `pp.notation false
             |>.setBool `pp.fullNames true |>.set `pp.maxSteps (100000 : Nat)) do
-              let text := (← ppExpr v).pretty 120
+              let text := ((← ppExpr v).pretty 120).replace (toString mark) "sorry"
               if text.length > chars then
                 return some (String.ofList (text.toList.take chars) ++ " …")
               else
@@ -82,7 +90,8 @@ def exportDecl (n : Name) (chars : Nat) : MetaM (Option Json) := do
         ("value_refs", toJson valueRefs),
         ("docstring", toJson doc),
         ("deprecated_to", toJson (deprecated.bind (·.newName?))),
-        ("value", toJson value?)])
+        ("value", toJson value?),
+        ("private", toJson (isPrivateName n))])
     catch _ => return none
 
 /-- The exports of the declarations `names`, in order. -/

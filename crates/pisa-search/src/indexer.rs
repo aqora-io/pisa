@@ -347,9 +347,11 @@ impl Indexer {
 
     /// Module `m` as the catalog has it, if it is kept.
     async fn read_module(&self, m: &str) -> anyhow::Result<Option<Module>> {
-        let Some(decls) = self.catalog.decls(m).await.map_err(store)? else {
+        let Some(mut decls) = self.catalog.decls(m).await.map_err(store)? else {
             return Ok(None);
         };
+        // Exported for the audit's review list, not for search.
+        decls.decls.retain(|d| !d.private);
         let described = parse_described(self.catalog.described(m).await.map_err(store)?);
         let has_entries = self.catalog.has_entries(m).await.map_err(store)?;
         let has_heads = self.catalog.has_heads(m).await.map_err(store)?;

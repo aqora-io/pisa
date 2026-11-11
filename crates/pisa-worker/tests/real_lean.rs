@@ -813,9 +813,29 @@ fn the_build_names_its_imports_and_exports_what_importers_see() {
     assert!(!names.contains(&"hidden"), "{names:?}");
     let double = export.iter().find(|d| d["name"] == "double").unwrap();
     assert_eq!(double["docstring"], "Doubles.");
-    // Importers see a module-system theorem as an axiom.
+    // Importers see a module-system theorem as an axiom; the export says
+    // what the module declares.
     let theorem = export.iter().find(|d| d["name"] == "double_two").unwrap();
-    assert_eq!(theorem["kind"], "axiom");
+    assert_eq!(theorem["kind"], "theorem");
+    // A definition that isn't exposed has its value, and docstring, all the
+    // same.
+    let costs = "module\n\n/-- The cost. -/\npublic def cost : Nat := 7\n\n\
+                 @[expose] public def cost2 : Nat := 8\n\n\
+                 public theorem bound : cost ≤ 10 := by decide\n";
+    let export = s.tool_build(costs).one("PISA_EXPORT").clone();
+    let find = |name: &str| {
+        let decls = export.as_array().unwrap();
+        decls.iter().find(|d| d["name"] == name).unwrap().clone()
+    };
+    let (cost, cost2, bound) = (find("cost"), find("cost2"), find("bound"));
+    assert_eq!(
+        (&cost["kind"], &cost["value"]),
+        (&serde_json::json!("def"), &serde_json::json!("7")),
+        "{cost}"
+    );
+    assert_eq!(cost["docstring"], "The cost.");
+    assert_eq!(cost2["value"], "8");
+    assert_eq!(bound["kind"], "theorem");
     let on = format!(
         "module\n\npublic import {}\n\npublic theorem four : double 2 = 4 := double_two\n",
         snapshot::module(&id)
@@ -975,4 +995,31 @@ fn a_verifier_that_cant_read_a_module_says_so() {
         .to_string();
     assert!(reason.contains(&format!("reading `{missing}`")), "{reason}");
     assert!(run.all("PISA_VERIFY").is_empty(), "{}", run.output);
+}
+
+/// The export prints a `sorry` as `sorry`, alone or inside a value, rather
+/// than `sorryAx` with its type and label, and it exports a private
+/// declaration too, marked so that search leaves it out.
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn the_export_prints_sorry_and_marks_what_is_private() {
+    let code = "private def h : Nat := sorry\n\n\
+                def cost (b : Bool) : Nat := if b then sorry else 1\n";
+    let export = Snapshots::new().tool_build(code).one("PISA_EXPORT").clone();
+    let decls = export.as_array().unwrap();
+    let h = decls
+        .iter()
+        .find(|d| d["name"].as_str().unwrap().ends_with(".h"))
+        .unwrap_or_else(|| panic!("{export}"));
+    assert_eq!(
+        (&h["value"], &h["private"]),
+        (&serde_json::json!("sorry"), &serde_json::json!(true))
+    );
+    let cost = decls.iter().find(|d| d["name"] == "cost").unwrap();
+    let value = cost["value"].as_str().unwrap();
+    assert!(
+        value.contains("sorry") && !value.contains("sorryAx"),
+        "{value}"
+    );
+    assert_eq!(cost["private"], false);
 }

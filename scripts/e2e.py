@@ -531,6 +531,8 @@ def review():
     assert out["clean"] is True, out
     budget = {d["name"]: d for d in out["review"][0]["declarations"]}["budget"]
     assert budget["hole"] and "cost" in budget["value"] and "program" in budget["value"], budget
+    # It names the other hole, whose value the reviewer reads with it.
+    assert budget.get("holes") == ["program"], budget
     assert post("/snapshots/accept", {"against": [loose["snapshot"]["id"]], "paranoid": False})["accepted"]
     delete_snapshots([gamed, loose])
     step("review: a budget left as a hole and set to the candidate's own cost is clean, and the review shows its value")

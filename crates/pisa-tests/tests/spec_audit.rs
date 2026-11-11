@@ -1173,14 +1173,15 @@ async fn the_review_lists_what_the_specs_statements_use_on_each_head() {
         .collect();
     // The spec's declarations in its order, the head's `three`, which the
     // hole's value now uses, then `g` from the snapshot below; each hole
-    // with its value on the head.
+    // with its value on the head, and `three` with its own, as the hole's
+    // value hides behind it.
     assert_eq!(
         listed,
         [
             "cost spec - \"three\"".to_string(),
             "good spec - -".into(),
             "t spec - -".into(),
-            "three head - -".into(),
+            "three head - \"3\"".into(),
             format!("g snapshot \"{}\" -", id(&base)),
         ]
     );
@@ -1198,6 +1199,43 @@ async fn the_review_lists_what_the_specs_statements_use_on_each_head() {
     // Only on request, and only against a spec.
     let r = audit(&c, &[id(&s)]).await;
     assert!(r.get("review").is_none(), "{r}");
+
+    // A hole left as `sorry` reads `sorry`, and one whose value names
+    // another hole says so.
+    let spec = "import Foo\n\ndef cost : Nat := sorry\ndef budget : Nat := sorry\n\
+                theorem fits : cost = budget := sorry";
+    let s = create(
+        &c,
+        json!({"code": spec, "holes": ["cost", "budget"], "verify": true}),
+    )
+    .await;
+    let filled = "import Foo\n\ndef cost : Nat := sorry\ndef budget : Nat := cost\n\
+                  theorem fits : cost = budget := rfl";
+    create(
+        &c,
+        json!({"code": filled, "replaces": replacing(&s), "verify": true}),
+    )
+    .await;
+    let (status, r) = get(
+        &c,
+        &format!("/snapshots/audit?against={}&review=true", id(&s)),
+    )
+    .await;
+    assert_eq!(status, 200, "{r}");
+    let by_name = |name: &str| {
+        let declarations = r["review"][0]["declarations"].as_array().unwrap();
+        declarations
+            .iter()
+            .find(|d| d["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_name("cost")["value"], "sorry");
+    let budget = by_name("budget");
+    assert_eq!(
+        (&budget["value"], &budget["holes"]),
+        (&json!("cost"), &json!(["cost"]))
+    );
     for query in ["review=true", &format!("against={}&review=yes", id(&s))] {
         let (status, e) = get(&c, &format!("/snapshots/audit?{query}")).await;
         assert_eq!(
