@@ -888,11 +888,22 @@ impl Catalog {
     }
 
     /// Stores `result`, what `POST /snapshots/accept` answered, as
-    /// acceptance `id`, a new random id. Refused like a record that is too
-    /// large.
-    pub async fn put_acceptance(&self, id: &str, result: &impl Serialize) -> Result<(), Error> {
+    /// acceptance `id`, a new random id, of the spec entries `specs`.
+    /// Refused like a record that is too large.
+    pub async fn put_acceptance(
+        &self,
+        id: &str,
+        specs: &[String],
+        result: &impl Serialize,
+    ) -> Result<(), Error> {
         let result = to_record(result).map_err(Error::from)?;
-        dispatch!(&self.db, put_acceptance(&self.version, id, &result))
+        dispatch!(&self.db, put_acceptance(&self.version, id, specs, &result))
+    }
+
+    /// The stored results of spec entry `spec`'s acceptances, newest first,
+    /// at most `limit`.
+    pub async fn acceptances_of(&self, spec: &str, limit: u32) -> Result<Vec<Value>, Error> {
+        dispatch!(&self.db, acceptances_of(&self.version, spec, limit.into()))
     }
 
     /// The amendments that `entries` make or are subject to, by the entry
@@ -2216,9 +2227,26 @@ mod tests {
         for catalog in catalogs().await {
             let result =
                 serde_json::json!({"accepted": true, "pairs": [{"spec": "s", "head": "h"}]});
-            catalog.put_acceptance("a1", &result).await.unwrap();
-            assert_eq!(catalog.acceptance("a1").await.unwrap(), Some(result));
+            let specs = ["s".to_string(), "t".into()];
+            catalog.put_acceptance("a1", &specs, &result).await.unwrap();
+            assert_eq!(
+                catalog.acceptance("a1").await.unwrap(),
+                Some(result.clone())
+            );
             assert_eq!(catalog.acceptance("a2").await.unwrap(), None);
+            // By spec, newest first.
+            let later = serde_json::json!({"accepted": false});
+            catalog
+                .put_acceptance("a2", &specs[..1], &later)
+                .await
+                .unwrap();
+            assert_eq!(
+                catalog.acceptances_of("s", 10).await.unwrap(),
+                [later, result.clone()]
+            );
+            assert_eq!(catalog.acceptances_of("t", 10).await.unwrap(), [result]);
+            assert_eq!(catalog.acceptances_of("s", 1).await.unwrap().len(), 1);
+            assert!(catalog.acceptances_of("u", 10).await.unwrap().is_empty());
         }
     }
 

@@ -28,10 +28,11 @@ use pisa_protocol::api::{
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
 use pisa_protocol::wire::{ExportedFile, ExportedPair, ExportedRun, SnapshotAcceptJob};
+use pisa_snapshots::review::review;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::ModuleMeta;
+use crate::catalog::{ModuleMeta, record_fits};
 use crate::launcher::Ran;
 use crate::pool::Pool;
 use crate::snapshots::Snapshots;
@@ -104,10 +105,16 @@ async fn audited_export(
             }
         }
         let mut head_defs = HashSet::new();
+        let mut head_axioms = HashSet::new();
         for m in &head_meta.modules {
             let meta = record(&m.id).await?;
-            let defs = meta.result.declarations.iter().filter(|d| d.kind == "def");
-            head_defs.extend(defs.map(|d| d.name.clone()));
+            for d in &meta.result.declarations {
+                match d.kind.as_str() {
+                    "axiom" => head_axioms.insert(d.name.clone()),
+                    "def" => head_defs.insert(d.name.clone()),
+                    _ => false,
+                };
+            }
         }
         let holes: Vec<String> = pair.holes.iter().chain(allow).cloned().collect();
         let named = config(
@@ -117,12 +124,15 @@ async fn audited_export(
             &holes,
             &assumptions,
             (&spec_defs, &head_defs),
+            &head_axioms,
         );
         let path = format!("comparator/{}.json", n + 1);
         files.push(file(&path, named.text));
         pairs.push(ExportedPair {
             spec: compared.spec.clone(),
             head: compared.head.clone(),
+            spec_module: snapshot::module(&pair.spec_module),
+            head_module: snapshot::module(&pair.head_module),
             config: path,
             theorems: named.theorems,
             left_out: named.left_out,
@@ -183,7 +193,12 @@ async fn audited_export(
 /// Lake builds each module once. Stores the result and returns it.
 pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptResponse, Error> {
     let project = pool.launcher().project();
-    let (audit, run) = audited_export(pool.snapshots(), project, &job.against, &job.allow).await?;
+    let (mut audit, run) =
+        audited_export(pool.snapshots(), project, &job.against, &job.allow).await?;
+    // What the leader reads beside the verdict, kept with it, read with the
+    // audit: a snapshot deleted while comparator runs takes nothing from it.
+    let reader = pool.snapshots().reader();
+    audit.review = review(reader, &audit.comparisons, &job.allow).await?;
     let key = key(&run);
     // One judgment at a time of a run, in its directory.
     let lock = pool.snapshots().lock(&format!("run:{key}"));
@@ -201,6 +216,9 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     // Comparator builds the modules, so free the slot's memory first.
     slot.retire_and_wait("evict").await;
     let timeout = Duration::from_secs(job.timeout_secs);
+    // The first pair comparator runs builds the run's modules, which later
+    // pairs replay, so it has the build's time too.
+    let mut building = Duration::from_secs(job.build_timeout_secs);
     let mut pairs = Vec::new();
     for pair in &run.pairs {
         // Nothing for comparator to judge, which it would refuse to start.
@@ -213,8 +231,9 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
                 }
                 let launcher = pool.launcher();
                 let oom_before = launcher.oom_kills(slot.id);
+                let limit = timeout + std::mem::take(&mut building);
                 let ran = launcher
-                    .lake(slot.id, &args, &dir, timeout)
+                    .lake(slot.id, &args, &dir, limit)
                     .await
                     .map_err(|e| {
                         Error::new(ErrorKind::Internal, format!("running lake comparator: {e}"))
@@ -241,6 +260,8 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
         pairs.push(AcceptPair {
             spec: pair.spec.clone(),
             head: pair.head.clone(),
+            spec_module: pair.spec_module.clone(),
+            head_module: pair.head_module.clone(),
             config: pair.config.clone(),
             accepted: error.is_none(),
             error,
@@ -253,8 +274,11 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     drop(slot);
     let clean = audit.clean == Some(true);
     let snapshots = pool.snapshots();
+    let specs = (job.against.iter())
+        .map(|a| snapshots.reader().parse(a))
+        .collect::<Result<Vec<_>, _>>()?;
     let hex = uuid::Uuid::new_v4().simple().to_string();
-    let accepted = AcceptResponse {
+    let mut accepted = AcceptResponse {
         id: format!("{}~{hex}", snapshots.reader().version()),
         created: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -268,9 +292,28 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
         heads: audit.heads.clone(),
         audit,
         pairs,
+        stale: false,
+        truncated: Vec::new(),
     };
-    snapshots.catalog().put_acceptance(&hex, &accepted).await?;
+    fit(&mut accepted);
+    snapshots
+        .catalog()
+        .put_acceptance(&hex, &specs, &accepted)
+        .await?;
     Ok(accepted)
+}
+
+/// Fits `accepted` to a record's 6 MiB: its pairs' outputs go first, then
+/// the review list, so that the verdict is kept once comparator has run.
+fn fit(accepted: &mut AcceptResponse) {
+    if !record_fits(accepted) {
+        accepted.pairs.iter_mut().for_each(|p| p.output.clear());
+        accepted.truncated.push("output".into());
+    }
+    if !record_fits(accepted) {
+        accepted.audit.review.clear();
+        accepted.truncated.push("review".into());
+    }
 }
 
 /// Whether `path` is one of a run's files that don't name what is built:
@@ -527,6 +570,7 @@ fn config(
     holes: &[String],
     assumptions: &[String],
     defs: (&HashSet<String>, &HashSet<String>),
+    head_axioms: &HashSet<String>,
 ) -> Named {
     let mut left_out: Vec<LeftOut> = Vec::new();
     let mut leave = |name: &String, reason: LeftOutReason| {
@@ -538,6 +582,27 @@ fn config(
         }
     };
     let private = |name: &str| name.starts_with("_private.");
+    // What comparator would refuse the pair for, though the audit doesn't.
+    let hidden = private_in_statement(spec, declarations);
+    let mut targets = Vec::new();
+    for d in declarations {
+        if d.kind != "theorem" || d.generated || d.parent.is_some() {
+            continue;
+        }
+        if !private(&d.name) && hidden.contains(d.name.as_str()) {
+            leave(&d.name, LeftOutReason::PrivateInStatement);
+        } else {
+            targets.push(&d.name);
+        }
+    }
+    let mut kept_axioms: Vec<&String> = Vec::new();
+    for a in assumptions {
+        if !private(a) && !head_axioms.contains(a) {
+            leave(a, LeftOutReason::AxiomNotInHead);
+        } else {
+            kept_axioms.push(a);
+        }
+    }
     let mut name = |names: &mut dyn Iterator<Item = &String>, holes: bool| -> Vec<String> {
         let mut kept: Vec<String> = Vec::new();
         for n in names {
@@ -558,16 +623,10 @@ fn config(
         }
         kept
     };
-    let theorems = name(
-        &mut declarations
-            .iter()
-            .filter(|d| d.kind == "theorem" && !d.generated && d.parent.is_none())
-            .map(|d| &d.name),
-        false,
-    );
+    let theorems = name(&mut targets.into_iter(), false);
     let holes = name(&mut holes.iter(), true);
     let standard: Vec<String> = STANDARD_AXIOMS.iter().map(|a| a.to_string()).collect();
-    let axioms = name(&mut standard.iter().chain(assumptions), false);
+    let axioms = name(&mut standard.iter().chain(kept_axioms), false);
     let config = json!({
         "challenge_module": snapshot::module(spec),
         "solution_module": snapshot::module(head),
@@ -580,6 +639,34 @@ fn config(
         theorems: theorems.len() as u64,
         left_out,
     }
+}
+
+/// The spec's theorems whose statement reaches a private name of the spec's
+/// own module, `spec`, directly or through the definitions of that module
+/// that its type uses. A private name of a snapshot below is one constant on
+/// both sides, so it doesn't count.
+fn private_in_statement<'a>(spec: &str, declarations: &'a [Declaration]) -> HashSet<&'a str> {
+    let own = format!("_private.{}.", snapshot::module(spec));
+    let mut reaching: HashSet<&str> = HashSet::new();
+    let reaches =
+        |r: &String, reaching: &HashSet<&str>| r.starts_with(&own) || reaching.contains(r.as_str());
+    loop {
+        let before = reaching.len();
+        for d in declarations.iter().filter(|d| d.kind != "theorem") {
+            let refs = d.type_refs.iter().chain(&d.value_refs);
+            if !reaching.contains(d.name.as_str()) && refs.clone().any(|r| reaches(r, &reaching)) {
+                reaching.insert(&d.name);
+            }
+        }
+        if reaching.len() == before {
+            break;
+        }
+    }
+    declarations
+        .iter()
+        .filter(|d| d.kind == "theorem" && d.type_refs.iter().any(|r| reaches(r, &reaching)))
+        .map(|d| d.name.as_str())
+        .collect()
 }
 
 /// What the README says of the project beside its pairs.
@@ -670,6 +757,8 @@ fn reason_text(reason: LeftOutReason) -> &'static str {
         LeftOutReason::Private => "private",
         LeftOutReason::NotADefinitionInSpec => "not a definition in the spec",
         LeftOutReason::NotADefinitionInHead => "not a definition in the head",
+        LeftOutReason::PrivateInStatement => "its statement uses a private name of the spec",
+        LeftOutReason::AxiomNotInHead => "an axiom the head doesn't build on",
     }
 }
 
@@ -742,6 +831,7 @@ mod tests {
         let assumptions = ["lit".to_string(), "_private.PisaSnap.sa.0.a".into()];
         let spec_defs: HashSet<String> = ["cost".to_string(), "gone".into()].into();
         let head_defs: HashSet<String> = ["cost".to_string()].into();
+        let head_axioms: HashSet<String> = ["lit".to_string()].into();
         let named = config(
             "a",
             "b",
@@ -749,6 +839,7 @@ mod tests {
             &holes,
             &assumptions,
             (&spec_defs, &head_defs),
+            &head_axioms,
         );
         let config: Value = serde_json::from_str(&named.text).unwrap();
         assert_eq!(
@@ -777,6 +868,99 @@ mod tests {
                 left_out("_private.PisaSnap.sa.0.a", LeftOutReason::Private),
             ]
         );
+    }
+
+    /// A target whose statement reaches a private name of the spec's own
+    /// module, directly or through the spec's definitions, and a spec axiom
+    /// the head no longer builds on, are left out and say why: comparator
+    /// would refuse the pair for either.
+    #[test]
+    fn a_pair_leaves_out_what_comparator_cant_judge() {
+        let using = |name: &str, kind: &str, type_refs: &[&str], value_refs: &[&str]| Declaration {
+            type_refs: type_refs.iter().map(|r| r.to_string()).collect(),
+            value_refs: value_refs.iter().map(|r| r.to_string()).collect(),
+            ..decl(name, kind)
+        };
+        let h = "_private.PisaSnap.sa.0.h";
+        let declarations = [
+            using(h, "def", &[], &[]),
+            using("f", "def", &[], &[h]),
+            using("t", "theorem", &["f"], &[]),
+            using("u", "theorem", &[h], &[]),
+            // A snapshot below's private name is the same on both sides.
+            using("v", "theorem", &["_private.PisaSnap.sz.0.g"], &[]),
+            using("w", "theorem", &["Nat"], &[]),
+        ];
+        let assumptions = ["lit".to_string(), "dropped".into()];
+        let none = HashSet::new();
+        let head_axioms: HashSet<String> = ["lit".to_string()].into();
+        let named = config(
+            "a",
+            "b",
+            &declarations,
+            &[],
+            &assumptions,
+            (&none, &none),
+            &head_axioms,
+        );
+        let config: Value = serde_json::from_str(&named.text).unwrap();
+        assert_eq!(config["theorem_names"], json!(["v", "w"]));
+        assert_eq!(
+            config["permitted_axioms"],
+            json!(["propext", "Quot.sound", "Classical.choice", "lit"])
+        );
+        let left_out = |name: &str, reason| LeftOut {
+            name: name.into(),
+            reason,
+        };
+        assert_eq!(
+            named.left_out,
+            [
+                left_out("t", LeftOutReason::PrivateInStatement),
+                left_out("u", LeftOutReason::PrivateInStatement),
+                left_out("dropped", LeftOutReason::AxiomNotInHead),
+            ]
+        );
+    }
+
+    /// An acceptance too large to store loses its pairs' outputs, then its
+    /// review list, and says so; the verdict stays.
+    #[test]
+    fn an_acceptance_too_large_drops_outputs_then_the_review() {
+        let pair = |output: String| AcceptPair {
+            spec: "v~s".into(),
+            head: "v~h".into(),
+            spec_module: "PisaSnap.ss".into(),
+            head_module: "PisaSnap.sh".into(),
+            config: "comparator/1.json".into(),
+            accepted: true,
+            error: None,
+            exit_code: Some(0),
+            output,
+            theorems: 1,
+            left_out: Vec::new(),
+        };
+        let accepted = |output: String| AcceptResponse {
+            id: "v~a".into(),
+            created: 0,
+            against: vec!["v~s".into()],
+            allow: Vec::new(),
+            paranoid: true,
+            accepted: true,
+            clean: true,
+            heads: vec!["v~h".into()],
+            audit: AuditSnapshotsResponse::default(),
+            pairs: vec![pair(output)],
+            stale: false,
+            truncated: Vec::new(),
+        };
+        let mut small = accepted("ok".into());
+        fit(&mut small);
+        assert!(small.truncated.is_empty());
+        let mut large = accepted("x".repeat(7 << 20));
+        fit(&mut large);
+        assert_eq!(large.truncated, ["output"]);
+        assert_eq!((large.pairs[0].output.as_str(), large.accepted), ("", true));
     }
 
     /// What comparator printed, as Lake 4.36.0-rc2's `CLI/Check.lean`,
@@ -901,6 +1085,8 @@ mod tests {
         let pair = ExportedPair {
             spec: "v~a".into(),
             head: "v~b".into(),
+            spec_module: "PisaSnap.sa".into(),
+            head_module: "PisaSnap.sb".into(),
             config: "comparator/1.json".into(),
             theorems: 2,
             left_out: vec![LeftOut {

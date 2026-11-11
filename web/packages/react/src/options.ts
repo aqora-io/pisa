@@ -16,6 +16,7 @@ import type {
   Health,
   Labels,
   LinePos,
+  ListAcceptancesResponse,
   ListDependentsResponse,
   ListSnapshotsParams,
   ListSnapshotsResponse,
@@ -246,6 +247,16 @@ export function auditOptions(
   return {
     queryKey: [...pisaKeys.snapshots(client), "audit", version, asked] as QueryKey,
     queryFn: ({ signal }) => client.auditSnapshots(params, { ...input, signal }),
+    retry: retryQuery,
+  };
+}
+
+/** A spec snapshot's stored acceptances, newest first. Keyed under the
+ *  snapshots, as a change to the run makes one stale. */
+export function acceptancesOptions(client: PisaClient, spec: SnapshotId): PisaQueryOptions<ListAcceptancesResponse> {
+  return {
+    queryKey: [...pisaKeys.snapshots(client), "acceptances", spec] as QueryKey,
+    queryFn: ({ signal }) => client.listAcceptances(spec, { signal }),
     retry: retryQuery,
   };
 }

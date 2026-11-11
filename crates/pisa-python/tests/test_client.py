@@ -476,6 +476,8 @@ def test_review_export_and_accept(url):
     accepted = client.accept_run([spec["id"]])
     assert accepted["accepted"] and accepted["clean"] and accepted["heads"] == [head["id"]], accepted
     assert client.get_acceptance(accepted["id"])["pairs"] == accepted["pairs"]
+    listed = client.list_acceptances(spec["id"])["acceptances"]
+    assert [a["id"] for a in listed][-1] == accepted["id"]
     job = client.submit_accept_run([spec["id"]], paranoid=False)
     assert job["kind"] == "accept_run" and client.wait_job(job)["accepted"]
 

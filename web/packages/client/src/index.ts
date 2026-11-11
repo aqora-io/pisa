@@ -1,5 +1,6 @@
 export {
   PisaClient,
+  type AcceptOptions,
   type AuditParams,
   type CheckOptions,
   type CheckSessionOptions,

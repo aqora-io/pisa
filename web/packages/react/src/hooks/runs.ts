@@ -1,6 +1,7 @@
 import type {
   AcceptResponse,
   Labels,
+  ListAcceptancesResponse,
   PisaError,
   RebuildOptions,
   RebuildSnapshotsResponse,
@@ -8,7 +9,7 @@ import type {
 } from "@aqora/pisa-client";
 import { type UseMutationResult, type UseQueryResult, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { type RebuildPlanInput, pisaKeys, rebuildPlanOptions } from "../options.ts";
+import { type RebuildPlanInput, acceptancesOptions, pisaKeys, rebuildPlanOptions } from "../options.ts";
 import { usePisaClient } from "../provider.tsx";
 import { type LongJob, type LongJobOptions, useLongJob } from "./jobs.ts";
 
@@ -40,12 +41,14 @@ export function useRebuildSnapshots(
 
 /** A run to accept: its spec snapshots, the definitions it may change
  *  besides the spec's holes, whether comparator runs Lean's other kernels
- *  too, and the seconds for each pair. */
+ *  too, the seconds for each pair, and those more for the first pair, which
+ *  builds the run. */
 export interface AcceptInput {
   against: SnapshotId[];
   allow?: string[];
   paranoid?: boolean;
   timeout?: number;
+  buildTimeout?: number;
 }
 
 /** Accepts runs, as long jobs: the audit, and `lake comparator` on each
@@ -55,14 +58,21 @@ export function useAcceptRun(
   options: LongJobOptions<AcceptResponse, AcceptInput> = {},
 ): LongJob<AcceptResponse, AcceptInput> {
   return useLongJob(
-    (c, { against, allow, paranoid, timeout }, { signal }) =>
+    (c, { against, allow, paranoid, timeout, buildTimeout }, { signal }) =>
       c.submitAcceptRun(
         against,
         { ...(allow !== undefined && { allow }), ...(paranoid !== undefined && { paranoid }) },
-        { ...(timeout !== undefined && { timeout }), signal },
+        { ...(timeout !== undefined && { timeout }), ...(buildTimeout !== undefined && { buildTimeout }), signal },
       ),
     options,
   );
+}
+
+/** Spec snapshot `spec`'s stored acceptances, newest first, or nothing
+ *  while `spec` is null. Refetched after any snapshot changes, as that can
+ *  make one stale. */
+export function useAcceptances(spec: SnapshotId | null): UseQueryResult<ListAcceptancesResponse, PisaError> {
+  return useQuery({ ...acceptancesOptions(usePisaClient(), spec ?? ""), enabled: spec !== null });
 }
 
 /** A run to export. */

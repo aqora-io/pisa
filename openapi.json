@@ -23,6 +23,10 @@
             "description": "The head.",
             "type": "string"
           },
+          "head_module": {
+            "description": "The head's module.",
+            "type": "string"
+          },
           "left_out": {
             "description": "What the configuration leaves out of what it would name, and why.",
             "items": {
@@ -36,6 +40,10 @@
           },
           "spec": {
             "description": "The spec snapshot.",
+            "type": "string"
+          },
+          "spec_module": {
+            "description": "The spec snapshot's module, `PisaSnap.s…`: the code it judged, which\nstays named when the snapshot goes.",
             "type": "string"
           },
           "theorems": {
@@ -72,12 +80,18 @@
             },
             "type": "array"
           },
+          "build_timeout": {
+            "description": "Seconds more for the first pair comparator runs, which builds the\nrun's snapshot modules that later pairs replay: 1800 by default.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "paranoid": {
             "description": "Also run the external kernels Lean bundles: `leanchecker-paranoid`,\n`lean4lean`, `nanoda`, `con-leche` and `con-ron`.",
             "type": "boolean"
           },
           "timeout": {
-            "description": "The time limit in seconds for each spec snapshot and head, in which\ncomparator builds and exports both and checks the head.",
+            "description": "The time limit in seconds for each spec snapshot and head, in which\ncomparator builds and exports both and checks the head: 600 by\ndefault.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -142,6 +156,17 @@
           },
           "paranoid": {
             "type": "boolean"
+          },
+          "stale": {
+            "description": "When read back: the run's heads are no longer the ones it judged, as\na head was replaced or deleted since.",
+            "type": "boolean"
+          },
+          "truncated": {
+            "description": "What was left out so that the record fits its 6 MiB: `output`, each\npair's, then `review`, the audit's review list.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -1893,7 +1918,9 @@
         "enum": [
           "private",
           "not_a_definition_in_spec",
-          "not_a_definition_in_head"
+          "not_a_definition_in_head",
+          "private_in_statement",
+          "axiom_not_in_head"
         ],
         "type": "string"
       },
@@ -1913,6 +1940,21 @@
         },
         "required": [
           "line"
+        ],
+        "type": "object"
+      },
+      "ListAcceptancesResponse": {
+        "description": "`GET /snapshots/accept?spec=<id>`: a spec snapshot's acceptances,\nnewest first.",
+        "properties": {
+          "acceptances": {
+            "items": {
+              "$ref": "#/components/schemas/AcceptResponse"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "acceptances"
         ],
         "type": "object"
       },
@@ -5143,6 +5185,97 @@
       }
     },
     "/snapshots/accept": {
+      "get": {
+        "description": "The stored acceptances that judged a spec snapshot, newest first, at most 100. Each says `stale` once the run's heads are no longer the ones it judged.",
+        "operationId": "listAcceptances",
+        "parameters": [
+          {
+            "description": "The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since",
+            "in": "query",
+            "name": "spec",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListAcceptancesResponse"
+                }
+              }
+            },
+            "description": "Its acceptances"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later."
+          }
+        },
+        "summary": "A spec snapshot's acceptances",
+        "tags": [
+          "snapshots"
+        ]
+      },
       "post": {
         "description": "Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches, in the run's export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.",
         "operationId": "acceptRun",

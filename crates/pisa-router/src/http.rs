@@ -62,6 +62,7 @@ pub struct App {
         snapshots::export,
         snapshots::accept,
         snapshots::acceptance,
+        snapshots::acceptances,
         documents::open,
         documents::edit,
         documents::goals,
@@ -95,7 +96,10 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/snapshots/settle", post(snapshots::settle))
         .route("/snapshots/audit", get(snapshots::audit))
         .route("/snapshots/export", get(snapshots::export))
-        .route("/snapshots/accept", post(snapshots::accept))
+        .route(
+            "/snapshots/accept",
+            post(snapshots::accept).get(snapshots::acceptances),
+        )
         .route("/snapshots/accept/{id}", get(snapshots::acceptance))
         .route("/documents", post(documents::open))
         .route(

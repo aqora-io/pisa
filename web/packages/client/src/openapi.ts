@@ -303,7 +303,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * A spec snapshot's acceptances
+         * @description The stored acceptances that judged a spec snapshot, newest first, at most 100. Each says `stale` once the run's heads are no longer the ones it judged.
+         */
+        get: operations["listAcceptances"];
         put?: never;
         /**
          * Judge a run and store the verdict
@@ -539,12 +543,19 @@ export interface components {
             exit_code?: number;
             /** @description The head. */
             head: string;
+            /** @description The head's module. */
+            head_module?: string;
             /** @description What the configuration leaves out of what it would name, and why. */
             left_out?: components["schemas"]["LeftOut"][];
             /** @description The end of what it printed. */
             output: string;
             /** @description The spec snapshot. */
             spec: string;
+            /**
+             * @description The spec snapshot's module, `PisaSnap.s…`: the code it judged, which
+             *     stays named when the snapshot goes.
+             */
+            spec_module?: string;
             /**
              * Format: int64
              * @description How many of the spec's theorems the configuration names.
@@ -568,6 +579,12 @@ export interface components {
              */
             allow?: string[];
             /**
+             * Format: int64
+             * @description Seconds more for the first pair comparator runs, which builds the
+             *     run's snapshot modules that later pairs replay: 1800 by default.
+             */
+            build_timeout?: number;
+            /**
              * @description Also run the external kernels Lean bundles: `leanchecker-paranoid`,
              *     `lean4lean`, `nanoda`, `con-leche` and `con-ron`.
              */
@@ -575,7 +592,8 @@ export interface components {
             /**
              * Format: int64
              * @description The time limit in seconds for each spec snapshot and head, in which
-             *     comparator builds and exports both and checks the head.
+             *     comparator builds and exports both and checks the head: 600 by
+             *     default.
              */
             timeout?: number;
         };
@@ -611,6 +629,16 @@ export interface components {
              */
             pairs: components["schemas"]["AcceptPair"][];
             paranoid: boolean;
+            /**
+             * @description When read back: the run's heads are no longer the ones it judged, as
+             *     a head was replaced or deleted since.
+             */
+            stale?: boolean;
+            /**
+             * @description What was left out so that the record fits its 6 MiB: `output`, each
+             *     pair's, then `review`, the audit's review list.
+             */
+            truncated?: string[];
         };
         /**
          * @description What a replacement may change besides adding declarations: the values of
@@ -1694,7 +1722,7 @@ export interface components {
             reason: components["schemas"]["LeftOutReason"];
         };
         /** @enum {string} */
-        LeftOutReason: "private" | "not_a_definition_in_spec" | "not_a_definition_in_head";
+        LeftOutReason: "private" | "not_a_definition_in_spec" | "not_a_definition_in_head" | "private_in_statement" | "axiom_not_in_head";
         /**
          * @description A position in a document's code, as for [`Pos`]. Without `column`, it is
          *     the line's first tactic: its first character that isn't blank, after a
@@ -1705,6 +1733,13 @@ export interface components {
             column?: number;
             /** Format: int64 */
             line: number;
+        };
+        /**
+         * @description `GET /snapshots/accept?spec=<id>`: a spec snapshot's acceptances,
+         *     newest first.
+         */
+        ListAcceptancesResponse: {
+            acceptances: components["schemas"]["AcceptResponse"][];
         };
         /**
          * @description `GET /snapshots/{id}/dependents`: the snapshots of every module that
@@ -2586,6 +2621,7 @@ export type JobStatus = components['schemas']['JobStatus'];
 export type LeftOut = components['schemas']['LeftOut'];
 export type LeftOutReason = components['schemas']['LeftOutReason'];
 export type LinePos = components['schemas']['LinePos'];
+export type ListAcceptancesResponse = components['schemas']['ListAcceptancesResponse'];
 export type ListDependentsResponse = components['schemas']['ListDependentsResponse'];
 export type ListSnapshotsResponse = components['schemas']['ListSnapshotsResponse'];
 export type Message = components['schemas']['Message'];
@@ -4088,6 +4124,89 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listAcceptances: {
+        parameters: {
+            query: {
+                /** @description The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since */
+                spec: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Its acceptances */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListAcceptancesResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

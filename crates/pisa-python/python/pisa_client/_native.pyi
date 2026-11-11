@@ -344,12 +344,21 @@ class PairError(TypedDict):
 
 class LeftOut(TypedDict):
     name: str
-    reason: Literal["private", "not_a_definition_in_spec", "not_a_definition_in_head"]
+    reason: Literal[
+        "private",
+        "not_a_definition_in_spec",
+        "not_a_definition_in_head",
+        "private_in_statement",
+        "axiom_not_in_head",
+    ]
 
 class AcceptPair(TypedDict):
     """Comparator's verdict on a spec snapshot and a head it reaches."""
     spec: str
     head: str
+    # Their modules, `PisaSnap.s…`: the code judged, named when a snapshot goes.
+    spec_module: NotRequired[str]
+    head_module: NotRequired[str]
     config: str
     accepted: bool
     error: NotRequired[PairError]
@@ -371,6 +380,14 @@ class AcceptResponse(TypedDict):
     heads: list[str]
     audit: AuditSnapshotsResponse
     pairs: list[AcceptPair]
+    # Read back: the run's heads are no longer the ones it judged.
+    stale: NotRequired[bool]
+    # What was left out to fit 6 MiB: "output", then "review".
+    truncated: NotRequired[list[str]]
+
+class ListAcceptancesResponse(TypedDict):
+    """A spec snapshot's acceptances, newest first."""
+    acceptances: list[AcceptResponse]
 
 class Document(TypedDict):
     id: str
@@ -742,17 +759,34 @@ class Client:
         """The run that spec snapshots `against` start, as a Lake project for
         `lake comparator` in `pisa-run/` of a tar.gz."""
     def accept_run(
-        self, against: list[str], *, allow: list[str] | None = None, paranoid: bool = True
+        self,
+        against: list[str],
+        *,
+        allow: list[str] | None = None,
+        paranoid: bool = True,
+        timeout: int | None = None,
+        build_timeout: int | None = None,
     ) -> AcceptResponse:
         """Audit the run and run `lake comparator` on the pairs the audit
-        compared, with the client's `timeout` for each pair, and store the
-        result. Paranoid runs the external kernels Lean bundles too."""
+        compared, and store the result. Paranoid runs the external kernels
+        Lean bundles too. `timeout` is each pair's limit and `build_timeout`
+        the first pair's more for building the run, the server's (600, 1800)
+        unless given: not the client's `timeout`."""
     def submit_accept_run(
-        self, against: list[str], *, allow: list[str] | None = None, paranoid: bool = True
+        self,
+        against: list[str],
+        *,
+        allow: list[str] | None = None,
+        paranoid: bool = True,
+        timeout: int | None = None,
+        build_timeout: int | None = None,
     ) -> Job:
         """Like `accept_run`, as a job."""
     def get_acceptance(self, id: str) -> AcceptResponse:
         """An acceptance `accept_run` stored, by its id."""
+    def list_acceptances(self, spec: str) -> ListAcceptancesResponse:
+        """The acceptances that judged spec snapshot `spec`, newest first, at
+        most 100; each says `stale` once the run's heads have moved on."""
     def open_document(self, code: str) -> Document:
         """Open code on Lean Beam, which keeps it elaborated for goals and
         probes until `close_document` or until it expires."""

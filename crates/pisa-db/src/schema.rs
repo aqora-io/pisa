@@ -91,6 +91,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    acceptance_specs (version, spec, acceptance) {
+        version -> Text,
+        spec -> Text,
+        acceptance -> Text,
+        created_micros -> BigInt,
+    }
+}
+
+diesel::table! {
     acceptances (version, id) {
         version -> Text,
         id -> Text,

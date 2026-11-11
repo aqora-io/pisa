@@ -34,6 +34,8 @@ const LEFT_OUT: Record<LeftOutReason, string> = {
   private: "private",
   not_a_definition_in_spec: "not a definition in the spec",
   not_a_definition_in_head: "not a definition in the head",
+  private_in_statement: "its statement uses a private name of the spec",
+  axiom_not_in_head: "an axiom the head doesn't build on",
 };
 
 /** Saves `blob` as a file the browser downloads. */

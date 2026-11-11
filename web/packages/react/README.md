@@ -81,8 +81,9 @@ function Editor({ code }: { code: string }) {
   plans a rebuild, a dry run answered at once; `useRebuildSnapshots()` runs
   one as a long job, and refetches every snapshot query once it ends.
   `useAcceptRun()` accepts a run, its audit and `lake comparator` on each
-  pair, as a long job, and `useExportRun()` gets its `pisa-run.tar.gz` as a
-  Blob to save.
+  pair, as a long job, `useAcceptances(spec | null)` lists a spec's stored
+  acceptances, and `useExportRun()` gets its `pisa-run.tar.gz` as a Blob to
+  save.
 - **Search.**
   - `useSearch(query)` runs once the query has a term, and keeps the last hits
     while new ones load. A result with `dense_pending` is stale at once, so

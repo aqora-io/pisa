@@ -1543,18 +1543,25 @@ pub struct AcceptRequest {
     #[serde(default = "paranoid_default")]
     pub paranoid: bool,
     /// The time limit in seconds for each spec snapshot and head, in which
-    /// comparator builds and exports both and checks the head.
-    #[serde(default = "accept_timeout")]
-    pub timeout: u64,
+    /// comparator builds and exports both and checks the head: 600 by
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Seconds more for the first pair comparator runs, which builds the
+    /// run's snapshot modules that later pairs replay: 1800 by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_timeout: Option<u64>,
 }
 
 fn paranoid_default() -> bool {
     true
 }
 
-fn accept_timeout() -> u64 {
-    600
-}
+/// The default of [`AcceptRequest::build_timeout`].
+pub const ACCEPT_BUILD_TIMEOUT: u64 = 1800;
+
+/// The default of [`AcceptRequest::timeout`].
+pub const ACCEPT_TIMEOUT: u64 = 600;
 
 /// A run's acceptance, as `POST /snapshots/accept` judged it and stored it.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1581,6 +1588,21 @@ pub struct AcceptResponse {
     /// Each spec snapshot with each head it reaches, as comparator judged
     /// them, in the order of the audit's `comparisons`.
     pub pairs: Vec<AcceptPair>,
+    /// When read back: the run's heads are no longer the ones it judged, as
+    /// a head was replaced or deleted since.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
+    /// What was left out so that the record fits its 6 MiB: `output`, each
+    /// pair's, then `review`, the audit's review list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncated: Vec<String>,
+}
+
+/// `GET /snapshots/accept?spec=<id>`: a spec snapshot's acceptances,
+/// newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListAcceptancesResponse {
+    pub acceptances: Vec<AcceptResponse>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1589,6 +1611,13 @@ pub struct AcceptPair {
     pub spec: String,
     /// The head.
     pub head: String,
+    /// The spec snapshot's module, `PisaSnap.s…`: the code it judged, which
+    /// stays named when the snapshot goes.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub spec_module: String,
+    /// The head's module.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub head_module: String,
     /// Its comparator configuration in the export.
     pub config: String,
     pub accepted: bool,
@@ -1656,6 +1685,15 @@ pub enum LeftOutReason {
     NotADefinitionInSpec,
     /// The same of the head, e.g. a name the head no longer builds on.
     NotADefinitionInHead,
+    /// A target whose statement uses a private name of the spec's module,
+    /// directly or through the spec's definitions. Comparator reads that
+    /// name as another constant in each module and would refuse the pair;
+    /// the audit compares a module's own private names alike.
+    PrivateInStatement,
+    /// An axiom of the spec that the head no longer builds on. Comparator
+    /// needs each permitted axiom on both sides and would fail the export;
+    /// the head can't use it.
+    AxiomNotInHead,
 }
 
 /// What a spec snapshot's statements depend on, on one head it reaches: the

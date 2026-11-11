@@ -163,6 +163,10 @@ pub struct SnapshotAcceptJob {
     pub paranoid: bool,
     /// For each pair.
     pub timeout_secs: u64,
+    /// More for the first pair comparator runs, which builds the run's
+    /// modules that later pairs replay.
+    #[serde(default)]
+    pub build_timeout_secs: u64,
 }
 
 /// A run as a Lake project, for `lake comparator`: its files, and the pairs
@@ -189,6 +193,11 @@ pub struct ExportedPair {
     pub spec: String,
     /// The head's id.
     pub head: String,
+    /// Their modules, `PisaSnap.s…`.
+    #[serde(default)]
+    pub spec_module: String,
+    #[serde(default)]
+    pub head_module: String,
     /// Its comparator configuration's path in the project.
     pub config: String,
     /// How many of the spec's theorems it names.
@@ -413,6 +422,8 @@ mod tests {
             pairs: vec![ExportedPair {
                 spec: "v~s".into(),
                 head: "v~h".into(),
+                spec_module: "PisaSnap.ss".into(),
+                head_module: "PisaSnap.sh".into(),
                 config: "comparator/1.json".into(),
                 theorems: 1,
                 left_out: vec![api::LeftOut {

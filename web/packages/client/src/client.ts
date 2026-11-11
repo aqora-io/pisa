@@ -23,6 +23,7 @@ import type {
   Labels,
   LeanDocument,
   LinePos,
+  ListAcceptancesResponse,
   ListDependentsResponse,
   ListSnapshotsParams,
   ListSnapshotsResponse,
@@ -129,6 +130,11 @@ export interface AuditParams {
    *  values, for a reader to compare with the spec. */
   review?: boolean;
 }
+
+/** An acceptance's limits: `timeout` for each pair (600 by default) and
+ *  `buildTimeout` more for the first, which builds the run (1800). The
+ *  server's unless given, not the client's timeout. */
+export type AcceptOptions = Omit<RunOptions, "version"> & { buildTimeout?: number };
 
 /** A session's check takes no version: the session's id carries it. Of
  *  `detail`, only `declarations` applies. */
@@ -391,7 +397,7 @@ export class PisaClient {
   acceptRun(
     against: SnapshotId[],
     params: { allow?: string[]; paranoid?: boolean } = {},
-    options: Omit<RunOptions, "version"> = {},
+    options: AcceptOptions = {},
   ): Promise<AcceptResponse> {
     return this.call("POST", ["snapshots", "accept"], this.acceptRequest(against, params, options), options);
   }
@@ -400,7 +406,7 @@ export class PisaClient {
   submitAcceptRun(
     against: SnapshotId[],
     params: { allow?: string[]; paranoid?: boolean } = {},
-    options: Omit<RunOptions, "version"> = {},
+    options: AcceptOptions = {},
   ): Promise<Job<AcceptResponse>> {
     return this.submit(["snapshots", "accept"], this.acceptRequest(against, params, options), options);
   }
@@ -410,12 +416,22 @@ export class PisaClient {
     return this.call("GET", ["snapshots", "accept", id], undefined, options);
   }
 
+  /** The acceptances that judged spec snapshot `spec`, newest first, at most
+   *  100; each says `stale` once the run's heads have moved on. */
+  listAcceptances(spec: SnapshotId, options: RequestOptions = {}): Promise<ListAcceptancesResponse> {
+    const query = new URLSearchParams({ spec });
+    return this.call("GET", ["snapshots", "accept"], undefined, options, query);
+  }
+
   private acceptRequest(
     against: SnapshotId[],
     params: { allow?: string[]; paranoid?: boolean },
-    options: Omit<RunOptions, "version">,
+    options: AcceptOptions,
   ): AcceptRequest {
-    const body: AcceptRequest = { against, ...this.timeoutOf(options) };
+    // An acceptance has limits of its own, not the client's.
+    const body: AcceptRequest = { against };
+    if (options.timeout !== undefined) body.timeout = options.timeout;
+    if (options.buildTimeout !== undefined) body.build_timeout = options.buildTimeout;
     if (params.allow !== undefined && params.allow.length > 0) body.allow = params.allow;
     if (params.paranoid !== undefined) body.paranoid = params.paranoid;
     return body;
@@ -681,9 +697,10 @@ export class PisaClient {
   }
 
   private createSnapshotRequest(code: string, options: CreateSnapshotOptions): CreateSnapshotRequest {
-    // The server takes a replacement's version from the snapshot it replaces.
-    const replacing = options.replaces !== undefined && options.version === undefined;
-    const run = replacing ? this.timeoutOf(options) : this.run(options);
+    // The server takes the version of a create that names a spec, to replace,
+    // amend or refute, from that spec.
+    const named = options.replaces !== undefined || options.amends !== undefined || options.refutes !== undefined;
+    const run = named && options.version === undefined ? this.timeoutOf(options) : this.run(options);
     const body: CreateSnapshotRequest = { code, ...run };
     if (options.verify !== undefined) body.verify = options.verify;
     if (options.labels !== undefined) body.labels = options.labels;

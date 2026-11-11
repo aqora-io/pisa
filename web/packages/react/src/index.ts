@@ -37,6 +37,7 @@ export {
   type ExportRunInput,
   type RebuildRunInput,
   useAcceptRun,
+  useAcceptances,
   useExportRun,
   useRebuildPlan,
   useRebuildSnapshots,
@@ -57,6 +58,7 @@ export {
   useVerifySnapshot,
 } from "./hooks/snapshots.ts";
 export {
+  acceptancesOptions,
   type CheckBatchInput,
   type CheckInput,
   type Checked,

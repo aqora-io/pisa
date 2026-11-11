@@ -534,24 +534,27 @@ impl Launcher {
         if let Some(cg) = &self.cgroups {
             cg.apply(slot, &mut cmd)?;
         }
-        let child = cmd.spawn()?;
-        let ran = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(out) => {
-                let out = out?;
-                let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
-                output.push_str(&String::from_utf8_lossy(&out.stderr));
-                Ran {
-                    code: out.status.code(),
-                    output,
-                }
+        let mut child = cmd.spawn()?;
+        // Read as it runs, so that what it printed before a timeout stays.
+        let (stdout, stderr) = (read_all(child.stdout.take()), read_all(child.stderr.take()));
+        let code = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status?.code(),
+            Err(_) => {
+                let _ = child.kill().await;
+                None
             }
-            Err(_) => Ran {
-                code: None,
-                output: format!("lake ran for more than {}s", timeout.as_secs()),
-            },
         };
+        // A process Lake started may outlive it and keep the pipes open, so
+        // take what was read by then.
+        let mut output = String::new();
+        for read in [stdout, stderr] {
+            output.push_str(&String::from_utf8_lossy(&read.finish().await));
+        }
+        if code.is_none() {
+            output.push_str(&format!("\nlake ran for more than {}s", timeout.as_secs()));
+        }
         self.wait_idle(slot).await;
-        Ok(ran)
+        Ok(Ran { code, output })
     }
 
     /// Waits (up to two seconds) until no process is left in the slot's
@@ -662,6 +665,45 @@ fn parse_env0(bytes: &[u8]) -> Vec<(OsString, OsString)> {
             ))
         })
         .collect()
+}
+
+/// A pipe read in a task of its own, into a buffer that keeps what it read.
+struct Reading {
+    task: tokio::task::JoinHandle<()>,
+    read: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl Reading {
+    /// What was read: all of it once the pipe closes, or what was read
+    /// two seconds after it is asked for if it doesn't.
+    async fn finish(self) -> Vec<u8> {
+        // On a timeout the task is left to end with the pipe.
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.task).await;
+        std::mem::take(&mut *self.read.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+/// Reads `pipe` in a task of its own.
+fn read_all<R>(pipe: Option<R>) -> Reading
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let into = read.clone();
+    let task = tokio::spawn(async move {
+        let Some(mut pipe) = pipe else { return };
+        let mut chunk = [0u8; 8192];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut pipe, &mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => into
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    Reading { task, read }
 }
 
 #[cfg(test)]

@@ -648,6 +648,21 @@ async fn ids_route_whatever_the_clients_version() {
     assert_eq!(other.get_snapshot(&id).await.unwrap().snapshot.id, id);
     let verified = other.verify_snapshot(&id).await.unwrap();
     assert!(verified.snapshot.verified);
+    // A replacement runs on the replaced snapshot's version, not the client's.
+    let opts = CreateSnapshotOptions {
+        replaces: Some(Replaces {
+            snapshot_id: id.clone(),
+            allow: None,
+        }),
+        fork: true,
+        ..Default::default()
+    };
+    let replacement = other.create_snapshot_with(code, &opts).await.unwrap();
+    let snapshot = replacement.snapshot.expect("kept");
+    assert!(
+        snapshot.id.starts_with(&id[..id.find('~').unwrap() + 1]),
+        "{snapshot:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -831,7 +846,11 @@ async fn client_reviews_exports_and_accepts_a_run() {
         .await
         .unwrap();
     assert_eq!(job.kind, JobKind::AcceptRun);
-    assert!(client.wait_job(&job).await.unwrap().accepted);
+    let later = client.wait_job(&job).await.unwrap();
+    assert!(later.accepted);
+    let listed = client.list_acceptances(&spec.id).await.unwrap();
+    let ids: Vec<&str> = listed.acceptances.iter().map(|a| a.id.as_str()).collect();
+    assert_eq!(ids, [later.id.as_str(), accepted.id.as_str()]);
     let none: [&str; 0] = [];
     let e = client.accept_run(none, &AcceptOptions::default()).await;
     assert!(matches!(e, Err(Error::Invalid(_))), "{e:?}");

@@ -68,6 +68,7 @@ export type {
   LeftOut,
   LeftOutReason,
   LinePos,
+  ListAcceptancesResponse,
   ListDependentsResponse,
   ListSnapshotsResponse,
   Message,

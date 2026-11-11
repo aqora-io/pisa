@@ -21,7 +21,7 @@ use crate::catalog::{
 };
 use crate::db::{DbError, retry};
 use crate::schema::{
-    acceptances, amendments, catalogs, refutations, changes, described, entries, leases, links, module_imports, modules,
+    acceptance_specs, acceptances, amendments, catalogs, refutations, changes, described, entries, leases, links, module_imports, modules,
 };
 
 const ENTRY: (
@@ -1331,22 +1331,70 @@ pub(crate) async fn put_acceptance(
     db: &Handle,
     v: &str,
     id: &str,
+    specs: &[String],
     result: &Value,
 ) -> Result<(), Error> {
     retry(|| async {
-        diesel::insert_into(acceptances::table)
-            .values((
-                acceptances::version.eq(v),
-                acceptances::id.eq(id),
-                acceptances::created_micros.eq(now_micros() as i64),
-                acceptances::result.eq(result),
-            ))
-            .execute(&mut *conn(db).await?)
-            .await?;
-        Ok::<_, DbError>(())
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        let created = now_micros() as i64;
+        tx!(conn, {
+            diesel::insert_into(acceptances::table)
+                .values((
+                    acceptances::version.eq(v),
+                    acceptances::id.eq(id),
+                    acceptances::created_micros.eq(created),
+                    acceptances::result.eq(result),
+                ))
+                .execute(conn)
+                .await?;
+            for spec in specs.iter().collect::<BTreeSet<_>>() {
+                diesel::insert_into(acceptance_specs::table)
+                    .values((
+                        acceptance_specs::version.eq(v),
+                        acceptance_specs::spec.eq(spec),
+                        acceptance_specs::acceptance.eq(id),
+                        acceptance_specs::created_micros.eq(created),
+                    ))
+                    .execute(conn)
+                    .await?;
+            }
+            Ok(())
+        })
     })
     .await?;
     Ok(())
+}
+
+pub(crate) async fn acceptances_of(
+    db: &Handle,
+    v: &str,
+    spec: &str,
+    limit: i64,
+) -> Result<Vec<Value>, Error> {
+    let mut c = conn(db).await?;
+    let ids: Vec<String> = acceptance_specs::table
+        .filter(acceptance_specs::version.eq(v))
+        .filter(acceptance_specs::spec.eq(spec))
+        .order((
+            acceptance_specs::created_micros.desc(),
+            acceptance_specs::acceptance.desc(),
+        ))
+        .limit(limit)
+        .select(acceptance_specs::acceptance)
+        .load(&mut *c)
+        .await
+        .map_err(DbError::from)?;
+    let mut results: HashMap<String, Value> = acceptances::table
+        .filter(acceptances::version.eq(v))
+        .filter(acceptances::id.eq_any(&ids))
+        .select((acceptances::id, acceptances::result))
+        .load::<(String, Value)>(&mut *c)
+        .await
+        .map_err(DbError::from)?
+        .into_iter()
+        .collect();
+    Ok(ids.iter().filter_map(|id| results.remove(id)).collect())
 }
 
 /// An amendment's columns: the amending entry, the amended, the reason, the

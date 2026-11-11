@@ -55,18 +55,18 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use pisa_protocol::api::{
-    self, AcceptPair, AcceptResponse, Allow, Amendment, Amends, ApplyTacticResponse, AtPosition,
-    AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditReview, AuditSnapshotsResponse,
-    AuditSummary, AuditSwap, AuditTarget, AuditThrough, AuditUnproved, AuditUnsettled, Change,
-    CheckResult, CreateSnapshotResponse, Declaration, DeclarationChange, DeleteSnapshotResponse,
-    Detail, Document, DocumentGoals, DocumentProbes, ErrorKind, Export, GoalsAt, GoalsMode, Health,
-    HealthStatus, Inherited, JobKind, JobStatus, LeftOut, LeftOutReason, LinePos,
-    ListDependentsResponse, ListSnapshotsResponse, Message, PairError, PairErrorKind, Pos, ProbeAt,
-    ProbeResult, ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced,
-    RebuildSkipped, RebuildSnapshotsResponse, Refutation, Refutes, Replacement, Replaces,
-    ResubmitItem, ResubmitSnapshotsResponse, ReviewDeclaration, ReviewOrigin, Session, Severity,
-    Snapshot, SnapshotDetail, Sorry, State, TacticInfo, TermInfo, VerifyFailure,
-    VerifySnapshotResponse,
+    self, AcceptPair, AcceptResponse, Allow, AmendedHoles, Amendment, Amends, ApplyTacticResponse,
+    AtPosition, AuditAssumption, AuditComparison, AuditFork, AuditLink, AuditReview,
+    AuditSnapshotsResponse, AuditSummary, AuditSwap, AuditTarget, AuditThrough, AuditUnproved,
+    AuditUnsettled, Change, CheckResult, CreateSnapshotResponse, Declaration, DeclarationChange,
+    DeleteSnapshotResponse, Detail, Document, DocumentGoals, DocumentProbes, ErrorKind, Export,
+    GoalsAt, GoalsMode, Health, HealthStatus, Inherited, JobKind, JobStatus, LeftOut,
+    LeftOutReason, LinePos, ListAcceptancesResponse, ListDependentsResponse, ListSnapshotsResponse,
+    Message, PairError, PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated,
+    RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse,
+    Refutation, Refutes, Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse,
+    ReviewDeclaration, ReviewOrigin, Session, Severity, Snapshot, SnapshotDetail, Sorry, State,
+    Superseded, TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
@@ -193,6 +193,12 @@ pub struct AcceptOptions {
     pub allow: Vec<String>,
     /// Also run the external kernels Lean bundles (true by default).
     pub paranoid: bool,
+    /// Each pair's limit in seconds; the server's default (600) unless set,
+    /// not the client's timeout.
+    pub timeout: Option<u64>,
+    /// Seconds more for the first pair, which builds the run's modules; the
+    /// server's default (1800) unless set.
+    pub build_timeout: Option<u64>,
 }
 
 impl Default for AcceptOptions {
@@ -200,6 +206,8 @@ impl Default for AcceptOptions {
         AcceptOptions {
             allow: Vec::new(),
             paranoid: true,
+            timeout: None,
+            build_timeout: None,
         }
     }
 }
@@ -662,9 +670,16 @@ impl Client {
         code: &str,
         opts: &CreateSnapshotOptions,
     ) -> CreateSnapshotRequest {
+        // A create that names a spec runs on the spec's version, which its id
+        // carries: another is refused.
+        let names_one = opts.replaces.is_some() || opts.amends.is_some() || opts.refutes.is_some();
         CreateSnapshotRequest {
             code: code.to_string(),
-            version: self.version.clone(),
+            version: if names_one {
+                None
+            } else {
+                self.version.clone()
+            },
             timeout: self.timeout,
             verify: opts.verify,
             labels: opts.labels.clone(),
@@ -1111,6 +1126,14 @@ impl Client {
         self.endpoint.get(url).await
     }
 
+    /// The acceptances that judged spec snapshot `spec`, newest first, at
+    /// most 100; each says `stale` once the run's heads have moved on.
+    pub async fn list_acceptances(&self, spec: &str) -> Result<ListAcceptancesResponse, Error> {
+        let mut url = self.endpoint.url("snapshots/accept")?;
+        url.query_pairs_mut().append_pair("spec", spec);
+        self.endpoint.get(url).await
+    }
+
     fn accept_request<I, S>(
         &self,
         against: I,
@@ -1133,7 +1156,8 @@ impl Client {
             against,
             allow: options.allow.clone(),
             paranoid: options.paranoid,
-            timeout: self.timeout,
+            timeout: options.timeout,
+            build_timeout: options.build_timeout,
         })
     }
 
@@ -1406,5 +1430,59 @@ mod tests {
             "http://h:8000/pisa/states/v~h~a%20b/tactic"
         );
         assert!(Client::new("not a url").is_err());
+    }
+
+    /// A create that names a spec runs on that spec's version, and an
+    /// acceptance has its own time limits: neither takes the client's.
+    #[test]
+    fn a_spec_or_a_run_takes_none_of_the_clients_defaults() {
+        let c = Client::new("http://h/")
+            .unwrap()
+            .with_version("a")
+            .with_timeout(60);
+        let named = [
+            CreateSnapshotOptions {
+                replaces: Some(Replaces {
+                    snapshot_id: "b~x".into(),
+                    allow: None,
+                }),
+                ..Default::default()
+            },
+            CreateSnapshotOptions {
+                amends: Some(api::Amends {
+                    snapshot_id: "b~x".into(),
+                    reason: "r".into(),
+                }),
+                ..Default::default()
+            },
+            CreateSnapshotOptions {
+                refutes: Some(api::Refutes {
+                    snapshot_id: "b~x".into(),
+                    target: "t".into(),
+                }),
+                ..Default::default()
+            },
+        ];
+        for opts in &named {
+            assert_eq!(
+                c.create_snapshot_request("x", opts).version,
+                None,
+                "{opts:?}"
+            );
+        }
+        let plain = c.create_snapshot_request("x", &CreateSnapshotOptions::default());
+        assert_eq!(plain.version.as_deref(), Some("a"));
+        let req = c
+            .accept_request(["b~s"], &AcceptOptions::default())
+            .unwrap();
+        assert_eq!((req.timeout, req.build_timeout), (None, None));
+        let asked = AcceptOptions {
+            timeout: Some(900),
+            ..Default::default()
+        };
+        assert_eq!(
+            c.accept_request(["b~s"], &asked).unwrap().timeout,
+            Some(900)
+        );
     }
 }

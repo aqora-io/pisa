@@ -232,11 +232,29 @@ describe("PisaClient", () => {
     expect((await client.acceptRun(["v2~s0"])).accepted).toBe(true);
     await client.submitAcceptRun(["v2~s0"], { allow: ["f"], paranoid: false }, { timeout: 60 });
     await client.getAcceptance("v2~a");
+    await client.listAcceptances("v2~s0");
     expect(sent.map((s) => [s.method, s.url, s.body])).toEqual([
       ["POST", "/api/snapshots/accept", { against: ["v2~s0"] }],
       ["POST", "/api/snapshots/accept", { against: ["v2~s0"], allow: ["f"], paranoid: false, timeout: 60 }],
       ["GET", "/api/snapshots/accept/v2~a", undefined],
+      ["GET", "/api/snapshots/accept?spec=v2%7Es0", undefined],
     ]);
+  });
+
+  it("sends an acceptance only the limits its call names", async () => {
+    const sent: unknown[] = [];
+    const client = new PisaClient({
+      url: "/api",
+      version: "v1",
+      timeout: 60,
+      fetch: async (_input, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return json({ id: "v2~a", accepted: true, pairs: [] });
+      },
+    });
+    await client.acceptRun(["v2~s0"]);
+    await client.acceptRun(["v2~s0"], {}, { timeout: 900, buildTimeout: 3600 });
+    expect(sent).toEqual([{ against: ["v2~s0"] }, { against: ["v2~s0"], timeout: 900, build_timeout: 3600 }]);
   });
 
   it("amends, refutes and resubmits", async () => {
@@ -248,8 +266,8 @@ describe("PisaClient", () => {
     await client.resubmitSnapshots("v2~s", "v2~t", { dryRun: true, labels: { run: "b" } });
     await client.submitResubmitSnapshots("v2~s", "v2~t", { verify: true, timeout: 30 });
     expect(sent.map((s) => [s.url, s.body])).toEqual([
-      ["/api/snapshots", { code: "x", version: "v1", amends: { snapshot_id: "v2~s", reason: "w is false" } }],
-      ["/api/snapshots", { code: "y", version: "v1", refutes: { snapshot_id: "v2~s", target: "w" } }],
+      ["/api/snapshots", { code: "x", amends: { snapshot_id: "v2~s", reason: "w is false" } }],
+      ["/api/snapshots", { code: "y", refutes: { snapshot_id: "v2~s", target: "w" } }],
       ["/api/snapshots/resubmit", { from: "v2~s", to: "v2~t", dry_run: true, labels: { run: "b" } }],
       ["/api/snapshots/resubmit", { from: "v2~s", to: "v2~t", timeout: 30, verify: true }],
     ]);

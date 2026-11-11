@@ -10,6 +10,7 @@ import {
   proofReducer,
   snapshotOptions,
   useAcceptRun,
+  useAcceptances,
   useAudit,
   useCheckBatch,
   useDeleteSnapshot,
@@ -411,15 +412,28 @@ describe("rebuilds", () => {
 });
 
 describe("accepting a run", () => {
+  it("lists a spec's acceptances", async () => {
+    const { client, calls } = fakeClient(() => ({ acceptances: [{ id: "v~a", accepted: true, stale: true }] }));
+    const { result } = renderHook(() => useAcceptances("v~s"), { wrapper: wrapper(client) });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data?.acceptances[0]?.stale).toBe(true);
+    expect(calls[0]?.path).toBe("/snapshots/accept?spec=v%7Es");
+    const idle = renderHook(() => useAcceptances(null), { wrapper: wrapper(client) });
+    expect(idle.result.current.fetchStatus).toBe("idle");
+  });
+
   it("accepts a run as a job", async () => {
     const job = { id: "c".repeat(32), kind: "accept_run" as const, status: "queued" as const };
     const { client, calls } = fakeClient((call) =>
       call.method === "POST" ? new Response(JSON.stringify(job), { status: 202 }) : { accepted: true, pairs: [] },
     );
     const { result } = renderHook(() => useAcceptRun(), { wrapper: wrapper(client) });
-    await act(() => result.current.mutateAsync({ against: ["v~s"], paranoid: false, timeout: 900 }));
+    await act(() => result.current.mutateAsync({ against: ["v~s"], paranoid: false, timeout: 900, buildTimeout: 3600 }));
     expect(result.current.data?.accepted).toBe(true);
-    expect(calls[0]).toMatchObject({ path: "/snapshots/accept", body: { against: ["v~s"], paranoid: false, timeout: 900 } });
+    expect(calls[0]).toMatchObject({
+      path: "/snapshots/accept",
+      body: { against: ["v~s"], paranoid: false, timeout: 900, build_timeout: 3600 },
+    });
     expect(calls[0]?.headers["prefer"]).toBe("respond-async");
   });
 

@@ -49,6 +49,8 @@ const { review } = await pisa.auditSnapshots({ against: [base!.id], review: true
 // the audit and comparator on each pair, kept under `id` for `getAcceptance`.
 const tarball = await pisa.exportRun([base!.id]);
 const { accepted, pairs } = await pisa.waitJob(await pisa.submitAcceptRun([base!.id]));
+// A spec's acceptances, newest first; one whose run has moved on says `stale`.
+const { acceptances } = await pisa.listAcceptances(base!.id);
 // Create each item a level at a time, with its `replaces`.
 const { plan } = await pisa.rebuildSnapshots(base!.id, replacement!.id, { project: "p" }, { dryRun: true });
 // Or let the server run it, retiring the originals the copies replace (not `base`); as a job, since it can take minutes.

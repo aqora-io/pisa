@@ -3,6 +3,7 @@
 //! has the snapshot warm. Reads, listings, updates, deletes and verifies go
 //! to any worker of the version, which a snapshot id names.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use axum::Json;
@@ -10,12 +11,13 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    AcceptRequest, AcceptResponse, Accepted, ApiErrors, AuditSnapshotsResponse,
-    CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse, Detail, ErrorKind,
-    JobKind, JobStatus, ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, PreferAsync,
-    RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
-    ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
-    UpdateSnapshotRequest, VerifySnapshotResponse,
+    ACCEPT_BUILD_TIMEOUT, ACCEPT_TIMEOUT, AcceptRequest, AcceptResponse, Accepted, ApiErrors,
+    AuditSnapshotsResponse, CreateSnapshotRequest, CreateSnapshotResponse, DeleteSnapshotResponse,
+    Detail, ErrorKind, JobKind, JobStatus, ListAcceptancesResponse, ListDependentsResponse,
+    ListSnapshotsResponse, MAX_REASON, PreferAsync, RebuildSnapshotsRequest,
+    RebuildSnapshotsResponse, ResubmitSnapshotsRequest, ResubmitSnapshotsResponse,
+    SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest,
+    VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -606,7 +608,8 @@ pub async fn accept(
         against: req.against,
         allow: req.allow,
         paranoid: req.paranoid,
-        timeout_secs: req.timeout,
+        timeout_secs: req.timeout.unwrap_or(ACCEPT_TIMEOUT),
+        build_timeout_secs: req.build_timeout.unwrap_or(ACCEPT_BUILD_TIMEOUT),
     });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::AcceptRun, p).await
@@ -644,9 +647,59 @@ pub async fn acceptance(
             format!("no acceptance {id}"),
         ));
     };
-    serde_json::from_value(stored)
-        .map(Json)
-        .map_err(|e| ApiError::new(ErrorKind::Internal, format!("a stored acceptance: {e}")))
+    Ok(Json(read_back(&reader, stored).await?))
+}
+
+#[utoipa::path(
+    get, path = "/snapshots/accept", operation_id = "listAcceptances", tag = "snapshots",
+    summary = "A spec snapshot's acceptances",
+    description = "The stored acceptances that judged a spec snapshot, newest first, at most \
+        100. Each says `stale` once the run's heads are no longer the ones it judged.",
+    params(("spec" = String, Query, description = "The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since")),
+    responses((status = 200, description = "Its acceptances", body = ListAcceptancesResponse), ApiErrors),
+)]
+/// `GET /snapshots/accept?spec=<id>`.
+pub async fn acceptances(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+) -> Result<Json<ListAcceptancesResponse>, ApiError> {
+    let spec = form_urlencoded::parse(query.as_deref().unwrap_or_default().as_bytes())
+        .find(|(name, _)| name == "spec")
+        .map(|(_, value)| value.into_owned())
+        .ok_or_else(|| {
+            ApiError::new(ErrorKind::BadRequest, "name the spec snapshot: ?spec=<id>")
+        })?;
+    let parsed = parse_id(&spec)?;
+    let reader = app.snapshots.version(&parsed.version);
+    let mut acceptances = Vec::new();
+    for stored in reader.catalog().acceptances_of(&parsed.entry, 100).await? {
+        acceptances.push(read_back(&reader, stored).await?);
+    }
+    Ok(Json(ListAcceptancesResponse { acceptances }))
+}
+
+/// A stored acceptance as it is answered: `stale` once its specs' runs'
+/// heads are no longer the ones it judged, or a spec is gone.
+async fn read_back(
+    reader: &pisa_snapshots::Reader,
+    stored: serde_json::Value,
+) -> Result<AcceptResponse, ApiError> {
+    let mut accepted: AcceptResponse = serde_json::from_value(stored)
+        .map_err(|e| ApiError::new(ErrorKind::Internal, format!("a stored acceptance: {e}")))?;
+    let mut now = BTreeSet::new();
+    for spec in &accepted.against {
+        match reader.parse(spec) {
+            Ok(entry) => match reader.heads_from(&entry).await {
+                Ok(heads) => now.extend(heads),
+                Err(e) if e.kind == ErrorKind::NotFound => accepted.stale = true,
+                Err(e) => return Err(e.into()),
+            },
+            Err(_) => accepted.stale = true,
+        }
+    }
+    let judged: BTreeSet<String> = accepted.heads.iter().cloned().collect();
+    accepted.stale |= now != judged;
+    Ok(accepted)
 }
 
 #[utoipa::path(

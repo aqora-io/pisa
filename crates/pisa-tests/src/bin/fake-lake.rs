@@ -8,7 +8,8 @@
 //! - a definition name that isn't a `def` in both modules is refused, as
 //!   comparator refuses one that isn't a definition;
 //! - a module that says `BUILD_FAIL` fails to build, and one that says
-//!   `CANNOT_RUN` keeps it from starting (exit 2).
+//!   `CANNOT_RUN` keeps it from starting (exit 2);
+//! - a module that says `SLOW_BUILD` takes 3 s to build, the first time.
 //!
 //! It prints its arguments first, for tests to read. It "builds" each module
 //! once in the project: `Built <module>` the first time, with a mark under
@@ -55,6 +56,9 @@ fn main() {
             fail("Child exited with 1");
         }
         let built = Path::new(".lake/build").join(format!("{module}.built"));
+        if code.contains("SLOW_BUILD") && !built.exists() {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        }
         if built.exists() {
             println!("Replayed {module}");
         } else {

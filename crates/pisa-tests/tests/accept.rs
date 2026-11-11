@@ -157,11 +157,25 @@ async fn accept(
     paranoid: bool,
     timeout_secs: u64,
 ) -> AcceptResponse {
+    accept_with(c, against, allow, paranoid, timeout_secs, 0).await
+}
+
+/// [`accept`] with `build_timeout_secs` more for the first pair, which
+/// builds the run's modules.
+async fn accept_with(
+    c: &Cluster,
+    against: &[&str],
+    allow: &[&str],
+    paranoid: bool,
+    timeout_secs: u64,
+    build_timeout_secs: u64,
+) -> AcceptResponse {
     let job = Job::SnapshotAccept(SnapshotAcceptJob {
         against: against.iter().map(|s| s.to_string()).collect(),
         allow: allow.iter().map(|s| s.to_string()).collect(),
         paranoid,
         timeout_secs,
+        build_timeout_secs,
     });
     match run(c, job).await {
         JobResult::SnapshotAccepted(Ok(r)) => *r,
@@ -253,11 +267,38 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
         r.pairs[0].error.as_ref().unwrap().kind,
         PairErrorKind::Timeout
     );
-    assert!(
-        r.pairs[0].output.contains("more than 1s"),
-        "{}",
-        r.pairs[0].output
-    );
+    let output = &r.pairs[0].output;
+    assert!(output.contains("more than 1s"), "{output}");
+    // What Lake printed before then is kept.
+    assert!(output.contains("Resolving dependencies"), "{output}");
+}
+
+/// The first pair, which builds the run's modules, has the build's time on
+/// top of its own; a slow build without it runs out.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_pair_has_time_to_build_the_runs_modules() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo
+
+theorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let slow = "import Foo
+
+-- SLOW_BUILD
+theorem t : 2 = 2 := rfl";
+    create(
+        &c,
+        json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let r = accept_with(&c, &[&id(&s)], &[], false, 2, 0).await;
+    let error = r.pairs[0].error.as_ref().map(|e| e.kind);
+    assert_eq!(error, Some(PairErrorKind::Timeout), "{r:?}");
+    let r = accept_with(&c, &[&id(&s)], &[], false, 2, 10).await;
+    assert!(r.accepted, "{r:?}");
 }
 
 /// The files of the tar.gz `bytes`, by path.
@@ -481,4 +522,108 @@ async fn what_comparator_cant_take_as_a_hole_is_left_out() {
         ]
     );
     assert_eq!(pair.theorems, 1);
+}
+
+/// A spec axiom the head no longer builds on is left out of the axioms
+/// comparator permits, and listed: comparator needs each on both sides.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_axiom_the_head_dropped_is_left_out() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let base = create(&c, json!({"code": "import Foo\n\naxiom lit : 1 = 1"})).await;
+    let s = create(&c, json!({"code": on(&base, "theorem t : 2 = 2 := sorry")})).await;
+    let filled = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+    create(
+        &c,
+        json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let r = accept(&c, &[&id(&s)], &[], false, 60).await;
+    let dropped = LeftOut {
+        name: "lit".into(),
+        reason: LeftOutReason::AxiomNotInHead,
+    };
+    assert_eq!(r.pairs[0].left_out, [dropped], "{r:?}");
+}
+
+async fn get(c: &Cluster, path: &str) -> Value {
+    let r = c.client.get(c.url(path)).send().await.unwrap();
+    assert_eq!(r.status(), 200, "{path}");
+    r.json().await.unwrap()
+}
+
+/// A head deleted while comparator runs leaves the acceptance whole: its
+/// review list is read with its audit, before comparator.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_deleted_during_comparator_doesnt_lose_the_acceptance() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem u : 3 = 3 := sorry"}),
+    )
+    .await;
+    let slow = "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl";
+    let h = create(
+        &c,
+        json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let delete = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let r = c.client.delete(c.url(&format!("/snapshots/{}", id(&h))));
+        assert_eq!(r.send().await.unwrap().status(), 200);
+    };
+    let spec = id(&s);
+    let against = [spec.as_str()];
+    let (r, ()) = tokio::join!(accept(&c, &against, &[], false, 60), delete);
+    assert_eq!(r.audit.review[0].head, id(&h), "{r:?}");
+    get(&c, &format!("/snapshots/accept/{}", r.id)).await;
+}
+
+/// A stored acceptance names the modules it judged and keeps the review
+/// list; a spec's acceptances are listed newest first, and one whose heads
+/// are no longer the run's says it is stale.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let s = create(&c, json!({"code": spec, "holes": ["cost"]})).await;
+    let filled =
+        |n: u32| format!("import Foo\n\ndef cost : Nat := {n}\ntheorem t : cost = cost := rfl");
+    let h = create(
+        &c,
+        json!({"code": filled(3), "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let first = accept(&c, &[&id(&s)], &[], false, 60).await;
+    let pair = &first.pairs[0];
+    assert_eq!(
+        (pair.spec_module.as_str(), pair.head_module.as_str()),
+        (module(&s).as_str(), module(&h).as_str())
+    );
+    assert_eq!(first.audit.review[0].head, id(&h), "{first:?}");
+    let second = accept(&c, &[&id(&s)], &[], false, 60).await;
+    let listed = get(&c, &format!("/snapshots/accept?spec={}", id(&s))).await;
+    let listed = listed["acceptances"].as_array().unwrap();
+    let ids: Vec<&Value> = listed.iter().map(|a| &a["id"]).collect();
+    assert_eq!(ids, [&json!(second.id), &json!(first.id)]);
+    assert!(
+        listed.iter().all(|a| a.get("stale").is_none()),
+        "{listed:?}"
+    );
+    // The run moves on.
+    create(
+        &c,
+        json!({"code": filled(4), "replaces": {"snapshot_id": id(&h)}}),
+    )
+    .await;
+    let read = get(&c, &format!("/snapshots/accept/{}", first.id)).await;
+    assert_eq!(read["stale"], true, "{read}");
+    // A spec with none lists none.
+    let other = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem z : 1 = 1 := sorry"}),
+    )
+    .await;
+    let none = get(&c, &format!("/snapshots/accept?spec={}", id(&other))).await;
+    assert_eq!(none["acceptances"], json!([]));
 }

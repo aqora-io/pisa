@@ -138,6 +138,11 @@ describe("snapshots", () => {
       verify: false,
     });
     expect(replaced.snapshot?.version).toBe("v");
+    // And so does an amendment.
+    const amended = await elsewhere.createSnapshot("import Foo\ntheorem web_replaced : 2 = 2 := sorry", {
+      amends: { snapshot_id: base.id, reason: "a stronger statement" },
+    });
+    expect(amended.snapshot?.version).toBe("v");
   });
 });
 
@@ -196,6 +201,7 @@ describe("runs", () => {
     const accepted = await runs.acceptRun([spec]);
     expect(accepted).toMatchObject({ accepted: true, clean: true, heads: [head.snapshot?.id] });
     expect((await runs.getAcceptance(accepted.id)).pairs).toEqual(accepted.pairs);
+    expect((await runs.listAcceptances(spec)).acceptances.map((a) => a.id)).toContain(accepted.id);
     const job = await runs.submitAcceptRun([spec], { paranoid: false });
     expect(job.kind).toBe("accept_run");
     expect((await runs.waitJob(job)).accepted).toBe(true);

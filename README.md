@@ -324,8 +324,9 @@ pnpm -C web generate
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting a run](#comparator) |
-| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, pairs: [{spec, head, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
-| `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept` |
+| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
+| `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
+| `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
 | `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries}`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
@@ -1012,6 +1013,9 @@ accepting a run takes both:
   judged as they were built, by their modules and Lake configuration, so
   judging the same run again, with another `allow` too, doesn't build it again. `paranoid: false` uses Lean's
   kernel only, and `timeout` (default 600) is each pair's limit in seconds.
+  The first pair comparator runs builds the run's snapshot modules, which
+  later pairs replay, so it has `build_timeout` (default 1800) more. A pair
+  that runs out keeps what Lake printed until then in its `output`.
   Each pair has comparator's `exit_code` (0 accepted, 1 refused or failed, 2
   couldn't start, none past `timeout`) and the end of its `output`. A pair
   not accepted says why in `error.kind`: `refused`, comparator's verdict;
@@ -1022,15 +1026,23 @@ accepting a run takes both:
   is `accepted` when the audit is `clean` (`clean`, with the whole `audit`
   and the `heads` both judged), comparator accepted every pair, and there is
   one at least. The result is stored with an `id`, and
-  `GET /snapshots/accept/{id}` reads it again. A pair that imports
+  `GET /snapshots/accept/{id}` reads it again; `GET /snapshots/accept?spec=<id>`
+  lists a spec snapshot's, newest first. It names the code it judged, which
+  stays named when snapshots go: each pair's `spec_module` and
+  `head_module`, and the audit with its review list. Read back, it says
+  `stale` once the run's heads are no longer the ones it judged. A result
+  over the record's 6 MiB is stored without its pairs' `output`, then
+  without the review, and `truncated` says which. A pair that imports
   Mathlib takes about 25 s, or 45 s paranoid, so send it with
   `Prefer: respond-async`. Or untar the export and run `lake comparator
   --paranoid --config comparator/1.json` there: it needs `bwrap`.
 - **Where the audit and comparator differ.** Each pair's `left_out` and
   `theorems` say what its configuration couldn't name. The full list:
   - *Private names* differ between two modules, so a configuration leaves out
-    private theorems, holes and assumptions (`private`). The audit compares
-    them.
+    private theorems, holes and assumptions (`private`), and a target whose
+    statement uses a private name of the spec's module, directly or through
+    the spec's definitions (`private_in_statement`): comparator would refuse
+    it. The audit compares them, reading a module's own private names alike.
   - *Holes that aren't plain definitions.* Comparator takes as a hole only a
     `def` that both sides declare. A hole or `allow` name that is an inductive
     type, a structure or an `opaque` is left out
@@ -1045,7 +1057,10 @@ accepting a run takes both:
     `Classical` in its header, or whose auxiliary declarations differ: the
     audit is `clean` and the pair `refused`.
   - *Axioms.* Comparator permits the standard three and the spec's
-    assumptions; the audit's `not_proved` uses `PISA_ALLOWED_AXIOMS`.
+    assumptions; the audit's `not_proved` uses `PISA_ALLOWED_AXIOMS`. A spec
+    assumption the head no longer builds on is left out
+    (`axiom_not_in_head`): comparator needs each on both sides, and the head
+    can't use it.
   - *Links' `allow`s* count for neither: both compare under the spec's holes
     and the request's `allow`.
 
@@ -1479,6 +1494,12 @@ Mathlib/Physlib oleans and the kernel are the trusted base.
 label, next to Mathlib's; see [Snapshots in search](#snapshot-search).
 
 ## Clients
+
+Each client takes a default version and timeout. A create that names a spec,
+with `replaces`, `amends` or `refutes`, runs on that spec's version and sends
+none; an acceptance has limits of its own, 600 s a pair and 1800 s more to
+build the run, which a call can set (`timeout`, `build_timeout`), and doesn't
+take the client's timeout.
 
 Rust (`pisa-client`):
 
