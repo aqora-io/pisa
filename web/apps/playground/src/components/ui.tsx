@@ -1,5 +1,5 @@
-import { type CheckResult, type Message, type PisaError, isPisaError } from "@aqora/pisa-client";
-import { type ButtonHTMLAttributes, type ReactNode, useState } from "react";
+import type { Message, PisaError, PisaErrorKind, ProofStatus } from "@aqora/pisa-client";
+import { type ButtonHTMLAttributes, type ReactNode, useId, useState } from "react";
 
 export function Button({ className, ...props }: ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
@@ -42,13 +42,18 @@ export function Badge({ tone = "slate", children }: { tone?: keyof typeof TONES;
   );
 }
 
+/** A titled region of a tab; its title names it, for screen readers and
+ *  tests. */
 export function Panel({ title, actions, children }: { title?: ReactNode; actions?: ReactNode; children: ReactNode }) {
+  const id = useId();
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm" {...(title !== undefined && { "aria-labelledby": id })}>
       {(title !== undefined || actions !== undefined) && (
         <div className="mb-3 flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
-          <div className="flex items-center gap-2">{actions}</div>
+          <h2 id={id} className="text-sm font-semibold text-slate-900">
+            {title}
+          </h2>
+          <div className="flex flex-wrap items-center justify-end gap-2">{actions}</div>
         </div>
       )}
       {children}
@@ -68,22 +73,91 @@ export function Field({ label, children }: { label: string; children: ReactNode 
 export const inputClass =
   "rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 shadow-sm focus:border-indigo-500 focus:outline-none";
 
-/** What went wrong, in words a person can act on. */
-export function ErrorNote({ error, onRetry }: { error: PisaError | null | undefined; onRetry?: () => void }) {
-  if (error === null || error === undefined) return null;
-  let text = error.message;
-  if (isPisaError(error, "capacity")) {
-    text = "No worker took the job in time: they are all busy, or none serves this version.";
-  } else if (isPisaError(error, "network")) {
-    text = "The server didn't answer.";
-  }
+/** What to do about each kind of error, unless a tab says better. */
+const HINTS: Partial<Record<PisaErrorKind, string>> = {
+  capacity: "No worker took the job in time: they are all busy, or none serves this version.",
+  network: "The server didn't answer.",
+  unavailable:
+    "No worker can take it now. Sessions and documents need a worker with a Lean Beam slot (PISA_BEAM_SLOTS); otherwise, try again shortly.",
+  timeout: "Lean ran out of time: give it a longer timeout, or less to do.",
+  out_of_memory: "Lean ran out of memory: give it less to do.",
+  conflict: "It changed meanwhile: look again, then try again.",
+  not_found: "It isn't there: it was deleted, closed, or has expired.",
+};
+
+/** What went wrong, in words a person can act on: a hint by kind, which
+ *  `hints` can replace, then what the server said. An aborted request shows
+ *  nothing. */
+export function ErrorNote({
+  error,
+  onRetry,
+  hints,
+}: {
+  error: PisaError | null | undefined;
+  onRetry?: () => void;
+  hints?: Partial<Record<PisaErrorKind, string>>;
+}) {
+  if (error === null || error === undefined || error.kind === "aborted") return null;
+  const hint = hints?.[error.kind] ?? HINTS[error.kind];
   return (
-    <div className="flex items-start justify-between gap-3 rounded-md bg-rose-50 p-3 text-sm text-rose-800">
-      <div>
-        <span className="font-semibold">{error.kind}</span>
-        {error.status !== undefined && <span className="text-rose-600"> ({error.status})</span>}: {text}
+    <div role="alert" className="flex items-start justify-between gap-3 rounded-md bg-rose-50 p-3 text-sm text-rose-800">
+      <div className="min-w-0 space-y-1">
+        <p>
+          <span className="font-semibold">{error.kind}</span>
+          {error.status !== undefined && <span className="text-rose-600"> ({error.status})</span>}: {hint ?? error.message}
+        </p>
+        {hint !== undefined && error.message !== "" && (
+          <pre className="whitespace-pre-wrap font-mono text-xs text-rose-700">{error.message}</pre>
+        )}
       </div>
       {onRetry !== undefined && <SubtleButton onClick={onRetry}>Retry</SubtleButton>}
+    </div>
+  );
+}
+
+/** A button that acts on a second click, after saying what it will do. */
+export function ConfirmButton({
+  onConfirm,
+  confirm,
+  disabled,
+  children,
+}: {
+  onConfirm: () => void;
+  confirm: string;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  const [armed, setArmed] = useState(false);
+  return (
+    <SubtleButton
+      disabled={disabled}
+      onBlur={() => setArmed(false)}
+      onClick={() => {
+        setArmed(!armed);
+        if (armed) onConfirm();
+      }}
+    >
+      {armed ? confirm : children}
+    </SubtleButton>
+  );
+}
+
+/** Content shown once its summary is clicked. */
+export function Disclosure({ summary, children }: { summary: ReactNode; children: ReactNode }) {
+  return (
+    <details>
+      <summary className="cursor-pointer text-xs font-medium text-slate-600 hover:text-slate-900">{summary}</summary>
+      <div className="mt-2">{children}</div>
+    </details>
+  );
+}
+
+/** Something to act on that isn't an error. */
+export function Notice({ action, children }: { action?: ReactNode; children: ReactNode }) {
+  return (
+    <div role="status" className="flex items-start justify-between gap-3 rounded-md bg-amber-50 p-3 text-sm text-amber-900">
+      <div className="min-w-0">{children}</div>
+      {action}
     </div>
   );
 }
@@ -135,50 +209,28 @@ export function Goals({ goals }: { goals: string[] }) {
   );
 }
 
-/** A check's verdict, and why. */
-export function CheckResultView({ result }: { result: CheckResult }) {
+const STATUS_TONE = { proved: "green", conditional: "indigo", sorry: "amber", rejected: "red" } as const;
+
+/** A proof status: proved, conditional on assumptions, sorry, or rejected. */
+export function StatusBadge({ status }: { status: ProofStatus }) {
+  return <Badge tone={STATUS_TONE[status]}>{status}</Badge>;
+}
+
+export function Checkbox({
+  checked,
+  onChange,
+  disabled,
+  children,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        {result.ok ? <Badge tone="green">✓ accepted</Badge> : <Badge tone="red">✗ not accepted</Badge>}
-        {result.error !== undefined && <Badge tone="amber">{result.error.kind}</Badge>}
-        <span className="text-xs text-slate-500">{result.time.toFixed(2)} s</span>
-      </div>
-      {result.error !== undefined && <p className="text-sm text-amber-800">{result.error.message}</p>}
-      {result.reasons.length > 0 && (
-        <ul className="list-inside list-disc text-sm text-rose-800">
-          {result.reasons.map((r) => (
-            <li key={r}>{r}</li>
-          ))}
-        </ul>
-      )}
-      {result.declarations.length > 0 && (
-        <table className="w-full text-left text-xs">
-          <thead className="text-slate-500">
-            <tr>
-              <th className="py-1 font-medium">Declaration</th>
-              <th className="py-1 font-medium">Kind</th>
-              <th className="py-1 font-medium">Other axioms</th>
-            </tr>
-          </thead>
-          <tbody className="font-mono text-slate-800">
-            {result.declarations.map((d) => (
-              <tr key={d.name} className="border-t border-slate-100">
-                <td className="py-1">{d.name}</td>
-                <td className="py-1">{d.kind}</td>
-                <td className="py-1">{d.axioms.join(", ") || "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {result.sorries.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-xs font-medium text-slate-600">Sorries</p>
-          <Goals goals={result.sorries.map((s) => s.goal)} />
-        </div>
-      )}
-      <Messages messages={result.messages} />
-    </div>
+    <label className="flex items-center gap-1.5 text-sm text-slate-700">
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      {children}
+    </label>
   );
 }

@@ -1,13 +1,19 @@
 import { type ProofNode, type ProofSession, useProofSession } from "@aqora/pisa-react";
 import { useState } from "react";
 
-import { Badge, Button, CheckResultView, ErrorNote, Goals, Messages, Panel, SubtleButton, inputClass } from "../components/ui.tsx";
+import { CheckResultView } from "../components/check-result.tsx";
+import { Probes } from "../components/probes.tsx";
+import { Badge, Button, Checkbox, CopyButton, ErrorNote, Goals, Messages, Panel, SubtleButton, inputClass } from "../components/ui.tsx";
 import { LeanEditor } from "../editor/LeanEditor.tsx";
+import { useGo } from "../nav.tsx";
 
-const EXAMPLE = `theorem add_zero_both (n : Nat) : n + 0 = n ∧ 0 + n = n := by
+export const PROVE_EXAMPLE = `theorem add_zero_both (n : Nat) : n + 0 = n ∧ 0 + n = n := by
   constructor
   · sorry
   · sorry`;
+
+/** What a `not_found` from a session means. */
+const GONE = "The session was closed, or has expired (a day after it started, in Compose and the chart): start again.";
 
 const STATUS = {
   pending: <Badge tone="indigo">…</Badge>,
@@ -84,16 +90,20 @@ function Tree({
   );
 }
 
-export function ProveTab({ version }: { version: string }) {
-  const [code, setCode] = useState(EXAMPLE);
+export function ProveTab({ code, setCode, version }: { code: string; setCode: (code: string) => void; version: string }) {
+  const go = useGo();
   const session = useProofSession(version !== "" ? { version } : {});
   const [selectedId, setSelected] = useState<number | null>(null);
   const [tactic, setTactic] = useState("");
   // The node whose path proves each root, by root.
   const [picked, setPicked] = useState<Record<number, number>>({});
+  const [full, setFull] = useState(false);
 
   const selected = selectedId ?? session.roots[0]?.id;
   const node = selected === undefined ? undefined : session.node(selected);
+  // A root is a sorry of the session's code, which is its document's sorry
+  // at the same index.
+  const sorry = node === undefined ? -1 : session.roots.findIndex((r) => r.id === node.id);
   const leaves = session.roots.flatMap((root) => {
     const leaf = picked[root.id] ?? completeUnder(session, root.id);
     return leaf === undefined ? [] : [leaf];
@@ -125,11 +135,19 @@ export function ProveTab({ version }: { version: string }) {
               <Button onClick={start} disabled={session.status === "starting"}>
                 {session.status === "idle" ? "Start" : "Start again"}
               </Button>
-              {session.status !== "idle" && <SubtleButton onClick={session.reset}>Reset</SubtleButton>}
+              {session.status !== "idle" && <SubtleButton onClick={session.reset}>Close</SubtleButton>}
             </>
           }
         >
-          <LeanEditor value={code} onChange={setCode} onRun={start} className="h-48" />
+          <LeanEditor value={code} onChange={setCode} onRun={start} className="h-48" label="Statement" />
+          {session.session !== undefined && (
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-xs">
+              <span className="text-slate-500">session</span>
+              <span className="truncate font-mono text-slate-700">{session.session}</span>
+              <CopyButton text={session.session} />
+              {session.code !== undefined && code !== session.code && <Badge tone="amber">edited since the start</Badge>}
+            </div>
+          )}
         </Panel>
         <ErrorNote error={session.error} onRetry={start} />
         {session.status === "starting" && <p className="text-sm text-slate-500">Starting the session…</p>}
@@ -179,12 +197,7 @@ export function ProveTab({ version }: { version: string }) {
             }
           >
             {node.status === "pending" && <p className="text-sm text-slate-500">Running…</p>}
-            {node.status === "failed" &&
-              (node.error?.kind === "not_found" ? (
-                <p className="text-sm text-amber-800">The state this tactic was applied to has expired: start again.</p>
-              ) : (
-                <ErrorNote error={node.error} />
-              ))}
+            {node.status === "failed" && <ErrorNote error={node.error} hints={{ not_found: GONE }} />}
             {node.status === "ok" && <Goals goals={node.goals} />}
             <Messages messages={node.messages} />
             {node.status === "ok" && !node.complete && (
@@ -208,22 +221,46 @@ export function ProveTab({ version }: { version: string }) {
             )}
           </Panel>
         )}
+        {session.session !== undefined && node !== undefined && sorry >= 0 && node.status === "ok" && (
+          <Panel title={`Try candidates at sorry ${sorry + 1}`}>
+            <Probes
+              key={`${session.session}:${node.id}`}
+              id={session.session}
+              at={{ sorry }}
+              revision={1}
+              use="Add to the tree"
+              onUse={(candidate) => {
+                const id = session.apply(node.id, candidate);
+                if (id !== undefined) setSelected(id);
+              }}
+            />
+          </Panel>
+        )}
         {session.status === "ready" && session.roots.length > 0 && (
           <Panel
             title="The proof"
             actions={
-              <Button onClick={() => session.check(proof)} disabled={leaves.length === 0 || session.verdict.status === "checking"}>
-                Check it
-              </Button>
+              <>
+                <Checkbox checked={full} onChange={setFull}>
+                  Declarations in full
+                </Checkbox>
+                <SubtleButton onClick={() => go({ to: "check", code: proof })}>Open in Check</SubtleButton>
+                <Button
+                  onClick={() => session.check(proof, full ? { detail: ["declarations"] } : {})}
+                  disabled={leaves.length === 0 || session.verdict.status === "checking"}
+                >
+                  Check it
+                </Button>
+              </>
             }
           >
             <p className="mb-2 text-xs text-slate-500">
               Each sorry with a finished branch, or the one you picked, gets that branch's tactics.
             </p>
-            <LeanEditor value={proof} readOnly className="h-40" />
+            <LeanEditor value={proof} readOnly className="h-40" label="The proof" />
             <div className="mt-3">
               {session.verdict.status === "checking" && <p className="text-sm text-slate-500">Checking…</p>}
-              <ErrorNote error={session.verdict.error} />
+              <ErrorNote error={session.verdict.error} hints={{ not_found: GONE }} />
               {session.verdict.result !== undefined && <CheckResultView result={session.verdict.result} />}
             </div>
           </Panel>

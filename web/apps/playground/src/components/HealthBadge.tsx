@@ -2,7 +2,8 @@ import { useHealth } from "@aqora/pisa-react";
 
 import { Badge } from "./ui.tsx";
 
-/** The server's health: up or not, its live workers, and search. */
+/** The server's health: up or not, its live workers, and search, with
+ *  whether Qdrant answers while it isn't ready. */
 export function HealthBadge() {
   const health = useHealth();
   if (health.isPending) return <Badge>connecting…</Badge>;
@@ -19,9 +20,12 @@ export function HealthBadge() {
       ) : search.ready ? (
         <Badge tone="indigo">search {search.version}</Badge>
       ) : (
-        <span title={search.error}>
-          <Badge tone="amber">search not ready</Badge>
-        </span>
+        <>
+          <span title={search.error}>
+            <Badge tone="amber">search not ready</Badge>
+          </span>
+          {search.qdrant === false && <Badge tone="red">Qdrant unreachable</Badge>}
+        </>
       )}
     </div>
   );

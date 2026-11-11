@@ -1,8 +1,12 @@
-import type { Hit, Labels, Query, SnapshotScope } from "@aqora/pisa-client";
+import type { Flags, Hit, Query, SnapshotScope } from "@aqora/pisa-client";
 import { type VersionInput, useDebouncedValue, useDeclaration, useResolve, useSearch } from "@aqora/pisa-react";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useState } from "react";
 
-import { Badge, Button, ErrorNote, Field, Goals, Panel, Spinner, SubtleButton, inputClass } from "../components/ui.tsx";
+import { SnapshotRef } from "../components/snapshot-ref.tsx";
+import { useElapsed } from "../elapsed.ts";
+import { Badge, Button, Disclosure, ErrorNote, Field, Goals, Panel, Spinner, StatusBadge, SubtleButton, inputClass } from "../components/ui.tsx";
+import { parseLabels, parseList } from "../labels.ts";
+import { useGo } from "../nav.tsx";
 
 const MODES = {
   text: "anything",
@@ -12,16 +16,7 @@ const MODES = {
   pattern: "a Lean pattern",
   goal: "a goal",
 } as const;
-
-const split = (text: string) =>
-  text
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s !== "");
-
-function parseLabels(text: string): Labels {
-  return Object.fromEntries(split(text).map((p) => [p.split("=")[0]?.trim() ?? "", p.split("=").slice(1).join("=").trim()]));
-}
+type Mode = keyof typeof MODES;
 
 /** A declaration to show: a snapshot's, with its module, or the bundle's. */
 interface Opened {
@@ -29,10 +24,33 @@ interface Opened {
   module?: string;
 }
 
+/** An import header that a name needs, with a link to try it. */
+function Imports({ imports, name }: { imports: string; name: string }) {
+  const go = useGo();
+  return (
+    <div className="flex items-start gap-2">
+      <pre className="min-w-0 flex-1 whitespace-pre-wrap rounded bg-slate-50 p-1.5 font-mono text-xs text-slate-700">{imports}</pre>
+      <SubtleButton onClick={() => go({ to: "check", code: `${imports}\n\n#check ${name}\n` })}>Try in Check</SubtleButton>
+    </div>
+  );
+}
+
+/** A declaration's flags, but its imports. */
+function FlagBadges({ flags }: { flags: Flags }) {
+  return (
+    <>
+      {flags.uses_sorry === true && <Badge tone="amber">uses sorry</Badge>}
+      {flags.informal === true && <Badge tone="amber">informal: stated, not proved</Badge>}
+      {flags.deprecated_to !== undefined && <Badge tone="amber">deprecated: {flags.deprecated_to}</Badge>}
+      {flags.additive_sibling !== undefined && <Badge>additive: {flags.additive_sibling}</Badge>}
+    </>
+  );
+}
+
 function HitView({ hit, onOpen }: { hit: Hit; onOpen: (open: Opened) => void }) {
-  // Only a snapshot module's declaration says whether it is verified.
-  const snapshot = hit.verified !== undefined;
+  const snapshot = hit.library === "PisaSnap";
   const open = () => onOpen({ name: hit.name, ...(snapshot && { module: hit.module }) });
+  const { imports } = hit.flags;
   return (
     <li className="space-y-1 py-2">
       <div className="flex flex-wrap items-center gap-2">
@@ -41,19 +59,34 @@ function HitView({ hit, onOpen }: { hit: Hit; onOpen: (open: Opened) => void }) 
         </button>
         {hit.title !== undefined && <span className="text-sm text-slate-700">{hit.title}</span>}
         <Badge>{hit.kind}</Badge>
+        {snapshot ? <Badge tone="indigo">snapshot</Badge> : <Badge>{hit.library}</Badge>}
         <span className="text-xs text-slate-500">{hit.module}</span>
-        {hit.flags.uses_sorry === true && <Badge tone="amber">uses sorry</Badge>}
-        {hit.flags.deprecated_to !== undefined && <Badge tone="amber">deprecated: {hit.flags.deprecated_to}</Badge>}
-        {snapshot && <Badge tone="indigo">snapshot</Badge>}
+        {hit.status !== undefined && <StatusBadge status={hit.status} />}
+        {hit.verified === true && <Badge tone="indigo">verified</Badge>}
+        <FlagBadges flags={hit.flags} />
         <span className="ml-auto text-xs text-slate-400">{hit.score.toFixed(3)}</span>
       </div>
       <pre className="whitespace-pre-wrap font-mono text-xs text-slate-800">{hit.signature}</pre>
       {hit.summary !== undefined && <p className="text-sm text-slate-600">{hit.summary}</p>}
-      {hit.source_url !== undefined && (
-        <a className="text-xs text-indigo-600 hover:underline" href={hit.source_url} target="_blank" rel="noreferrer">
-          source
-        </a>
+      {imports !== undefined && <Imports imports={imports} name={hit.name} />}
+      {hit.snapshot_ids !== undefined && hit.snapshot_ids.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-slate-500">heads</span>
+          {hit.snapshot_ids.map((id) => (
+            <SnapshotRef key={id} id={id} />
+          ))}
+        </div>
       )}
+      <div className="flex flex-wrap items-start gap-3">
+        {hit.source_url !== undefined && (
+          <a className="text-xs text-indigo-600 hover:underline" href={hit.source_url} target="_blank" rel="noreferrer">
+            source
+          </a>
+        )}
+        <Disclosure summary="What a model reads">
+          <pre className="whitespace-pre-wrap font-mono text-xs text-slate-700">{hit.text}</pre>
+        </Disclosure>
+      </div>
     </li>
   );
 }
@@ -91,13 +124,23 @@ function DeclView({
   return (
     <Panel title={<span className="font-mono">{d.name}</span>}>
       <div className="space-y-3">
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge>{d.kind}</Badge>
+          <FlagBadges flags={d.flags} />
           <span className="text-xs text-slate-500">
-            {d.library} · {d.module}
+            {d.library} · {d.module} · {version.version ?? "the server's default version"}
           </span>
         </div>
-        <Goals goals={[d.type_full]} />
+        <pre className="whitespace-pre-wrap font-mono text-xs text-slate-800">{d.signature}</pre>
+        <Disclosure summary="With full names and no notation">
+          <Goals goals={[d.type_full]} />
+        </Disclosure>
+        {d.flags.imports !== undefined && <Imports imports={d.flags.imports} name={d.name} />}
+        {d.source_url !== undefined && (
+          <a className="text-xs text-indigo-600 hover:underline" href={d.source_url} target="_blank" rel="noreferrer">
+            source
+          </a>
+        )}
         {d.docstring !== undefined && <p className="text-sm text-slate-700">{d.docstring}</p>}
         {d.description !== undefined && (
           <div className="rounded bg-indigo-50 p-2 text-sm text-indigo-900">
@@ -122,36 +165,46 @@ function DeclView({
 
 function Resolver({ version, onOpen }: { version: VersionInput; onOpen: (name: string) => void }) {
   const [text, setText] = useState("");
-  const names = split(useDebouncedValue(text, 300));
+  const names = parseList(useDebouncedValue(text, 300));
   const resolved = useResolve(names, version);
   return (
     <Panel title="Did you mean…">
       <input className={`${inputClass} w-full font-mono`} value={text} onChange={(e) => setText(e.target.value)} placeholder="Real.sqrt_mul_sefl, Nat.add_com" />
       <ErrorNote error={resolved.error} />
-      <ul className="mt-2 space-y-1 text-sm">
+      <ul className="mt-2 space-y-3 text-sm">
         {resolved.data?.map((r) => (
-          <li key={r.name} className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs">{r.name}</span>
-            {r.exists ? <Badge tone="green">exists</Badge> : <Badge tone="amber">unknown</Badge>}
-            {r.suggestions !== undefined && <Names names={r.suggestions.map((s) => s.name)} onOpen={onOpen} />}
+          <li key={r.name} className="space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-xs">{r.name}</span>
+              {r.exists ? <Badge tone="green">exists</Badge> : <Badge tone="amber">unknown</Badge>}
+              {r.deprecated_to !== undefined && (
+                <button type="button" onClick={() => onOpen(r.deprecated_to ?? r.name)}>
+                  <Badge tone="amber">deprecated: use {r.deprecated_to}</Badge>
+                </button>
+              )}
+            </div>
+            {r.imports !== undefined && <Imports imports={r.imports} name={r.name} />}
+            {r.suggestions !== undefined && r.suggestions.length > 0 && (
+              <ul className="space-y-1 border-l-2 border-slate-100 pl-2">
+                {r.suggestions.map((g) => (
+                  <li key={g.name} className="space-y-0.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button type="button" className="font-mono text-xs text-indigo-700 hover:underline" onClick={() => onOpen(g.name)}>
+                        {g.name}
+                      </button>
+                      <Badge>{g.kind}</Badge>
+                    </div>
+                    <pre className="whitespace-pre-wrap font-mono text-xs text-slate-600">{g.signature}</pre>
+                    {g.imports !== undefined && <Imports imports={g.imports} name={g.name} />}
+                  </li>
+                ))}
+              </ul>
+            )}
           </li>
         ))}
       </ul>
     </Panel>
   );
-}
-
-/** Whole seconds since `active` last became true. */
-function useElapsed(active: boolean): number {
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    setSeconds(0);
-    const started = Date.now();
-    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 250);
-    return () => clearInterval(timer);
-  }, [active]);
-  return seconds;
 }
 
 function Searching({ seconds }: { seconds: number }) {
@@ -165,8 +218,11 @@ function Searching({ seconds }: { seconds: number }) {
 
 export function SearchTab({ version: asked }: { version: string }) {
   const version: VersionInput = asked !== "" ? { version: asked } : {};
-  const [mode, setMode] = useState<keyof typeof MODES>("text");
-  const [text, setText] = useState("");
+  // What to search for: one or more fields, each at most once.
+  const [fields, setFields] = useState<{ mode: Mode; text: string }[]>([{ mode: "text", text: "" }]);
+  const setField = (i: number, field: { mode: Mode; text: string }) => setFields(fields.map((f, j) => (j === i ? field : f)));
+  const unused = (Object.keys(MODES) as Mode[]).filter((m) => !fields.some((f) => f.mode === m));
+  const filled = fields.filter((f) => f.text.trim() !== "");
   const [libraries, setLibraries] = useState("");
   const [kinds, setKinds] = useState("");
   const [k, setK] = useState(10);
@@ -183,9 +239,9 @@ export function SearchTab({ version: asked }: { version: string }) {
     e.preventDefault();
     const snapshots: SnapshotScope = scope === "labels" ? { labels: parseLabels(scopeLabels) } : scope;
     const query: Query = {
-      [mode]: text,
-      libraries: split(libraries),
-      kinds: split(kinds),
+      ...Object.fromEntries(filled.map((f) => [f.mode, f.text])),
+      libraries: parseList(libraries),
+      kinds: parseList(kinds),
       limit: k,
       ...(sorried !== "default" && { include_sorried: sorried === "include" }),
       snapshots,
@@ -201,31 +257,58 @@ export function SearchTab({ version: asked }: { version: string }) {
       <div className="space-y-4">
         <Panel>
           <form onSubmit={submit}>
-            <div className="flex gap-2">
-              <select className={inputClass} value={mode} onChange={(e) => setMode(e.target.value as keyof typeof MODES)}>
-                {Object.entries(MODES).map(([m, label]) => (
-                  <option key={m} value={m}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-              <input
-                className={`${inputClass} flex-1`}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="trace of a density matrix is one"
-                autoFocus
-              />
-              <Button type="submit" disabled={text.trim() === ""} className="inline-flex items-center gap-2">
-                {search.isFetching ? (
-                  <>
-                    <Spinner />
-                    Searching…
-                  </>
-                ) : (
-                  "Search"
-                )}
-              </Button>
+            <div className="space-y-2">
+              {fields.map((f, i) => (
+                <div key={i} className="flex gap-2">
+                  <select
+                    className={inputClass}
+                    aria-label="Search for"
+                    value={f.mode}
+                    onChange={(e) => setField(i, { ...f, mode: e.target.value as Mode })}
+                  >
+                    {(Object.keys(MODES) as Mode[])
+                      .filter((m) => m === f.mode || unused.includes(m))
+                      .map((m) => (
+                        <option key={m} value={m}>
+                          {MODES[m]}
+                        </option>
+                      ))}
+                  </select>
+                  <input
+                    className={`${inputClass} flex-1`}
+                    aria-label={MODES[f.mode]}
+                    value={f.text}
+                    onChange={(e) => setField(i, { ...f, text: e.target.value })}
+                    placeholder={i === 0 ? "trace of a density matrix is one" : ""}
+                    autoFocus={i === 0}
+                  />
+                  {i === 0 ? (
+                    <Button type="submit" disabled={filled.length === 0} className="inline-flex items-center gap-2">
+                      {search.isFetching ? (
+                        <>
+                          <Spinner />
+                          Searching…
+                        </>
+                      ) : (
+                        "Search"
+                      )}
+                    </Button>
+                  ) : (
+                    <SubtleButton aria-label={`Remove ${MODES[f.mode]}`} onClick={() => setFields(fields.filter((_, j) => j !== i))}>
+                      ×
+                    </SubtleButton>
+                  )}
+                </div>
+              ))}
+              {unused[0] !== undefined && (
+                <button
+                  type="button"
+                  className="text-xs text-indigo-600 hover:underline"
+                  onClick={() => setFields([...fields, { mode: unused[0] ?? "text", text: "" }])}
+                >
+                  Add a field
+                </button>
+              )}
             </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-5">
               <Field label="Libraries">

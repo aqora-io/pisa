@@ -1461,13 +1461,41 @@ const step = await client.applyTactic(session.states[0]!.id, "simp");
 ```
 
 React (`@aqora/pisa-react`, in `web/packages/react`) has hooks over TanStack
-Query: `useCheck` and `useLiveCheck` for an editor, `useProofSession` for a
-tree of tactics, the snapshot queries and mutations, `useSearch`, `useResolve`
+Query: `useCheck`, `useLiveCheck` and `useCheckBatch` for checks,
+`useProofSession` for a tree of tactics, `useDocument` with
+`useDocumentGoals` and `useProbeDocument` for open documents, the snapshot
+queries and mutations with `useDependents` and `useAudit`, `useLongJob` for
+requests run as jobs, `useRebuildPlan`, `useRebuildSnapshots`,
+`useAcceptRun` and `useExportRun` for runs, and `useSearch`, `useResolve`
 and `useDeclaration`. The packages' READMEs have examples.
 
-The playground (`web/apps/playground`) uses the hooks for checks, proofs,
-snapshots and search. `vite dev` proxies `/api` to `PISA_URL`, by default the
-compose stack's `http://localhost:8000`:
+The playground (`web/apps/playground`) has a tab for each part of the API:
+
+- **Check**: code checked as you type, or with Ctrl/⌘-Enter, and the goals
+  at the cursor. Declarations in full, a timeout, positions pinned for their
+  goals and terms, a check run as a job, and a batch of code split at
+  `-- ---` lines.
+- **Prove**: a session's tree of tactics from each `sorry`, candidates tried
+  at a `sorry`, and the finished proof checked against the session.
+- **Documents**: code kept open, saved a revision at a time, with its
+  sorries, the goals at the cursor or at lines, and candidates tried at a
+  `sorry` or at the cursor.
+- **Snapshots**: creates that may replace a snapshot, fork a run or leave
+  holes; the list, or its heads; and a snapshot with its link, holes, stored
+  check and dependents, to verify, replace or delete.
+- **Runs**: audits of a project by its labels or of a run against its spec,
+  the export and acceptance, and rebuilds planned and run.
+- **Search**: several fields at once, a declaration's details, and names
+  resolved, when the server searches.
+
+Prove and Documents need a worker with a Lean Beam slot (`PISA_BEAM_SLOTS`).
+Links carry code and ids between tabs: a check's code to keep or prove, a
+snapshot's header to build on, a hit's imports to try, and any snapshot id
+to open. The version box applies to every request once it settles, except
+those about a snapshot, document or session, whose id carries its version.
+
+`vite dev` proxies `/api` to `PISA_URL`, by default the compose stack's
+`http://localhost:8000`:
 
 ```sh
 cd web && pnpm install

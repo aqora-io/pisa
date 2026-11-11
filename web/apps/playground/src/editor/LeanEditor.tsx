@@ -18,10 +18,12 @@ interface Props {
   onRun?: () => void;
   readOnly?: boolean;
   className?: string;
+  /** What the editor holds, for screen readers and tests. */
+  label?: string;
 }
 
 /** A CodeMirror editor for Lean, controlled through `value`. */
-export function LeanEditor({ value, onChange, diagnostics, onCursor, onRun, readOnly = false, className }: Props) {
+export function LeanEditor({ value, onChange, diagnostics, onCursor, onRun, readOnly = false, className, label }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const callbacks = useRef({ onChange, onCursor, onRun });
@@ -39,6 +41,7 @@ export function LeanEditor({ value, onChange, diagnostics, onCursor, onRun, read
           lean,
           lintGutter(),
           EditorState.readOnly.of(readOnly),
+          EditorView.contentAttributes.of(label !== undefined ? { "aria-label": label } : {}),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) callbacks.current.onChange?.(update.state.doc.toString());
             if (update.selectionSet || update.docChanged) {
@@ -54,7 +57,7 @@ export function LeanEditor({ value, onChange, diagnostics, onCursor, onRun, read
       view.current = null;
     };
     // The editor is made once; `value` and `diagnostics` reach it below.
-  }, [readOnly]);
+  }, [readOnly, label]);
 
   useEffect(() => {
     const editor = view.current;
