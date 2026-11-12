@@ -201,6 +201,27 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release that keeps requests to their scope and runs to their names:
+- The first process of this release migrates the catalog: `labels` on
+  documents, sessions, jobs, acceptances and refutations, `runs` on
+  snapshots and documents, and `run_names` with a `scope` column (SQLite
+  builds the table again). Earlier releases can't read the migrated
+  database.
+- What was made before has no scope's labels but those its labels have: a
+  snapshot labelled `user=42` is in the scope `user=42`, while earlier
+  documents, sessions, jobs and acceptances, and run names, are reached only
+  by requests without a scope (see [Scopes](#scopes)). Idempotency keys are
+  per scope too, so the retry of an earlier create sends no scope.
+- Upgrade the servers and the workers together: a job carries its scope,
+  which an earlier worker would drop, running it unscoped.
+- Browsers calling from another origin may now send `Pisa-Scope` and `PUT`.
+- A run's name now follows every amendment of its spec, without `name`
+  (see [Naming a run](#run-names)), and copies made by a rebuild or a
+  settle keep the code as sent. Snapshots copied before have no `source`.
+- Exports name only the audited pairs by their run, so the files of a
+  lemma run the pairs import are `PisaSnap/s….lean` again. Acceptances
+  stored before have no `challenge_module` and `solution_module`.
+
 To the release that supersedes amended specs and refuses clashing imports:
 - A module built earlier whose header imports two snapshots that declare
   the same name no longer verifies: its re-check fails with the clash, and
@@ -311,6 +332,9 @@ To the release that names each thing in the API once:
 All fields are snake_case. The request and response types are in
 `crates/pisa-protocol/src/api.rs`. Code is a Lean file: plain, or
 module-system (a `module` header with `public`, `meta` and `all` imports).
+Every endpoint but `/health` and `/openapi.json` takes a `Pisa-Scope`
+header, which keeps the request to one tenant's labels; see
+[Scopes](#scopes).
 
 The server describes its API and search as OpenAPI 3.1 at `GET /openapi.json`,
 also committed as `openapi.json`. Its schemas are derived from the Rust types,
@@ -341,10 +365,12 @@ pnpm -C web generate
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting a run](#comparator) |
-| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
+| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
 | `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
-| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries, runs?}`; see [Documents](#documents) |
+| `GET /runs/{name}` | `?version=` → `{name, root, heads, module?, snapshot_id?}`: the run, and what `import PisaRun.<name>` resolves to when its heads are on one module; see [Naming a run](#run-names) |
+| `PUT /runs/{name}` | `{snapshot_id}` → as `GET /runs/{name}`: names the run the snapshot is in |
+| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries, runs?}`, each run with `moved_to?`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
 | `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened}` |
@@ -356,6 +382,36 @@ pnpm -C web generate
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
 takes a comma-separated list of origins, or `*`. It is empty by default.
+
+<a id="scopes"></a>
+**Scopes.** A request may send `Pisa-Scope: user=42,org=7`: labels that keep
+it to one tenant, so that tenants can share a server.
+- **The header** is comma-separated `key=value` pairs, each key once, at most
+  64, keys and values as for [labels](#labels) with no `,` in a value; a
+  malformed one is a 400. No header, or an empty one, is no scope, which
+  bounds nothing.
+- **What it creates** has the scope's labels: snapshots, those a rebuild, a
+  settle or a resubmit copies included, documents, sessions, jobs and
+  acceptances. A create's `labels` that give a scope key another value keep
+  nothing (`bad_request` in `check.error`), and `PATCH /snapshots/{id}` that
+  changes or removes one is a 400.
+- **What it reads and names** must have them, or it is `not_found`, as for
+  what doesn't exist: snapshots by id, replaced, amended or refuted ones,
+  dependents, listings and label audits (the scope is added to their
+  filters), runs, their audits, exports, settles, rebuilds, resubmits and
+  acceptances, documents, sessions and their states, and jobs by id.
+- **Imports.** Code in a scope imports a snapshot module only if a snapshot
+  in the scope is on it, else `not_found` as for an unknown snapshot, and
+  names resolve to the scope's runs. A module's own imports come with it.
+  No code imports an open document's module, `PisaDocs.…` (400).
+- **Keys and names** are the scope's own: an idempotency key and a run name
+  are unique in a scope, so two tenants can use the same ones.
+- **Search** keeps snapshot hits to the scope (see
+  [Snapshot search](#snapshot-search)), and `GET /declarations/{name}` with
+  `module=` is `not_found` for a module no snapshot of the scope is on. The
+  library's declarations are everyone's.
+- **Not yet:** fairness between scopes, caps and metrics per scope, and
+  listing or deleting a scope's documents, sessions and jobs.
 
 <a id="async-requests"></a>
 **Async requests.** A check, a session's start, tactic or check, a
@@ -793,29 +849,46 @@ POST /check {"code": "import PisaRun.projA.lemma1\n\ntheorem t : 1 = 1 := lemma1
 
 - **Names.** Dotted parts, each a letter or `_` then letters, digits and
   `_`, none a Lean keyword, up to 128 bytes; one name per run, unique in its
-  version, so dots give projects namespaces. A name another run has, while
-  that run has snapshots, keeps nothing (`check.error` is a `conflict` that
-  names that run's first snapshot), unless the create [amends](#amending)
-  that run's spec: the name then moves to the amending spec's run, and a
-  resubmit carries the run there. `name` with `replaces`, or a malformed
-  name, is a 400. Snapshots show the name of their run as `run`.
+  version and [scope](#scopes), so dots give projects namespaces. A name
+  another run has, while that run has snapshots, keeps nothing
+  (`check.error` is a `conflict` that names that run's first snapshot).
+  `name` with `replaces`, or a malformed name, is a 400. Snapshots show the
+  name of their run as `run`.
+- **Amending.** A create that [amends](#amending) a named run's spec takes
+  the run's name for its own run, without sending `name`, and a resubmit
+  carries the run there; another `name` alongside is a `bad_request`, as a
+  run has one name.
+- **Later.** `PUT /runs/{name} {"snapshot_id": …}` names the run that
+  snapshot is in, from any of its snapshots: a name it had goes, and one
+  another run with snapshots has is a `conflict`. `GET /runs/{name}` reads
+  a run by its name: its `root`, its `heads`, and, when they are on one
+  module, the `module` and `snapshot_id` the name resolves to now.
 - **Resolving.** Each `PisaRun.<name>` import becomes the module of the run's
-  head, on the same line, so positions after the header don't move; a
-  message on that import line has columns of the resolved line. Answers list
-  what each name resolved to in `runs`. A run whose heads are on several
-  modules, a fork, is a `conflict` that names them; a name no run has is a
-  `not_found`. For `/check`, a batch and a create these are in `check.error`
-  (a batch resolves each header once); for sessions and documents they are
-  HTTP errors.
-- **When.** `/check`, creates and each revision of a document resolve at the
-  request. A session resolves when it starts, and its final check imports
-  the same modules, so a run that moved on doesn't change its imports.
+  head, on the same line, so positions don't move; a message on that import
+  line is placed on the line as sent. Answers list what each name resolved
+  to in `runs`. A run whose heads are on several modules, a fork, is a
+  `conflict` that names them; a name no run has is a `not_found`. The
+  resolved imports are checked as hash imports are, so a name and another
+  version of its run by hash are a `bad_request` that says which module the
+  name is. A create into a run (`replaces`, forks too) that imports that
+  run by name is a `bad_request`: it would import the head it replaces. For
+  `/check`, a batch and a create these are in `check.error` (a batch
+  resolves each header once); for sessions and documents they are HTTP
+  errors.
+- **When.** `/check` and creates resolve at the request. A session resolves
+  when it starts and a document when it opens: the session's final check,
+  and each revision of the document, import the same modules, and a name
+  the code adds later resolves then. Their answers set a run's `moved_to`
+  to its head when the run has moved to another module since; once no
+  snapshot is on the module a name was pinned to, they are a `not_found`
+  that names the import.
 - **What is kept.** A create's module is the code as resolved, so its hash,
   and all of pisa's records, name modules as before. The snapshot keeps the
-  code as sent as `source` (`GET /snapshots/{id}`), and a create with a
-  `key` sent again after the run moved returns the first snapshot. Copies
-  made by a rebuild, a settle or a resubmit import modules, and have no
-  `source`.
+  code as sent as `source` (`GET /snapshots/{id}`), and what its names
+  resolved to: a create with a `key` sent again as the same text resolves
+  as the first did, and returns the first snapshot with its `runs`, whatever
+  the run did since. Copies made by a rebuild or a settle keep `source`,
+  its hash imports moved as the copy's are; a resubmit's keep the head's.
 - **Retention.** A run keeps its name while it has snapshots, its first one
   deleted or not; the name goes with the run's last snapshot.
 
@@ -1608,6 +1681,12 @@ with `replaces`, `amends` or `refutes`, runs on that spec's version and sends
 none; an acceptance has limits of its own, 600 s a pair and 1800 s more to
 build the run, which a call can set (`timeout`, `build_timeout`), and doesn't
 take the client's timeout.
+
+A client may also take a [scope](#scopes), which it sends with every request:
+`Client::with_scope` in Rust, `Client(url, scope={...})` in Python and
+`scope` in TypeScript's options. Runs are read and named by name with
+`get_run` and `name_run` (`getRun`, `nameRun` in TypeScript); see
+[Naming a run](#run-names).
 
 Rust (`pisa-client`):
 

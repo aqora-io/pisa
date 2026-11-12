@@ -33,11 +33,12 @@ BASE = os.environ.get("PISA_URL", "http://localhost:8000")
 COMPOSE = ["docker", "compose"]
 
 
-def call(method, path, body=None, timeout=900, base=BASE):
+def call(method, path, body=None, timeout=900, base=BASE, scope=None):
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(
-        base + path, data=data, method=method, headers={"content-type": "application/json"}
-    )
+    headers = {"content-type": "application/json"}
+    if scope is not None:
+        headers["pisa-scope"] = scope
+    req = urllib.request.Request(base + path, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             text = r.read().decode()
@@ -515,41 +516,93 @@ def run_names(outside):
     lemma_head = create_snapshot(f"{lemma} := rfl", replaces={"snapshot_id": spec["snapshot"]["id"]}, verify=True)
     checked = check(proof)
     assert checked["ok"] and checked["runs"][0]["snapshot_id"] == lemma_head["snapshot"]["id"], checked
+    status, run = call("GET", "/runs/e2e.lemma")
+    assert status == 200 and run["snapshot_id"] == lemma_head["snapshot"]["id"], run
+    assert run["root"] == spec["snapshot"]["id"], run
     step("run names: code imports a run by name, which follows the run's head")
 
-    # The same text, after a conflict, replacing the head the answer names.
-    refused = post("/snapshots", {"code": proof, "replaces": {"snapshot_id": target_id}, "timeout": 600})
+    # The head imports the lemma's spec, which settling moves to its proof;
+    # the copy keeps the text as written.
+    done = post("/snapshots/settle", {"against": [target_id], "timeout": 600})
+    assert done["ok"] and len(done["created"]) == 1, done
+    settled = done["created"][0]["new_snapshot_id"]
+    status, detail = call("GET", f"/snapshots/{settled}")
+    assert status == 200 and detail["source"] == proof, detail
+    assert lemma_head["snapshot"]["module"] in detail["code"] and detail["run"] == "e2e.main", detail
+    step("run names: a settled copy keeps the code as written, importing the run by name")
+
+    # Text resent after a conflict, replacing the head the answer names.
+    resend = f"{proof}\n-- resent"
+    refused = post("/snapshots", {"code": resend, "replaces": {"snapshot_id": target_id}, "timeout": 600})
     assert refused["check"]["error"]["kind"] == "conflict", refused
-    assert refused["heads"] == [head["snapshot"]["id"]], refused
-    resent = create_snapshot(proof, replaces={"snapshot_id": head["snapshot"]["id"]}, verify=True)
+    assert refused["heads"] == [settled], refused
+    resent = create_snapshot(resend, replaces={"snapshot_id": settled}, verify=True)
     assert resent["snapshot"]["run"] == "e2e.main", resent
     status, detail = call("GET", f"/snapshots/{resent['snapshot']['id']}")
-    assert status == 200 and detail["source"] == proof, detail
+    assert status == 200 and detail["source"] == resend, detail
     out = audit_against(target)
     assert out["clean"] is True and out["heads"] == [resent["snapshot"]["id"]], out
-    step("run names: a conflict is resent unchanged, and the run is clean on the proved lemma")
+    step("run names: a conflict is resent, imports unchanged, and the run is clean on the proved lemma")
 
-    query = urllib.parse.urlencode([("against", target_id)])
+    # Against both specs, each pair is named by its run.
+    specs = [target_id, spec["snapshot"]["id"]]
+    query = urllib.parse.urlencode([("against", s) for s in specs])
     with urllib.request.urlopen(BASE + f"/snapshots/export?{query}", timeout=900) as r:
         archive = r.read()
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         names = tar.getnames()
-        config = json.load(tar.extractfile("pisa-run/comparator/1.json"))
-    # The pair is named by its run; the lemma it imports keeps its hash names.
-    lemma_files = [x["snapshot"]["module"].replace(".", "/") + ".lean" for x in (spec, lemma_head)]
-    for path in ["PisaRun/e2e/main.lean", "PisaSpec/e2e/main.lean", *lemma_files]:
+        configs = [json.load(tar.extractfile(f"pisa-run/comparator/{n}.json")) for n in (1, 2)]
+    for path in ["PisaRun/e2e/main.lean", "PisaSpec/e2e/main.lean", "PisaRun/e2e/lemma.lean",
+                 "PisaSpec/e2e/lemma.lean"]:
         assert f"pisa-run/{path}" in names, names
-    judged = ("PisaSpec.e2e.main", "PisaRun.e2e.main")
-    assert (config["challenge_module"], config["solution_module"]) == judged, config
-    verdict = post("/snapshots/accept", {"against": [target_id]})
+    judged = {("PisaSpec.e2e.main", "PisaRun.e2e.main"), ("PisaSpec.e2e.lemma", "PisaRun.e2e.lemma")}
+    assert {(c["challenge_module"], c["solution_module"]) for c in configs} == judged, configs
+    verdict = post("/snapshots/accept", {"against": specs})
     assert verdict["accepted"] and verdict["clean"], verdict
-    pair = verdict["pairs"][0]
-    assert (pair["challenge_module"], pair["solution_module"]) == judged, pair
+    assert {(p["challenge_module"], p["solution_module"]) for p in verdict["pairs"]} == judged, verdict
     if outside:
         built_outside(archive)
-    step("run names: the export names the pair by its run, builds and is accepted")
-    for x in [resent, head, target, lemma_head, spec]:
-        status, gone = call("DELETE", f"/snapshots/{x['snapshot']['id']}")
+    step("run names: the export names each pair by its run, builds and is accepted")
+
+    # Named again, the run keeps one name.
+    status, run = call("PUT", "/runs/e2e.renamed", {"snapshot_id": resent["snapshot"]["id"]})
+    assert status == 200 and run["heads"] == [resent["snapshot"]["id"]], run
+    assert call("GET", "/runs/e2e.main")[0] == 404
+    step("run names: a run is named again by PUT /runs/{name}")
+    for x in [resent["snapshot"]["id"], settled, head["snapshot"]["id"], target_id,
+              lemma_head["snapshot"]["id"], spec["snapshot"]["id"]]:
+        status, gone = call("DELETE", f"/snapshots/{x}")
+        assert status == 200, gone
+
+
+def scopes():
+    a, b = "e2e=a", "e2e=b"
+    code = "theorem e2e_scoped : 1 + 1 = 2 := rfl"
+    body = {"code": code, "name": "e2e.scoped", "key": "e2e-scoped", "timeout": 600}
+    status, mine = call("POST", "/snapshots", body, scope=a)
+    assert status == 200 and mine["snapshot"]["labels"] == {"e2e": "a"}, mine
+    mine = mine["snapshot"]
+    assert call("GET", f"/snapshots/{mine['id']}", scope=b)[0] == 404
+    status, listed = call("GET", "/snapshots", scope=b)
+    assert status == 200 and mine["id"] not in [s["id"] for s in listed["snapshots"]], listed
+    # The same key and name are the other scope's to take.
+    status, theirs = call("POST", "/snapshots", {**body, "code": f"{code}\n-- b"}, scope=b)
+    assert status == 200 and theirs["snapshot"]["id"] != mine["id"], theirs
+    theirs = theirs["snapshot"]
+    uses = "import PisaRun.e2e.scoped\n\nexample : 1 + 1 = 2 := e2e_scoped"
+    for scope, made in [(a, mine), (b, theirs)]:
+        status, r = call("POST", "/check", {"code": uses, "timeout": 600}, scope=scope)
+        assert status == 200 and r["ok"] and r["runs"][0]["snapshot_id"] == made["id"], r
+    status, r = call("POST", "/check", {"code": uses, "timeout": 600}, scope="e2e=c")
+    assert r["error"]["kind"] == "not_found", r
+    by_hash = f"{mine['header']}\n\nexample : 1 + 1 = 2 := e2e_scoped"
+    status, r = call("POST", "/check", {"code": by_hash, "timeout": 600}, scope=b)
+    assert r["error"]["kind"] == "not_found", r
+    assert call("PATCH", f"/snapshots/{mine['id']}", {"labels": {"e2e": None}}, scope=a)[0] == 400
+    step("scopes: what a scope makes is its own, and other scopes reach none of it")
+    for scope, made in [(a, mine), (b, theirs)]:
+        assert call("DELETE", f"/snapshots/{made['id']}", scope=b if scope == a else a)[0] == 404
+        status, gone = call("DELETE", f"/snapshots/{made['id']}", scope=scope)
         assert status == 200, gone
 
 
@@ -940,6 +993,7 @@ if __name__ == "__main__":
     refute_amend_and_resubmit()
     through_links_and_settle()
     run_names(outside=not args.mathlib and not args.no_failover)
+    scopes()
     # The export of a project with packages fetches them to build.
     comparator(outside=not args.mathlib and not args.no_failover)
     review()
