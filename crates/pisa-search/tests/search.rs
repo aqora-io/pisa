@@ -885,10 +885,12 @@ fn only(lanes: &str) -> Lanes {
 }
 
 /// A goal's target finds the theorem that concludes it, through the
-/// conclusion lane, whatever its hypotheses mention.
+/// conclusion lane (off by default, so weighted here), whatever its
+/// hypotheses mention.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_goal_finds_the_theorem_that_concludes_it() {
-    let Some(t) = engine().await else { return };
+    let Some(mut t) = engine().await else { return };
+    t.engine.weights.concl = 1.0;
     let goal = Query {
         goal: Some("x : ℝ\nh : Real.sqrt x = 0\n⊢ Matrix.trace 1 = Fintype.card n".into()),
         ..Default::default()
@@ -902,15 +904,18 @@ async fn a_goal_finds_the_theorem_that_concludes_it() {
     assert_eq!(hits.first(), Some(&"Matrix.trace_one"), "{hits:?}");
     // Real.sqrt is only in a hypothesis.
     assert!(!hits.iter().any(|h| h.starts_with("Real.")), "{hits:?}");
-    // All lanes together put it first too.
+    // All lanes together, at the default weights, put it first too.
+    t.engine.weights = Default::default();
     assert_eq!(t.names(goal).await[0], "Matrix.trace_one");
     t.done().await;
 }
 
-/// `consts` names constants exactly, for the structural and conclusion lanes.
+/// `consts` names constants exactly, for the structural and conclusion lanes
+/// (the latter off by default, so weighted here).
 #[tokio::test(flavor = "multi_thread")]
 async fn consts_name_the_constants_a_search_is_about() {
-    let Some(t) = engine().await else { return };
+    let Some(mut t) = engine().await else { return };
+    t.engine.weights.concl = 1.0;
     let q = Query {
         consts: vec!["Fintype.card".into()],
         ..Default::default()
@@ -1012,5 +1017,24 @@ async fn a_text_result_is_its_hits_rendered() {
     assert!(text.hits.is_empty());
     let rendered: Vec<&str> = full.hits.iter().map(|h| h.text.as_str()).collect();
     assert_eq!(text.text, Some(rendered.join("\n\n")));
+    t.done().await;
+}
+
+/// A lane weighted 0 isn't asked: its candidates would add nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lane_without_weight_is_not_asked() {
+    let Some(mut t) = engine().await else { return };
+    t.engine.weights.concl = 0.0;
+    let q = Query {
+        consts: vec!["Fintype.card".into()],
+        ..Default::default()
+    };
+    let r = t
+        .engine
+        .search_batch(std::slice::from_ref(&q), only("concl"))
+        .await
+        .unwrap();
+    let hits: Vec<&str> = r[0].hits.iter().map(|h| h.name.as_str()).collect();
+    assert!(hits.is_empty(), "{hits:?}");
     t.done().await;
 }

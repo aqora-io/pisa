@@ -54,11 +54,13 @@ const MAX_EMBEDDINGS: usize = 32;
 /// The library of snapshot declarations.
 pub const SNAPSHOT_LIBRARY: &str = pisa_protocol::snapshot::ROOT;
 
-/// Fusion and scoring parameters, tuned on MathlibQR (see `search/eval/`).
+/// Fusion and scoring parameters, tuned on the dev splits of the physics sets
+/// with MathlibQR as a guard (see `search/eval/`).
 ///
 /// Under Qdrant's RRF a weight below 1 makes a lane's ranks fall off fast:
 /// lexical and structural matches lift their top few hits without crowding
-/// out the dense lane further down, which retrieves best alone.
+/// out the dense lane further down, which retrieves best alone. A lane
+/// weighted 0 isn't asked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Weights {
@@ -101,12 +103,15 @@ pub struct Weights {
 impl Default for Weights {
     fn default() -> Self {
         Weights {
-            rrf_k: 30,
-            lexical: 0.02,
+            rrf_k: 20,
+            lexical: 0.05,
             name: 3.0,
             structural: 0.02,
             structural_identifiers: 1.0,
-            concl: 1.0,
+            // Off: on the physics sets it lowered MRR, and it added nothing
+            // even to premises that conclude like their goal; see
+            // search/eval/v4.36.0-rc2-1e541805-physics.md.
+            concl: 0.0,
             dense: 1.0,
             exact_lane: 1.0,
             prose_name: 1.0,
@@ -116,7 +121,7 @@ impl Default for Weights {
             prose_doc: 1.2,
             lean_signature: 2.0,
             lean_name: 1.5,
-            pagerank: 0.008,
+            pagerank: 0.016,
             pagerank_cap: 4.0,
             intent: 0.002,
             exact: 1.0,
@@ -624,6 +629,9 @@ impl Engine {
         let mut prefetch = Vec::new();
         let mut weights = Vec::new();
         let mut lane = |query: Value, using: &str, weight: f64| {
+            if weight <= 0.0 {
+                return;
+            }
             prefetch.push(json!({
                 "query": query, "using": using, "filter": visible, "limit": w.depth,
             }));

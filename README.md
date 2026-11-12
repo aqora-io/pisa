@@ -2048,7 +2048,9 @@ with weighted reciprocal rank fusion:
   each theorem concludes: the constants of its conclusion's
   discrimination-tree key, which an index of format 5 or later holds. A
   collection loaded from an earlier bundle has no room for it: drop it and
-  load the new bundle;
+  load the new bundle. Its default weight is 0, so it isn't asked: on the
+  physics sets it lowered MRR, even for premises that conclude like their
+  goal (see `search/eval/v4.36.0-rc2-1e541805-physics.md`);
 - **dense:** Qwen3-Embedding-8B vectors for every declaration, from Scaleway's
   serverless API, which also embeds each query. Qwen3-Embedding-0.6B is a
   free, local alternative (TEI on CPU, or llama.cpp on a GPU) that retrieves
@@ -2059,7 +2061,8 @@ with weighted reciprocal rank fusion:
 
 Qdrant's weights scale a lane's ranks rather than its scores: a weight below 1
 makes a lane count only for its first few hits. The tuned defaults (`Weights`
-in `crates/pisa-search/src/engine.rs`) lean on the dense lane, with lexical and
+in `crates/pisa-search/src/engine.rs`, tuned on the physics sets' dev splits
+with MathlibQR as a guard) lean on the dense lane, with lexical and
 structural matches lifting their top hits. PageRank over the dependency graph is
 a prior, added after fusion, and a name query also favours names close to it by
 edit distance. Declarations that depend on `sorry` are hidden unless
