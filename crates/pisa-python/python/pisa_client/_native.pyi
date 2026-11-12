@@ -874,7 +874,8 @@ class Client:
         """An acceptance `accept_run` stored, by its id."""
     def list_acceptances(self, spec: str) -> ListAcceptancesResponse:
         """The acceptances that judged spec snapshot `spec`, newest first, at
-        most 100; each says `stale` once the run's heads have moved on."""
+        most 100; each says `stale` once the run's heads have moved on, its
+        spec is amended, or a target is refuted."""
     def get_run(self, name: str) -> NamedRun:
         """The run named `name`: its root, its heads, and, when they are on
         one module, what `import PisaRun.<name>` resolves to now."""

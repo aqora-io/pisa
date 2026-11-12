@@ -1187,7 +1187,8 @@ impl Client {
     }
 
     /// The acceptances that judged spec snapshot `spec`, newest first, at
-    /// most 100; each says `stale` once the run's heads have moved on.
+    /// most 100; each says `stale` once the run's heads have moved on, its
+    /// spec is amended, or a target is refuted.
     pub async fn list_acceptances(&self, spec: &str) -> Result<ListAcceptancesResponse, Error> {
         let mut url = self.endpoint.url("snapshots/accept")?;
         url.query_pairs_mut().append_pair("spec", spec);

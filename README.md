@@ -1212,7 +1212,10 @@ accepting a run takes both:
   kernel only, and `timeout` (default 600) is each pair's limit in seconds.
   The first pair comparator runs builds the run's snapshot modules, which
   later pairs replay, so it has `build_timeout` (default 1800) more. A pair
-  that runs out keeps what Lake printed until then in its `output`.
+  that runs out keeps what Lake printed until then in its `output`. A run
+  whose audit lists `unsettled` heads, which hold only through links, is a
+  409 `conflict` at once, naming the settle to send first: comparator would
+  judge records that read `sorry`. Nothing is stored.
   Each pair has comparator's `exit_code` (0 accepted, 1 refused or failed, 2
   couldn't start, none past `timeout`) and the end of its `output`. A pair
   not accepted says why in `error.kind`: `refused`, comparator's verdict;
@@ -1227,7 +1230,8 @@ accepting a run takes both:
   lists a spec snapshot's, newest first. It names the code it judged, which
   stays named when snapshots go: each pair's `spec_module` and
   `head_module`, and the audit with its review list. Read back, it says
-  `stale` once the run's heads are no longer the ones it judged. A result
+  `stale` once the run's heads are no longer the ones it judged, a spec is
+  amended, or a target is refuted that its audit didn't list. A result
   over the record's 6 MiB is stored without its pairs' `output`, then
   without the review, and `truncated` says which. A pair that imports
   Mathlib takes about 25 s, or 45 s paranoid, so send it with

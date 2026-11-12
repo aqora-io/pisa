@@ -1746,7 +1746,8 @@ pub struct AcceptResponse {
     /// them, in the order of the audit's `comparisons`.
     pub pairs: Vec<AcceptPair>,
     /// When read back: the run's heads are no longer the ones it judged, as
-    /// a head was replaced or deleted since.
+    /// a head was replaced or deleted since, a spec is amended, or a target
+    /// is refuted that its audit didn't list.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
     /// What was left out so that the record fits its 6 MiB: `output`, each

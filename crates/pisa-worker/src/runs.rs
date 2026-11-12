@@ -211,6 +211,20 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     let project = pool.launcher().project();
     let (mut audit, run) =
         audited_export(pool.snapshots(), project, &job.against, &job.allow).await?;
+    // A head that holds only through links would be judged on records that
+    // read `sorry`: the run is settled first.
+    if !audit.unsettled.is_empty() {
+        let heads: Vec<&str> = audit.unsettled.iter().map(|u| u.head.as_str()).collect();
+        let body = serde_json::json!({"against": job.against, "allow": job.allow});
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            format!(
+                "the run isn't settled: {} hold only through links. Send POST /snapshots/settle \
+                 {body}, then accept the run",
+                heads.join(", ")
+            ),
+        ));
+    }
     // What the leader reads beside the verdict, kept with it, read with the
     // audit: a snapshot deleted while comparator runs takes nothing from it.
     let reader = pool.snapshots().reader();

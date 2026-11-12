@@ -3,7 +3,7 @@
 //! has the snapshot warm. Reads, listings, updates, deletes and verifies go
 //! to any worker of the version, which a snapshot id names.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use axum::Json;
@@ -693,8 +693,10 @@ fn tarball(run: &ExportedRun) -> std::io::Result<Vec<u8>> {
         same but for the spec's holes and `allow`, and the proofs use only the standard axioms \
         and the spec's assumptions. The run is `accepted` when the audit is `clean` and \
         comparator accepted every pair. The result is stored, and \
-        `GET /snapshots/accept/{id}` reads it again. A Mathlib-sized pair takes about half a \
-        minute, or a minute paranoid: send it with `Prefer: respond-async`.",
+        `GET /snapshots/accept/{id}` reads it again. A run with heads that hold only through \
+        links (the audit's `unsettled`) is a 409 `conflict` at once, naming the settle to send. \
+        A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with \
+        `Prefer: respond-async`.",
     params(PreferAsync),
     request_body = AcceptRequest,
     responses((status = 200, description = "The audit and comparator's verdict on each pair", body = AcceptResponse), Accepted, ApiErrors),
@@ -759,14 +761,15 @@ pub async fn acceptance(
             format!("no acceptance {id}"),
         ));
     };
-    Ok(Json(read_back(&reader, stored).await?))
+    Ok(Json(read_back(&reader, stored, &mut HashMap::new()).await?))
 }
 
 #[utoipa::path(
     get, path = "/snapshots/accept", operation_id = "listAcceptances", tag = "snapshots",
     summary = "A spec snapshot's acceptances",
     description = "The stored acceptances that judged a spec snapshot, newest first, at most \
-        100. Each says `stale` once the run's heads are no longer the ones it judged.",
+        100. Each says `stale` once the run's heads are no longer the ones it judged, its spec \
+        is amended, or a target is refuted that its audit didn't list.",
     params(("spec" = String, Query, description = "The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since")),
     responses((status = 200, description = "Its acceptances", body = ListAcceptancesResponse), ApiErrors),
 )]
@@ -784,33 +787,82 @@ pub async fn acceptances(
     let parsed = parse_id(&spec)?;
     let reader = app.snapshots.version(&parsed.version);
     let mut acceptances = Vec::new();
+    let mut specs = HashMap::new();
     for stored in reader.catalog().acceptances_of(&parsed.entry, 100).await? {
-        acceptances.push(read_back(&reader, stored).await?);
+        acceptances.push(read_back(&reader, stored, &mut specs).await?);
     }
     Ok(Json(ListAcceptancesResponse { acceptances }))
 }
 
+/// What a spec snapshot's run is now, for reading acceptances back: its
+/// heads, whether an amendment supersedes it, and the snapshots that refute
+/// its targets. `None` once it is gone.
+struct SpecNow {
+    heads: Vec<String>,
+    superseded: bool,
+    refuted_by: BTreeSet<String>,
+}
+
+async fn spec_now(
+    reader: &pisa_snapshots::Reader,
+    entry: &str,
+) -> Result<Option<SpecNow>, ApiError> {
+    let heads = match reader.heads_from(entry).await {
+        Ok(heads) => heads,
+        Err(e) if e.kind == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let superseded = reader.superseding(entry).await?.is_some();
+    let refuted_by = (reader.refutations_against(entry).await?)
+        .into_iter()
+        .map(|(_, r)| r.snapshot_id)
+        .collect();
+    Ok(Some(SpecNow {
+        heads,
+        superseded,
+        refuted_by,
+    }))
+}
+
 /// A stored acceptance as it is answered: `stale` once its specs' runs'
-/// heads are no longer the ones it judged, or a spec is gone.
+/// heads are no longer the ones it judged, a spec is gone or amended, or a
+/// target is refuted that its audit didn't list. `specs` keeps what each
+/// spec is now across a listing.
 async fn read_back(
     reader: &pisa_snapshots::Reader,
     stored: serde_json::Value,
+    specs: &mut HashMap<String, Option<SpecNow>>,
 ) -> Result<AcceptResponse, ApiError> {
     let mut accepted: AcceptResponse = serde_json::from_value(stored)
         .map_err(|e| ApiError::new(ErrorKind::Internal, format!("a stored acceptance: {e}")))?;
+    let judged_refutations: BTreeSet<&String> = (accepted.audit.refutations.iter())
+        .map(|r| &r.snapshot_id)
+        .collect();
     let mut now = BTreeSet::new();
+    let mut stale = false;
     for spec in &accepted.against {
-        match reader.parse(spec) {
-            Ok(entry) => match reader.heads_from(&entry).await {
-                Ok(heads) => now.extend(heads),
-                Err(e) if e.kind == ErrorKind::NotFound => accepted.stale = true,
-                Err(e) => return Err(e.into()),
-            },
-            Err(_) => accepted.stale = true,
+        let Ok(entry) = reader.parse(spec) else {
+            stale = true;
+            continue;
+        };
+        if !specs.contains_key(&entry) {
+            let found = spec_now(reader, &entry).await?;
+            specs.insert(entry.clone(), found);
+        }
+        match &specs[&entry] {
+            Some(spec) => {
+                now.extend(spec.heads.iter().cloned());
+                stale |= spec.superseded;
+                stale |= !spec
+                    .refuted_by
+                    .iter()
+                    .all(|r| judged_refutations.contains(r));
+            }
+            None => stale = true,
         }
     }
     let judged: BTreeSet<String> = accepted.heads.iter().cloned().collect();
-    accepted.stale |= now != judged;
+    accepted.stale = stale || now != judged;
     Ok(accepted)
 }
 

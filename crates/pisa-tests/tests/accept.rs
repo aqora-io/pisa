@@ -634,6 +634,79 @@ async fn get(c: &Cluster, path: &str) -> Value {
     r.json().await.unwrap()
 }
 
+/// A run whose heads hold only through links is refused at once, naming the
+/// settle to send: comparator would judge records that read `sorry`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsettled_run_is_refused_at_once() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec_l = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem lemma_l : 1 = 1 := sorry"}),
+    )
+    .await;
+    let spec_t = create(
+        &c,
+        json!({"code": on(&spec_l, "theorem top : 2 = 2 := sorry")}),
+    )
+    .await;
+    let code = on(&spec_l, "theorem top : 2 = 2 := by have := lemma_l; rfl");
+    create(
+        &c,
+        json!({"code": code, "replaces": {"snapshot_id": id(&spec_t)}}),
+    )
+    .await;
+    let lemma = "import Foo\n\ntheorem lemma_l : 1 = 1 := rfl";
+    create(
+        &c,
+        json!({"code": lemma, "replaces": {"snapshot_id": id(&spec_l)}}),
+    )
+    .await;
+    let job = Job::SnapshotAccept(SnapshotAcceptJob {
+        against: vec![id(&spec_l), id(&spec_t)],
+        allow: Vec::new(),
+        paranoid: false,
+        timeout_secs: 60,
+        build_timeout_secs: 0,
+    });
+    let JobResult::SnapshotAccepted(Err(e)) = run(&c, job).await else {
+        panic!("an unsettled run was judged")
+    };
+    assert_eq!(e.kind, pisa_protocol::api::ErrorKind::Conflict, "{e:?}");
+    assert!(e.message.contains("POST /snapshots/settle"), "{e:?}");
+    let listed = get(&c, &format!("/snapshots/accept?spec={}", id(&spec_t))).await;
+    assert_eq!(listed["acceptances"], json!([]), "{listed}");
+}
+
+/// An acceptance is stale once its spec is amended, which supersedes it, or
+/// a target is refuted that its audit didn't list.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_acceptance_is_stale_once_its_spec_is_amended_or_a_target_refuted() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    for change in ["amend", "refute"] {
+        let code = format!(
+            "import Foo\n\ntheorem t : 1 = 2 := sorry\ntheorem e : 1 = 1 := sorry -- {change}"
+        );
+        let s = create(&c, json!({"code": code})).await;
+        let head = code.replace("sorry", "rfl");
+        create(
+            &c,
+            json!({"code": head, "replaces": {"snapshot_id": id(&s)}}),
+        )
+        .await;
+        let accepted = accept(&c, &[&id(&s)], &[], false, 60).await;
+        let path = format!("/snapshots/accept/{}", accepted.id);
+        assert!(get(&c, &path).await.get("stale").is_none(), "{change}");
+        let body = match change {
+            "amend" => json!({"code": code.replace("1 = 1", "2 = 2"),
+                              "amends": {"snapshot_id": id(&s), "reason": "e was wrong"}}),
+            _ => json!({"code": on(&s, "theorem r : ¬ (1 = 2) := by decide"),
+                        "refutes": {"snapshot_id": id(&s), "target": "t"}}),
+        };
+        create(&c, body).await;
+        assert_eq!(get(&c, &path).await["stale"], true, "{change}");
+    }
+}
+
 /// A head deleted while comparator runs leaves the acceptance whole: its
 /// review list is read with its audit, before comparator.
 #[tokio::test(flavor = "multi_thread")]

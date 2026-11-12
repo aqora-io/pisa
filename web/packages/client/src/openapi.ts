@@ -329,13 +329,13 @@ export interface paths {
         };
         /**
          * A spec snapshot's acceptances
-         * @description The stored acceptances that judged a spec snapshot, newest first, at most 100. Each says `stale` once the run's heads are no longer the ones it judged.
+         * @description The stored acceptances that judged a spec snapshot, newest first, at most 100. Each says `stale` once the run's heads are no longer the ones it judged, its spec is amended, or a target is refuted that its audit didn't list.
          */
         get: operations["listAcceptances"];
         put?: never;
         /**
          * Judge a run and store the verdict
-         * @description Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches, in the run's export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
+         * @description Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches, in the run's export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A run with heads that hold only through links (the audit's `unsettled`) is a 409 `conflict` at once, naming the settle to send. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
          */
         post: operations["acceptRun"];
         delete?: never;
@@ -666,7 +666,8 @@ export interface components {
             paranoid: boolean;
             /**
              * @description When read back: the run's heads are no longer the ones it judged, as
-             *     a head was replaced or deleted since.
+             *     a head was replaced or deleted since, a spec is amended, or a target
+             *     is refuted that its audit didn't list.
              */
             stale?: boolean;
             /**
