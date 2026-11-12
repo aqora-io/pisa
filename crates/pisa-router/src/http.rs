@@ -133,7 +133,14 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status =
             StatusCode::from_u16(self.0.kind.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(ErrorResponse { error: self.0 })).into_response()
+        let retry_after = self.0.kind.retry_after();
+        let mut response = (status, Json(ErrorResponse { error: self.0 })).into_response();
+        if let Some(seconds) = retry_after {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 
@@ -296,7 +303,7 @@ impl App {
     /// workers on the queue, those without limits, and the versions whose
     /// sweeps are refused, each `null` if it can't be read.
     pub async fn health(&self) -> (StatusCode, Health) {
-        let workers = self.dispatcher.workers().await;
+        let counts = self.dispatcher.workers().await;
         let (code, status) = if self.draining.load(Ordering::Acquire) {
             (StatusCode::SERVICE_UNAVAILABLE, HealthStatus::Draining)
         } else {
@@ -312,7 +319,8 @@ impl App {
         };
         let health = Health {
             status,
-            workers,
+            workers: counts.map(|(workers, _)| workers),
+            queued: counts.map(|(_, queued)| queued),
             unlimited_workers,
             sweeps_refused: self.sweeps_refused().await,
             search: None,

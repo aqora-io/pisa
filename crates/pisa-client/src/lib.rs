@@ -64,10 +64,10 @@ pub use pisa_protocol::api::{
     LeftOut, LeftOutReason, LinePos, ListAcceptancesResponse, ListDependentsResponse,
     ListSnapshotsResponse, Message, NameRunRequest, NamedRun, PairError, PairErrorKind, Pos,
     ProbeAt, ProbeResult, ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced,
-    RebuildSkipped, RebuildSnapshotsResponse, RebuildSuperseded, Refutation, Refutes, Replacement,
-    Replaces, ResubmitItem, ResubmitSnapshotsResponse, ReviewDeclaration, ReviewOrigin, RunImport,
-    Session, Severity, Snapshot, SnapshotDetail, Sorry, State, Superseded, TacticInfo, TermInfo,
-    VerifyFailure, VerifySnapshotResponse,
+    RebuildSkipped, RebuildSnapshotsResponse, RebuildSuperseded, Refusal, Refutation, Refutes,
+    Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse, ReviewDeclaration,
+    ReviewOrigin, RunImport, Session, Severity, Snapshot, SnapshotDetail, Sorry, State, Superseded,
+    TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
@@ -76,8 +76,9 @@ pub use pisa_protocol::search::{
 
 const DEFAULT_TIMEOUT: u64 = 60;
 
-/// How long each look at a job waits for it: the server's longest.
-const JOB_WAIT: Duration = Duration::from_secs(60);
+/// How long each look at a job waits for it: well short of the 60 s at which
+/// proxies cut requests off, which async requests are there to avoid.
+const JOB_WAIT: Duration = Duration::from_secs(25);
 
 /// A request sent with `Prefer: respond-async`: its job, whose answer is a
 /// `T`. Anyone with its id can read the answer or cancel it, so keep it
@@ -784,7 +785,19 @@ impl Client {
         if r.status() == reqwest::StatusCode::ACCEPTED {
             return Ok(JobPoll::Pending(r.json().await?));
         }
-        Ok(JobPoll::Done(server_error(r).await?.json().await?))
+        let done: api::GetJobResponse = server_error(r).await?.json().await?;
+        let status = reqwest::StatusCode::from_u16(done.http_status)
+            .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        if !status.is_success() {
+            return Err(server_failure(status, &done.body.to_string()));
+        }
+        serde_json::from_value(done.body)
+            .map(JobPoll::Done)
+            .map_err(|e| Error::Server {
+                status: done.http_status,
+                kind: ErrorKind::Internal,
+                message: format!("a job's answer that doesn't read: {e}"),
+            })
     }
 
     /// Waits for `job` to finish, however long it takes, and returns what

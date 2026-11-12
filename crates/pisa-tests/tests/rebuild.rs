@@ -1208,7 +1208,7 @@ async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
         let client = c.client.clone();
         async move {
             let r = client.get(url).send().await.unwrap();
-            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+            common::job_answer(r.status().as_u16(), r.json::<Value>().await.unwrap())
         }
     };
     let (status, running) = look("0").await;

@@ -64,20 +64,14 @@ pub async fn create(
     };
     if let Err(e) = resolve_create(&app, &mut p).await {
         // In-band, as a create's other failures of its imports are.
-        let refused = CreateSnapshotResponse {
-            snapshot: None,
+        let mut refused = CreateSnapshotResponse {
             check: CheckResult {
                 error: Some(e),
                 ..Default::default()
             },
-            replacement: None,
-            heads: Vec::new(),
-            unverified: None,
-            amendment: None,
-            refutation: None,
-            refutations: Vec::new(),
-            runs: Vec::new(),
+            ..Default::default()
         };
+        refused.refused = refused.refusal();
         return Json(refused).into_response();
     }
     app.answer(prefer, JobKind::CreateSnapshot, p).await
@@ -327,11 +321,19 @@ pub(crate) fn prepare_create(app: &App, req: CreateSnapshotRequest) -> Result<Pr
     })
 }
 
+/// A create's answer, saying what to do next if it kept nothing. A worker
+/// that failed is in-band, as for `/check`: a create carries a key, so
+/// sending it again is safe.
 pub(crate) fn created(done: JobResult) -> Result<CreateSnapshotResponse, ApiError> {
-    let JobResult::SnapshotCreated(r) = done else {
-        return Err(unexpected(done));
+    let mut r = match done {
+        JobResult::SnapshotCreated(r) => *r,
+        other => CreateSnapshotResponse {
+            check: crate::http::failed_result(other),
+            ..Default::default()
+        },
     };
-    Ok(*r)
+    r.refused = r.refusal();
+    Ok(r)
 }
 
 #[utoipa::path(
@@ -1300,4 +1302,28 @@ pub(crate) async fn submit(
         .dispatcher
         .submit(prepare(job, version, priority))
         .await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pisa_protocol::api::Refusal;
+
+    /// A worker that failed a create answers in-band, as for `/check`: the
+    /// create carries a key, so it can be sent again.
+    #[test]
+    fn a_failed_create_is_answered_in_band() {
+        let failed = JobResult::Failed {
+            error: "the worker stopped".into(),
+        };
+        let Ok(r) = created(failed) else {
+            panic!("a failed create is an HTTP error");
+        };
+        assert_eq!(r.refused, Some(Refusal::Retry));
+        let error = r.check.error.unwrap();
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (ErrorKind::Internal, "the worker stopped")
+        );
+    }
 }

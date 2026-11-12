@@ -373,7 +373,7 @@ async fn an_async_check_answers_with_what_its_names_resolved_to() {
     assert_eq!(r.status(), 202);
     let job: Value = r.json().await.unwrap();
     let path = format!("/jobs/{}?wait=30", job["id"].as_str().unwrap());
-    let r = get(&c, &path).await;
+    let (_, r) = common::job_answer(200, get(&c, &path).await);
     assert_eq!(
         (&r["declarations"][0]["own_status"], &r["runs"]),
         (&json!("proved"), &run("proj.lemma", &spec)),

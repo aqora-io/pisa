@@ -455,8 +455,9 @@ async fn the_api_exports_a_run_and_judges_it() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 200);
-    let verdict: Value = r.json().await.unwrap();
+    let status = r.status().as_u16();
+    let (status, verdict) = common::job_answer(status, r.json().await.unwrap());
+    assert_eq!(status, 200, "{verdict}");
     assert_eq!(verdict["accepted"], true, "{verdict}");
     assert_eq!(verdict["pairs"][0]["head"], json!(id(&p)), "{verdict}");
     // It is kept.

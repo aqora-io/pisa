@@ -373,6 +373,7 @@ async fn a_nested_settle_rebuilds_from_the_bottom_up() {
     assert_eq!(job["kind"], "rebuild_snapshots");
     let path = format!("/jobs/{}?wait=30", job["id"].as_str().unwrap());
     let (status, done) = c.request(reqwest::Method::GET, &path, None).await;
+    let (status, done) = common::job_answer(status, done);
     assert_eq!(status, 200, "{done}");
     assert_eq!(done["ok"], true, "{done}");
     let level = |head: &Value| {

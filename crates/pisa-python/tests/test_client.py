@@ -326,7 +326,7 @@ def test_replacing_only_a_head(url):
     other = "import Foo\ntheorem head_t : 1 = 1 := rfl\ntheorem head_u : 2 = 2 := rfl"
     refused = client.create_snapshot(other, replaces=link)
     assert "snapshot" not in refused and refused["check"]["error"]["kind"] == "conflict"
-    assert refused["heads"] == [first["id"]]
+    assert refused["refused"] == "conflict" and refused["heads"] == [first["id"]]
     forked = client.create_snapshot(other, replaces=link, fork=True)
     assert forked["snapshot"]["replaces"] == link and "heads" not in forked
     job = client.submit_create_snapshot(other + "\ntheorem head_v : 3 = 3 := rfl", replaces=link, fork=True)

@@ -110,13 +110,7 @@ impl Snapshots {
         CreateSnapshotResponse {
             snapshot: Some(self.snapshot(entry, entry_meta, &meta)),
             check: meta.result,
-            replacement: None,
-            heads: Vec::new(),
-            unverified: None,
-            amendment: None,
-            refutation: None,
-            refutations: Vec::new(),
-            runs: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -127,15 +121,8 @@ impl Snapshots {
         let mut check = meta.result;
         check.ok = false;
         CreateSnapshotResponse {
-            snapshot: None,
             check,
-            replacement: None,
-            heads: Vec::new(),
-            unverified: None,
-            amendment: None,
-            refutation: None,
-            refutations: Vec::new(),
-            runs: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -217,17 +204,7 @@ impl Snapshots {
         pool: &Arc<Pool>,
         job: SnapshotCreateJob,
     ) -> CreateSnapshotResponse {
-        let mut response = CreateSnapshotResponse {
-            snapshot: None,
-            check: CheckResult::default(),
-            replacement: None,
-            heads: Vec::new(),
-            unverified: None,
-            amendment: None,
-            refutation: None,
-            refutations: Vec::new(),
-            runs: Vec::new(),
-        };
+        let mut response = CreateSnapshotResponse::default();
         let valid =
             check_labels(&job.labels).and_then(|()| job.key.as_deref().map_or(Ok(()), check_key));
         if let Err(e) = valid {

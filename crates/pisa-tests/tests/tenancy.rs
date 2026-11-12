@@ -236,6 +236,7 @@ async fn documents_sessions_states_and_jobs_keep_to_their_scope() {
     assert_eq!(get(&c, B, &job).await.0, 404);
     assert_eq!(send(&c, B, Method::DELETE, &job, None).await.0, 404);
     let (status, r) = get(&c, A, &format!("{job}?wait=30")).await;
+    let (status, r) = common::job_answer(status, r);
     assert_eq!((status, &r["ok"]), (200, &json!(true)), "{r}");
 }
 

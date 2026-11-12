@@ -456,7 +456,8 @@ describe("PisaClient", () => {
       if (s.method === "POST") return json(job, 202);
       if (s.method === "DELETE") return json({ ...job, status: "cancelled" });
       looks += 1;
-      return looks < 3 ? json({ ...job, status: "running" }, 202) : json({ ok: true });
+      const done = { ...job, status: "done", http_status: 200, body: { ok: true } };
+      return looks < 3 ? json({ ...job, status: "running" }, 202) : json(done);
     });
     const submitted = await client.submitCheck("#check Nat", { detail: ["tactics"] });
     expect(submitted).toEqual(job);
@@ -467,8 +468,8 @@ describe("PisaClient", () => {
     expect((await client.waitJob(submitted)).ok).toBe(true);
     expect(sent.slice(1).map((s) => s.url)).toEqual([
       `/api/jobs/${job.id}`,
-      `/api/jobs/${job.id}?wait=60`,
-      `/api/jobs/${job.id}?wait=60`,
+      `/api/jobs/${job.id}?wait=25`,
+      `/api/jobs/${job.id}?wait=25`,
     ]);
     expect((await client.cancelJob(submitted)).status).toBe("cancelled");
   });
@@ -489,7 +490,8 @@ describe("PisaClient", () => {
     const statuses = ["queued", "running"];
     const { client, sent } = recording(() => {
       const status = statuses.shift();
-      return status === undefined ? json({ ok: true }) : json({ ...job, status }, 202);
+      const done = { ...job, status: "done", http_status: 200, body: { ok: true } };
+      return status === undefined ? json(done) : json({ ...job, status }, 202);
     });
     const seen: string[] = [];
     await client.waitJob(job, { wait: 5, onPending: (j) => seen.push(j.status) });
@@ -503,9 +505,9 @@ describe("PisaClient", () => {
 
   it("throws a job's error as its request would have, and a server that won't queue it", async () => {
     const job = { id: "b".repeat(32), kind: "apply_tactic", status: "queued" };
-    const { client } = recording((s) =>
-      s.method === "POST" ? json(job, 202) : json({ error: { kind: "lean", message: "no" } }, 422),
-    );
+    // The look answers 200, with the request's 422 in its envelope.
+    const failed = { ...job, status: "done", http_status: 422, body: { error: { kind: "lean", message: "no" } } };
+    const { client } = recording((s) => (s.method === "POST" ? json(job, 202) : json(failed)));
     const submitted = await client.submitApplyTactic("v~h~s", "fail");
     const thrown = await client.waitJob(submitted).catch((e: unknown) => e);
     expect(isPisaError(thrown, "lean")).toBe(true);

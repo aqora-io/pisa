@@ -775,14 +775,18 @@ async fn requests_out_of_bounds_are_bad_requests() {
 #[tokio::test(flavor = "multi_thread")]
 async fn without_beam_documents_are_unavailable_and_checks_still_run() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let (status, e) = c
-        .post("/documents", json!({"code": CODE, "version": "v"}))
-        .await;
-    assert_eq!(
-        (status, &e["error"]["kind"]),
-        (503, &json!("unavailable")),
-        "{e}"
-    );
+    let r = c
+        .client
+        .post(c.url("/documents"))
+        .json(&json!({"code": CODE, "version": "v"}))
+        .send()
+        .await
+        .unwrap();
+    // It says when to try again.
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["retry-after"], "2");
+    let e: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(e["error"]["kind"], "unavailable", "{e}");
     let id = format!("{}~{}", c.version("v"), new_id());
     let (status, _) = c
         .post(

@@ -1152,6 +1152,10 @@
             },
             "type": "array"
           },
+          "refused": {
+            "$ref": "#/components/schemas/Refusal",
+            "description": "Set exactly when `snapshot` is absent: what to do next."
+          },
           "refutation": {
             "$ref": "#/components/schemas/Refutation",
             "description": "What the snapshot's create checked of the target it\n[`refutes`](CreateSnapshotRequest::refutes), if it refutes one."
@@ -1176,7 +1180,7 @@
           },
           "snapshot": {
             "$ref": "#/components/schemas/Snapshot",
-            "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept: Lean reported errors, the check\ncould not complete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), the snapshot it replaces is replaced already (a\n`conflict`, see `heads`), or `verify: true` found it kept but failing\nthe re-check (`check.error` says why)."
+            "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept, and then `refused` says what to do\nnext and `check` why: Lean reported errors, the check could not\ncomplete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), the snapshot it replaces is replaced already (a\n`conflict`, see `heads`), or the request broke a rule\n(`check.error` says which)."
           },
           "unverified": {
             "$ref": "#/components/schemas/VerifyFailure",
@@ -1748,6 +1752,39 @@
         ],
         "type": "object"
       },
+      "GetJobResponse": {
+        "description": "What `GET /jobs/{id}` answers once the job is done: the status its\nrequest would have answered with, and that answer. A 404 or a 503 answered\ninstead is the look's own, not the job's.",
+        "properties": {
+          "body": {
+            "$ref": "#/components/schemas/JobOutcome",
+            "description": "What its request would have answered: a [`JobOutcome`] by `kind` when\n`http_status` is 200, else an [`ErrorResponse`]."
+          },
+          "http_status": {
+            "description": "The status its request would have answered with: 200, or its error's,\ne.g. 429 when no worker took the job in time.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus",
+            "description": "`done`."
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "http_status",
+          "body"
+        ],
+        "type": "object"
+      },
       "GoalsAt": {
         "properties": {
           "goals": {
@@ -1789,6 +1826,15 @@
       "Health": {
         "description": "`GET /health`: 200, or 503 once the server is stopping.",
         "properties": {
+          "queued": {
+            "description": "The jobs waiting on the queue for a worker, of every version; `null`\nif it can't be read.",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "search": {
             "oneOf": [
               {
@@ -1837,6 +1883,7 @@
         "required": [
           "status",
           "workers",
+          "queued",
           "unlimited_workers",
           "sweeps_refused",
           "search"
@@ -1974,8 +2021,11 @@
         "type": "string"
       },
       "JobOutcome": {
-        "description": "What `GET /jobs/{id}` answers once the job is done: what its request\nwould have. By `kind`: `check` and `check_session` a `CheckResult`,\n`start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,\n`create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a\n`VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`,\n`accept_run` an `AcceptResponse` and `resubmit_snapshots` a\n`ResubmitSnapshotsResponse`. An error is the request's own, with\nits status.",
+        "description": "What a done job's request answered, in [`GetJobResponse::body`]. By\n`kind`: `check` and `check_session` a `CheckResult`, `start_session` a\n`Session`, `apply_tactic` an `ApplyTacticResponse`, `create_snapshot` a\n`CreateSnapshotResponse`, `verify_snapshot` a `VerifySnapshotResponse`,\n`rebuild_snapshots` a `RebuildSnapshotsResponse`, `accept_run` an\n`AcceptResponse` and `resubmit_snapshots` a `ResubmitSnapshotsResponse`;\nwith any other `http_status` than 200, the request's `ErrorResponse`.",
         "oneOf": [
+          {
+            "$ref": "#/components/schemas/ErrorResponse"
+          },
           {
             "$ref": "#/components/schemas/CheckResult"
           },
@@ -2710,6 +2760,17 @@
           "by"
         ],
         "type": "object"
+      },
+      "Refusal": {
+        "description": "Why a create kept nothing, by what to do next. Code with `sorry` is\nkept: a refusal is never about what isn't proved yet.",
+        "enum": [
+          "proof",
+          "limit",
+          "request",
+          "conflict",
+          "retry"
+        ],
+        "type": "string"
       },
       "Refutation": {
         "description": "A snapshot's refutation of a spec's target, as its create checked it.",
@@ -3765,7 +3826,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -3785,7 +3856,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Check Lean code",
@@ -3868,7 +3949,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -3888,7 +3979,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Check several pieces of code",
@@ -3988,7 +4089,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4008,7 +4119,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "A declaration's details",
@@ -4091,7 +4212,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4111,7 +4242,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Open code for goals and probes",
@@ -4186,7 +4327,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4206,7 +4357,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Close a document",
@@ -4306,7 +4467,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4326,7 +4497,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Replace a document's code",
@@ -4428,7 +4609,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4448,7 +4639,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "The goals at positions in a document",
@@ -4550,7 +4751,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4570,7 +4781,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Try candidate tactics at a position",
@@ -4684,7 +4905,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4704,7 +4935,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Cancel an async request",
@@ -4713,7 +4954,7 @@
         ]
       },
       "get": {
-        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers as its request would have, with the same status; an error is the request's own. Until then it answers 202. A job's answer is kept for an hour after it is done.",
+        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done.",
         "operationId": "getJob",
         "parameters": [
           {
@@ -4751,11 +4992,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobOutcome"
+                  "$ref": "#/components/schemas/GetJobResponse"
                 }
               }
             },
-            "description": "Done: the request's answer"
+            "description": "Done: the request's status and answer"
           },
           "202": {
             "content": {
@@ -4805,7 +5046,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4825,7 +5076,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "An async request's answer",
@@ -4908,7 +5169,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -4928,7 +5199,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Check names exist",
@@ -5019,7 +5300,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5039,7 +5330,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "A run by name",
@@ -5129,7 +5430,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5149,7 +5460,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Name a run",
@@ -5232,7 +5553,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5252,7 +5583,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Search declarations",
@@ -5368,7 +5709,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5388,7 +5739,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Start a proof session",
@@ -5513,7 +5874,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5533,7 +5904,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Check a session's finished proof",
@@ -5655,7 +6036,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5675,7 +6066,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "List snapshots",
@@ -5789,7 +6190,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5809,7 +6220,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Keep code as a snapshot",
@@ -5891,7 +6312,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -5911,7 +6342,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "A spec snapshot's acceptances",
@@ -6025,7 +6466,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6045,7 +6496,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Judge a run and store the verdict",
@@ -6127,7 +6588,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6147,7 +6618,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "A stored acceptance",
@@ -6285,7 +6766,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6305,7 +6796,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "What a project rests on",
@@ -6402,7 +6903,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6422,7 +6933,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "A run as a Lake project",
@@ -6538,7 +7059,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6558,7 +7089,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Rebuild a snapshot's dependents on its replacement",
@@ -6674,7 +7215,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6694,7 +7245,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Carry an amended spec's run over to the spec that amends it",
@@ -6810,7 +7371,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6830,7 +7401,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Rebuild a run's heads onto what their targets hold through",
@@ -6921,7 +7502,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -6941,7 +7532,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Delete a snapshot",
@@ -7029,7 +7630,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -7049,7 +7660,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "A snapshot, with its module's code, check and exports",
@@ -7139,7 +7760,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -7159,7 +7790,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Set or remove a snapshot's labels",
@@ -7253,7 +7894,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -7273,7 +7924,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "The snapshots above a snapshot",
@@ -7408,7 +8069,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -7428,7 +8099,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Re-check a snapshot's module with the kernel",
@@ -7553,7 +8234,17 @@
                 }
               }
             },
-            "description": "`capacity`: no worker took the job in time; retry later."
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "500": {
             "content": {
@@ -7573,7 +8264,17 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later."
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Apply a tactic to a state",

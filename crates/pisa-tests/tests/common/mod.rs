@@ -310,3 +310,17 @@ impl Cluster {
 pub fn url_of(server: &Running, path: &str) -> String {
     format!("http://{}{path}", server.http_addr)
 }
+
+/// What `GET /jobs/{id}` answered, `status` and `body`, as the job's request
+/// would have: a done job's envelope opened to its `http_status` and `body`;
+/// anything else, a 202 or the look's own error, as it is.
+#[allow(dead_code)]
+pub fn job_answer(status: u16, body: Value) -> (u16, Value) {
+    if status != 200 {
+        return (status, body);
+    }
+    assert_eq!(body["status"], "done", "{body}");
+    let http_status = (body["http_status"].as_u64())
+        .unwrap_or_else(|| panic!("a done job without http_status: {body}"));
+    (http_status as u16, body["body"].clone())
+}

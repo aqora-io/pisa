@@ -290,8 +290,9 @@ async fn a_resubmit_carries_a_run_over_to_the_amending_spec() {
         .client
         .get(c.url(&format!("/jobs/{}?wait=30", job["id"].as_str().unwrap())));
     let r = r.send().await.unwrap();
-    assert_eq!(r.status(), 200);
-    assert_eq!(r.json::<Value>().await.unwrap(), done);
+    let status = r.status().as_u16();
+    let answer = common::job_answer(status, r.json::<Value>().await.unwrap());
+    assert_eq!(answer, (200, done));
     // The amended spec may be gone.
     delete(&c, &old).await;
     let (_, after) = resubmit(&c, json!({"from": old, "to": new, "dry_run": true})).await;

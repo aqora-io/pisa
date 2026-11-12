@@ -275,6 +275,15 @@ describe("runs", () => {
   });
 });
 
+/** What `GET /jobs/{id}` answers for a done `job`: its request's status and
+ *  answer. */
+const envelope = (job: { id: string; kind: string }, body: unknown, http_status = 200) => ({
+  ...job,
+  status: "done",
+  http_status,
+  body,
+});
+
 describe("long jobs", () => {
   const job = { id: "a".repeat(32), kind: "check" as const, status: "queued" as const };
   const answer = { ok: true, time: 0, messages: [], sorries: [], reasons: [], declarations: [] };
@@ -288,7 +297,7 @@ describe("long jobs", () => {
     const { client, calls } = fakeClient((call) => {
       if (call.method === "POST") return respond(job, 202);
       polls += 1;
-      return polls === 1 ? running.promise : answer;
+      return polls === 1 ? running.promise : envelope(job, answer);
     });
     const { result } = renderHook(() => useLongJob(submitCheck), { wrapper: wrapper(client) });
     act(() => result.current.mutate("#check Nat"));
@@ -335,7 +344,7 @@ describe("long jobs", () => {
       await result.current.cancel();
     });
     expect(result.current.job?.status).toBe("running");
-    done.resolve(answer);
+    done.resolve(envelope(job, answer));
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
   });
 
@@ -395,9 +404,9 @@ describe("rebuilds", () => {
     const { client, calls } = fakeClient((call) => {
       if (call.path.startsWith("/snapshots?") || call.path === "/snapshots") return { snapshots: [] };
       if (call.method === "POST") return respond(job, 202);
-      if (answered) return respond({ error: { kind: "unavailable", message: "lost" } }, 503);
+      if (answered) return envelope(job, { error: { kind: "unavailable", message: "lost" } }, 503);
       answered = true;
-      return plan;
+      return envelope(job, plan);
     });
     const { result } = renderHook(() => ({ list: useSnapshots(), run: useRebuildSnapshots() }), { wrapper: wrapper(client) });
     await waitFor(() => expect(result.current.list.isSuccess).toBe(true));
@@ -425,7 +434,7 @@ describe("accepting a run", () => {
   it("accepts a run as a job", async () => {
     const job = { id: "c".repeat(32), kind: "accept_run" as const, status: "queued" as const };
     const { client, calls } = fakeClient((call) =>
-      call.method === "POST" ? new Response(JSON.stringify(job), { status: 202 }) : { accepted: true, pairs: [] },
+      call.method === "POST" ? new Response(JSON.stringify(job), { status: 202 }) : envelope(job, { accepted: true, pairs: [] }),
     );
     const { result } = renderHook(() => useAcceptRun(), { wrapper: wrapper(client) });
     await act(() => result.current.mutateAsync({ against: ["v~s"], paranoid: false, timeout: 900, buildTimeout: 3600 }));

@@ -100,7 +100,19 @@ impl ErrorKind {
             ErrorKind::Internal => 500,
         }
     }
+
+    /// How many seconds a client should wait before sending the request
+    /// again, which the server says in `Retry-After`: for the kinds whose
+    /// request may succeed later as it is.
+    pub fn retry_after(self) -> Option<u64> {
+        matches!(self, ErrorKind::Capacity | ErrorKind::Unavailable).then_some(RETRY_AFTER_SECS)
+    }
 }
+
+/// The `Retry-After` of a 429 or a 503, in seconds. A 429 comes after the
+/// request already waited the server's `max_wait` for a worker, so a short
+/// wait is enough; clients back off further on their own.
+pub const RETRY_AFTER_SECS: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct Error {
@@ -152,13 +164,19 @@ pub enum ApiErrors {
     #[response(status = 422)]
     Unprocessable(ErrorResponse),
     /// `capacity`: no worker took the job in time; retry later.
-    #[response(status = 429)]
+    #[response(
+        status = 429,
+        headers(("Retry-After" = u64, description = "Seconds to wait before retrying"))
+    )]
     Capacity(ErrorResponse),
     /// `internal`.
     #[response(status = 500)]
     Internal(ErrorResponse),
     /// `unavailable`: e.g. search isn't ready; retry later.
-    #[response(status = 503)]
+    #[response(
+        status = 503,
+        headers(("Retry-After" = u64, description = "Seconds to wait before retrying"))
+    )]
     Unavailable(ErrorResponse),
 }
 
@@ -243,17 +261,35 @@ pub struct JobWait {
     pub wait: Option<u64>,
 }
 
-/// What `GET /jobs/{id}` answers once the job is done: what its request
-/// would have. By `kind`: `check` and `check_session` a `CheckResult`,
-/// `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
-/// `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
-/// `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`,
-/// `accept_run` an `AcceptResponse` and `resubmit_snapshots` a
-/// `ResubmitSnapshotsResponse`. An error is the request's own, with
-/// its status.
+/// What `GET /jobs/{id}` answers once the job is done: the status its
+/// request would have answered with, and that answer. A 404 or a 503 answered
+/// instead is the look's own, not the job's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct GetJobResponse {
+    pub id: String,
+    pub kind: JobKind,
+    /// `done`.
+    pub status: JobStatus,
+    /// The status its request would have answered with: 200, or its error's,
+    /// e.g. 429 when no worker took the job in time.
+    pub http_status: u16,
+    /// What its request would have answered: a [`JobOutcome`] by `kind` when
+    /// `http_status` is 200, else an [`ErrorResponse`].
+    #[schema(value_type = JobOutcome)]
+    pub body: serde_json::Value,
+}
+
+/// What a done job's request answered, in [`GetJobResponse::body`]. By
+/// `kind`: `check` and `check_session` a `CheckResult`, `start_session` a
+/// `Session`, `apply_tactic` an `ApplyTacticResponse`, `create_snapshot` a
+/// `CreateSnapshotResponse`, `verify_snapshot` a `VerifySnapshotResponse`,
+/// `rebuild_snapshots` a `RebuildSnapshotsResponse`, `accept_run` an
+/// `AcceptResponse` and `resubmit_snapshots` a `ResubmitSnapshotsResponse`;
+/// with any other `http_status` than 200, the request's `ErrorResponse`.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(untagged)]
 pub enum JobOutcome {
+    Error(ErrorResponse),
     Check(CheckResult),
     Session(Session),
     ApplyTactic(ApplyTacticResponse),
@@ -272,6 +308,11 @@ pub struct Health {
     /// The live workers on the queue; `null` if it can't be read.
     #[schema(required = true)]
     pub workers: Option<u64>,
+    /// The jobs waiting on the queue for a worker, of every version; `null`
+    /// if it can't be read.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub queued: Option<u64>,
     /// The live workers that run Lean without memory or process limits, as
     /// a worker without `PISA_CGROUP_ROOT` does, by name; `null` if the
     /// queue can't be read.
@@ -1145,18 +1186,22 @@ pub struct Snapshot {
     pub run: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct CreateSnapshotResponse {
     /// The snapshot this create added, or on a
     /// [`key`](CreateSnapshotRequest::key) replay the one the key is on.
-    /// Absent when nothing new was kept: Lean reported errors, the check
-    /// could not complete, the code changed what the snapshot it
+    /// Absent when nothing new was kept, and then `refused` says what to do
+    /// next and `check` why: Lean reported errors, the check could not
+    /// complete, the code changed what the snapshot it
     /// [`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`
     /// says how), the snapshot it replaces is replaced already (a
-    /// `conflict`, see `heads`), or `verify: true` found it kept but failing
-    /// the re-check (`check.error` says why).
+    /// `conflict`, see `heads`), or the request broke a rule
+    /// (`check.error` says which).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<Snapshot>,
+    /// Set exactly when `snapshot` is absent: what to do next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<Refusal>,
     /// The check, as for `/check`. It has no `sorries`, and `time` includes
     /// importing the module's imports.
     pub check: CheckResult,
@@ -1195,6 +1240,54 @@ pub struct CreateSnapshotResponse {
     /// PisaRun.<name>`) resolved to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunImport>,
+}
+
+/// Why a create kept nothing, by what to do next. Code with `sorry` is
+/// kept: a refusal is never about what isn't proved yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Refusal {
+    /// Change the code: Lean or the kernel rejected it, the policy refused
+    /// it, its header failed, it changed a statement of what it replaces
+    /// (`check.changes`), or it doesn't refute its target.
+    Proof,
+    /// The code ran out of time or memory, or crashed Lean: it may be right.
+    /// Give it more `timeout`, or make it cheaper.
+    Limit,
+    /// Change the request: it breaks a rule (`bad_request`), names what
+    /// doesn't exist (`not_found`), or conflicts with what is kept in a way
+    /// no resend fixes, as a run name another run has (`conflict` with no
+    /// `heads`).
+    Request,
+    /// What it replaces is replaced already: send the same code again
+    /// replacing one of `heads`.
+    Conflict,
+    /// Nothing is known to be wrong: no worker took it, or one failed. Send
+    /// it again later, with the same `key`.
+    Retry,
+}
+
+impl CreateSnapshotResponse {
+    /// What the answer's refusal is, `None` when it kept a snapshot. Every
+    /// refusal with no `check.error` is the code's own: Lean's errors, a
+    /// statement changed or a target not refuted.
+    pub fn refusal(&self) -> Option<Refusal> {
+        if self.snapshot.is_some() {
+            return None;
+        }
+        let kind = self.check.error.as_ref().map(|e| e.kind);
+        Some(match kind {
+            None | Some(ErrorKind::Lean | ErrorKind::Policy) => Refusal::Proof,
+            Some(ErrorKind::Timeout | ErrorKind::OutOfMemory | ErrorKind::Crash) => Refusal::Limit,
+            Some(ErrorKind::Conflict) if !self.heads.is_empty() => Refusal::Conflict,
+            Some(ErrorKind::Conflict | ErrorKind::BadRequest | ErrorKind::NotFound) => {
+                Refusal::Request
+            }
+            Some(ErrorKind::Capacity | ErrorKind::Unavailable | ErrorKind::Internal) => {
+                Refusal::Retry
+            }
+        })
+    }
 }
 
 /// `GET /snapshots/{id}`: a snapshot with its module's code, check and
@@ -2339,6 +2432,55 @@ pub fn messages(ms: Vec<repl::Message>) -> Vec<Message> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_refusal_says_what_to_do_next() {
+        let refused = |kind: Option<ErrorKind>, heads: &[&str]| {
+            let answer = CreateSnapshotResponse {
+                check: CheckResult {
+                    error: kind.map(|k| Error::new(k, "")),
+                    ..Default::default()
+                },
+                heads: heads.iter().map(|h| h.to_string()).collect(),
+                ..Default::default()
+            };
+            answer.refusal()
+        };
+        use ErrorKind::*;
+        // Lean's errors, a changed statement and a failed refutation have no
+        // error: the code's own.
+        assert_eq!(refused(None, &[]), Some(Refusal::Proof));
+        for (kind, refusal) in [
+            (Lean, Refusal::Proof),
+            (Policy, Refusal::Proof),
+            (Timeout, Refusal::Limit),
+            (OutOfMemory, Refusal::Limit),
+            (Crash, Refusal::Limit),
+            (BadRequest, Refusal::Request),
+            (NotFound, Refusal::Request),
+            (Conflict, Refusal::Request),
+            (Capacity, Refusal::Retry),
+            (Unavailable, Refusal::Retry),
+            (Internal, Refusal::Retry),
+        ] {
+            assert_eq!(refused(Some(kind), &[]), Some(refusal), "{kind:?}");
+        }
+        assert_eq!(refused(Some(Conflict), &["v~h"]), Some(Refusal::Conflict));
+        // Kept, `sorry` and all: no refusal.
+        let snapshot = json!({
+            "id": "v~a", "version": "v", "module": "PisaSnap.sa", "header": "",
+            "imports": [], "labels": {}, "status": "sorry", "verified": false, "created": 0,
+        });
+        let kept = CreateSnapshotResponse {
+            snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(kept.refusal(), None);
+        assert_eq!(
+            serde_json::to_value(Refusal::Conflict).unwrap(),
+            json!("conflict")
+        );
+    }
 
     #[test]
     fn requests_default_their_timeout() {

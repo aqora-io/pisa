@@ -1,7 +1,8 @@
 //! Async requests. An endpoint that may run long, asked with
 //! `Prefer: respond-async`, queues its job and answers 202 with it at once;
-//! `/jobs/{id}` then answers, for an hour after the job is done, as the
-//! request would have. Without the header the endpoint waits, as before.
+//! `/jobs/{id}` then answers, for an hour after the job is done, with the
+//! status and the answer the request would have had. Without the header the
+//! endpoint waits, as before.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +13,9 @@ use axum::http::header::{CACHE_CONTROL, LOCATION};
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use pisa_protocol::api::{ApiErrors, ErrorKind, Job, JobKind, JobOutcome, JobStatus, JobWait};
+use pisa_protocol::api::{
+    ApiErrors, ErrorKind, ErrorResponse, GetJobResponse, Job, JobKind, JobStatus, JobWait,
+};
 use pisa_protocol::wire::JobResult;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -86,25 +89,54 @@ pub(crate) fn accepted(id: String, kind: JobKind, status: JobStatus) -> Response
 
 /// What a request of `kind` answers, given its job's outcome.
 pub(crate) fn respond(kind: JobKind, outcome: Result<JobResult, DispatchError>) -> Response {
-    let outcome = outcome.map_err(ApiError::from);
-    match kind {
-        JobKind::Check => answer(outcome.map(check_result)),
-        JobKind::StartSession => answer(outcome.and_then(sessions::started)),
-        JobKind::ApplyTactic => answer(outcome.and_then(sessions::applied)),
-        JobKind::CheckSession => answer(outcome.and_then(sessions::checked)),
-        JobKind::CreateSnapshot => answer(outcome.and_then(snapshots::created)),
-        JobKind::VerifySnapshot => answer(outcome.and_then(snapshots::verified)),
-        JobKind::RebuildSnapshots => answer(outcome.and_then(snapshots::rebuilt)),
-        JobKind::AcceptRun => answer(outcome.and_then(snapshots::judged)),
-        JobKind::ResubmitSnapshots => answer(outcome.and_then(snapshots::resubmitted)),
-    }
-}
-
-fn answer<T: Serialize>(answer: Result<T, ApiError>) -> Response {
-    match answer {
+    match answer(kind, outcome) {
         Ok(body) => Json(body).into_response(),
         Err(e) => e.into_response(),
     }
+}
+
+/// A done job's answer: the status and the answer its request would have
+/// had.
+fn done(id: String, kind: JobKind, outcome: Result<JobResult, DispatchError>) -> Response {
+    let (http_status, body) = match answer(kind, outcome) {
+        Ok(body) => (StatusCode::OK.as_u16(), body),
+        Err(ApiError(error)) => {
+            let status = error.kind.status();
+            let body = serde_json::to_value(ErrorResponse { error }).unwrap_or_default();
+            (status, body)
+        }
+    };
+    let done = GetJobResponse {
+        id,
+        kind,
+        status: JobStatus::Done,
+        http_status,
+        body,
+    };
+    no_store(Json(done))
+}
+
+/// What a request of `kind` answers, given its job's outcome, or its error.
+fn answer(
+    kind: JobKind,
+    outcome: Result<JobResult, DispatchError>,
+) -> Result<serde_json::Value, ApiError> {
+    let outcome = outcome.map_err(ApiError::from);
+    match kind {
+        JobKind::Check => json(outcome.map(check_result)),
+        JobKind::StartSession => json(outcome.and_then(sessions::started)),
+        JobKind::ApplyTactic => json(outcome.and_then(sessions::applied)),
+        JobKind::CheckSession => json(outcome.and_then(sessions::checked)),
+        JobKind::CreateSnapshot => json(outcome.and_then(snapshots::created)),
+        JobKind::VerifySnapshot => json(outcome.and_then(snapshots::verified)),
+        JobKind::RebuildSnapshots => json(outcome.and_then(snapshots::rebuilt)),
+        JobKind::AcceptRun => json(outcome.and_then(snapshots::judged)),
+        JobKind::ResubmitSnapshots => json(outcome.and_then(snapshots::resubmitted)),
+    }
+}
+
+fn json<T: Serialize>(answer: Result<T, ApiError>) -> Result<serde_json::Value, ApiError> {
+    serde_json::to_value(answer?).map_err(|e| ApiError::new(ErrorKind::Internal, e.to_string()))
 }
 
 /// A job's answer is its own, and its status changes: not for caches.
@@ -142,12 +174,14 @@ fn is_token(id: &str) -> bool {
 #[utoipa::path(
     get, path = "/jobs/{id}", operation_id = "getJob", tag = "jobs",
     summary = "An async request's answer",
-    description = "Waits up to `wait` seconds for the job to finish. Done, it answers as its \
-        request would have, with the same status; an error is the request's own. Until then \
-        it answers 202. A job's answer is kept for an hour after it is done.",
+    description = "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with \
+        the status its request would have answered with (`http_status`) and that answer \
+        (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it \
+        answers 202. A 404 or a 503 is the look's own. A job's answer is kept for an hour \
+        after it is done.",
     params(("id" = String, Path, description = "The job's id, from the 202"), JobWait),
     responses(
-        (status = 200, description = "Done: the request's answer", body = JobOutcome),
+        (status = 200, description = "Done: the request's status and answer", body = GetJobResponse),
         (status = 202, description = "Not done yet", body = Job),
         ApiErrors,
     ),
@@ -172,7 +206,7 @@ pub async fn get(
                 let job = Job { id, kind, status };
                 no_store((StatusCode::ACCEPTED, Json(job)))
             }
-            Looking::Done(outcome) => no_store(respond(kind, *outcome)),
+            Looking::Done(outcome) => done(id, kind, *outcome),
         },
         Err(e) => no_store(ApiError::from(e)),
     }

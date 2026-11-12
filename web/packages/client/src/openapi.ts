@@ -177,7 +177,7 @@ export interface paths {
         };
         /**
          * An async request's answer
-         * @description Waits up to `wait` seconds for the job to finish. Done, it answers as its request would have, with the same status; an error is the request's own. Until then it answers 202. A job's answer is kept for an hour after it is done.
+         * @description Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done.
          */
         get: operations["getJob"];
         put?: never;
@@ -1355,6 +1355,8 @@ export interface components {
              *     following what replaces it, oldest first.
              */
             heads?: string[];
+            /** @description Set exactly when `snapshot` is absent: what to do next. */
+            refused?: components["schemas"]["Refusal"];
             /**
              * @description What the snapshot's create checked of the target it
              *     [`refutes`](CreateSnapshotRequest::refutes), if it refutes one.
@@ -1380,12 +1382,13 @@ export interface components {
             /**
              * @description The snapshot this create added, or on a
              *     [`key`](CreateSnapshotRequest::key) replay the one the key is on.
-             *     Absent when nothing new was kept: Lean reported errors, the check
-             *     could not complete, the code changed what the snapshot it
+             *     Absent when nothing new was kept, and then `refused` says what to do
+             *     next and `check` why: Lean reported errors, the check could not
+             *     complete, the code changed what the snapshot it
              *     [`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`
              *     says how), the snapshot it replaces is replaced already (a
-             *     `conflict`, see `heads`), or `verify: true` found it kept but failing
-             *     the re-check (`check.error` says why).
+             *     `conflict`, see `heads`), or the request broke a rule
+             *     (`check.error` says which).
              */
             snapshot?: components["schemas"]["Snapshot"];
             /**
@@ -1716,6 +1719,28 @@ export interface components {
             /** @description The version the index was built from. */
             version: string;
         };
+        /**
+         * @description What `GET /jobs/{id}` answers once the job is done: the status its
+         *     request would have answered with, and that answer. A 404 or a 503 answered
+         *     instead is the look's own, not the job's.
+         */
+        GetJobResponse: {
+            /**
+             * @description What its request would have answered: a [`JobOutcome`] by `kind` when
+             *     `http_status` is 200, else an [`ErrorResponse`].
+             */
+            body: components["schemas"]["JobOutcome"];
+            /**
+             * Format: int32
+             * @description The status its request would have answered with: 200, or its error's,
+             *     e.g. 429 when no worker took the job in time.
+             */
+            http_status: number;
+            id: string;
+            kind: components["schemas"]["JobKind"];
+            /** @description `done`. */
+            status: components["schemas"]["JobStatus"];
+        };
         GoalsAt: {
             /**
              * @description The goals there, as Lean prints them: none in the imports or outside
@@ -1741,6 +1766,12 @@ export interface components {
         GoalsMode: "before" | "after";
         /** @description `GET /health`: 200, or 503 once the server is stopping. */
         Health: {
+            /**
+             * Format: int64
+             * @description The jobs waiting on the queue for a worker, of every version; `null`
+             *     if it can't be read.
+             */
+            queued: number | null;
             search: components["schemas"]["SearchHealth"] | null;
             /** @description `draining`, with a 503, once the server is stopping. */
             status: components["schemas"]["HealthStatus"];
@@ -1830,16 +1861,15 @@ export interface components {
          */
         JobKind: "check" | "start_session" | "apply_tactic" | "check_session" | "create_snapshot" | "verify_snapshot" | "rebuild_snapshots" | "accept_run" | "resubmit_snapshots";
         /**
-         * @description What `GET /jobs/{id}` answers once the job is done: what its request
-         *     would have. By `kind`: `check` and `check_session` a `CheckResult`,
-         *     `start_session` a `Session`, `apply_tactic` an `ApplyTacticResponse`,
-         *     `create_snapshot` a `CreateSnapshotResponse`, `verify_snapshot` a
-         *     `VerifySnapshotResponse`, `rebuild_snapshots` a `RebuildSnapshotsResponse`,
-         *     `accept_run` an `AcceptResponse` and `resubmit_snapshots` a
-         *     `ResubmitSnapshotsResponse`. An error is the request's own, with
-         *     its status.
+         * @description What a done job's request answered, in [`GetJobResponse::body`]. By
+         *     `kind`: `check` and `check_session` a `CheckResult`, `start_session` a
+         *     `Session`, `apply_tactic` an `ApplyTacticResponse`, `create_snapshot` a
+         *     `CreateSnapshotResponse`, `verify_snapshot` a `VerifySnapshotResponse`,
+         *     `rebuild_snapshots` a `RebuildSnapshotsResponse`, `accept_run` an
+         *     `AcceptResponse` and `resubmit_snapshots` a `ResubmitSnapshotsResponse`;
+         *     with any other `http_status` than 200, the request's `ErrorResponse`.
          */
-        JobOutcome: components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"] | components["schemas"]["ResubmitSnapshotsResponse"];
+        JobOutcome: components["schemas"]["ErrorResponse"] | components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"] | components["schemas"]["ResubmitSnapshotsResponse"];
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
         /**
@@ -2270,6 +2300,12 @@ export interface components {
             by: string;
             snapshot_id: string;
         };
+        /**
+         * @description Why a create kept nothing, by what to do next. Code with `sorry` is
+         *     kept: a refusal is never about what isn't proved yet.
+         * @enum {string}
+         */
+        Refusal: "proof" | "limit" | "request" | "conflict" | "retry";
         /** @description A snapshot's refutation of a spec's target, as its create checked it. */
         Refutation: {
             /**
@@ -2840,6 +2876,7 @@ export type ErrorResponse = components['schemas']['ErrorResponse'];
 export type Export = components['schemas']['Export'];
 export type Flags = components['schemas']['Flags'];
 export type GetDeclarationResponse = components['schemas']['GetDeclarationResponse'];
+export type GetJobResponse = components['schemas']['GetJobResponse'];
 export type GoalsAt = components['schemas']['GoalsAt'];
 export type GoalsMode = components['schemas']['GoalsMode'];
 export type Health = components['schemas']['Health'];
@@ -2877,6 +2914,7 @@ export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];
 export type RebuildSnapshotsResponse = components['schemas']['RebuildSnapshotsResponse'];
 export type RebuildSuperseded = components['schemas']['RebuildSuperseded'];
+export type Refusal = components['schemas']['Refusal'];
 export type Refutation = components['schemas']['Refutation'];
 export type Refutes = components['schemas']['Refutes'];
 export type Replacement = components['schemas']['Replacement'];
@@ -2992,6 +3030,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3010,6 +3050,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3079,6 +3121,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3097,6 +3141,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3173,6 +3219,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3191,6 +3239,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3260,6 +3310,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3278,6 +3330,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3344,6 +3398,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3362,6 +3418,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3443,6 +3501,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3461,6 +3521,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3542,6 +3604,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3560,6 +3624,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3641,6 +3707,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3659,6 +3727,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3717,13 +3787,13 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Done: the request's answer */
+            /** @description Done: the request's status and answer */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["JobOutcome"];
+                    "application/json": components["schemas"]["GetJobResponse"];
                 };
             };
             /** @description Not done yet */
@@ -3771,6 +3841,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3789,6 +3861,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3857,6 +3931,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3875,6 +3951,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3944,6 +4022,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -3962,6 +4042,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4036,6 +4118,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4054,6 +4138,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4126,6 +4212,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4144,6 +4232,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4213,6 +4303,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4231,6 +4323,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4318,6 +4412,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4336,6 +4432,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4426,6 +4524,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4444,6 +4544,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4520,6 +4622,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4538,6 +4642,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4625,6 +4731,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4643,6 +4751,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4711,6 +4821,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4729,6 +4841,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4816,6 +4930,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4834,6 +4950,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4902,6 +5020,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4920,6 +5040,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -4998,6 +5120,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5016,6 +5140,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5086,6 +5212,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5104,6 +5232,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5191,6 +5321,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5209,6 +5341,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5296,6 +5430,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5314,6 +5450,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5401,6 +5539,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5419,6 +5559,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5490,6 +5632,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5508,6 +5652,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5579,6 +5725,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5597,6 +5745,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5669,6 +5819,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5687,6 +5839,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5758,6 +5912,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5776,6 +5932,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5867,6 +6025,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5885,6 +6045,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5975,6 +6137,8 @@ export interface operations {
             /** @description `capacity`: no worker took the job in time; retry later. */
             429: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {
@@ -5993,6 +6157,8 @@ export interface operations {
             /** @description `unavailable`: e.g. search isn't ready; retry later. */
             503: {
                 headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
                     [name: string]: unknown;
                 };
                 content: {

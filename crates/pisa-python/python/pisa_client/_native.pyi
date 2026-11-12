@@ -220,8 +220,15 @@ class Refutation(TypedDict):
     # The refuting snapshot was deleted since; the record stays.
     gone: NotRequired[bool]
 
+# Why a create kept nothing, by what to do next: change the code (`proof`),
+# give it more room (`limit`), change the request (`request`), resend it
+# replacing one of `heads` (`conflict`), or send it again later (`retry`).
+Refusal = Literal["proof", "limit", "request", "conflict", "retry"]
+
 class CreateSnapshotResponse(TypedDict):
     snapshot: NotRequired[Snapshot]
+    # Set exactly when `snapshot` is absent.
+    refused: NotRequired[Refusal]
     check: CheckResult
     replacement: NotRequired[Replacement]
     heads: NotRequired[list[str]]
@@ -600,6 +607,8 @@ class SweepRefused(TypedDict):
 class Health(TypedDict):
     status: Literal["ok", "draining"]
     workers: int | None
+    # The jobs waiting on the queue for a worker, of every version.
+    queued: int | None
     unlimited_workers: list[str] | None
     sweeps_refused: list[SweepRefused] | None
     search: SearchHealth | None

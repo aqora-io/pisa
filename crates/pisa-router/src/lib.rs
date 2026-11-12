@@ -115,6 +115,7 @@ fn cors(origins: &[String]) -> anyhow::Result<Option<CorsLayer>> {
         ])
         .expose_headers([
             header::LOCATION,
+            header::RETRY_AFTER,
             header::HeaderName::from_static("preference-applied"),
         ])
         .max_age(Duration::from_secs(3600));

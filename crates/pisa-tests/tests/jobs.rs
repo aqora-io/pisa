@@ -36,8 +36,23 @@ async fn accepted(c: &Cluster, path: &str, body: Value, kind: &str) -> String {
     job
 }
 
-/// `GET /jobs/{id}?wait=…` at `url` (a server's `/jobs/{id}`).
+/// `GET /jobs/{id}?wait=…` at `url` (a server's `/jobs/{id}`), as the
+/// job's request would have answered once it is done.
 async fn look(c: &Cluster, url: &str, wait: &str) -> (u16, Value) {
+    let (status, r) = look_raw(c, url, wait).await;
+    if status == 200 {
+        let id = url.rsplit('/').next().unwrap();
+        assert_eq!(
+            (&r["id"], &r["status"]),
+            (&json!(id), &json!("done")),
+            "{r}"
+        );
+    }
+    common::job_answer(status, r)
+}
+
+/// `GET /jobs/{id}?wait=…` at `url`, as it answers.
+async fn look_raw(c: &Cluster, url: &str, wait: &str) -> (u16, Value) {
     let r = c
         .client
         .get(format!("{url}?wait={wait}"))
@@ -153,8 +168,16 @@ async fn a_wait_returns_as_soon_as_the_job_is_done() {
     assert_eq!((a.0, b.0), (200, 200));
     assert_eq!(a.1["ok"], true);
     assert!(started.elapsed() < Duration::from_secs(5));
-    // The answer stays.
-    assert_eq!(look(&c, &url, "0").await.0, 200);
+    // The answer stays, in its envelope: the job, its request's status and
+    // answer.
+    let (status, r) = look_raw(&c, &url, "0").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        (&r["id"], &r["kind"], &r["status"], &r["http_status"]),
+        (&json!(job), &json!("check"), &json!("done"), &json!(200)),
+        "{r}"
+    );
+    assert_eq!(r["body"]["ok"], true, "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -167,14 +190,27 @@ async fn failures_are_kept_and_requests_checked_first() {
     let (status, _, r) = submit(&c, &c.url("/states/nope/tactic"), json!({"tactic": "rfl"})).await;
     assert_eq!((status, &r["error"]["kind"]), (400, &json!("bad_request")));
 
-    // No worker of this version takes it in time: 429, however often asked.
+    // No worker of this version takes it in time: 429, however often asked,
+    // and asked at once it says when to try again.
     let body = json!({"code": "#check Nat", "version": "nope"});
+    let r = c.client.post(c.url("/check")).json(&body).send().await;
+    let r = r.unwrap();
+    assert_eq!(r.status(), 429);
+    assert_eq!(r.headers()["retry-after"], "2");
     let job = accepted(&c, "/check", body, "check").await;
     let url = c.url(&format!("/jobs/{job}"));
     for wait in ["10", "0"] {
         let (status, r) = look(&c, &url, wait).await;
         assert_eq!((status, &r["error"]["kind"]), (429, &json!("capacity")));
     }
+    // The look itself succeeded: the 429 is the job's, in its envelope.
+    let (status, r) = look_raw(&c, &url, "0").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        (&r["kind"], &r["http_status"], &r["body"]["error"]["kind"]),
+        (&json!("check"), &json!(429), &json!("capacity")),
+        "{r}"
+    );
 
     // A state nobody has: the request's 404.
     let (_, session) = c.post("/sessions", json!({"code": CODE})).await;

@@ -17,6 +17,7 @@ import type {
   DocumentProbes,
   ErrorKind,
   GetDeclarationResponse,
+  GetJobResponse,
   GoalsMode,
   Health,
   Job as JobSchema,
@@ -207,7 +208,7 @@ export interface JobOptions extends RequestOptions {
 }
 
 export interface WaitJobOptions extends RequestOptions {
-  /** Seconds each look waits, 1–60; 60 by default. A job that finishes is
+  /** Seconds each look waits, 1–60; 25 by default. A job that finishes is
    *  answered at once, whatever this is, so it only sets how soon a job's
    *  progress is seen. */
   wait?: number;
@@ -216,8 +217,9 @@ export interface WaitJobOptions extends RequestOptions {
   onPending?: (job: JobSchema) => void;
 }
 
-/** How long each look of `waitJob` waits: the server's longest. */
-const JOB_WAIT = 60;
+/** How long each look of `waitJob` waits: well short of the 60 s at which
+ *  proxies cut requests off, which async requests are there to avoid. */
+const JOB_WAIT = 25;
 
 const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
   "timeout",
@@ -662,7 +664,9 @@ export class PisaClient {
     const r = await this.send("GET", ["jobs", job.id], undefined, query, options.signal);
     const body = await readJson(r);
     if (r.status === 202) return { done: false, job: body as JobSchema };
-    return { done: true, answer: ok<T>(r, body) };
+    // Done: the status and answer its request would have had.
+    const done = ok<GetJobResponse>(r, body);
+    return { done: true, answer: answerOf<T>(done.http_status, "", done.body) };
   }
 
   /** Waits for `job` to finish, however long it takes, and returns what its
@@ -845,13 +849,18 @@ async function readJson(r: Response): Promise<unknown> {
 
 /** The body of a successful response, or the error it carries. */
 function ok<T>(r: Response, body: unknown): T {
-  if (r.ok) {
-    if (body === undefined) throw new PisaError("bad_response", "the response isn't JSON", r.status);
+  return answerOf<T>(r.status, r.statusText, body);
+}
+
+/** The answer `body` is with `status`, or the error it is thrown as. */
+function answerOf<T>(status: number, statusText: string, body: unknown): T {
+  if (status >= 200 && status < 300) {
+    if (body === undefined) throw new PisaError("bad_response", "the response isn't JSON", status);
     return body as T;
   }
   const error = isObject(body) ? body["error"] : undefined;
   if (isObject(error) && typeof error["kind"] === "string" && ERROR_KINDS.has(error["kind"])) {
-    throw new PisaError(error["kind"] as ErrorKind, String(error["message"] ?? ""), r.status);
+    throw new PisaError(error["kind"] as ErrorKind, String(error["message"] ?? ""), status);
   }
-  throw new PisaError("bad_response", `HTTP ${r.status} ${r.statusText}`.trim(), r.status);
+  throw new PisaError("bad_response", `HTTP ${status} ${statusText}`.trim(), status);
 }

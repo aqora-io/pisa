@@ -156,7 +156,12 @@ async fn a_server_shutting_down_answers_what_it_has() {
     let health = url_of(&b, "/health");
     let base = url_of(&b, "/");
     let client = Client::new(&base).unwrap();
-    assert_eq!(client.health().await.unwrap().status, HealthStatus::Ok);
+    let healthy = client.health().await.unwrap();
+    // The job is running: nothing waits for a worker.
+    assert_eq!(
+        (healthy.status, healthy.queued),
+        (HealthStatus::Ok, Some(0))
+    );
     let stopping = tokio::spawn(b.shutdown(Duration::from_millis(300), Duration::from_secs(10)));
     // Load balancers learn first, while it still serves.
     let mut draining = None;

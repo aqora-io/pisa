@@ -424,10 +424,11 @@ impl Dispatcher {
         })
     }
 
-    /// The live workers on the queue, if it can be read.
-    pub async fn workers(&self) -> Option<u64> {
+    /// The live workers on the queue, and the jobs waiting for one, if it
+    /// can be read.
+    pub async fn workers(&self) -> Option<(u64, u64)> {
         match self.queue.counts(LIVE).await {
-            Ok(counts) => Some(counts.workers),
+            Ok(counts) => Some((counts.workers, counts.queued.iter().sum())),
             Err(e) => {
                 tracing::warn!("reading the queue's state failed: {e}");
                 None

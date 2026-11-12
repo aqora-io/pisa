@@ -84,6 +84,7 @@ async fn without_qdrant_there_is_no_search() {
         json!({
             "status": "ok",
             "workers": 0,
+            "queued": 0,
             "unlimited_workers": [],
             "sweeps_refused": [],
             "search": null
@@ -153,6 +154,11 @@ async fn browsers_may_call_only_from_the_configured_origins() {
         r.headers()["access-control-allow-origin"],
         "http://app.example"
     );
+    // A page can read when to retry a 429 or a 503.
+    let exposed = r.headers()["access-control-expose-headers"]
+        .to_str()
+        .unwrap();
+    assert!(exposed.contains("retry-after"), "{exposed}");
 
     let server = start_on(config(SearchArgs::default()), Db::memory().await)
         .await
