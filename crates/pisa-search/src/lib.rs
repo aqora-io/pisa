@@ -5,6 +5,7 @@ pub mod dense;
 pub mod encode;
 pub mod engine;
 pub mod eval;
+pub mod eval_sets;
 pub mod index;
 pub mod indexer;
 pub mod informal_store;

@@ -2266,12 +2266,31 @@ hits = client.search(description="doubling adds a number to itself", snapshots={
 hits[0]["module"], hits[0]["snapshot_ids"], hits[0]["status"]  # "PisaSnap.s1f…", ["v4.35.0-1a2b3c4d~9c0e…"], "proved"
 ```
 
-**Quality.** Two reports track it:
+**Quality.** These reports track it:
 - `search/eval/<env_id>-qdrant.md`: recall, MRR and nDCG on LeanSearch v2's
   MathlibQR benchmark, per lane and per query style, with
   `<env_id>-before-qdrant.md` for the in-memory engine it replaced. Run it with
   `pisa-search eval --qdrant URL --env-id ENV --data MathlibQR.json`; several
   `--weights` are compared in one run;
+- `search/eval/<env_id>-physics.md`: the same on three physics sets in
+  `search/eval/sets/`, each split in a `dev` half to tune on and a `test` half
+  to report on (`--set FILE`, repeatable, and `--split dev|test`):
+  - `physics-synthetic`: 300 declarations from each of Physlib, QuantumInfo and
+    PhyslibAlpha, asked with the searches the describer wrote for them, in
+    words and as a formula. The same call wrote the indexed description, so
+    these score high and favour the lexical lane;
+  - `physics-premises`: 300 theorems from each, their statement sent as a
+    `goal`, with the theorems their proof uses as the answers (core logic and
+    instances left out, and the theorem itself left out of the hits);
+  - `physics-papers`: statements as papers state them, from a set of 50 drawn
+    from alphaXiv papers, the Palomar registry's physics entries, and statements
+    written for areas the libraries cover. Each answer was chosen from the
+    corpus by hand; a statement with no counterpart in the libraries is listed,
+    not scored.
+
+  The first two are written by `pisa-search eval-sets --corpus DIR --informal
+  STORE --out search/eval/sets`, the same for the same seed; R@k counts the
+  share of a query's answers in the first k hits;
 - `search/pilot/2026-10-22/report.md`: the informalization pilot, with cost,
   a full-run estimate, check pass rates and samples to review.
 

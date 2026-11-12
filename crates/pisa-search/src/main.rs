@@ -198,7 +198,7 @@ enum Command {
         #[arg(long, default_value_t = 0.99)]
         min_coverage: f64,
     },
-    /// Measure retrieval quality on MathlibQR.
+    /// Measure retrieval quality on MathlibQR and evaluation sets.
     Eval {
         #[command(flatten)]
         qdrant: QdrantArgs,
@@ -207,7 +207,13 @@ enum Command {
         env_id: String,
         /// MathlibQR.json (downloaded from the pinned commit if absent).
         #[arg(long)]
-        data: PathBuf,
+        data: Option<PathBuf>,
+        /// An evaluation set (`search/eval/sets/*.json`); repeat for several.
+        #[arg(long)]
+        set: Vec<PathBuf>,
+        /// Only this half of each set: `dev` to tune on, `test` to report on.
+        #[arg(long, value_enum)]
+        split: Option<pisa_search::eval::Split>,
         /// Weights to use instead of the defaults, as JSON (fields of
         /// `Weights`); several are evaluated in turn, embedding queries once.
         #[arg(long)]
@@ -221,6 +227,23 @@ enum Command {
         /// Write the report here as well as to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Write the physics evaluation sets that need no model spend: the
+    /// describer's queries, and premise retrieval from proofs.
+    EvalSets {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// The description store whose synthetic queries to draw on.
+        #[arg(long)]
+        informal: String,
+        /// Directory to write `physics-synthetic.json` and `physics-premises.json` to.
+        #[arg(long)]
+        out: PathBuf,
+        /// Declarations drawn from each physics library.
+        #[arg(long, default_value_t = 300)]
+        per_library: usize,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
     },
     /// Run one search against a loaded bundle and print the hits.
     Query {
@@ -633,6 +656,8 @@ async fn main() -> anyhow::Result<()> {
             qdrant,
             env_id,
             data,
+            set,
+            split,
             weights,
             fused_only,
             embedder,
@@ -649,7 +674,17 @@ async fn main() -> anyhow::Result<()> {
                     .map(|w| serde_json::from_str(w))
                     .collect::<Result<_, _>>()?
             };
-            let items = pisa_search::eval::load(&data).await?;
+            let mut sets = Vec::new();
+            if let Some(data) = &data {
+                sets.push(pisa_search::eval::mathlib_qr(data).await?);
+            }
+            for path in &set {
+                sets.push(pisa_search::eval::read_set(path)?);
+            }
+            anyhow::ensure!(
+                !sets.is_empty(),
+                "name MathlibQR with --data or a set with --set"
+            );
             let labels = engine::weight_labels(weights.len());
             let mut configs = Vec::new();
             for (w, suffix) in weights.iter().zip(&labels) {
@@ -657,13 +692,39 @@ async fn main() -> anyhow::Result<()> {
                     configs.push((format!("{label}{suffix}"), lanes, w.clone()));
                 }
             }
-            let report = pisa_search::eval::run(&mut engine, &items, &configs).await?;
-            let report = report.markdown(engine.env_id());
+            let mut report = String::new();
+            for s in &sets {
+                let r = pisa_search::eval::run(&mut engine, s, split, &configs).await?;
+                if !report.is_empty() {
+                    report.push('\n');
+                }
+                report.push_str(&r.markdown(engine.env_id()));
+            }
             print!("{report}");
             if let Some(out) = out {
                 std::fs::write(out, report)?;
             }
             drop_blocking(engine).await;
+        }
+        Command::EvalSets {
+            corpus,
+            informal,
+            out,
+            per_library,
+            seed,
+        } => {
+            let c = Corpus::read(&corpus)?;
+            let entries = Store::open(&informal)?.load_all().await?;
+            std::fs::create_dir_all(&out)?;
+            use pisa_search::eval_sets;
+            for set in [
+                eval_sets::synthetic(&c.decls, &entries, per_library, seed),
+                eval_sets::premises(&c.decls, per_library, seed),
+            ] {
+                let path = out.join(format!("{}.json", set.name));
+                std::fs::write(&path, pisa_search::eval::write_set(&set)?)?;
+                eprintln!("wrote {} ({} items)", path.display(), set.items.len());
+            }
         }
         Command::RepairDescriptions { informal } => {
             let store = Store::open(&informal)?;
