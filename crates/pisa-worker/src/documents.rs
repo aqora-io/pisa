@@ -85,6 +85,9 @@ struct BeamSlot {
     beam: tokio::sync::Mutex<Option<Running>>,
     /// Requests to it that timed out since one last answered.
     timeouts: AtomicU32,
+    /// The process last stopped on purpose, so that requests in flight on
+    /// it, on its other documents too, say so rather than that it crashed.
+    stopped: Mutex<Option<Arc<Beam>>>,
 }
 
 #[derive(Clone)]
@@ -181,6 +184,7 @@ impl Documents {
                 workspace,
                 beam: tokio::sync::Mutex::new(None),
                 timeouts: AtomicU32::new(0),
+                stopped: Mutex::default(),
             });
         }
         let documents = Documents {
@@ -266,6 +270,7 @@ impl Documents {
                 slot = s.id,
                 "restarting Lean Beam after {RESTART_AFTER_TIMEOUTS} timeouts in a row"
             );
+            *s.stopped.lock().unwrap() = Some(r.beam.clone());
             r.beam.kill().await;
         }
     }
@@ -286,6 +291,18 @@ impl Documents {
                 ErrorKind::Unavailable,
                 format!("Lean Beam failed: {message}"),
             ),
+            BeamError::Exited { .. } | BeamError::Dead | BeamError::Io(_)
+                if (self.slots[slot].stopped.lock().unwrap().as_ref())
+                    .is_some_and(|stopped| Arc::ptr_eq(stopped, beam)) =>
+            {
+                Error::new(
+                    ErrorKind::Unavailable,
+                    format!(
+                        "Lean Beam was restarted after {RESTART_AFTER_TIMEOUTS} timeouts in a row \
+                         on its slot; the document opens again on the next request"
+                    ),
+                )
+            }
             BeamError::Exited { .. } | BeamError::Dead | BeamError::Io(_) => {
                 let s = &self.slots[slot];
                 let mut oom = false;

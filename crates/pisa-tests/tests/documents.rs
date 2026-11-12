@@ -338,6 +338,30 @@ async fn a_candidate_after_a_reopen_has_its_whole_limit() {
     assert!(p.results[3].closed, "{:?}", p.results[3]);
 }
 
+/// Beam restarted after three timeouts in a row on one document: a request
+/// in flight on another of its documents says so, rather than that Beam
+/// crashed, as nothing it sent did.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_reads_as_one_on_the_slots_other_documents() {
+    let c = beam_cluster().await;
+    let (a, b) = (new_id(), new_id());
+    open(&c, &a, CODE).await;
+    open(&c, &b, CODE).await;
+    let slow = "SLEEP 3000";
+    let on_a = probes(&a, &["SLEEP 4000"], 10, 300);
+    let on_b = probes(&b, &[slow, slow, slow], 1, 300);
+    let (on_a, _) = tokio::join!(run(&c, &a, on_a), async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        run(&c, &b, on_b).await
+    });
+    let JobResult::DocumentProbes(Ok(p)) = on_a else {
+        panic!("not probed: {on_a:?}")
+    };
+    let e = p.results[0].error.as_ref().unwrap();
+    assert_eq!(e.kind, ErrorKind::Unavailable, "{e:?}");
+    assert!(e.message.contains("restarted"), "{e:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_probe_request_has_a_budget_for_all_its_candidates() {
     let c = beam_cluster().await;

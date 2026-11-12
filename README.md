@@ -563,7 +563,8 @@ tactics at a `sorry`:
   with the fewest documents open per Beam slot: the others leave it to that
   worker for up to two seconds. A Lean Beam process that times out three
   times in a row is restarted, as what timed out may still run in it, and
-  its documents reopen.
+  its documents reopen. A request in flight on another of its documents
+  answers `unavailable`, naming the restart, rather than `crash`.
 - Only workers with Beam slots serve documents. Without one, the endpoints
   answer 503 `unavailable`; a 429 means no Beam worker took the job in time.
   The worker settings:
