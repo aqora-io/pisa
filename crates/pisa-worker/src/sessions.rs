@@ -78,6 +78,8 @@ impl Sessions {
             Err(e) => return failed(e.into()),
         };
         let check = |code: String, runs: Vec<RunImport>| {
+            // Code that imports runs by name is the completed code, as sent.
+            let source = (!runs.is_empty()).then(|| job.code.clone());
             run_check(
                 pool,
                 CheckJob {
@@ -86,6 +88,7 @@ impl Sessions {
                     detail: Vec::new(),
                     at: Vec::new(),
                     runs,
+                    source,
                 },
             )
         };

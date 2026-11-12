@@ -236,6 +236,7 @@ async fn worker_publishes_a_new_warm_header_before_the_result() {
             detail: Vec::new(),
             at: Vec::new(),
             runs: Vec::new(),
+            source: None,
         });
         run_raw(&queue, serde_json::to_value(job).unwrap()).await;
         let warm = &queue.registry("v", LIVE).await.unwrap()[0].warm;
@@ -269,6 +270,7 @@ async fn a_job_that_does_not_decode_fails_alone() {
         detail: Vec::new(),
         at: Vec::new(),
         runs: Vec::new(),
+        source: None,
     });
     let r = result(serde_json::to_value(job).unwrap()).await;
     assert!(
@@ -330,6 +332,14 @@ async fn header_errors_and_crashes_are_in_band() {
     let r = check(&c, json!({"code": "import Missing\n#check Nat"})).await;
     assert_eq!(r["ok"], false);
     assert_eq!(r["messages"][0]["severity"], "error");
+    // On the line it was written on, not the normalised header's.
+    let code = "-- first\nimport Foo\n\nimport Foo\n  import Missing\n#check Nat";
+    let r = check(&c, json!({"code": code})).await;
+    assert_eq!(
+        r["messages"][0]["pos"],
+        json!({"line": 5, "column": 2}),
+        "{r}"
+    );
 
     let r = check(&c, json!({"code": "CRASH"})).await;
     assert_eq!(r["error"]["kind"], "crash", "{r}");

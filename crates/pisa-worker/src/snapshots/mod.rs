@@ -44,7 +44,7 @@ use pisa_protocol::api::{
     AmendedHoles, CheckResult, CreateSnapshotResponse, DeleteSnapshotResponse, Error, ErrorKind,
     Replacement, Snapshot, VerifyFailure, VerifySnapshotResponse,
 };
-use pisa_protocol::header::{Split, header_key, split_header};
+use pisa_protocol::header::{self, Split, header_key, split_header};
 use pisa_protocol::labels::{check_key, check_labels};
 use pisa_protocol::repl::CommandResponse;
 use pisa_protocol::snapshot;

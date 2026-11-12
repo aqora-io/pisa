@@ -18,6 +18,9 @@ pub struct Split {
     pub body: String,
     /// Number of lines of the original code that precede the body.
     pub header_lines: u64,
+    /// The line of the code, from 0, that each line of `header` comes from:
+    /// the first with that import.
+    pub header_at: Vec<u64>,
 }
 
 /// The modifiers and modules of an import line, e.g. `("public import",
@@ -50,6 +53,7 @@ pub fn header_key(header: &str) -> String {
 pub fn split_header(code: &str) -> Split {
     let lines: Vec<&str> = code.split('\n').collect();
     let mut imports: Vec<String> = Vec::new();
+    let mut header_at: Vec<u64> = Vec::new();
     let mut in_block_comment = 0usize;
     let mut header_end = 0;
     for (i, line) in lines.iter().enumerate() {
@@ -67,6 +71,7 @@ pub fn split_header(code: &str) -> Split {
         } else if let Some(line) = header_line(t) {
             if !imports.contains(&line) {
                 imports.push(line);
+                header_at.push(i as u64);
             }
             header_end = i + 1;
         } else {
@@ -85,6 +90,94 @@ pub fn split_header(code: &str) -> Split {
         header,
         body: lines[last_import..].join("\n"),
         header_lines: last_import as u64,
+        header_at,
+    }
+}
+
+/// Where a position Lean reports in the normalised header of `split` (lines
+/// from 1, columns from 0 in code points) is in `submitted`: on the line its
+/// import comes from, at the same word. `submitted` is the split code, or the
+/// code as sent before imports by run name were resolved, on the same lines.
+/// `None` for a line the header doesn't have.
+pub fn header_to_code(
+    split: &Split,
+    submitted: &str,
+    line: u64,
+    column: u64,
+) -> Option<(u64, u64)> {
+    let at = *split
+        .header_at
+        .get(usize::try_from(line).ok()?.checked_sub(1)?)?;
+    let from = split.header.split('\n').nth(line as usize - 1)?;
+    let to = submitted.split('\n').nth(at as usize)?;
+    Some((at + 1, align_column(from, to, column)))
+}
+
+/// Places columns of `code` on `submitted`, the code as sent, whose header
+/// lines name runs where `code`'s import their heads: a function of a
+/// position's line (from 1) and column that gives its column there. Columns
+/// of other lines stay as they are.
+pub fn resolved_to_submitted<'a>(
+    code: &'a str,
+    submitted: &'a str,
+) -> impl Fn(u64, u64) -> u64 + 'a {
+    let header_lines = split_header(code).header_lines as usize;
+    let differ: Vec<Option<(&str, &str)>> = code
+        .split('\n')
+        .zip(submitted.split('\n'))
+        .take(header_lines)
+        .map(|(from, to)| (from != to).then_some((from, to)))
+        .collect();
+    move |line, column| {
+        let at = line.checked_sub(1).and_then(|i| differ.get(i as usize));
+        match at {
+            Some(Some((from, to))) => align_column(from, to, column),
+            _ => column,
+        }
+    }
+}
+
+/// Column `column` (in code points) of line `from` placed on line `to`,
+/// whose words are those of `from`, some of other lengths, and maybe more:
+/// at the same word, as far into it as `to`'s has, or as far past its end.
+fn align_column(from: &str, to: &str, column: u64) -> u64 {
+    // Each word's first column and its length.
+    let words = |line: &str| -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        let mut start = None;
+        let mut len = 0;
+        for (i, c) in line.chars().enumerate() {
+            let i = i as u64;
+            match (c.is_whitespace(), start) {
+                (false, None) => start = Some(i),
+                (true, Some(s)) => {
+                    out.push((s, i - s));
+                    start = None;
+                }
+                _ => {}
+            }
+            len = i + 1;
+        }
+        if let Some(s) = start {
+            out.push((s, len - s));
+        }
+        out
+    };
+    let (from_words, to_words) = (words(from), words(to));
+    let line_end = to.chars().count() as u64;
+    let Some(k) = from_words.iter().rposition(|(s, _)| *s <= column) else {
+        return column.min(to_words.first().map_or(line_end, |w| w.0));
+    };
+    let (Some(&(from_start, from_len)), Some(&(to_start, to_len))) =
+        (from_words.get(k), to_words.get(k))
+    else {
+        return line_end;
+    };
+    let offset = column - from_start;
+    let next = to_words.get(k + 1).map_or(line_end, |w| w.0);
+    match offset < from_len {
+        true => to_start + offset.min(to_len),
+        false => (to_start + to_len + offset - from_len).min(next),
     }
 }
 
@@ -165,6 +258,40 @@ mod tests {
         );
         assert_eq!(import_parts("private import X"), None);
         assert_eq!(import_parts("import"), None);
+    }
+
+    #[test]
+    fn header_positions_are_placed_on_the_lines_they_come_from() {
+        let code = "-- hi\nimport  Foo -- foo\n\nimport Foo\n  import Missing\ntheorem x : True := trivial";
+        let s = split_header(code);
+        assert_eq!(s.header, "import Foo\nimport Missing");
+        assert_eq!(s.header_at, [1, 4]);
+        // `Missing`, at 7 in the header's second line.
+        assert_eq!(header_to_code(&s, code, 2, 7), Some((5, 9)));
+        assert_eq!(header_to_code(&s, code, 2, 14), Some((5, 16)));
+        assert_eq!(header_to_code(&s, code, 1, 0), Some((2, 0)));
+        assert_eq!(header_to_code(&s, code, 3, 0), None);
+        assert_eq!(header_to_code(&s, code, 0, 0), None);
+        // Placed on the code as sent, whose import names a run.
+        let sent = "-- hi\nimport  Foo -- foo\n\nimport Foo\n  import PisaRun.m\ntheorem x : True := trivial";
+        assert_eq!(header_to_code(&s, sent, 2, 14), Some((5, 18)));
+    }
+
+    #[test]
+    fn columns_after_a_resolved_import_move_back() {
+        let module = "PisaSnap.s0123456789abcdef0123456789abcdef";
+        let code = format!("import {module} Foo -- x\n\ntheorem t : True := trivial");
+        let sent = "import PisaRun.a.b Foo -- x\n\ntheorem t : True := trivial";
+        let foo = 8 + module.len() as u64;
+        let place = resolved_to_submitted(&code, sent);
+        assert_eq!(place(1, foo), 19);
+        assert_eq!(place(1, foo + 3), 22);
+        // Into the resolved module: as far into the name as it goes.
+        assert_eq!(place(1, 7), 7);
+        assert_eq!(place(1, 30), 18);
+        assert_eq!(place(1, 0), 0);
+        // The body's lines are the same.
+        assert_eq!(place(3, 12), 12);
     }
 
     #[test]

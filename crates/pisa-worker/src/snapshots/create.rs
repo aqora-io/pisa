@@ -151,8 +151,20 @@ impl Snapshots {
         let (amends, refutes) = (job.amends.is_some(), job.refutes.is_some());
         let replaces = job.replaces.is_some();
         let runs = job.runs.clone();
+        let sent = job.source.clone().map(|source| (job.code.clone(), source));
         let mut done = self.create_checked(pool, job).await;
         done.runs = runs;
+        // The build's messages are in the code as resolved: placed on the
+        // header lines as sent.
+        if let Some((code, source)) = &sent {
+            let place = header::resolved_to_submitted(code, source);
+            for m in &mut done.check.messages {
+                m.pos.column = place(m.pos.line, m.pos.column);
+                if let Some(end) = &mut m.end_pos {
+                    end.column = place(end.line, end.column);
+                }
+            }
+        }
         if let Some(s) = done.snapshot.as_mut()
             && let Err(e) = self.reader.name_runs(std::slice::from_mut(s)).await
         {

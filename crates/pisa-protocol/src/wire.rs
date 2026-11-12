@@ -61,6 +61,10 @@ pub struct CheckJob {
     /// code imports those modules already.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<api::RunImport>,
+    /// The code as sent, importing runs by name, when `runs` resolved them:
+    /// where messages on its header lines are placed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

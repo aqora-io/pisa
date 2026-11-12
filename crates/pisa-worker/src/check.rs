@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use pisa_protocol::api::{Detail, Error, ErrorKind};
-use pisa_protocol::header::split_header;
+use pisa_protocol::header::{header_to_code, split_header};
 use pisa_protocol::repl::{
     self, CommandResponse, Pos, ReplCommand, ReplResponse, Severity, at_positions, tactics,
 };
@@ -53,9 +53,19 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
 
     let env = match slot.warm_up(&split.header, &split.header_key).await {
         Ok((env, _)) => env,
-        Err(HeaderFailure::Lean(r)) => {
-            // Header positions are already those of the submitted code, and
-            // its error messages say what went wrong.
+        Err(HeaderFailure::Lean(mut r)) => {
+            // Its error messages say what went wrong, at positions in the
+            // normalised header: placed on the submitted lines.
+            let submitted = job.source.as_deref().unwrap_or(&job.code);
+            let place = |p: &mut Pos| {
+                if let Some((line, column)) = header_to_code(&split, submitted, p.line, p.column) {
+                    *p = Pos { line, column };
+                }
+            };
+            for m in &mut r.messages {
+                place(&mut m.pos);
+                m.end_pos.as_mut().map(place);
+            }
             outcome.verification = Some(slot.policy().judge(&r, None));
             outcome.response = Some(*r);
             return outcome;
@@ -265,6 +275,7 @@ mod tests {
             detail: detail.to_vec(),
             at: vec![api::Pos { line: 1, column: 0 }; at],
             runs: Vec::new(),
+            source: None,
         };
         assert_eq!(infotree(&job(&[], 0)), None);
         assert_eq!(infotree(&job(&[Detail::Tactics], 0)), Some("original"));

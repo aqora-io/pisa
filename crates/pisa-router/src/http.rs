@@ -410,7 +410,7 @@ async fn check(
             Vec::new(),
             app.versions.resolve(req.version.as_deref()),
         ),
-        Ok(Some(r)) => (r.code, r.runs, Some(r.version)),
+        Ok(Some(r)) => (req.code, r.runs, Some(r.version)),
         Err(e) => return Ok(Json(unresolved(e)).into_response()),
     };
     let p = prepare_check(code, req.timeout, req.detail, req.at, version, runs);
@@ -451,11 +451,7 @@ async fn check_batch(
         let header = split_header(&item.code).header;
         let (code, version, runs) = match &resolved[&header] {
             Ok(None) => (item.code, version.clone(), Vec::new()),
-            Ok(Some((runs, v))) => (
-                pisa_snapshots::resolve_with(&item.code, runs),
-                Some(v.clone()),
-                runs.clone(),
-            ),
+            Ok(Some((runs, v))) => (item.code, Some(v.clone()), runs.clone()),
             Err(e) => {
                 let e = e.clone();
                 return futures::future::Either::Left(async move { unresolved(e) });
@@ -508,6 +504,8 @@ async fn check_one(
     Ok(check_result(app.dispatcher.submit(p).await?))
 }
 
+/// A check of `code`, as sent: it runs with its imports by run name
+/// resolved as `runs` says.
 fn prepare_check(
     code: String,
     timeout_secs: u64,
@@ -516,6 +514,10 @@ fn prepare_check(
     version: Option<String>,
     runs: Vec<RunImport>,
 ) -> Prepared {
+    let (code, source) = match runs.is_empty() {
+        true => (code, None),
+        false => (pisa_snapshots::resolve_with(&code, &runs), Some(code)),
+    };
     let split = split_header(&code);
     let route = Route {
         version,
@@ -529,6 +531,7 @@ fn prepare_check(
         detail,
         at,
         runs,
+        source,
     });
     Prepared {
         job,

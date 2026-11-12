@@ -344,6 +344,20 @@ async fn a_session_and_a_document_keep_their_runs_and_say_what_moved() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_header_failure_is_placed_on_the_line_sent() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    lemma(&c).await;
+    let code = "import PisaRun.proj.lemma -- the lemma\n\nimport PisaRun.proj.lemma\n  import Missing\n#check Nat";
+    let r = check(&c, code).await;
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(
+        r["messages"][0]["pos"],
+        json!({"line": 4, "column": 2}),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_async_check_answers_with_what_its_names_resolved_to() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = lemma(&c).await;
