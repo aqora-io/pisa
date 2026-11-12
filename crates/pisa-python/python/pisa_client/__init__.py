@@ -17,9 +17,19 @@
     assert client.check(base["header"] + "\\nexample : double 2 = 4 := rfl")["ok"]
 
     hits = client.search(description="trace of a density matrix is one")["hits"]
+
+`Client`'s calls block, with the GIL released, and stop at Ctrl-C.
+`AsyncClient` takes the same arguments, and its calls return asyncio futures
+instead, which start at once:
+
+    from pisa_client import AsyncClient
+
+    async def main():
+        client = AsyncClient("http://localhost:8000")
+        results = await asyncio.gather(*(client.check(code) for code in codes))
 """
 
-from ._native import Client
+from ._native import AsyncClient, Client
 from .errors import CapacityError, LeanError, LimitError, NotFoundError, PisaError
 
-__all__ = ["Client", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]
+__all__ = ["AsyncClient", "Client", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]

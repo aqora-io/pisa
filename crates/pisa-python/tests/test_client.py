@@ -4,7 +4,9 @@ fake-repl in place of Lean. Build the binaries first:
     cargo build -p pisa-server -p pisa-worker -p pisa-tests
 """
 
+import asyncio
 import os
+import signal
 import socket
 import subprocess
 import threading
@@ -13,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from pisa_client import CapacityError, Client, LeanError, NotFoundError, PisaError
+from pisa_client import AsyncClient, CapacityError, Client, LeanError, NotFoundError, PisaError
 
 BIN = Path(os.environ.get("PISA_BIN_DIR", Path(__file__).parents[3] / "target" / "debug"))
 
@@ -275,6 +277,41 @@ def test_a_gateways_errors_are_retried_and_read_as_capacity():
         assert (e.value.kind, e.value.status) == ("unavailable", 502) and len(seen) == 1
     finally:
         server.shutdown()
+
+
+def test_an_async_client_answers_with_futures(url):
+    async def main():
+        client = AsyncClient(url, timeout=30)
+        assert (await client.check("#check Nat"))["ok"]
+        codes = [f"theorem t{i} : {i} = {i} := rfl" for i in range(4)]
+        results = await asyncio.gather(*(client.check(code) for code in codes))
+        assert all(r["ok"] for r in results), results
+        session = await client.start_session("theorem t : 1 = 1 := by sorry")
+        with pytest.raises(LeanError):
+            await client.apply_tactic(session["states"][0]["id"], "fail")
+        job = await client.submit_check("#check Nat")
+        assert (await client.wait_job(job))["ok"]
+        # A cancel drops the request at once.
+        slow = asyncio.ensure_future(client.check("SLEEP 5000\n#check Nat"))
+        await asyncio.sleep(0.2)
+        started = time.monotonic()
+        slow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await slow
+        assert time.monotonic() - started < 1
+
+    asyncio.run(main())
+
+
+def test_ctrl_c_stops_a_call(url):
+    client = Client(url, timeout=30)
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        client.check("SLEEP 5000\n#check Nat")
+    assert time.monotonic() - started < 2
+    timer.cancel()
 
 
 def test_threads_share_a_client(url):
