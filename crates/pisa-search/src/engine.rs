@@ -23,7 +23,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::dense::{Embedder, QUERY_INSTRUCTION};
 use crate::encode;
-use crate::index::{BundleManifest, StoredDecl};
+use crate::index::{BundleManifest, CONCLUSION_FORMAT, StoredDecl};
 use crate::points::{PointPayload, collection, entries_collection};
 use crate::qdrant::{Qdrant, ScoredPoint, any, is};
 use crate::symbols::Symbols;
@@ -71,6 +71,9 @@ pub struct Weights {
     /// identifiers, only symbols, and when it does.
     pub structural: f64,
     pub structural_identifiers: f64,
+    /// The conclusion lane's weight: a goal's target or a pattern against
+    /// theorems' conclusions.
+    pub concl: f64,
     pub dense: f64,
     pub exact_lane: f64,
     /// Prose against each field.
@@ -103,6 +106,7 @@ impl Default for Weights {
             name: 3.0,
             structural: 0.02,
             structural_identifiers: 1.0,
+            concl: 1.0,
             dense: 1.0,
             exact_lane: 1.0,
             prose_name: 1.0,
@@ -353,7 +357,11 @@ impl Engine {
             })
             .collect();
         let queries = queries.as_slice();
-        let parsed: Vec<Parsed> = queries.iter().map(parse).collect();
+        let mut parsed: Vec<Parsed> = queries.iter().map(parse).collect();
+        let known = self.known_names(&parsed).await?;
+        for p in &mut parsed {
+            p.resolve(&known);
+        }
         let mut results: Vec<QueryResult> = vec![QueryResult::default(); queries.len()];
         let vectors = self.embed(queries, &parsed, lanes).await;
         let modules = self.scopes(queries).await?;
@@ -430,6 +438,29 @@ impl Engine {
                 .collect();
         }
         Ok(results)
+    }
+
+    /// Which of the queries' identifiers name a declaration of the index or
+    /// of a snapshot, in one request.
+    async fn known_names(&self, parsed: &[Parsed]) -> Result<HashSet<String>, SearchError> {
+        let mut names: Vec<&String> = (parsed.iter())
+            .flat_map(|p| p.identifiers.iter().chain(&p.concl_identifiers))
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let searches = (names.iter())
+            .map(|n| json!({"filter": and(vec![is("name", n.as_str())]), "limit": 1}))
+            .collect();
+        let found = self.q.query_batch(&self.collection, searches).await?;
+        Ok(names
+            .into_iter()
+            .zip(found)
+            .filter(|(_, f)| !f.is_empty())
+            .map(|(n, _)| n.clone())
+            .collect())
     }
 
     /// Each query's vector for the dense lane, or why there is none. A text
@@ -616,18 +647,16 @@ impl Engine {
                 lane(json!(v), "trigrams", w.name);
             }
         }
-        let mut consts: Vec<(String, f32)> =
-            p.identifiers.iter().map(|i| (i.clone(), 1.0)).collect();
-        let all_tokens: Vec<String> = p.prose.iter().chain(&p.lean).cloned().collect();
-        consts.extend(self.symbols.constants(&all_tokens));
-        if lanes.structural && !consts.is_empty() {
-            // Symbols alone are weaker evidence than names written in Lean.
-            let weight = if p.identifiers.is_empty() {
-                w.structural
-            } else {
-                w.structural_identifiers
-            };
+        if lanes.structural
+            && let Some((consts, weight)) = structural(p, &self.symbols, w)
+        {
             lane(json!(encode::consts_query(&consts)), "consts", weight);
+        }
+        if lanes.concl && self.manifest.format >= CONCLUSION_FORMAT {
+            let consts = conclusion(p, &self.symbols);
+            if !consts.is_empty() {
+                lane(json!(encode::consts_query(&consts)), "concl", w.concl);
+            }
         }
         if lanes.dense
             && let Some(v) = vector
@@ -1046,6 +1075,7 @@ pub fn lane_configs(fused_only: bool) -> Vec<(&'static str, Lanes)> {
         lexical: false,
         name: false,
         structural: false,
+        concl: false,
         dense: false,
     };
     let mut configs = vec![("fused", Lanes::ALL)];
@@ -1061,6 +1091,13 @@ pub fn lane_configs(fused_only: bool) -> Vec<(&'static str, Lanes)> {
             "structural",
             Lanes {
                 structural: true,
+                ..none
+            },
+        ));
+        configs.push((
+            "concl",
+            Lanes {
+                concl: true,
                 ..none
             },
         ));
@@ -1090,6 +1127,7 @@ pub struct Lanes {
     pub lexical: bool,
     pub name: bool,
     pub structural: bool,
+    pub concl: bool,
     pub dense: bool,
 }
 
@@ -1098,6 +1136,7 @@ impl Lanes {
         lexical: true,
         name: true,
         structural: true,
+        concl: true,
         dense: true,
     };
 }
@@ -1108,6 +1147,12 @@ pub struct Parsed {
     pub prose: Vec<String>,
     pub lean: Vec<String>,
     pub identifiers: Vec<String>,
+    /// The identifiers and tokens of a goal's target or a pattern: what a
+    /// conclusion should look like.
+    pub concl_identifiers: Vec<String>,
+    pub concl_tokens: Vec<String>,
+    /// Constants the query names exactly.
+    pub consts: Vec<String>,
     pub name: Option<String>,
     /// Text for the dense lane.
     pub dense_text: String,
@@ -1144,14 +1189,26 @@ pub fn parse(q: &Query) -> Parsed {
     let mut p = Parsed::default();
     let mut nl = field(&q.description);
     let mut latex = field(&q.latex);
-    let mut lean: Vec<String> = field(&q.pattern)
-        .into_iter()
-        .chain(field(&q.goal))
-        .collect();
+    let mut lean: Vec<String> = Vec::new();
+    // What a conclusion should look like: a goal's target, or a pattern.
+    let mut concl: Vec<String> = Vec::new();
+    let mut lean_text = |text: String, lean: &mut Vec<String>| {
+        let text = text.replace("|-", "⊢");
+        let target = text.rsplit_once('⊢').map_or(text.as_str(), |(_, t)| t);
+        concl.push(target.to_string());
+        lean.push(text);
+    };
+    for text in field(&q.pattern).into_iter().chain(field(&q.goal)) {
+        lean_text(text, &mut lean);
+    }
     p.name = field(&q.name);
+    p.consts = (q.consts.iter())
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
     if let Some(text) = &field(&q.text) {
         match classify(text) {
-            "lean" => lean.push(text.clone()),
+            "lean" => lean_text(text.clone(), &mut lean),
             "latex" => latex = Some(latex.map_or(text.clone(), |l| format!("{l} {text}"))),
             "name" => p.name = p.name.clone().or(Some(text.clone())),
             _ => nl = Some(nl.map_or(text.clone(), |n| format!("{n} {text}"))),
@@ -1176,12 +1233,75 @@ pub fn parse(q: &Query) -> Parsed {
         p.identifiers.extend(lean_identifiers(l));
         dense.push(l.clone());
     }
+    for c in &concl {
+        p.concl_tokens.extend(tokens(c));
+        p.concl_identifiers.extend(lean_identifiers(c));
+    }
+    for ids in [&mut p.identifiers, &mut p.concl_identifiers] {
+        let mut seen = HashSet::new();
+        ids.retain(|i| seen.insert(i.clone()));
+    }
     if let Some(name) = &p.name {
         p.lean.extend(tokens(name));
         dense.push(name.clone());
     }
     p.dense_text = dense.join("\n");
     p
+}
+
+impl Parsed {
+    /// Keeps only the identifiers that name a declaration in `known`: a
+    /// hypothesis name, `fun` or a variable names nothing.
+    pub fn resolve(&mut self, known: &HashSet<String>) {
+        self.identifiers.retain(|i| known.contains(i));
+        self.concl_identifiers.retain(|i| known.contains(i));
+    }
+}
+
+/// Weighted constants, each once at its highest weight.
+fn merge(consts: impl IntoIterator<Item = (String, f32)>) -> Vec<(String, f32)> {
+    let mut out: Vec<(String, f32)> = Vec::new();
+    for (c, w) in consts {
+        match out.iter_mut().find(|(name, _)| *name == c) {
+            Some(existing) => existing.1 = existing.1.max(w),
+            None => out.push((c, w)),
+        }
+    }
+    out
+}
+
+/// The structural lane's constants and weight, or `None` without any: the
+/// query's names, the constants it names, and those its symbols suggest.
+/// Symbols alone are weaker evidence than names, so they weigh less.
+pub fn structural(p: &Parsed, symbols: &Symbols, w: &Weights) -> Option<(Vec<(String, f32)>, f64)> {
+    let all_tokens: Vec<String> = p.prose.iter().chain(&p.lean).cloned().collect();
+    let named = p
+        .identifiers
+        .iter()
+        .chain(&p.consts)
+        .map(|i| (i.clone(), 1.0));
+    let consts = merge(named.chain(symbols.constants(&all_tokens)));
+    if consts.is_empty() {
+        return None;
+    }
+    let named = !p.identifiers.is_empty() || !p.consts.is_empty();
+    let weight = if named {
+        w.structural_identifiers
+    } else {
+        w.structural
+    };
+    Some((consts, weight))
+}
+
+/// The conclusion lane's constants: those of a goal's target or a pattern,
+/// named or suggested by its symbols, and those the query names.
+pub fn conclusion(p: &Parsed, symbols: &Symbols) -> Vec<(String, f32)> {
+    let named = p
+        .concl_identifiers
+        .iter()
+        .chain(&p.consts)
+        .map(|i| (i.clone(), 1.0));
+    merge(named.chain(symbols.constants(&p.concl_tokens)))
 }
 
 pub fn flags(d: &StoredDecl, sibling: Option<String>) -> Flags {
@@ -1434,5 +1554,69 @@ mod tests {
         assert_eq!(p.prose, ["trace", "is", "one"]);
         assert_eq!(p.identifiers, ["Matrix.trace"]);
         assert!(p.lean.contains(&"matrix.trace".to_string()));
+        // A pattern is what a conclusion looks like.
+        assert_eq!(p.concl_identifiers, ["Matrix.trace"]);
+    }
+
+    /// A goal's hypotheses feed the structural lane, its target the
+    /// conclusion lane too.
+    #[test]
+    fn a_goal_splits_at_its_turnstile() {
+        let p = parse(&Query {
+            goal: Some("x : ℝ\nh : Real.sqrt x = 0\n⊢ Matrix.trace 1 = Fintype.card n".into()),
+            ..Default::default()
+        });
+        assert_eq!(p.identifiers, ["Real.sqrt", "Matrix.trace", "Fintype.card"]);
+        assert_eq!(p.concl_identifiers, ["Matrix.trace", "Fintype.card"]);
+        assert!(p.concl_tokens.contains(&"=".to_string()));
+        assert!(!p.concl_tokens.contains(&"real.sqrt".to_string()));
+        // Lean text in `text` with a turnstile is a goal.
+        let t = parse(&Query {
+            text: Some("h : 0 ≤ a ⊢ Real.sqrt a ^ 2 = a".into()),
+            ..Default::default()
+        });
+        assert_eq!(t.concl_identifiers, ["Real.sqrt"]);
+    }
+
+    #[test]
+    fn consts_are_taken_as_given() {
+        let p = parse(&Query {
+            consts: vec!["Matrix.trace".into(), " ".into()],
+            ..Default::default()
+        });
+        assert_eq!(p.consts, ["Matrix.trace"]);
+    }
+
+    /// Only identifiers that name something count: an unknown hypothesis
+    /// name, `fun` or `ℝ` neither go to the structural lane nor raise its
+    /// weight.
+    #[test]
+    fn identifiers_count_only_when_they_name_something() {
+        let w = Weights::default();
+        let symbols = Symbols::default();
+        let mut p = parse(&Query {
+            goal: Some("hx : fun y => y\n⊢ Matrix.trace A = ℝ".into()),
+            ..Default::default()
+        });
+        assert!(p.identifiers.contains(&"hx".to_string()));
+        let known: HashSet<String> = ["Matrix.trace".to_string()].into();
+        p.resolve(&known);
+        assert_eq!(p.identifiers, ["Matrix.trace"]);
+        assert_eq!(p.concl_identifiers, ["Matrix.trace"]);
+        let (consts, weight) = structural(&p, &symbols, &w).unwrap();
+        assert_eq!(consts, [("Matrix.trace".to_string(), 1.0)]);
+        assert_eq!(weight, w.structural_identifiers);
+        p.resolve(&HashSet::new());
+        assert!(structural(&p, &symbols, &w).is_none());
+        // Constants a caller names count as names.
+        p.consts = vec!["Fintype.card".into()];
+        assert_eq!(
+            structural(&p, &symbols, &w).unwrap().1,
+            w.structural_identifiers
+        );
+        assert_eq!(
+            conclusion(&p, &symbols),
+            [("Fintype.card".to_string(), 1.0)]
+        );
     }
 }

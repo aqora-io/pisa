@@ -401,7 +401,7 @@ pub fn lean_identifiers(text: &str) -> Vec<String> {
             ident.push(c);
         } else {
             let id = ident.trim_matches('.');
-            if id.len() > 1 && id.chars().next().is_some_and(|c| c.is_alphabetic()) {
+            if id.chars().nth(1).is_some() && id.chars().next().is_some_and(|c| c.is_alphabetic()) {
                 out.push(id.to_string());
             }
             ident.clear();

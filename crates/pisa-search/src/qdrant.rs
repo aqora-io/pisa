@@ -144,6 +144,17 @@ impl Qdrant {
         Ok(r.exists)
     }
 
+    /// The names of a collection's sparse vectors.
+    pub async fn sparse_vectors(&self, collection: &str) -> anyhow::Result<Vec<String>> {
+        let path = format!("/collections/{collection}");
+        let info: Value = self.call(reqwest::Method::GET, &path, None).await?;
+        let sparse = &info["config"]["params"]["sparse_vectors"];
+        Ok(sparse
+            .as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
     pub async fn create(&self, collection: &str, config: &Value) -> anyhow::Result<()> {
         let path = format!("/collections/{collection}");
         let _: Value = self.call(reqwest::Method::PUT, &path, Some(config)).await?;

@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use crate::corpus::{self, Corpus, Decl, LineRange};
 use crate::text::split_name;
 
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
+
+/// The first format whose bundles have conclusion keys for the conclusion lane.
+pub const CONCLUSION_FORMAT: u32 = 5;
 
 /// What a hit or `/declarations` shows for one declaration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -30,6 +33,10 @@ pub struct StoredDecl {
     /// The constants its type mentions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub type_refs: Vec<String>,
+    /// For a theorem, the constants its conclusion is built from, in the order
+    /// of its discrimination-tree path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub concl: Vec<String>,
     #[serde(default)]
     pub docstring: Option<String>,
     #[serde(default)]
@@ -195,6 +202,7 @@ fn stored_decl(
         signature: d.signature.clone(),
         type_full: d.type_pp_full.clone(),
         type_refs: d.type_refs.clone(),
+        concl: conclusion_constants(&d.concl_keys),
         docstring: d.docstring.clone(),
         range: d.range,
         deprecated_to: d.deprecated_to.clone(),
@@ -207,6 +215,23 @@ fn stored_decl(
         deps,
         pagerank,
     }
+}
+
+/// The constants among a conclusion's discrimination-tree keys, each once:
+/// no stars, literals, projections (`Prod.1`) or other placeholders.
+pub fn conclusion_constants(keys: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for k in keys {
+        let constant = k.chars().next().is_some_and(char::is_alphabetic)
+            && !k
+                .rsplit('.')
+                .next()
+                .is_some_and(|last| last.chars().all(|c| c.is_ascii_digit()));
+        if constant && !out.contains(k) {
+            out.push(k.clone());
+        }
+    }
+    out
 }
 
 /// PageRank where each declaration passes rank to what it uses, so widely
@@ -282,6 +307,32 @@ impl Bundle {
 
 #[cfg(test)]
 mod tests {
+    /// A conclusion's keys as constants: no stars, literals, projections
+    /// or other placeholders, each once.
+    #[test]
+    fn conclusion_keys_keep_their_constants() {
+        let keys: Vec<String> = [
+            "Eq",
+            "*",
+            "Matrix.trace",
+            "HMul.hMul",
+            "*",
+            "1",
+            "\"s\"",
+            "Code.1",
+            "◾",
+            "→",
+            "Matrix.trace",
+            "Real.sqrt",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            conclusion_constants(&keys),
+            ["Eq", "Matrix.trace", "HMul.hMul", "Real.sqrt"]
+        );
+    }
+
     use super::*;
 
     #[test]

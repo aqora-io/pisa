@@ -25,7 +25,9 @@ pub struct Loaded {
     pub removed: usize,
 }
 
-/// Creates `collection` with `config` and `indexes` unless it exists.
+/// Creates `collection` with `config` and `indexes` unless it exists. One
+/// that exists without a sparse vector `config` names, made before that lane,
+/// is refused: a sparse vector can't be added to it.
 pub async fn ensure_collection(
     q: &Qdrant,
     collection: &str,
@@ -34,6 +36,14 @@ pub async fn ensure_collection(
 ) -> anyhow::Result<()> {
     if !q.exists(collection).await? {
         q.create(collection, config).await?;
+    } else if let Some(wanted) = config["sparse_vectors"].as_object() {
+        let has = q.sparse_vectors(collection).await?;
+        let lacking: Vec<&String> = wanted.keys().filter(|k| !has.contains(k)).collect();
+        anyhow::ensure!(
+            lacking.is_empty(),
+            "collection {collection} has no {lacking:?} sparse vector, as it was made before \
+             that lane: drop it and load again"
+        );
     }
     for (field, schema) in indexes {
         q.index(collection, field, schema).await?;

@@ -36,6 +36,7 @@ DECLS = [
         "kind": "theorem",
         "signature": "Matrix.trace_one [Fintype n] [DecidableEq n] : Matrix.trace (1 : Matrix n n R) = Fintype.card n",
         "type_refs": ["Matrix.trace", "Matrix"],
+        "concl_keys": ["Eq", "*", "Matrix.trace", "*", "*", "*", "1", "Fintype.card", "*"],
         "docstring": "The trace of the identity matrix is the dimension.",
     },
     {
@@ -108,6 +109,9 @@ def test_search(url):
     assert hits[0]["name"] == "Matrix.trace_one"
     assert isinstance(hits[0]["score"], float)
     assert "status" not in hits[0] and "verified" not in hits[0]
+
+    by_consts = client.search(consts=["Matrix.trace"], kinds=["theorem"])["hits"]
+    assert by_consts[0]["name"] == "Matrix.trace_one", by_consts
 
     by_name = client.search(name="Real.sqrt_mul_sefl", limit=1)["hits"]
     assert [h["name"] for h in by_name] == ["Real.sqrt_mul_self"]

@@ -53,6 +53,11 @@ pub struct Query {
     /// A declaration name, possibly partial or misspelled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Constants the statement is about, by their exact names, e.g. those of a
+    /// goal's target read from a Lean term: they rank declarations that
+    /// mention them, and theorems that conclude with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consts: Vec<String>,
     /// Restrict to these libraries, e.g. `["Physlib"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub libraries: Vec<String>,
@@ -100,6 +105,7 @@ impl Default for Query {
             pattern: None,
             goal: None,
             name: None,
+            consts: Vec::new(),
             libraries: Vec::new(),
             kinds: Vec::new(),
             limit: default_limit(),

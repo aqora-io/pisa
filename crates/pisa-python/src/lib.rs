@@ -1062,8 +1062,8 @@ impl Base {
 
     #[pyo3(signature = (
         text = None, *, description = None, latex = None, pattern = None, goal = None,
-        name = None, libraries = None, kinds = None, limit = 5, include_sorried = None,
-        snapshots = None
+        name = None, consts = None, libraries = None, kinds = None, limit = 5,
+        include_sorried = None, snapshots = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search<'py>(
@@ -1075,6 +1075,7 @@ impl Base {
         pattern: Option<String>,
         goal: Option<String>,
         name: Option<String>,
+        consts: Option<Vec<String>>,
         libraries: Option<Vec<String>>,
         kinds: Option<Vec<String>>,
         limit: usize,
@@ -1094,6 +1095,7 @@ impl Base {
             pattern,
             goal,
             name,
+            consts: consts.unwrap_or_default(),
             libraries: libraries.unwrap_or_default(),
             kinds: kinds.unwrap_or_default(),
             limit,

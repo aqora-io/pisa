@@ -169,9 +169,10 @@ pub fn point(
     if let Some(v) = dense {
         vector.insert("dense".into(), json!(v));
     }
-    let sparse: [(&str, Sparse); 3] = [
+    let sparse: [(&str, Sparse); 4] = [
         ("lexical", encode::lexical_doc(s, field_stats)),
         ("consts", encode::consts_doc(&s.type_refs)),
+        ("concl", encode::consts_doc(&s.concl)),
         ("trigrams", encode::trigrams(&s.name)),
     ];
     for (name, v) in sparse {
@@ -190,7 +191,7 @@ pub fn collection_config(replication: u32) -> Value {
             "size": crate::dense::DIMS, "distance": "Cosine", "on_disk": true,
             "quantization_config": {"scalar": {"type": "int8", "always_ram": true}},
         }},
-        "sparse_vectors": {"lexical": sparse, "consts": sparse, "trigrams": sparse},
+        "sparse_vectors": {"lexical": sparse, "consts": sparse, "concl": sparse, "trigrams": sparse},
         "shard_number": 1,
         "replication_factor": replication,
         "on_disk_payload": true,
@@ -300,5 +301,13 @@ mod tests {
         let v = point(base_id(&s.name), &p, &s, None, &BTreeMap::new());
         assert!(v["vector"].get("dense").is_none() && v["vector"].get("consts").is_none());
         assert!(v["vector"]["trigrams"]["indices"].is_array());
+        assert!(v["vector"].get("concl").is_none());
+        let t = StoredDecl {
+            concl: vec!["Eq".into(), "Matrix.trace".into()],
+            ..s
+        };
+        let v = point(base_id(&t.name), &p, &t, None, &BTreeMap::new());
+        assert_eq!(v["vector"]["concl"]["indices"].as_array().unwrap().len(), 2);
+        assert!(collection_config(1)["sparse_vectors"]["concl"].is_object());
     }
 }

@@ -1112,6 +1112,7 @@ class Client:
         pattern: str | None = None,
         goal: str | None = None,
         name: str | None = None,
+        consts: list[str] | None = None,
         libraries: list[str] | None = None,
         kinds: list[str] | None = None,
         limit: int = 5,
@@ -1120,6 +1121,9 @@ class Client:
     ) -> QueryResult:
         """Search declarations by free `text` or by the fields that apply: a
         description, LaTeX, a Lean pattern, a goal state or a (partial) name.
+        `consts` names constants exactly, e.g. those of a goal's target: a
+        goal's target and a pattern are also matched against theorems'
+        conclusions.
         `snapshots` also searches snapshot modules: "all", or {"labels":
         {...}} for the modules of the heads with every label, heads being the
         snapshots that nothing replaces. Unknown names and empty results are
@@ -1625,6 +1629,7 @@ class AsyncClient:
         pattern: str | None = None,
         goal: str | None = None,
         name: str | None = None,
+        consts: list[str] | None = None,
         libraries: list[str] | None = None,
         kinds: list[str] | None = None,
         limit: int = 5,
@@ -1633,6 +1638,9 @@ class AsyncClient:
     ) -> Future[QueryResult]:
         """Search declarations by free `text` or by the fields that apply: a
         description, LaTeX, a Lean pattern, a goal state or a (partial) name.
+        `consts` names constants exactly, e.g. those of a goal's target: a
+        goal's target and a pattern are also matched against theorems'
+        conclusions.
         `snapshots` also searches snapshot modules: "all", or {"labels":
         {...}} for the modules of the heads with every label, heads being the
         snapshots that nothing replaces. Unknown names and empty results are
@@ -1657,6 +1665,7 @@ class Query(TypedDict, total=False):
     pattern: str
     goal: str
     name: str
+    consts: list[str]
     libraries: list[str]
     kinds: list[str]
     limit: int

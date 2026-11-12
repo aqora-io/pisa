@@ -2034,14 +2034,21 @@ with `--replication 2`. A server opens its index in the background, so until
 Qdrant answers with the bundle, `/search` answers 503, `/health` says why,
 and the rest of the API works.
 
-**How it ranks.** Each of four lanes is a Qdrant query, and Qdrant fuses them
+**How it ranks.** Each of five lanes is a Qdrant query, and Qdrant fuses them
 with weighted reciprocal rank fusion:
 - **lexical:** BM25 over names, descriptions, signatures and docstrings, as a
   sparse vector with a token per field and term;
 - **name:** the name's trigrams, plus an exact match, which always comes first;
 - **structural:** constants the query names or implies, matched against each
-  type's constants. LaTeX symbols map to constants through
-  `search/symbols.toml`;
+  type's constants. A Lean word counts only when it names a declaration, so a
+  goal's hypothesis names and variables don't; `consts` names constants
+  exactly. LaTeX symbols, notation and quantum-information words (`|ψ⟩`,
+  `ᴴ`, partial trace, fidelity) map to constants through `search/symbols.toml`;
+- **conclusion:** a goal's target, after its `⊢`, or a `pattern`, against what
+  each theorem concludes: the constants of its conclusion's
+  discrimination-tree key, which an index of format 5 or later holds. A
+  collection loaded from an earlier bundle has no room for it: drop it and
+  load the new bundle;
 - **dense:** Qwen3-Embedding-8B vectors for every declaration, from Scaleway's
   serverless API, which also embeds each query. Qwen3-Embedding-0.6B is a
   free, local alternative (TEI on CPU, or llama.cpp on a GPU) that retrieves
@@ -2164,7 +2171,7 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, libraries?, kinds?, limit?, include_sorried?, snapshots?}], version?}` → `{version, results: [{hits, warnings?, dense_pending?}]}`, at most 64 queries |
+| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?}], version?}` → `{version, results: [{hits, warnings?, dense_pending?}]}`, at most 64 queries |
 | `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}` |
 | `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 

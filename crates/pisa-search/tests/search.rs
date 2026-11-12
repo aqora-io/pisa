@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use pisa_protocol::search::{Informal, Query};
 use pisa_protocol::version::Versions;
 use pisa_search::corpus::{self, Corpus, Decl, Manifest};
-use pisa_search::engine::Engine;
+use pisa_search::engine::{Engine, Lanes};
 use pisa_search::qdrant::Qdrant;
 use pisa_search::symbols::{self, Symbols};
 use pisa_search::{index, load, points};
@@ -107,6 +107,13 @@ fn corpus() -> Corpus {
             )
         },
         d("Real", "def", "Mathlib", "Real : Type", &[]),
+        d(
+            "Fintype.card",
+            "def",
+            "Mathlib",
+            "Fintype.card (α : Type) [Fintype α] : ℕ",
+            &[],
+        ),
         D {
             value_refs: &["Real.sqrt"],
             ..d(
@@ -237,6 +244,76 @@ fn corpus() -> Corpus {
         "QuantumMechanics.HarmonicOscillator.eigenstates_orthonormal",
     );
     decls[i].uses_sorry = true;
+    // Conclusion keys as `PisaExport` prints a discrimination-tree path.
+    let keys = |ks: &[&str]| ks.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+    for (name, ks) in [
+        (
+            "Matrix.trace_one",
+            &[
+                "Eq",
+                "*",
+                "Matrix.trace",
+                "*",
+                "*",
+                "*",
+                "*",
+                "1",
+                "Fintype.card",
+                "*",
+                "*",
+            ][..],
+        ),
+        (
+            "Matrix.trace_mul_comm",
+            &[
+                "Eq",
+                "*",
+                "Matrix.trace",
+                "*",
+                "*",
+                "*",
+                "*",
+                "HMul.hMul",
+                "*",
+                "*",
+                "Matrix.trace",
+            ],
+        ),
+        (
+            "Real.sqrt_mul_self",
+            &[
+                "Eq",
+                "Real",
+                "Real.sqrt",
+                "HMul.hMul",
+                "Real",
+                "Real",
+                "Real",
+                "*",
+                "*",
+                "*",
+            ],
+        ),
+        (
+            "Real.mul_self_sqrt",
+            &[
+                "Eq",
+                "Real",
+                "HMul.hMul",
+                "Real",
+                "Real",
+                "Real",
+                "Real.sqrt",
+                "*",
+                "Real.sqrt",
+                "*",
+                "*",
+            ],
+        ),
+    ] {
+        let i = by(&mut decls, name);
+        decls[i].concl_keys = keys(ks);
+    }
     decls.sort_by(|a, b| a.name.cmp(&b.name));
     corpus::compute_hashes(&mut decls);
     let mut libraries = std::collections::BTreeMap::new();
@@ -783,4 +860,95 @@ async fn queries_skip_blanks_noise_and_bad_filters() {
     let err = t.engine.check_filters(&mut q).unwrap_err();
     assert!(err.contains("known: Mathlib, Physlib"), "{err}");
     t.done().await;
+}
+
+fn only(lanes: &str) -> Lanes {
+    Lanes {
+        lexical: lanes.contains("lexical"),
+        name: lanes.contains("name"),
+        structural: lanes.contains("structural"),
+        concl: lanes.contains("concl"),
+        dense: false,
+    }
+}
+
+/// A goal's target finds the theorem that concludes it, through the
+/// conclusion lane, whatever its hypotheses mention.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_goal_finds_the_theorem_that_concludes_it() {
+    let Some(t) = engine().await else { return };
+    let goal = Query {
+        goal: Some("x : ℝ\nh : Real.sqrt x = 0\n⊢ Matrix.trace 1 = Fintype.card n".into()),
+        ..Default::default()
+    };
+    let r = t
+        .engine
+        .search_batch(std::slice::from_ref(&goal), only("concl"))
+        .await
+        .unwrap();
+    let hits: Vec<&str> = r[0].hits.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(hits.first(), Some(&"Matrix.trace_one"), "{hits:?}");
+    // Real.sqrt is only in a hypothesis.
+    assert!(!hits.iter().any(|h| h.starts_with("Real.")), "{hits:?}");
+    // All lanes together put it first too.
+    assert_eq!(t.names(goal).await[0], "Matrix.trace_one");
+    t.done().await;
+}
+
+/// `consts` names constants exactly, for the structural and conclusion lanes.
+#[tokio::test(flavor = "multi_thread")]
+async fn consts_name_the_constants_a_search_is_about() {
+    let Some(t) = engine().await else { return };
+    let q = Query {
+        consts: vec!["Fintype.card".into()],
+        ..Default::default()
+    };
+    let r = t
+        .engine
+        .search_batch(std::slice::from_ref(&q), only("concl"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r[0].hits.first().map(|h| h.name.as_str()),
+        Some("Matrix.trace_one")
+    );
+    // The structural lane reads a declaration's type, which here mentions
+    // `Matrix.trace` but not `Fintype.card`.
+    let q = Query {
+        consts: vec!["Matrix.trace".into()],
+        ..Default::default()
+    };
+    let r = t
+        .engine
+        .search_batch(std::slice::from_ref(&q), only("structural"))
+        .await
+        .unwrap();
+    let hits: Vec<&str> = r[0].hits.iter().map(|h| h.name.as_str()).collect();
+    assert!(hits.contains(&"Matrix.trace_one"), "{hits:?}");
+    t.done().await;
+}
+
+/// A collection loaded before the conclusion lane has no room for it: the
+/// load says to drop it rather than fail half way.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_collection_without_the_conclusion_lane_is_refused() {
+    let Ok(url) = std::env::var("PISA_TEST_QDRANT_URL") else {
+        return;
+    };
+    let q = Qdrant::new(&url, None).unwrap();
+    let env_id = format!("test-{}-old", std::process::id());
+    let collection = points::collection(&env_id);
+    let mut config = points::collection_config(1);
+    config["sparse_vectors"]
+        .as_object_mut()
+        .unwrap()
+        .remove("concl");
+    q.create(&collection, &config).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = corpus();
+    c.manifest.env_id = env_id.clone();
+    index::build(&c, &HashMap::new(), None, dir.path()).unwrap();
+    let e = load::load(dir.path(), &q, 1, 0.0).await.unwrap_err();
+    assert!(e.to_string().contains("concl"), "{e}");
+    q.drop(&collection).await.unwrap();
 }

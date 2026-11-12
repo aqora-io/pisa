@@ -2363,6 +2363,13 @@
       "Query": {
         "description": "One search. Fill as many fields as you can: each feeds different lanes,\nand more fields mean better fusion.",
         "properties": {
+          "consts": {
+            "description": "Constants the statement is about, by their exact names, e.g. those of a\ngoal's target read from a Lean term: they rank declarations that\nmention them, and theorems that conclude with them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "description": {
             "description": "A natural-language description.",
             "type": "string"

@@ -2032,6 +2032,12 @@ export interface components {
          *     and more fields mean better fusion.
          */
         Query: {
+            /**
+             * @description Constants the statement is about, by their exact names, e.g. those of a
+             *     goal's target read from a Lean term: they rank declarations that
+             *     mention them, and theorems that conclude with them.
+             */
+            consts?: string[];
             /** @description A natural-language description. */
             description?: string;
             /** @description A pretty-printed goal state (hypotheses and `⊢ target`). */
