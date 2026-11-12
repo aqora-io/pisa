@@ -618,6 +618,15 @@ mod tests {
         // One that fits is as it was, so its vector is kept.
         let short = document_view(&decl("t : 1 = 1"), Some(&described("One is one.")));
         assert_eq!(short, "theorem t\nA name\nOne is one.\nt : 1 = 1");
+        // A definition's value isn't in it: printing values re-embeds nothing.
+        let valued = Decl {
+            value: Some("2 + 2".into()),
+            ..decl("t : 1 = 1")
+        };
+        assert_eq!(
+            document_view(&valued, Some(&described("One is one."))),
+            short
+        );
         // A long description is cut so that the whole signature fits.
         let signature = format!("t : {} = 1", "x".repeat(900));
         let view = document_view(&decl(&signature), Some(&described(&"y".repeat(3000))));

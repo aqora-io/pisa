@@ -407,6 +407,7 @@ impl Indexer {
                     signature: d.signature.clone(),
                     type_full: d.type_pp_full.clone(),
                     type_refs: d.type_refs.clone(),
+                    value: d.value.clone(),
                     docstring: d.docstring.clone(),
                     deprecated_to: d.deprecated_to.clone(),
                     uses_sorry: d.uses_sorry,

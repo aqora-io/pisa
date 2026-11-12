@@ -1118,12 +1118,15 @@ class Client:
         limit: int = 5,
         include_sorried: bool | None = None,
         snapshots: SnapshotScope | None = None,
+        format: Format | None = None,
     ) -> QueryResult:
         """Search declarations by free `text` or by the fields that apply: a
         description, LaTeX, a Lean pattern, a goal state or a (partial) name.
         `consts` names constants exactly, e.g. those of a goal's target: a
         goal's target and a pattern are also matched against theorems'
         conclusions.
+        `format="text"` returns the hits rendered for a model's context, in
+        `text`, and no `hits`.
         `snapshots` also searches snapshot modules: "all", or {"labels":
         {...}} for the modules of the heads with every label, heads being the
         snapshots that nothing replaces. Unknown names and empty results are
@@ -1635,12 +1638,15 @@ class AsyncClient:
         limit: int = 5,
         include_sorried: bool | None = None,
         snapshots: SnapshotScope | None = None,
+        format: Format | None = None,
     ) -> Future[QueryResult]:
         """Search declarations by free `text` or by the fields that apply: a
         description, LaTeX, a Lean pattern, a goal state or a (partial) name.
         `consts` names constants exactly, e.g. those of a goal's target: a
         goal's target and a pattern are also matched against theorems'
         conclusions.
+        `format="text"` returns the hits rendered for a model's context, in
+        `text`, and no `hits`.
         `snapshots` also searches snapshot modules: "all", or {"labels":
         {...}} for the modules of the heads with every label, heads being the
         snapshots that nothing replaces. Unknown names and empty results are
@@ -1671,6 +1677,9 @@ class Query(TypedDict, total=False):
     limit: int
     include_sorried: NotRequired[bool]
     snapshots: SnapshotScope
+    format: Format
+
+Format = Literal["full", "text"]
 
 class SnapshotLabels(TypedDict):
     labels: dict[str, str]
@@ -1690,6 +1699,7 @@ class Hit(TypedDict):
     library: str
     module: str
     signature: str
+    value: NotRequired[str]
     title: NotRequired[str]
     summary: NotRequired[str]
     flags: Flags
@@ -1702,6 +1712,7 @@ class Hit(TypedDict):
 
 class QueryResult(TypedDict):
     hits: list[Hit]
+    text: NotRequired[str]
     warnings: NotRequired[list[str]]
     dense_pending: NotRequired[bool]
 
@@ -1725,6 +1736,7 @@ class DeclarationDetail(TypedDict):
     module: str
     signature: str
     type_full: str
+    value: NotRequired[str]
     docstring: NotRequired[str]
     description: NotRequired[Description]
     flags: Flags

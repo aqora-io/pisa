@@ -1063,7 +1063,7 @@ impl Base {
     #[pyo3(signature = (
         text = None, *, description = None, latex = None, pattern = None, goal = None,
         name = None, consts = None, libraries = None, kinds = None, limit = 5,
-        include_sorried = None, snapshots = None
+        include_sorried = None, snapshots = None, format = None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn search<'py>(
@@ -1081,11 +1081,17 @@ impl Base {
         limit: usize,
         include_sorried: Option<bool>,
         snapshots: Option<Bound<'py, PyAny>>,
+        format: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let snapshots = match snapshots {
             Some(s) => serde_json::from_value(from_py(&s)?)
                 .map_err(|e| PyValueError::new_err(format!("invalid snapshots: {e}")))?,
+            None => Default::default(),
+        };
+        let format = match format {
+            Some(f) => serde_json::from_value(serde_json::Value::String(f))
+                .map_err(|e| PyValueError::new_err(format!("invalid format: {e}")))?,
             None => Default::default(),
         };
         let query = pisa_client::Query {
@@ -1101,6 +1107,7 @@ impl Base {
             limit,
             include_sorried,
             snapshots,
+            format,
         };
         self.call(py, async move { inner.search(&query).await })
     }

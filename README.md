@@ -2171,18 +2171,28 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?}], version?}` → `{version, results: [{hits, warnings?, dense_pending?}]}`, at most 64 queries |
+| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?, format?}], version?}` → `{version, results: [{hits, text?, warnings?, dense_pending?}]}`, at most 64 queries |
 | `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}` |
-| `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
+| `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, value, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 
 Each hit carries:
 - name, kind, library, module and signature;
-- a description's `title` and `summary`, when one exists;
+- for a definition, abbreviation or opaque, its `value`: what it is defined
+  as, with notation, past the parameters the signature names, cut at 1,000
+  characters (` …`). Recursive definitions have none, since Lean keeps only
+  their compiled form, and a snapshot's is as its build printed it;
+- a description's `title` and `summary`, when one exists: whole sentences, two
+  at most within 240 characters;
 - flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
 - a score, comparable only within one query, and a source link;
-- `text`, about 150 tokens ready for a model's context;
+- `text`, about 150 tokens ready for a model's context: the signature (past
+  400 characters, binders go from the middle so that the conclusion stays),
+  the start of the value, and the summary;
 - for a snapshot declaration, `snapshot_ids` (the scope's heads on its
   module), `status` and `verified` (see [below](#snapshot-search)).
+
+With `format: "text"`, a result has no `hits`, only `text`: each hit's `text`,
+separated by blank lines.
 
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists

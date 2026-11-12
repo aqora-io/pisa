@@ -76,6 +76,26 @@ pub struct Query {
     /// heads only, those that no other snapshot replaces.
     #[serde(default, skip_serializing_if = "SnapshotScope::is_none")]
     pub snapshots: SnapshotScope,
+    /// How the result carries its hits (default `full`).
+    #[serde(default, skip_serializing_if = "Format::is_full")]
+    pub format: Format,
+}
+
+/// How a result carries its hits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Format {
+    /// `hits`, with every field.
+    #[default]
+    Full,
+    /// `text` alone: each hit's `text`, one after another, and no `hits`.
+    Text,
+}
+
+impl Format {
+    pub fn is_full(&self) -> bool {
+        *self == Format::Full
+    }
 }
 
 /// Which snapshot modules a query searches: `"none"`, `"all"` (those with a
@@ -111,6 +131,7 @@ impl Default for Query {
             limit: default_limit(),
             include_sorried: None,
             snapshots: SnapshotScope::None,
+            format: Format::Full,
         }
     }
 }
@@ -125,7 +146,11 @@ pub struct SearchResponse {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct QueryResult {
+    /// Empty with `format: "text"`.
     pub hits: Vec<Hit>,
+    /// With `format: "text"`: the hits rendered, separated by blank lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     /// What made this result worse than usual, e.g. a lane that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -144,6 +169,11 @@ pub struct Hit {
     pub module: String,
     /// The declaration's signature, with notation.
     pub signature: String,
+    /// What a definition, abbreviation or opaque is defined as, with
+    /// notation, past the parameters the signature names; cut at 1,000
+    /// characters, ending in ` …`. A snapshot's, as its build printed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     /// What it is called in words, when a description exists, e.g.
     /// "Subadditivity of von Neumann entropy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +301,9 @@ pub struct DeclarationDetail {
     pub signature: String,
     /// The type with full names and no notation.
     pub type_full: String,
+    /// As in [`Hit::value`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docstring: Option<String>,
     /// What it states, in words, when a description exists.

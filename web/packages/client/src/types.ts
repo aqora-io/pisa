@@ -55,6 +55,7 @@ export type {
   ErrorResponse,
   Export,
   Flags,
+  Format,
   GetDeclarationResponse,
   GetJobResponse,
   GoalsAt,

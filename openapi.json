@@ -1361,6 +1361,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "value": {
+            "description": "As in [`Hit::value`].",
+            "type": "string"
           }
         },
         "required": [
@@ -1736,6 +1740,14 @@
         },
         "type": "object"
       },
+      "Format": {
+        "description": "How a result carries its hits.",
+        "enum": [
+          "full",
+          "text"
+        ],
+        "type": "string"
+      },
       "GetDeclarationResponse": {
         "properties": {
           "declaration": {
@@ -1948,6 +1960,10 @@
           },
           "title": {
             "description": "What it is called in words, when a description exists, e.g.\n\"Subadditivity of von Neumann entropy\".",
+            "type": "string"
+          },
+          "value": {
+            "description": "What a definition, abbreviation or opaque is defined as, with\nnotation, past the parameters the signature names; cut at 1,000\ncharacters, ending in ` …`. A snapshot's, as its build printed it.",
             "type": "string"
           },
           "verified": {
@@ -2374,6 +2390,10 @@
             "description": "A natural-language description.",
             "type": "string"
           },
+          "format": {
+            "$ref": "#/components/schemas/Format",
+            "description": "How the result carries its hits (default `full`)."
+          },
           "goal": {
             "description": "A pretty-printed goal state (hypotheses and `⊢ target`).",
             "type": "string"
@@ -2431,10 +2451,15 @@
             "type": "boolean"
           },
           "hits": {
+            "description": "Empty with `format: \"text\"`.",
             "items": {
               "$ref": "#/components/schemas/Hit"
             },
             "type": "array"
+          },
+          "text": {
+            "description": "With `format: \"text\"`: the hits rendered, separated by blank lines.",
+            "type": "string"
           },
           "warnings": {
             "description": "What made this result worse than usual, e.g. a lane that failed.",

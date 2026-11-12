@@ -14,8 +14,8 @@ use lru::LruCache;
 use pisa_protocol::api::SnapshotId;
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::search::{
-    DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SnapshotScope,
-    Suggestion,
+    DeclarationDetail, Description, Flags, Format, Hit, Query, QueryResult, Resolution,
+    SnapshotScope, Suggestion,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -436,6 +436,11 @@ impl Engine {
                     hit(n + 1, s, snapshot_ids)
                 })
                 .collect();
+            if queries[i].format == Format::Text {
+                let r = &mut results[i];
+                let texts: Vec<String> = r.hits.drain(..).map(|h| h.text).collect();
+                r.text = Some(texts.join("\n\n"));
+            }
         }
         Ok(results)
     }
@@ -1016,6 +1021,7 @@ impl Engine {
             module: d.module.clone(),
             signature: d.signature.clone(),
             type_full: d.type_full.clone(),
+            value: d.value.clone(),
             docstring: d.docstring.clone(),
             description: d.informal.clone().map(Description::from),
             flags: flags(&stored, None),
@@ -1057,6 +1063,7 @@ fn hit(n: usize, s: Scored, snapshot_ids: Vec<String>) -> Hit {
         library: d.library.clone(),
         module: d.module.clone(),
         signature: d.signature.clone(),
+        value: d.value.clone(),
         title: d.informal.as_ref().map(|i| i.informal_name.clone()),
         text: render(n, &d, summary.as_deref(), &flags),
         summary,
@@ -1324,22 +1331,49 @@ pub fn short_signature(d: &StoredDecl) -> String {
     {
         sig = &rest[end + 1..];
     }
-    let sig = drop_instance_binders(sig.trim());
     let sig: String = sig.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate(&sig, 400)
+    let (binders, rest) = binders(&sig);
+    let binders: Vec<&str> = binders.into_iter().filter(|b| !is_instance(b)).collect();
+    let whole = binders.iter().chain([&rest]).filter(|p| !p.is_empty());
+    let whole = whole.copied().collect::<Vec<_>>().join(" ");
+    if whole.chars().count() <= MAX_SIGNATURE {
+        return whole;
+    }
+    // Binders go from the middle, so that the conclusion stays: `… : type`.
+    let Some(room) = MAX_SIGNATURE.checked_sub(rest.chars().count() + 2) else {
+        return format!("… {}", truncate(rest, MAX_SIGNATURE - 2));
+    };
+    let mut out = String::new();
+    for b in binders {
+        if out.chars().count() + b.chars().count() + 1 > room {
+            break;
+        }
+        out.push_str(b);
+        out.push(' ');
+    }
+    out.push_str("… ");
+    out.push_str(rest);
+    out
 }
 
-/// Removes `[...]` binders, and `{inst✝ : ...}` ones, from the binders before
-/// a signature's type; brackets inside the type are left alone.
-fn drop_instance_binders(sig: &str) -> String {
-    let mut out = String::new();
+/// The longest signature a hit's text shows, in characters.
+const MAX_SIGNATURE: usize = 400;
+
+/// `[...]` binders, and `{inst✝ : ...}` ones.
+fn is_instance(binder: &str) -> bool {
+    binder.starts_with('[')
+        || (binder.starts_with('{') && binder[1..].trim_start().starts_with("inst"))
+}
+
+/// A signature's binder groups, and the rest from its type's `:`.
+fn binders(sig: &str) -> (Vec<&str>, &str) {
+    let mut out = Vec::new();
     let mut rest = sig;
     loop {
         let trimmed = rest.trim_start();
-        let Some(open) = trimmed.chars().next().filter(|c| "([{⦃".contains(*c)) else {
-            out.push_str(trimmed);
-            return out;
-        };
+        if !trimmed.starts_with(['(', '[', '{', '⦃']) {
+            return (out, trimmed);
+        }
         let mut depth = 0usize;
         let mut end = None;
         for (i, c) in trimmed.char_indices() {
@@ -1356,15 +1390,9 @@ fn drop_instance_binders(sig: &str) -> String {
             }
         }
         let Some(end) = end else {
-            out.push_str(trimmed);
-            return out;
+            return (out, trimmed);
         };
-        let group = &trimmed[..end];
-        let instance = open == '[' || (open == '{' && group[1..].trim_start().starts_with("inst"));
-        if !instance {
-            out.push_str(group);
-            out.push(' ');
-        }
+        out.push(&trimmed[..end]);
         rest = &trimmed[end..];
     }
 }
@@ -1378,23 +1406,61 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-/// The first sentence of the description, or of the docstring.
+/// The first sentences of the description, or of the docstring: two at
+/// most within 240 characters, or the first cut at 240.
 pub fn summary(d: &StoredDecl) -> Option<String> {
+    const MAX: usize = 240;
     let text = d
         .informal
         .as_ref()
         .map(|i| i.statement_nl.as_str())
         .or(d.docstring.as_deref())?;
     let text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let first = match text.find(". ") {
-        Some(i) => &text[..=i],
-        None => &text,
+    let ends = sentence_ends(&text);
+    let first = ends.first().map_or(text.len(), |&e| e);
+    if text[..first].chars().count() > MAX {
+        return Some(truncate(&text[..first], MAX));
+    }
+    let end = match ends.get(1) {
+        Some(&second) if text[..second].chars().count() <= MAX => second,
+        _ => first,
     };
-    (!first.is_empty()).then(|| truncate(first, 240))
+    let s = text[..end].trim_end();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
-/// About 150 tokens for a model: name, kind and library; signature; a summary;
-/// a line of flags when there are any.
+/// Where each sentence of `text` ends (after its `.`, `!` or `?`): before a
+/// space and a word that doesn't start in lower case, and not after an
+/// abbreviation or an initial. A decimal point has no space after it.
+fn sentence_ends(text: &str) -> Vec<usize> {
+    const ABBREVIATIONS: [&str; 7] = ["i.e.", "e.g.", "resp.", "cf.", "vs.", "etc.", "approx."];
+    let mut ends = Vec::new();
+    for (i, c) in text.char_indices() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+        let end = i + 1;
+        let next = text[end..].strip_prefix(' ').and_then(|r| r.chars().next());
+        if end < text.len() && next.is_none_or(char::is_lowercase) {
+            continue;
+        }
+        if c == '.' {
+            let word = text[..end].rsplit(' ').next().unwrap_or("");
+            let word = word.trim_start_matches(|c: char| !c.is_alphanumeric());
+            let mut letters = word.chars();
+            let initial = matches!((letters.next(), letters.next()), (Some(l), Some('.')) if l.is_uppercase())
+                && letters.next().is_none();
+            if initial || ABBREVIATIONS.iter().any(|a| word.eq_ignore_ascii_case(a)) {
+                continue;
+            }
+        }
+        ends.push(end);
+    }
+    ends
+}
+
+/// About 150 tokens for a model: name, kind and library; signature; the start
+/// of a definition's value; a summary; a line of flags when there are any.
 pub fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) -> String {
     let mut out = format!(
         "{n}. {}   {} · {}\n   {}",
@@ -1403,6 +1469,11 @@ pub fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) ->
         d.library,
         short_signature(d)
     );
+    if let Some(v) = &d.value {
+        let v: String = v.split_whitespace().collect::<Vec<_>>().join(" ");
+        out.push_str("\n   := ");
+        out.push_str(&truncate(&v, 200));
+    }
     if let Some(s) = summary {
         out.push_str("\n   ");
         out.push_str(s);
@@ -1517,20 +1588,114 @@ mod tests {
         }));
     }
 
+    fn documented(doc: &str) -> StoredDecl {
+        StoredDecl {
+            name: "f".into(),
+            kind: "def".into(),
+            signature: "f : ℕ".into(),
+            docstring: Some(doc.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A summary is whole sentences, two at most within 240 characters: an
+    /// abbreviation, an initial or a decimal point doesn't end one.
+    #[test]
+    fn a_summary_keeps_whole_sentences() {
+        let s = |doc: &str| summary(&documented(doc)).unwrap();
+        assert_eq!(
+            s("The trace, i.e. the sum of the diagonal. It is linear. It is cyclic."),
+            "The trace, i.e. the sum of the diagonal. It is linear."
+        );
+        assert_eq!(
+            s("Due to J. von Neumann, e.g. in his book. See also\n  Wigner. And more."),
+            "Due to J. von Neumann, e.g. in his book. See also Wigner."
+        );
+        assert_eq!(
+            s("About 3.14 is close to π! Is it rational? No."),
+            "About 3.14 is close to π! Is it rational?"
+        );
+        // A second sentence that doesn't fit is left out.
+        let first = format!("{}.", "a".repeat(200));
+        assert_eq!(s(&format!("{first} B{}.", "b".repeat(50))), first);
+        // A first sentence too long on its own is cut.
+        let long = s(&format!("{}. Short.", "c".repeat(300)));
+        assert_eq!(long.chars().count(), 241);
+        assert!(long.ends_with('…'));
+        assert_eq!(s("No full stop"), "No full stop");
+    }
+
+    /// Past 400 characters, binders go from the middle, so that the
+    /// conclusion stays; one too long on its own is cut.
+    #[test]
+    fn a_long_signature_keeps_its_conclusion() {
+        let binders: String = (0..40).map(|i| format!("(h{i} : a{i} ≤ b{i}) ")).collect();
+        let d = StoredDecl {
+            name: "f".into(),
+            signature: format!("f {binders}[Fintype n] : a0 + a1 = b0 + b1"),
+            ..Default::default()
+        };
+        let s = short_signature(&d);
+        assert!(s.chars().count() <= 400, "{s}");
+        assert!(s.starts_with("(h0 : a0 ≤ b0) (h1 : a1 ≤ b1)"), "{s}");
+        assert!(s.ends_with(") … : a0 + a1 = b0 + b1"), "{s}");
+        let d = StoredDecl {
+            name: "f".into(),
+            signature: format!("f (x : ℕ) : {}x = x", "x + ".repeat(200)),
+            ..Default::default()
+        };
+        let s = short_signature(&d);
+        assert!(s.starts_with("… : x + x"), "{s}");
+        assert!(s.chars().count() <= 401 && s.ends_with('…'), "{s}");
+        // A short one is whole.
+        let d = StoredDecl {
+            name: "f".into(),
+            signature: "f (x : ℕ) [Fintype n] : x = x".into(),
+            ..Default::default()
+        };
+        assert_eq!(short_signature(&d), "(x : ℕ) : x = x");
+    }
+
+    /// A definition's rendering shows the start of its value.
+    #[test]
+    fn a_rendered_definition_shows_its_value() {
+        let d = StoredDecl {
+            value: Some("m * n\n  / m.gcd n".into()),
+            ..documented("The least common multiple.")
+        };
+        let text = render(1, &d, summary(&d).as_deref(), &Flags::default());
+        assert_eq!(
+            text,
+            "1. f   def · \n   : ℕ\n   := m * n / m.gcd n\n   The least common multiple."
+        );
+        let long = StoredDecl {
+            value: Some("x".repeat(500)),
+            ..d
+        };
+        let text = render(1, &long, None, &Flags::default());
+        let value = text.lines().last().unwrap();
+        assert_eq!(value.chars().count(), "   := ".len() + 201);
+    }
+
     #[test]
     fn signatures_drop_instance_binders() {
+        let short = |sig: &str| {
+            short_signature(&StoredDecl {
+                name: "f".into(),
+                signature: format!("f {sig}"),
+                ..Default::default()
+            })
+        };
         assert_eq!(
-            drop_instance_binders(
+            short(
                 "{n : Type u_3} [Fintype n] [DecidableEq n] {inst✝ : Ring R} (A : Matrix n n R) : (A * 1).trace = A.trace"
             ),
             "{n : Type u_3} (A : Matrix n n R) : (A * 1).trace = A.trace"
         );
+        // Brackets in the type are left alone.
+        assert_eq!(short(": [a, b].length = 2"), ": [a, b].length = 2");
         assert_eq!(
-            drop_instance_binders(": [a, b].length = 2"),
-            ": [a, b].length = 2"
-        );
-        assert_eq!(
-            drop_instance_binders("[(c : C) → AddCommGroup (V c)] (x : V c) : x = x"),
+            short("[(c : C) → AddCommGroup (V c)] (x : V c) : x = x"),
             "(x : V c) : x = x"
         );
     }

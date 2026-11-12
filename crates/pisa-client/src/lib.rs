@@ -70,8 +70,8 @@ pub use pisa_protocol::api::{
     TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
-    DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,
-    SnapshotScope, Suggestion,
+    DeclarationDetail, Description, Flags, Format, Hit, Query, QueryResult, Resolution,
+    SearchHealth, SnapshotScope, Suggestion,
 };
 
 const DEFAULT_TIMEOUT: u64 = 60;

@@ -1526,6 +1526,8 @@ export interface components {
             type_full: string;
             /** @description Declarations that use it, most prominent first (at most 50). */
             used_by: string[];
+            /** @description As in [`Hit::value`]. */
+            value?: string;
         };
         /**
          * @description `DELETE /snapshots/{id}`: deletes the snapshot. Its module goes too once
@@ -1714,6 +1716,11 @@ export interface components {
             /** @description Depends on `sorry`: not usable as a proof step. */
             uses_sorry?: boolean;
         };
+        /**
+         * @description How a result carries its hits.
+         * @enum {string}
+         */
+        Format: "full" | "text";
         GetDeclarationResponse: {
             declaration: components["schemas"]["DeclarationDetail"];
             /** @description The version the index was built from. */
@@ -1830,6 +1837,12 @@ export interface components {
              *     "Subadditivity of von Neumann entropy".
              */
             title?: string;
+            /**
+             * @description What a definition, abbreviation or opaque is defined as, with
+             *     notation, past the parameters the signature names; cut at 1,000
+             *     characters, ending in ` …`. A snapshot's, as its build printed it.
+             */
+            value?: string;
             /**
              * @description For a snapshot module's declaration: its module and everything the
              *     module imports passed the kernel re-check.
@@ -2040,6 +2053,8 @@ export interface components {
             consts?: string[];
             /** @description A natural-language description. */
             description?: string;
+            /** @description How the result carries its hits (default `full`). */
+            format?: components["schemas"]["Format"];
             /** @description A pretty-printed goal state (hypotheses and `⊢ target`). */
             goal?: string;
             /**
@@ -2074,7 +2089,10 @@ export interface components {
              *     embedded; asking again shortly will likely include it.
              */
             dense_pending?: boolean;
+            /** @description Empty with `format: "text"`. */
             hits: components["schemas"]["Hit"][];
+            /** @description With `format: "text"`: the hits rendered, separated by blank lines. */
+            text?: string;
             /** @description What made this result worse than usual, e.g. a lane that failed. */
             warnings?: string[];
         };
@@ -2881,6 +2899,7 @@ export type ErrorKind = components['schemas']['ErrorKind'];
 export type ErrorResponse = components['schemas']['ErrorResponse'];
 export type Export = components['schemas']['Export'];
 export type Flags = components['schemas']['Flags'];
+export type Format = components['schemas']['Format'];
 export type GetDeclarationResponse = components['schemas']['GetDeclarationResponse'];
 export type GetJobResponse = components['schemas']['GetJobResponse'];
 export type GoalsAt = components['schemas']['GoalsAt'];

@@ -65,6 +65,8 @@ pub struct PointPayload {
     pub signature: String,
     pub type_full: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docstring: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub informal: Option<Informal>,
@@ -119,6 +121,7 @@ impl PointPayload {
             module: s.module.clone(),
             signature: s.signature.clone(),
             type_full: s.type_full.clone(),
+            value: s.value.clone(),
             docstring: s.docstring.clone(),
             informal: s.informal.clone(),
             deprecated_to: s.deprecated_to.clone(),
@@ -142,6 +145,7 @@ impl PointPayload {
             library: self.library.clone(),
             signature: self.signature.clone(),
             type_full: self.type_full.clone(),
+            value: self.value.clone(),
             docstring: self.docstring.clone(),
             deprecated_to: self.deprecated_to.clone(),
             additive_sibling: self.additive_sibling.clone(),

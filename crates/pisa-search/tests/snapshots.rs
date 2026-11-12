@@ -643,6 +643,32 @@ async fn a_hit_has_its_own_status() {
     s.done(e).await;
 }
 
+/// A snapshot's definition carries the value its build printed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_definition_carries_its_value() {
+    let Some(mut s) = setup().await else { return };
+    let mut decls = doubling();
+    decls.push(SnapshotDecl {
+        kind: "def".into(),
+        value: Some("n + n".into()),
+        ..snapshot_decl("double", "double (n : ℕ) : ℕ", "Twice a number.")
+    });
+    create(&s.catalog, "a1", decls, &[]).await;
+    let e = s.engine().await;
+    s.index(&e, false);
+    let q = Query {
+        name: Some("double".into()),
+        snapshots: SnapshotScope::All,
+        ..Default::default()
+    };
+    let hits = until(&e, q, |hits| has(hits, "double")).await;
+    let double = hits.iter().find(|h| h.name == "double").unwrap();
+    assert_eq!(double.value.as_deref(), Some("n + n"));
+    let theorem = hits.iter().find(|h| h.name == "double_eq").unwrap();
+    assert_eq!(theorem.value, None);
+    s.done(e).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_snapshot_declaration_opens_by_its_module() {
     let Some(mut s) = setup().await else { return };

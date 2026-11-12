@@ -37,6 +37,9 @@ pub struct StoredDecl {
     /// of its discrimination-tree path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub concl: Vec<String>,
+    /// A definition's value; see [`crate::corpus::Decl::value`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     #[serde(default)]
     pub docstring: Option<String>,
     #[serde(default)]
@@ -203,6 +206,7 @@ fn stored_decl(
         type_full: d.type_pp_full.clone(),
         type_refs: d.type_refs.clone(),
         concl: conclusion_constants(&d.concl_keys),
+        value: d.value.clone(),
         docstring: d.docstring.clone(),
         range: d.range,
         deprecated_to: d.deprecated_to.clone(),

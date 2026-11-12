@@ -27,6 +27,11 @@ pub struct Decl {
     pub type_refs: Vec<String>,
     #[serde(default)]
     pub value_refs: Vec<String>,
+    /// What a definition, abbreviation or opaque is defined as, with
+    /// notation, cut at 1,000 characters. In no hash: it changes no
+    /// description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
     #[serde(default)]
     pub docstring: Option<String>,
     #[serde(default)]
@@ -502,6 +507,7 @@ pub mod tests {
 
         let mut same = v.clone();
         same[1].attrs.push("simp".into());
+        same[0].value = Some("Nat".into());
         compute_hashes(&mut same);
         assert_eq!(same[1].content_hash, before);
 
@@ -557,7 +563,9 @@ pub mod tests {
                 "\n",
                 r#"{"record":"module","env":"x","name":"Physlib.M","doc":"About M."}"#,
                 "\n",
-                r#"{"record":"decl","env":"x","name":"a","kind":"def","module":"Mathlib.A","library":"Mathlib","signature":"a : Nat","type_pp_full":"Nat"}"#,
+                r#"{"record":"decl","env":"x","name":"a","kind":"def","module":"Mathlib.A","library":"Mathlib","signature":"a : Nat","type_pp_full":"Nat","value":"2 + 2"}"#,
+                "\n",
+                r#"{"record":"decl","env":"x","name":"c","kind":"def","module":"QuantumInfo.Finite.C","library":"QuantumInfo","signature":"c : Nat","type_pp_full":"Nat","range":{"start":7,"end":8}}"#,
                 "\n",
                 r#"{"record":"additive","name":"a","sibling":"b"}"#,
                 "\n"
@@ -581,8 +589,9 @@ pub mod tests {
                 .iter()
                 .map(|d| d.name.as_str())
                 .collect::<Vec<_>>(),
-            ["a", "b"]
+            ["a", "b", "c"]
         );
+        assert_eq!(corpus.decls[0].value.as_deref(), Some("2 + 2"));
         assert!(corpus.decls[1].uses_sorry);
         assert_eq!(corpus.decls[0].additive_sibling.as_deref(), Some("b"));
         assert_eq!(corpus.decls[1].additive_sibling.as_deref(), Some("a"));
@@ -590,6 +599,11 @@ pub mod tests {
         assert_eq!(
             source_url(&corpus.manifest.sources, &corpus.decls[1]).unwrap(),
             "https://github.com/leanprover-community/physlib/blob/def/Physlib/M.lean#L3-L4"
+        );
+        // QuantumInfo lives in Physlib's repository, under its own folder.
+        assert_eq!(
+            source_url(&corpus.manifest.sources, &corpus.decls[2]).unwrap(),
+            "https://github.com/leanprover-community/physlib/blob/def/QuantumInfo/Finite/C.lean#L7-L8"
         );
         assert_eq!(
             corpus.manifest.sources["PhyslibAlpha"],

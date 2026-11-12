@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use pisa_protocol::search::{Informal, Query};
+use pisa_protocol::search::{Format, Informal, Query};
 use pisa_protocol::version::Versions;
 use pisa_search::corpus::{self, Corpus, Decl, Manifest};
 use pisa_search::engine::{Engine, Lanes};
@@ -314,6 +314,8 @@ fn corpus() -> Corpus {
         let i = by(&mut decls, name);
         decls[i].concl_keys = keys(ks);
     }
+    let i = by(&mut decls, "Matrix.trace");
+    decls[i].value = Some("∑ i, A i i".into());
     decls.sort_by(|a, b| a.name.cmp(&b.name));
     corpus::compute_hashes(&mut decls);
     let mut libraries = std::collections::BTreeMap::new();
@@ -732,7 +734,7 @@ async fn the_snapshot_version_is_accepted() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn rust_client() {
-    use pisa_client::{Client, ErrorKind};
+    use pisa_client::{Client, ErrorKind, Format};
 
     let Some(t) = engine().await else { return };
     let addr = serve(&t, None).await;
@@ -759,6 +761,16 @@ async fn rust_client() {
         .unwrap();
     assert_eq!(batch.len(), 2);
     assert_eq!(batch[0].hits[0].name, "Nat.succ_le_succ");
+    let text = c
+        .search(&Query {
+            name: Some("Nat.succ_le_succ".into()),
+            format: Format::Text,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(text.hits.is_empty());
+    assert!(text.text.unwrap().starts_with("1. Nat.succ_le_succ"));
 
     let r = c
         .resolve(["Real.sqrt_mul_sefl", "Matrix.trace"])
@@ -951,4 +963,54 @@ async fn a_collection_without_the_conclusion_lane_is_refused() {
     let e = load::load(dir.path(), &q, 1, 0.0).await.unwrap_err();
     assert!(e.to_string().contains("concl"), "{e}");
     q.drop(&collection).await.unwrap();
+}
+
+/// A definition's hit, and its detail, say what it is defined as; a
+/// theorem's say nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_definition_carries_its_value() {
+    let Some(t) = engine().await else { return };
+    let r = t
+        .engine
+        .search(&description("trace of a matrix"))
+        .await
+        .unwrap();
+    let trace = r.hits.iter().find(|h| h.name == "Matrix.trace").unwrap();
+    assert_eq!(trace.value.as_deref(), Some("∑ i, A i i"));
+    assert!(trace.text.contains("\n   := ∑ i, A i i"), "{}", trace.text);
+    let theorem = r.hits.iter().find(|h| h.kind == "theorem").unwrap();
+    assert_eq!(theorem.value, None);
+    let d = t
+        .engine
+        .detail("Matrix.trace", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(d.value.as_deref(), Some("∑ i, A i i"));
+    t.done().await;
+}
+
+/// `format: "text"` answers with the hits rendered, one after another, and
+/// no hits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_text_result_is_its_hits_rendered() {
+    let Some(t) = engine().await else { return };
+    let q = Query {
+        limit: 3,
+        ..description("trace of a matrix")
+    };
+    let full = t.engine.search(&q).await.unwrap();
+    assert_eq!(full.text, None);
+    let text = t
+        .engine
+        .search(&Query {
+            format: Format::Text,
+            ..q
+        })
+        .await
+        .unwrap();
+    assert!(text.hits.is_empty());
+    let rendered: Vec<&str> = full.hits.iter().map(|h| h.text.as_str()).collect();
+    assert_eq!(text.text, Some(rendered.join("\n\n")));
+    t.done().await;
 }

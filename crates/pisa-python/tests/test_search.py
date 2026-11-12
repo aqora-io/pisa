@@ -29,6 +29,7 @@ DECLS = [
         "kind": "def",
         "signature": "Matrix.trace {n R} [Fintype n] [AddCommMonoid R] (A : Matrix n n R) : R",
         "type_refs": ["Matrix"],
+        "value": "∑ i, A i i",
         "docstring": "The trace of a square matrix: the sum of its diagonal entries.",
     },
     {
@@ -113,6 +114,12 @@ def test_search(url):
     by_consts = client.search(consts=["Matrix.trace"], kinds=["theorem"])["hits"]
     assert by_consts[0]["name"] == "Matrix.trace_one", by_consts
 
+    as_text = client.search(name="Matrix.trace", limit=2, format="text")
+    assert as_text["hits"] == [] and as_text["text"].startswith("1. Matrix.trace"), as_text
+    assert "\n   := ∑ i, A i i" in as_text["text"], as_text
+    with pytest.raises(ValueError, match="format"):
+        client.search("trace", format="markdown")
+
     by_name = client.search(name="Real.sqrt_mul_sefl", limit=1)["hits"]
     assert [h["name"] for h in by_name] == ["Real.sqrt_mul_self"]
     assert client.search("Real.sqrt_mul_sefl", libraries=["Mathlib"], kinds=["theorem"])["hits"]
@@ -134,6 +141,7 @@ def test_resolve_and_get_declaration(url):
 
     declaration = client.get_declaration("Matrix.trace")
     assert declaration["dependencies"] == ["Matrix"] and "Matrix.trace_one" in declaration["used_by"]
+    assert declaration["value"] == "∑ i, A i i"
     # No snapshot module has it, so it is the bundle's.
     assert client.get_declaration("Matrix.trace", module="PisaSnap.s0")["library"] == "Mathlib"
     with pytest.raises(NotFoundError, match="did you mean Real.sqrt_mul_self"):

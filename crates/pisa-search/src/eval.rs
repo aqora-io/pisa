@@ -434,6 +434,7 @@ mod tests {
             library: "Mathlib".into(),
             module: "M".into(),
             signature: String::new(),
+            value: None,
             title: None,
             summary: None,
             flags: Flags {

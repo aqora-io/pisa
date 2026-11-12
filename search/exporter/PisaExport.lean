@@ -129,6 +129,44 @@ def isInformal (ci : ConstantInfo) : Bool :=
 
 def fmt (f : FormatWithInfos) : String := f.fmt.pretty 120
 
+/-- The longest value printed, in characters; a longer one is cut and ends in ` …`. -/
+def valueCap : Nat := 1000
+
+/-- How many parameters a signature names before its colon: the leading
+binders of `type` that `ppSignature` prints, those with a name of their own
+and instance arguments. -/
+def signatureArity (type : Expr) : Nat :=
+  match type with
+  | .forallE n _ b bi => if bi.isInstImplicit || !n.hasMacroScopes then signatureArity b + 1 else 0
+  | _ => 0
+
+/-- What a definition, abbreviation or opaque is defined as, with notation,
+past the parameters its signature already names (`flip`'s is
+`fun b a => f a b`). `none` for theorems and instances; for values compiled
+from recursion (`brecOn`, `WellFounded.fix`), which show the kernel's encoding
+rather than what was written; and for an opaque whose value is only an
+inhabitant (`default`, `Classical.ofNonempty`), as a `partial def`'s or a
+builtin's is. Proofs inside print as `⋯`; a `sorry` term prints as `sorry`. -/
+def valueOf (env : Environment) (ci : ConstantInfo) : MetaM (Option String) := do
+  let value? := match ci with
+    | .defnInfo d => if isInstanceCore env d.name then none else some d.value
+    | .opaqueInfo o => some o.value
+    | _ => none
+  let some value := value? | return none
+  let compiled := value.getUsedConstants.any fun c =>
+    c == ``WellFounded.fix || c matches .str _ "brecOn" || c matches .str _ "binductionOn"
+  if compiled then return none
+  try
+    lambdaBoundedTelescope value (signatureArity ci.type) fun _ body => do
+      let mut core := body
+      while core.isLet do core := core.letBody!
+      let inhabitant := core.getAppFn.isConstOf ``Inhabited.default ||
+        core.getAppFn.isConstOf ``Classical.ofNonempty
+      if ci matches .opaqueInfo _ && inhabitant then return none
+      let s := (← ppExpr body).pretty 120
+      return some (if s.length > valueCap then (s.take valueCap).toString ++ " …" else s)
+  catch _ => return none
+
 def names (ns : Array Name) : Json := toJson (ns.map toString)
 
 /-- The record for one declaration, or `none` if Lean fails on it. -/
@@ -157,6 +195,7 @@ def exportDecl (env : Environment) (envLabel : String) (modules : Std.HashMap Na
           pure (keys.map fun k => (format k).pretty)
         catch _ => pure #[]
       else pure #[]
+    let value ← valueOf env ci
     let informal := isInformal ci
     let informalDeps := if informal then
         (ci.value?.map nameLiterals).getD #[] |>.filter (· != n)
@@ -176,6 +215,7 @@ def exportDecl (env : Environment) (envLabel : String) (modules : Std.HashMap Na
       ("type_pp_full", typeFull),
       ("type_refs", names typeRefs),
       ("value_refs", names valueRefs),
+      ("value", toJson value),
       ("docstring", toJson doc),
       ("attrs", toJson attrs),
       ("range", match ranges with
