@@ -214,6 +214,11 @@ To the release that checks old modules for clashing imports:
   current.
 - A rebuild leaves the heads of a run whose spec was amended out, in
   `superseded`, rather than failing on them.
+- A module-system snapshot whose export can't be made again in today's
+  format (the export fails, runs out of time or doesn't fit) is recorded so,
+  and no worker tries it again until a newer format; the review list says
+  why a value behind it is missing. One the worker couldn't start, as with a
+  broken sandbox, isn't recorded, and is tried again by the next pass.
 
 To the release that keeps requests to their scope and runs to their names:
 - The first process of this release migrates the catalog: `labels` on
@@ -683,7 +688,8 @@ declaration that isn't proved; set it on both, or on neither.
 
 `GET /snapshots/{id}` adds the module's `code`, its `check`, and its
 `exports`: the declarations that code importing it sees, each `{name, kind,
-signature, docstring?, description?}`. `description` is `{title, text,
+signature?, error?, docstring?, description?}`, with `error` in place of
+`signature` for one that didn't print. `description` is `{title, text,
 latex?, aliases, source}`, which search writes when it has a describe model
 (`PISA_SEARCH_DESCRIBE_MODEL`; see [Snapshot search](#snapshot-search)), a
 little after the create.

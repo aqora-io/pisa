@@ -1526,6 +1526,47 @@ pub(crate) async fn stale_exports_after(
     Ok(rows)
 }
 
+pub(crate) async fn mark_export_failed(
+    db: &Handle,
+    v: &str,
+    m: &str,
+    build: &str,
+    error: &str,
+) -> Result<bool, Error> {
+    let marked = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let Some(meta) = module_in(conn, v, m).await? else {
+                return Ok(false);
+            };
+            if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
+                return Ok(false);
+            }
+            let decls: Option<Value> = modules::table
+                .find((v, m))
+                .select(modules::decls)
+                .first(conn)
+                .await?;
+            let Some(decls) = decls else {
+                return Ok(false);
+            };
+            let mut decls: SnapshotDecls = serde_json::from_value(decls)?;
+            decls.failed = Some(crate::catalog::ExportFailure {
+                format: crate::catalog::EXPORT_FORMAT,
+                error: error.to_string(),
+            });
+            diesel::update(modules::table.find((v, m)))
+                .set(modules::decls.eq(Some(to_record(&decls)?)))
+                .execute(conn)
+                .await?;
+            Ok(true)
+        })
+    })
+    .await?;
+    Ok(marked)
+}
+
 pub(crate) async fn replace_decls(
     db: &Handle,
     v: &str,

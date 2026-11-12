@@ -375,12 +375,14 @@ impl Reader {
         Ok(swapped)
     }
 
-    /// The signatures the search exports of `modules` show, by name.
+    /// The signatures the search exports of `modules` show, by name, of
+    /// the declarations that printed.
     pub async fn exports_of(&self, modules: &[String]) -> HashMap<String, String> {
         let mut out = HashMap::new();
         for m in modules {
             if let Ok(Some(exported)) = self.catalog.decls(m).await {
-                out.extend(exported.decls.into_iter().map(|d| (d.name, d.signature)));
+                let printed = exported.decls.into_iter().filter(|d| d.error.is_none());
+                out.extend(printed.map(|d| (d.name, d.signature)));
             }
         }
         out
@@ -450,9 +452,10 @@ impl Reader {
                 .remove(&d.name)
                 .and_then(|r| serde_json::from_value::<Informal>(r.get("informal")?.clone()).ok())
                 .map(Description::from),
+            signature: d.printed_signature().map(String::from),
+            error: d.error,
             name: d.name,
             kind: d.kind,
-            signature: d.signature,
             docstring: d.docstring,
         });
         Ok(exports.collect())

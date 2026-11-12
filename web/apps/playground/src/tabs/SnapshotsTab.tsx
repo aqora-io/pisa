@@ -83,7 +83,11 @@ function Exports({ exports, onRefresh }: { exports: Export[]; onRefresh: () => v
               <Badge>{d.kind}</Badge>
               {d.description !== undefined && <span className="text-sm font-medium text-slate-700">{d.description.title}</span>}
             </div>
-            <pre className="whitespace-pre-wrap font-mono text-xs text-slate-700">{d.signature}</pre>
+            {d.signature !== undefined ? (
+              <pre className="whitespace-pre-wrap font-mono text-xs text-slate-700">{d.signature}</pre>
+            ) : (
+              <p className="text-xs text-amber-700">Didn't print: {d.error}</p>
+            )}
             {d.description !== undefined ? (
               <p className="text-sm text-slate-600">{d.description.text}</p>
             ) : (

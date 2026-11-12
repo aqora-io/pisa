@@ -262,6 +262,19 @@ pub struct SnapshotDecl {
     pub status: ProofStatus,
 }
 
+impl SnapshotDecl {
+    /// Its signature, if it printed: one that didn't has an `error`, and an
+    /// empty signature and type in records.
+    pub fn printed_signature(&self) -> Option<&str> {
+        self.error.is_none().then_some(self.signature.as_str())
+    }
+
+    /// Its type with full names, if it printed.
+    pub fn printed_type(&self) -> Option<&str> {
+        self.error.is_none().then_some(self.type_pp_full.as_str())
+    }
+}
+
 /// How much of a definition's value the export prints.
 pub const VALUE_CHARS: usize = 4000;
 
@@ -289,6 +302,17 @@ pub struct SnapshotDecls {
     /// [`EXPORT_FORMAT`] when the export was made; 0 before formats.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub format: u32,
+    /// Why making the export again in a newer format failed, which isn't
+    /// tried again until a newer one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<ExportFailure>,
+}
+
+/// A failure to make a module's export again in format `format`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportFailure {
+    pub format: u32,
+    pub error: String,
 }
 
 impl SnapshotDecls {
@@ -300,6 +324,7 @@ impl SnapshotDecls {
             verified: false,
             decls,
             format: EXPORT_FORMAT,
+            failed: None,
         };
         out.refresh(meta);
         out
@@ -990,6 +1015,19 @@ impl Catalog {
         )
     }
 
+    /// Records on module `m`'s declarations for search, if its own build is
+    /// still `build` and it has them, that making them again in today's
+    /// format failed, for `error`, so that it isn't tried again; returns
+    /// whether it recorded it.
+    pub async fn mark_export_failed(
+        &self,
+        m: &str,
+        build: &str,
+        error: &str,
+    ) -> Result<bool, Error> {
+        dispatch!(&self.db, mark_export_failed(&self.version, m, build, error))
+    }
+
     /// Stores `decls` as module `m`'s declarations for search, flagged from
     /// its record, and logs the change, if the module's own build is still
     /// `build`; returns whether it stored them. Declarations that can't be
@@ -1447,6 +1485,22 @@ mod tests {
             assert_eq!(page, [pair("x")]);
             let next = catalog.stale_exports_after(Some("x"), 1).await.unwrap();
             assert_eq!(next, [pair("zz")]);
+            // One that failed to be made again in today's format isn't
+            // tried again; one of another build is left alone.
+            assert!(!catalog.mark_export_failed("x", "c", "no").await.unwrap());
+            assert!(
+                catalog
+                    .mark_export_failed("x", "b", "it broke")
+                    .await
+                    .unwrap()
+            );
+            let stale = catalog.stale_exports_after(None, 10).await.unwrap();
+            assert_eq!(stale, [pair("zz")]);
+            let failed = catalog.decls("x").await.unwrap().unwrap().failed.unwrap();
+            assert_eq!(
+                (failed.format, failed.error.as_str()),
+                (EXPORT_FORMAT, "it broke")
+            );
         }
     }
 

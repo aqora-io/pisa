@@ -22,8 +22,9 @@ impl Snapshots {
     /// than [`EXPORT_FORMAT`](crate::catalog::EXPORT_FORMAT), one at a time,
     /// under [`REEXPORT_LEASE`] held as `owner`, which it ends when done: it
     /// stops when another holds it.
-    /// A module whose export fails is logged and left to the next pass.
-    /// Returns how many it stored.
+    /// A module whose export fails is logged; the failure is recorded on it
+    /// unless the worker couldn't run the export, which the next pass tries
+    /// again. Returns how many it stored.
     pub async fn reexport(&self, pool: &Arc<Pool>, owner: &str) -> Result<usize, Error> {
         let mut stored = 0;
         let mut after: Option<String> = None;
@@ -65,7 +66,10 @@ impl Snapshots {
 
     /// Exports module `m` again, in a slot whose process is retired first,
     /// as the export loads the module's closure; stores the export if the
-    /// module's own build is still `build`, and says whether it did.
+    /// module's own build is still `build`, and says whether it did. An
+    /// export that would fail again, as one that fails, runs out of time,
+    /// can't be read or doesn't fit, is recorded on the module, which isn't
+    /// tried again. One the worker couldn't run isn't.
     async fn reexport_one(&self, pool: &Arc<Pool>, m: &str, build: &str) -> Result<bool, Error> {
         self.ensure_one(m).await?;
         let meta = self.catalog.module(m).await?;
@@ -77,9 +81,19 @@ impl Snapshots {
         let timeout = slot.import_timeout() + EXPORT_TIME;
         let export = slot.export(&snapshot::module(m), timeout).await;
         drop(slot);
-        let export = export.map_err(|e| Error::new(ErrorKind::Crash, e))?;
-        let decls = parse_export(export).ok_or_else(|| internal("unreadable export"))?;
-        let decls = SnapshotDecls::new(&meta, decls);
-        self.catalog.replace_decls(m, build, &decls).await
+        let failed = match export.map(parse_export) {
+            Err(ExportError::Worker(e)) => return Err(Error::new(ErrorKind::Internal, e)),
+            Err(ExportError::Export(e)) => e,
+            Ok(Some(decls)) => {
+                let decls = SnapshotDecls::new(&meta, decls);
+                match self.catalog.replace_decls(m, build, &decls).await {
+                    Err(e) if e.kind == ErrorKind::BadRequest => e.message,
+                    stored => return stored,
+                }
+            }
+            Ok(None) => "the export can't be read".to_string(),
+        };
+        self.catalog.mark_export_failed(m, build, &failed).await?;
+        Err(Error::new(ErrorKind::Crash, failed))
     }
 }

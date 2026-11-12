@@ -1321,9 +1321,9 @@ async fn the_review_says_why_a_value_is_missing() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
     let s = create(&c, json!({"code": spec, "holes": ["cost"], "verify": true})).await;
-    let unprintable =
-        "import Foo\n\ndef cost : Nat := 3 -- UNPRINTABLE\ntheorem t : cost = cost := rfl";
-    create(
+    let unprintable = "import Foo\n\ndef cost : Nat := 3 -- UNPRINTABLE\n\
+                       theorem t : cost = cost := rfl -- UNPRINTABLE";
+    let head = create(
         &c,
         json!({"code": unprintable, "replaces": replacing(&s), "verify": true}),
     )
@@ -1333,12 +1333,26 @@ async fn the_review_says_why_a_value_is_missing() {
         &format!("/snapshots/audit?against={}&review=true", id(&s)),
     )
     .await;
-    let cost = &r["review"][0]["declarations"][0];
-    assert_eq!(cost["name"], "cost", "{r}");
-    let why = cost["unprinted"]
-        .as_str()
-        .unwrap_or_else(|| panic!("{cost}"));
-    assert!(why.contains("ran out of heartbeats"), "{why}");
+    let reviewed = r["review"][0]["declarations"].as_array().unwrap();
+    for name in ["cost", "t"] {
+        let d = reviewed.iter().find(|d| d["name"] == name);
+        let d = d.unwrap_or_else(|| panic!("no {name}: {r}"));
+        // What didn't print has no text to show, and says why.
+        assert!(
+            d.get("signature").is_none() && d.get("type").is_none(),
+            "{d}"
+        );
+        let why = d["unprinted"].as_str().unwrap_or_else(|| panic!("{d}"));
+        assert!(why.contains("ran out of heartbeats"), "{why}");
+    }
+    let (_, detail) = get(&c, &format!("/snapshots/{}?detail=declarations", id(&head))).await;
+    let exports = detail["exports"].as_array().unwrap();
+    let cost = exports.iter().find(|e| e["name"] == "cost").unwrap();
+    assert!(cost.get("signature").is_none(), "{cost}");
+    assert!(
+        cost["error"].as_str().unwrap().contains("heartbeats"),
+        "{cost}"
+    );
 
     let other = "import Foo\n\ndef cost : Nat := sorry\ntheorem u : cost = cost := sorry";
     let s = create(

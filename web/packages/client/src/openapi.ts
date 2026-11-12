@@ -1680,10 +1680,15 @@ export interface components {
         Export: {
             description?: components["schemas"]["Description"];
             docstring?: string;
+            /** @description Why it didn't print, if it didn't. */
+            error?: string;
             kind: string;
             name: string;
-            /** @description The declaration's signature, with notation. */
-            signature: string;
+            /**
+             * @description The declaration's signature, with notation; absent when it didn't
+             *     print.
+             */
+            signature?: string;
         };
         Flags: {
             /** @description The `to_additive` counterpart, folded into this hit. */
@@ -2433,17 +2438,19 @@ export interface components {
             name: string;
             origin: components["schemas"]["ReviewOrigin"];
             /**
-             * @description As the build printed it, with notation. None from a build before
-             *     private declarations were exported.
+             * @description As the build printed it, with notation. None when it didn't print,
+             *     as `unprinted` says, and from a build before private declarations
+             *     were exported.
              */
             signature?: string;
             /** @description A snapshot of its module, for one from below. */
             snapshot_id?: string;
-            /** @description Its type, with full names and no notation. */
+            /** @description Its type, with full names and no notation; None as `signature` is. */
             type?: string;
             /**
-             * @description Why there is no `value` where there should be one: it didn't print,
-             *     its module has no export, or the export doesn't have it.
+             * @description Why there is no `value` where there should be one, or no
+             *     `signature`: it didn't print, its module has no export, or the export
+             *     doesn't have it.
              */
             unprinted?: string;
             /**

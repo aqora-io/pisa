@@ -1680,6 +1680,10 @@
           "docstring": {
             "type": "string"
           },
+          "error": {
+            "description": "Why it didn't print, if it didn't.",
+            "type": "string"
+          },
           "kind": {
             "type": "string"
           },
@@ -1687,14 +1691,13 @@
             "type": "string"
           },
           "signature": {
-            "description": "The declaration's signature, with notation.",
+            "description": "The declaration's signature, with notation; absent when it didn't\nprint.",
             "type": "string"
           }
         },
         "required": [
           "name",
-          "kind",
-          "signature"
+          "kind"
         ],
         "type": "object"
       },
@@ -3004,7 +3007,7 @@
             "$ref": "#/components/schemas/ReviewOrigin"
           },
           "signature": {
-            "description": "As the build printed it, with notation. None from a build before\nprivate declarations were exported.",
+            "description": "As the build printed it, with notation. None when it didn't print,\nas `unprinted` says, and from a build before private declarations\nwere exported.",
             "type": "string"
           },
           "snapshot_id": {
@@ -3012,11 +3015,11 @@
             "type": "string"
           },
           "type": {
-            "description": "Its type, with full names and no notation.",
+            "description": "Its type, with full names and no notation; None as `signature` is.",
             "type": "string"
           },
           "unprinted": {
-            "description": "Why there is no `value` where there should be one: it didn't print,\nits module has no export, or the export doesn't have it.",
+            "description": "Why there is no `value` where there should be one, or no\n`signature`: it didn't print, its module has no export, or the export\ndoesn't have it.",
             "type": "string"
           },
           "value": {

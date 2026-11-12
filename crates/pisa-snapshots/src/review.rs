@@ -74,6 +74,8 @@ pub async fn review(
     let catalog = snapshots.catalog();
     let mut metas = Records::default();
     let mut exports: HashMap<String, HashMap<String, SnapshotDecl>> = HashMap::new();
+    // Why a module's export couldn't be made again, for those whose couldn't.
+    let mut failed: HashMap<String, String> = HashMap::new();
     let mut snapshot_ids: HashMap<String, Option<String>> = HashMap::new();
     let mut out = Vec::new();
     for compared in comparisons {
@@ -97,7 +99,11 @@ pub async fn review(
             .collect();
         let mut read = catalog.decls_of(&unread).await?;
         for m in unread {
-            let decls = read.remove(&m).map(|d| d.decls).unwrap_or_default();
+            let read = read.remove(&m);
+            if let Some(f) = read.as_ref().and_then(|d| d.failed.as_ref()) {
+                failed.insert(m.clone(), f.error.clone());
+            }
+            let decls = read.map(|d| d.decls).unwrap_or_default();
             let by_name = decls.into_iter().map(|d| (d.name.clone(), d)).collect();
             exports.insert(m, by_name);
         }
@@ -215,11 +221,17 @@ pub async fn review(
                 kind: d.kind.clone(),
                 origin,
                 snapshot_id,
-                signature: exported.map(|e| e.signature.clone()),
-                type_full: exported.map(|e| e.type_pp_full.clone()),
+                signature: exported
+                    .and_then(|e| e.printed_signature())
+                    .map(String::from),
+                type_full: exported.and_then(|e| e.printed_type()).map(String::from),
                 hole,
                 value: exported.filter(|_| by_value).and_then(|e| e.value.clone()),
                 unprinted: match exported {
+                    Some(e) if e.error.is_some() => e
+                        .error
+                        .as_ref()
+                        .map(|error| format!("it didn't print: {error}")),
                     _ if !(by_value && follows_value(&d.kind)) => None,
                     Some(e) if e.value.is_some() => None,
                     Some(e) => e
@@ -231,11 +243,15 @@ pub async fn review(
                          didn't fit"
                             .into(),
                     ),
-                    None => Some(
-                        "its module's export doesn't have it: built before private \
-                         declarations were exported"
+                    None => Some(match failed.get(m) {
+                        Some(error) => format!(
+                            "its module's export doesn't have it, and couldn't be made again: \
+                             {error}"
+                        ),
+                        None => "its module's export doesn't have it: built before private \
+                                 declarations were exported"
                             .into(),
-                    ),
+                    }),
                 },
                 holes: match by_value {
                     true => d

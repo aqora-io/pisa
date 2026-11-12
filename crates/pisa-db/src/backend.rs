@@ -139,14 +139,20 @@ pub(crate) mod pg {
     }
 
     /// Modules whose declarations for search have a `format` other than
-    /// today's, or none.
+    /// today's, or none, and that didn't fail to be made again in it.
     fn older_export<'a>(query: modules::BoxedQuery<'a, Pg>) -> modules::BoxedQuery<'a, Pg> {
         let format = crate::catalog::EXPORT_FORMAT.to_string();
-        query.filter(
-            modules::decls
-                .retrieve_as_text("format")
-                .is_distinct_from(format),
-        )
+        query
+            .filter(
+                modules::decls
+                    .retrieve_as_text("format")
+                    .is_distinct_from(format.clone()),
+            )
+            .filter(
+                modules::decls
+                    .retrieve_by_path_as_text(vec!["failed", "format"])
+                    .is_distinct_from(format),
+            )
     }
 
     mod catalog {
@@ -261,7 +267,9 @@ pub(crate) mod sqlite {
     /// As PostgreSQL's.
     fn older_export<'a>(query: modules::BoxedQuery<'a, Sqlite>) -> modules::BoxedQuery<'a, Sqlite> {
         let format = i64::from(crate::catalog::EXPORT_FORMAT);
-        query.filter(json_number(modules::decls, "$.format").is_not(format))
+        query
+            .filter(json_number(modules::decls, "$.format").is_not(format))
+            .filter(json_number(modules::decls, "$.failed.format").is_not(format))
     }
 
     mod catalog {

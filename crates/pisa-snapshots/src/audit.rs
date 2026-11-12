@@ -587,7 +587,7 @@ impl Reader {
                 assumption.signature = exported
                     .into_iter()
                     .find(|d| d.name == assumption.name)
-                    .map(|d| d.signature);
+                    .and_then(|d| d.printed_signature().map(String::from));
                 assumption.snapshot_id = match entries.get(&m) {
                     Some(e) => Some(self.id(e)),
                     None => {

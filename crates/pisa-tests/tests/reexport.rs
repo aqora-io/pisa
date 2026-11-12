@@ -83,3 +83,64 @@ async fn a_worker_exports_an_old_module_system_snapshot_again() {
     let plain = catalog.decls(&plain).await.unwrap().unwrap();
     assert_eq!((names(&plain), plain.format), (vec!["p".to_string()], 0));
 }
+
+/// An export that can't be made again is recorded on its module, and no
+/// worker tries it again; the review list says why a value behind it is
+/// missing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_export_that_cant_be_made_again_is_recorded() {
+    let mut c = Cluster::start(&[("w0", "v", 1)]).await;
+    let catalog = Catalog::new(c.db.clone(), c.version("v"));
+    let spec = "module\n\npublic def cost : Nat := sorry\npublic theorem t : cost = cost := sorry";
+    let (status, spec) = c
+        .post("/snapshots", json!({"code": spec, "holes": ["cost"]}))
+        .await;
+    assert_eq!(status, 200, "{spec}");
+    let spec_id = spec["snapshot"]["id"].as_str().unwrap().to_string();
+    let head = "module\n\npublic def cost : Nat := helper\ndef helper : Nat := 3\n\
+                public theorem t : cost = cost := rfl\n-- EXPORT_FAIL";
+    let body = json!({"code": head, "replaces": {"snapshot_id": spec_id}});
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    let name = r["snapshot"]["module"].as_str().unwrap();
+    let m = name.strip_prefix("PisaSnap.s").unwrap().to_string();
+    let build = catalog
+        .module(&m)
+        .await
+        .unwrap()
+        .modules
+        .pop()
+        .unwrap()
+        .build;
+    make_old(&catalog, &m, &build, "cost").await;
+
+    c.add_worker(worker_config("w1", "v", 1));
+    let failed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(failed) = catalog.decls(&m).await.unwrap().unwrap().failed {
+                return failed;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the failure is recorded");
+    assert_eq!(failed.format, EXPORT_FORMAT);
+    assert!(failed.error.contains("export failed"), "{failed:?}");
+    assert!(
+        catalog
+            .stale_exports_after(None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let path = format!("/snapshots/audit?against={spec_id}&review=true");
+    let (status, audit) = c.request(reqwest::Method::GET, &path, None).await;
+    assert_eq!(status, 200, "{audit}");
+    let reviewed = audit["review"][0]["declarations"].as_array().unwrap();
+    let helper = reviewed.iter().find(|d| d["name"] == "helper");
+    let helper = helper.unwrap_or_else(|| panic!("no helper: {audit}"));
+    let why = helper["unprinted"].as_str().unwrap();
+    assert!(why.contains("couldn't be made again"), "{why}");
+}

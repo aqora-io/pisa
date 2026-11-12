@@ -1214,8 +1214,13 @@ pub struct SnapshotDetail {
 pub struct Export {
     pub name: String,
     pub kind: String,
-    /// The declaration's signature, with notation.
-    pub signature: String,
+    /// The declaration's signature, with notation; absent when it didn't
+    /// print.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Why it didn't print, if it didn't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docstring: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1888,11 +1893,12 @@ pub struct ReviewDeclaration {
     /// A snapshot of its module, for one from below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
-    /// As the build printed it, with notation. None from a build before
-    /// private declarations were exported.
+    /// As the build printed it, with notation. None when it didn't print,
+    /// as `unprinted` says, and from a build before private declarations
+    /// were exported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
-    /// Its type, with full names and no notation.
+    /// Its type, with full names and no notation; None as `signature` is.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_full: Option<String>,
     /// One of the spec's holes, or a definition the audit's `allow` names.
@@ -1904,8 +1910,9 @@ pub struct ReviewDeclaration {
     /// characters. None from a build before values were printed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
-    /// Why there is no `value` where there should be one: it didn't print,
-    /// its module has no export, or the export doesn't have it.
+    /// Why there is no `value` where there should be one, or no
+    /// `signature`: it didn't print, its module has no export, or the export
+    /// doesn't have it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unprinted: Option<String>,
     /// The other holes its value names, which a reviewer reads with it.

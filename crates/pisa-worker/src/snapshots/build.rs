@@ -331,7 +331,7 @@ impl Snapshots {
                     let gained: Vec<String> =
                         swapped.gained.iter().map(|(m, _)| m.clone()).collect();
                     let mut now = self.reader.exports_of(&gained).await;
-                    let own = exported.iter().flatten();
+                    let own = exported.iter().flatten().filter(|d| d.error.is_none());
                     now.extend(own.map(|d| (d.name.clone(), d.signature.clone())));
                     self.reader.sign(&mut changes, r, swapped, &now).await;
                     verification.ok = false;
@@ -365,7 +365,7 @@ impl Snapshots {
         }
         let amends = match &rel.amending {
             Some(a) => {
-                let own = exported.iter().flatten();
+                let own = exported.iter().flatten().filter(|d| d.error.is_none());
                 let own = own.map(|d| (d.name.clone(), d.signature.clone()));
                 let decls = &verification.declarations;
                 match self

@@ -12,7 +12,7 @@ use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplRespon
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
-use crate::launcher::{Compiled, Launcher, VerifyRun};
+use crate::launcher::{Compiled, ExportError, Launcher, VerifyRun};
 use crate::policy::{Policy, header_command};
 use crate::snapshots::Snapshots;
 
@@ -381,7 +381,7 @@ impl Lease {
         &self,
         module: &str,
         timeout: Duration,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, ExportError> {
         self.pool.launcher.export(self.id, module, timeout).await
     }
 

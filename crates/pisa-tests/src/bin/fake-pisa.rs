@@ -24,7 +24,8 @@
 //! (`PISA_FAILED`), as when it can't describe the module.
 //!
 //! `pisa export --value-chars <n> M` prints the `PISA_EXPORT` its build
-//! printed, from the module's code in its fake olean on LEAN_PATH.
+//! printed, from the module's code in its fake olean on LEAN_PATH; a module
+//! that says `EXPORT_FAIL` makes it fail.
 
 use std::io::Write;
 
@@ -94,6 +95,10 @@ fn export(module: &str) {
         eprintln!("fake-pisa: unknown module {module}");
         std::process::exit(1);
     };
+    if code.contains("EXPORT_FAIL") {
+        eprintln!("fake-pisa: the export fails as asked");
+        std::process::exit(1);
+    }
     println!("PISA_EXPORT {}", exports(&as_reported(&code)));
 }
 

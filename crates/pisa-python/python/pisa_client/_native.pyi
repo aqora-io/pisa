@@ -243,7 +243,9 @@ class Description(TypedDict):
 class Export(TypedDict):
     name: str
     kind: str
-    signature: str
+    # Absent when it didn't print, and then `error` says why.
+    signature: NotRequired[str]
+    error: NotRequired[str]
     docstring: NotRequired[str]
     description: NotRequired[Description]
 
