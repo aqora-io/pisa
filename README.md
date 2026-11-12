@@ -201,6 +201,28 @@ and the rest of the API works.
 
 ## Upgrading
 
+To the release that answers jobs in an envelope and retries in the clients:
+- `GET /jobs/{id}` of a done job answers 200 with `{id, kind, status:
+  "done", http_status, body}`: the status its request would have had, and
+  its answer, errors included. Read those two fields, not the response's
+  own status. Earlier clients misread it, and the earlier TypeScript client
+  returns the envelope as the answer, so upgrade the clients with the
+  servers.
+- 429 and 503 answers carry `Retry-After: 2`, which browsers may read.
+  `/health` adds `queued`.
+- A create that keeps nothing says what to do next in `refused`. A create
+  whose worker failed answers 200, with a `check.error` of kind `internal`,
+  as `/check` does, rather than a 500.
+- The clients send requests again by themselves: `with_retry(RetryPolicy::none())`,
+  `retry=False` or `retry: false` turns it off. A create without a `key` is
+  sent with one of the client's, `client:` and 32 hex digits. React's
+  queries no longer run again on top of a retrying client.
+- The clients read a gateway's 502, 503 or 504 as `unavailable`, which
+  Python raises as `CapacityError`, rather than `internal` or
+  `bad_response`.
+- `wait_job` and `waitJob` look every 25 s, and with retries off they no
+  longer try a dropped connection again.
+
 To the release that checks old modules for clashing imports:
 - A worker of this release clears `verified`, once per version, on each
   module verified before creates refused a header whose imports declare one
@@ -372,7 +394,7 @@ pnpm -C web generate
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages, runs?}`; see [Tactic sessions](#sessions) and [Naming a run](#run-names) |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid, and a failing tactic is a 422 |
 | `POST /sessions/{id}/check` | `{code, timeout?, detail?}` → check result, also requiring the session's original statements and imports; a `lean` error if the axiom report can't describe a declaration of the session's code, whose statement it couldn't guard |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, name?, detail?}` → `{snapshot?, check, replacement?, heads?, unverified?, amendment?, refutation?, refutations?, runs?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending), [Refuting a target](#refuting) and [Naming a run](#run-names) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, name?, detail?}` → `{snapshot?, refused?, check, replacement?, heads?, unverified?, amendment?, refutation?, refutations?, runs?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending), [Refuting a target](#refuting) and [Naming a run](#run-names) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created, run?}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `source?`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
@@ -394,9 +416,9 @@ pnpm -C web generate
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
 | `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened}` |
 | `DELETE /documents/{id}` | → 204 |
-| `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → the request's answer once its job is done, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
+| `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, unlimited_workers, sweeps_refused, search}`, the live workers on the queue, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -441,10 +463,12 @@ requests off at 60 s, or over a network that drops, send them with
 "queued"}` at once, with `Location: /jobs/{id}`, and runs the request as it
 would have:
 - `GET /jobs/{id}?wait=30` waits up to `wait` seconds (at most 60) and, once
-  the job is done, answers exactly as the request would have: its status and
-  body, errors included, e.g. a 429 when no worker took it in time. Until then
-  it answers 202 with `status` `queued` or `running`. Any server answers for
-  any job.
+  the job is done, answers 200 `{id, kind, status: "done", http_status,
+  body}`: the status and the answer the request would have had, errors
+  included, e.g. an `http_status` of 429 when no worker took it in time.
+  Until then it answers 202 with `status` `queued` or `running`. A 404 or a
+  503 is the look's own, never the job's. Any server answers for any job.
+  The clients look every 25 s, well short of a proxy's 60.
 - An answer is kept for an hour after its job is done; then the job is a 404.
 - `DELETE /jobs/{id}` withdraws a job no worker has started (`cancelled`); a
   `running` or `done` one stays as it is.
@@ -625,6 +649,8 @@ limit in seconds (default 60).
 - **Checks report failures in-band.** A check that times out, crashes or is
   rejected by the policy still returns 200, with `ok: false` and the `error`.
   Batch items work the same way, so one failed item never fails a batch.
+  So does a create: one that keeps nothing says in `refused` what to do
+  next (see [Snapshots](#snapshots)), a worker that failed it included.
 - **Other requests use HTTP statuses:**
 
 | `kind` | Status | Meaning |
@@ -635,6 +661,10 @@ limit in seconds (default 60).
 | `bad_request`, `not_found` | 400, 404 | Malformed request; unknown or expired job, state or session; unknown snapshot or declaration |
 | `conflict` | 409 | A create replaces a snapshot that another already replaces, in-band in `check.error` (see [Replacing](#replacing)); or a document is at another revision than the request names |
 | `internal` | 500 | A bug |
+
+A 429 or a 503 carries `Retry-After`, in seconds. The clients send a request
+again by themselves (see [Clients](#clients)), and read a gateway's 502, 503
+or 504, whose body isn't pisa's, as `unavailable`.
 
 ## Snapshots
 
@@ -661,13 +691,28 @@ POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double
   again. `GET`, `PATCH`, `DELETE` and `verify` take the id, which carries the
   version, so they take no `version`; a module name there is a `bad_request`.
 
-A create that keeps nothing has no `snapshot`, and its `check` says why. That
-includes `verify: true` on code that is already kept but fails the re-check:
-`check.error` has the reason, as new code that fails the re-check isn't kept.
-It also includes a header whose imports Lean reads differently from its lines,
-such as an import after a block comment on the same line: the record would
-miss what the module builds on, so it is a `bad_request` that asks for each
-import on its own line. And it includes a header that imports two snapshots
+A create that keeps nothing has no `snapshot`; `refused` says what to do
+next, and its `check` why:
+- `proof`: change the code. Lean or the kernel rejected it, the policy
+  refused it, its header failed, it changed a statement of what it
+  replaces (`check.changes`), or it doesn't refute its target. Code with
+  `sorry` is kept: a refusal is never about what isn't proved yet.
+- `limit`: it ran out of time or memory, or crashed Lean. It may be right:
+  give it more `timeout`, or make it cheaper.
+- `request`: change the request. It breaks a rule (`bad_request`), names
+  what doesn't exist in its scope (`not_found`), or conflicts in a way no
+  resend fixes, as a run name another run has.
+- `conflict`: what it replaces is replaced already. Send the same code again
+  replacing one of `heads`.
+- `retry`: nothing is known to be wrong. No worker took it, or one failed;
+  send it again later, with the same `key`.
+
+Code that is already kept but fails the re-check `verify: true` asks for is
+refused too: `check.error` has the reason, as new code that fails the
+re-check isn't kept. So is a header whose imports Lean reads differently from
+its lines, such as an import after a block comment on the same line: the
+record would miss what the module builds on, so it is a `bad_request` that
+asks for each import on its own line. And so is a header that imports two snapshots
 declaring the same name, a `bad_request` that names a snapshot of each. Lean
 loads both when the name is a theorem of one statement in each, as a
 skeleton and its fill are, and the code then uses whichever comes first in
@@ -736,6 +781,9 @@ in `check.error`), so that a retry is safe:
   that when its worker is lost after keeping the snapshot, the retry of its
   job returns that snapshot instead of adding another. Keys that start with
   `job:` are the server's: a create that sends one is a 400.
+- The clients send a create that has no key with one of theirs, `client:`
+  and 32 hex digits, so that sending it again after a lost answer returns
+  the snapshot it kept (see [Clients](#clients)).
 
 <a id="replacing"></a>
 **Replacing a snapshot.** A create can name the snapshot of its version that
@@ -1740,6 +1788,34 @@ A client may also take a [scope](#scopes), which it sends with every request:
 `get_run` and `name_run` (`getRun`, `nameRun` in TypeScript); see
 [Naming a run](#run-names).
 
+**Retries.** Every client sends a request again by itself, after a random
+wait that grows each time, from 1 s to 30 s, and is at least the server's
+`Retry-After`: up to 4 attempts within 5 minutes.
+- **What is sent again.** A 429 is always sent again, since nothing ran. A
+  request safe to send twice is also sent again after a 502, 503 or 504, or
+  a connection that failed or dropped: reads, checks, tactics, goals,
+  probes, verifies, creates and dry runs.
+- **Creates.** A create without a `key` gets one of the client's, `client:`
+  and 32 hex digits, so a retry can't keep it twice.
+- **Batches.** A batch's items that no worker took are sent again alone.
+- **Turning it off.** `with_retry(RetryPolicy::none())` in Rust,
+  `Client(url, retry=False)` in Python, and `retry: false` in TypeScript send
+  each request once.
+
+**One call per kind of create.** `POST /snapshots` is five things, by the
+fields it is sent with. Each has its own call:
+- `create_snapshot` keeps plain code.
+- `create_spec` keeps a spec, with its `holes`.
+- `create_proof` keeps a proof that replaces a spec or a head of its run. On
+  a `conflict` with one head, it sends the same code again replacing that
+  head, with the same key, up to 3 times. It returns the last answer, whose
+  `refused` says what to do next.
+- `amend_spec` amends a spec, with a reason.
+- `refute` refutes a target of a spec.
+
+TypeScript names them `createSnapshot`, `createSpec`, `createProof`,
+`amendSpec` and `refute`.
+
 Rust (`pisa-client`):
 
 ```rust
@@ -1816,12 +1892,28 @@ job = client.submit_check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"
 client.wait_job(job)["ok"]   # what check would have returned, or raised
 ```
 
-Calls are synchronous. They release the GIL, so one `Client` can be shared
-across threads. Results are plain dicts; the type stubs describe their shapes.
-Exceptions carry `.kind` and `.status`, and their class says what to do:
+`Client`'s calls block. They release the GIL, so one `Client` can be shared
+across threads, and they stop at Ctrl-C, dropping the request. `AsyncClient`
+takes the same arguments, and its calls return asyncio futures instead,
+which start at once; cancelling one drops its request. Either way, a job a
+worker took runs on.
+
+```python
+import asyncio
+from pisa_client import AsyncClient
+
+async def main(codes):
+    client = AsyncClient("http://localhost:8000", timeout=60)
+    return await asyncio.gather(*(client.check(code) for code in codes))
+```
+
+Results are plain dicts; the type stubs describe their shapes. Exceptions
+carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
 - `LimitError`: the input hit a timeout, the memory limit, or crashed Lean.
-- `CapacityError`: no worker was free, or the server is unavailable; retry later.
+- `CapacityError`: no worker was free, the server is unavailable, or a
+  gateway answered 502, 503 or 504, once the client's retries ran out;
+  retry later.
 - `NotFoundError`: unknown or expired job, state or session, or unknown
   snapshot or declaration.
 - `PisaError`: the base class; also raised for transport failures, with no

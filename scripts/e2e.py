@@ -486,6 +486,7 @@ def through_links_and_settle():
     refused = post("/snapshots", {"code": retyped, "replaces": {"snapshot_id": settled}, "timeout": 600})
     built = time.time() - started
     assert "snapshot" not in refused and refused["check"]["ok"] is False, refused
+    assert refused["refused"] == "proof", refused
     assert "statement: e2e_main has a different type" in refused["check"]["reasons"], refused
     started = time.time()
     kept = create_snapshot(retyped)
@@ -535,7 +536,7 @@ def run_names(outside):
     resend = f"{proof}\n-- resent"
     refused = post("/snapshots", {"code": resend, "replaces": {"snapshot_id": target_id}, "timeout": 600})
     assert refused["check"]["error"]["kind"] == "conflict", refused
-    assert refused["heads"] == [settled], refused
+    assert refused["refused"] == "conflict" and refused["heads"] == [settled], refused
     resent = create_snapshot(resend, replaces={"snapshot_id": settled}, verify=True)
     assert resent["snapshot"]["run"] == "e2e.main", resent
     status, detail = call("GET", f"/snapshots/{resent['snapshot']['id']}")
