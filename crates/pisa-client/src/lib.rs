@@ -177,6 +177,60 @@ pub struct CreateSnapshotOptions {
     pub name: Option<String>,
 }
 
+/// Options for [`Client::create_spec`].
+#[derive(Debug, Clone, Default)]
+pub struct SpecOptions {
+    /// The definitions its proofs may fill; see
+    /// [`CreateSnapshotOptions::holes`].
+    pub holes: Vec<String>,
+    /// The name of the run it starts; see [`CreateSnapshotOptions::name`].
+    pub name: Option<String>,
+    pub verify: Option<bool>,
+    pub labels: BTreeMap<String, String>,
+    pub key: Option<String>,
+    pub detail: Vec<Detail>,
+}
+
+/// Options for [`Client::create_proof`].
+#[derive(Debug, Clone, Default)]
+pub struct ProofOptions {
+    /// The definitions whose values it may change besides the spec's holes;
+    /// see [`Allow`].
+    pub allow: Vec<String>,
+    /// Replace a snapshot that is replaced already, starting a branch; see
+    /// [`CreateSnapshotOptions::fork`]. Then no conflict is followed.
+    pub fork: bool,
+    pub verify: Option<bool>,
+    pub labels: BTreeMap<String, String>,
+    pub key: Option<String>,
+    pub detail: Vec<Detail>,
+}
+
+/// Options for [`Client::amend_spec`].
+#[derive(Debug, Clone, Default)]
+pub struct AmendOptions {
+    /// The new spec's holes; `None` keeps the amended spec's, and an empty
+    /// list leaves none.
+    pub holes: Option<Vec<String>>,
+    /// A name for its run: only the one the amended spec's run has, which
+    /// the new spec's run takes over anyway.
+    pub name: Option<String>,
+    pub labels: BTreeMap<String, String>,
+    pub key: Option<String>,
+    pub detail: Vec<Detail>,
+}
+
+/// Options for [`Client::refute`].
+#[derive(Debug, Clone, Default)]
+pub struct RefuteOptions {
+    pub labels: BTreeMap<String, String>,
+    pub key: Option<String>,
+    pub detail: Vec<Detail>,
+}
+
+/// How many heads [`Client::create_proof`] follows after a conflict.
+const FOLLOW_HEADS: usize = 3;
+
 /// Options for [`Client::delete_snapshot_with`].
 #[derive(Debug, Clone, Default)]
 pub struct DeleteSnapshotOptions {
@@ -914,6 +968,122 @@ impl Client {
         self.endpoint
             .submit(self.endpoint.url("snapshots")?, Some(&req), Repeat::Safe)
             .await
+    }
+
+    /// Keeps a spec: code with `sorry`s to prove, whose holes, the
+    /// definitions it leaves open, its proofs may fill.
+    pub async fn create_spec(
+        &self,
+        code: &str,
+        opts: &SpecOptions,
+    ) -> Result<CreateSnapshotResponse, Error> {
+        let create = CreateSnapshotOptions {
+            holes: opts.holes.clone(),
+            name: opts.name.clone(),
+            verify: opts.verify,
+            labels: opts.labels.clone(),
+            key: opts.key.clone(),
+            detail: opts.detail.clone(),
+            ..Default::default()
+        };
+        self.create_snapshot_with(code, &create).await
+    }
+
+    /// Keeps `code` as a proof that replaces snapshot `replaces_id`, a spec
+    /// or a head of its run, keeping its statements. When that is replaced
+    /// already, the answer is a `conflict` naming the run's `heads`; with one
+    /// head, this sends the same code again replacing it, as code that
+    /// imports runs by name resolves against the heads at each create, up to
+    /// 3 times. It returns the last answer: kept, or refused with
+    /// [`CreateSnapshotResponse::refused`] saying what to do next.
+    pub async fn create_proof(
+        &self,
+        replaces_id: &str,
+        code: &str,
+        opts: &ProofOptions,
+    ) -> Result<CreateSnapshotResponse, Error> {
+        let allow = (!opts.allow.is_empty()).then(|| Allow {
+            definitions: opts.allow.clone(),
+        });
+        let mut create = CreateSnapshotOptions {
+            replaces: Some(Replaces {
+                snapshot_id: replaces_id.to_string(),
+                allow,
+            }),
+            fork: opts.fork,
+            verify: opts.verify,
+            labels: opts.labels.clone(),
+            // One key for every attempt: one that keeps nothing doesn't use
+            // it up.
+            key: Some(opts.key.clone().unwrap_or_else(client_key)),
+            detail: opts.detail.clone(),
+            ..Default::default()
+        };
+        let mut tried = vec![replaces_id.to_string()];
+        loop {
+            let answer = self.create_snapshot_with(code, &create).await?;
+            let head = match (answer.refusal(), answer.heads.as_slice()) {
+                (Some(Refusal::Conflict), [head])
+                    if !opts.fork && !tried.contains(head) && tried.len() <= FOLLOW_HEADS =>
+                {
+                    head.clone()
+                }
+                _ => return Ok(answer),
+            };
+            if let Some(replaces) = &mut create.replaces {
+                replaces.snapshot_id = head.clone();
+            }
+            tried.push(head);
+        }
+    }
+
+    /// Keeps `code` as a spec that amends spec `spec_id`, for `reason`, 1 to
+    /// 4,096 characters: it supersedes it, and the amended spec's run takes
+    /// no more proofs. Carry them over with [`Client::resubmit_snapshots`].
+    pub async fn amend_spec(
+        &self,
+        spec_id: &str,
+        reason: &str,
+        code: &str,
+        opts: &AmendOptions,
+    ) -> Result<CreateSnapshotResponse, Error> {
+        let create = CreateSnapshotOptions {
+            amends: Some(Amends {
+                snapshot_id: spec_id.to_string(),
+                reason: reason.to_string(),
+            }),
+            name: opts.name.clone(),
+            labels: opts.labels.clone(),
+            key: opts.key.clone(),
+            detail: opts.detail.clone(),
+            ..Default::default()
+        };
+        let mut req = self.create_snapshot_request(code, &create);
+        req.holes = opts.holes.clone();
+        self.post("snapshots", &req, Repeat::Safe).await
+    }
+
+    /// Keeps `code` as the refutation of `target`, a theorem of spec
+    /// `spec_id`: code that builds on the spec and proves the negation of
+    /// the target's statement. A run with a refuted target isn't clean.
+    pub async fn refute(
+        &self,
+        spec_id: &str,
+        target: &str,
+        code: &str,
+        opts: &RefuteOptions,
+    ) -> Result<CreateSnapshotResponse, Error> {
+        let create = CreateSnapshotOptions {
+            refutes: Some(Refutes {
+                snapshot_id: spec_id.to_string(),
+                target: target.to_string(),
+            }),
+            labels: opts.labels.clone(),
+            key: opts.key.clone(),
+            detail: opts.detail.clone(),
+            ..Default::default()
+        };
+        self.create_snapshot_with(code, &create).await
     }
 
     fn create_snapshot_request(

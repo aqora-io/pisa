@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use common::Cluster;
 use pisa_client::{
-    AcceptOptions, Allow, Amends, AuditOptions, CheckOptions, Client, CreateSnapshotOptions,
-    DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions, HealthStatus, Job, JobKind,
-    JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt, ProofStatus, RebuildOptions,
-    Refutes, Replaces, ResubmitOptions, RetryPolicy, SettleOptions,
+    AcceptOptions, Allow, AmendOptions, Amends, AuditOptions, CheckOptions, Client,
+    CreateSnapshotOptions, DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions,
+    HealthStatus, Job, JobKind, JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt,
+    ProofOptions, ProofStatus, RebuildOptions, Refusal, RefuteOptions, Refutes, Replaces,
+    ResubmitOptions, RetryPolicy, SettleOptions, SpecOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1295,4 +1296,78 @@ async fn a_batch_sends_again_only_the_items_no_worker_took() {
         seen.iter()
             .all(|r| r.method == "POST" && r.path == "/check/batch")
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_names_each_kind_of_create() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap().with_version("v");
+    let opts = SpecOptions {
+        holes: vec!["cost".into()],
+        name: Some("named.spec".into()),
+        ..Default::default()
+    };
+    let spec = "import Foo\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry\ntheorem w : 1 = 2 := sorry";
+    let spec = client
+        .create_spec(spec, &opts)
+        .await
+        .unwrap()
+        .snapshot
+        .unwrap();
+    assert_eq!(spec.holes, ["cost"]);
+    assert_eq!(spec.run.as_deref(), Some("named.spec"));
+
+    // A proof onto the spec, then another sent onto the spec as well, which
+    // lands on the first's head.
+    let proof = |n: u32| {
+        format!(
+            "import Foo\ndef cost : Nat := {n}\ntheorem t : cost = cost := rfl\ntheorem w : 1 = 2 := sorry"
+        )
+    };
+    let none = ProofOptions::default();
+    let first = client
+        .create_proof(&spec.id, &proof(1), &none)
+        .await
+        .unwrap();
+    let first = first.snapshot.unwrap();
+    let second = client
+        .create_proof(&spec.id, &proof(2), &none)
+        .await
+        .unwrap();
+    let second = second.snapshot.expect("onto the head");
+    assert_eq!(second.replaces.unwrap().snapshot_id, first.id);
+    // A branch, and then two heads: the caller chooses.
+    let fork = ProofOptions {
+        fork: true,
+        ..Default::default()
+    };
+    client
+        .create_proof(&first.id, &proof(3), &fork)
+        .await
+        .unwrap()
+        .snapshot
+        .unwrap();
+    let refused = client
+        .create_proof(&spec.id, &proof(4), &none)
+        .await
+        .unwrap();
+    assert_eq!(refused.refused, Some(Refusal::Conflict), "{refused:?}");
+    assert_eq!(refused.heads.len(), 2, "{refused:?}");
+
+    // `w` is false: refute it, then amend the spec without it.
+    let refuter = format!("{}\ntheorem r : ¬ (1 = 2) := by decide", spec.header);
+    let none = RefuteOptions::default();
+    let refuted = client.refute(&spec.id, "w", &refuter, &none).await.unwrap();
+    assert_eq!(refuted.refutation.map(|r| r.theorem).as_deref(), Some("r"));
+    let amended = "import Foo\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let none = AmendOptions::default();
+    let amended = client
+        .amend_spec(&spec.id, "w is false", amended, &none)
+        .await
+        .unwrap();
+    assert_eq!(amended.amendment.unwrap().changes[0].name, "w");
+    let amended = amended.snapshot.unwrap();
+    // It keeps the amended spec's holes, and takes its run's name.
+    assert_eq!(amended.holes, ["cost"]);
+    assert_eq!(amended.run.as_deref(), Some("named.spec"));
 }

@@ -670,6 +670,28 @@ def test_run_names(url):
         client.get_run("py.lemma")
 
 
+def test_each_kind_of_create_has_its_call(url):
+    client = Client(url, timeout=30)
+    spec = client.create_spec("import Foo\ntheorem py_named : 1 = 1 := sorry", name="py.named")["snapshot"]
+    first = client.create_proof(spec["id"], "import Foo\ntheorem py_named : 1 = 1 := rfl")["snapshot"]
+    # Sent onto the spec, the next proof lands on the head.
+    second = client.create_proof(spec["id"], "import Foo\ntheorem py_named : 1 = 1 := by rfl")["snapshot"]
+    assert second["replaces"]["snapshot_id"] == first["id"]
+
+    async def main():
+        on_head = await AsyncClient(url, timeout=30).create_proof(
+            spec["id"], "import Foo\ntheorem py_named : 1 = 1 := by exact rfl")
+        assert on_head["snapshot"]["replaces"]["snapshot_id"] == second["id"]
+
+    asyncio.run(main())
+    more = "import Foo\ntheorem py_named : 1 = 1 := sorry\ntheorem py_more : 2 = 2 := sorry"
+    amended = client.amend_spec(spec["id"], "one more target", more)
+    assert amended["snapshot"]["run"] == "py.named", amended
+    refuter = f"{spec['header']}\ntheorem py_r : ¬ (1 = 2) := by decide"
+    refused = client.refute(spec["id"], "py_named", refuter)
+    assert "snapshot" not in refused and refused["refused"] == "proof", refused
+
+
 def test_a_client_keeps_to_its_scope(url):
     mine = Client(url, timeout=30, scope={"user": "py"})
     made = mine.create_snapshot("import Foo\ntheorem py_scoped : 1 = 1 := rfl")["snapshot"]

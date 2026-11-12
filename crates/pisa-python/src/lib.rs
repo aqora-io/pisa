@@ -450,6 +450,109 @@ impl Base {
         })
     }
 
+    #[pyo3(signature = (code, *, holes = None, name = None, verify = None, labels = None, key = None, detail = Vec::new()))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_spec<'py>(
+        &self,
+        py: Python<'py>,
+        code: String,
+        holes: Option<Vec<String>>,
+        name: Option<String>,
+        verify: Option<bool>,
+        labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = pisa_client::SpecOptions {
+            holes: holes.unwrap_or_default(),
+            name,
+            verify,
+            labels: labels.unwrap_or_default(),
+            key,
+            detail: parse_detail(detail)?,
+        };
+        self.call(py, async move { inner.create_spec(&code, &opts).await })
+    }
+
+    #[pyo3(signature = (replaces_id, code, *, allow = None, fork = false, verify = None, labels = None, key = None, detail = Vec::new()))]
+    #[allow(clippy::too_many_arguments)]
+    fn create_proof<'py>(
+        &self,
+        py: Python<'py>,
+        replaces_id: String,
+        code: String,
+        allow: Option<Vec<String>>,
+        fork: bool,
+        verify: Option<bool>,
+        labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = pisa_client::ProofOptions {
+            allow: allow.unwrap_or_default(),
+            fork,
+            verify,
+            labels: labels.unwrap_or_default(),
+            key,
+            detail: parse_detail(detail)?,
+        };
+        self.call(py, async move {
+            inner.create_proof(&replaces_id, &code, &opts).await
+        })
+    }
+
+    #[pyo3(signature = (spec_id, reason, code, *, holes = None, name = None, labels = None, key = None, detail = Vec::new()))]
+    #[allow(clippy::too_many_arguments)]
+    fn amend_spec<'py>(
+        &self,
+        py: Python<'py>,
+        spec_id: String,
+        reason: String,
+        code: String,
+        holes: Option<Vec<String>>,
+        name: Option<String>,
+        labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = pisa_client::AmendOptions {
+            holes,
+            name,
+            labels: labels.unwrap_or_default(),
+            key,
+            detail: parse_detail(detail)?,
+        };
+        self.call(py, async move {
+            inner.amend_spec(&spec_id, &reason, &code, &opts).await
+        })
+    }
+
+    #[pyo3(signature = (spec_id, target, code, *, labels = None, key = None, detail = Vec::new()))]
+    #[allow(clippy::too_many_arguments)]
+    fn refute<'py>(
+        &self,
+        py: Python<'py>,
+        spec_id: String,
+        target: String,
+        code: String,
+        labels: Option<BTreeMap<String, String>>,
+        key: Option<String>,
+        detail: Vec<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        let opts = pisa_client::RefuteOptions {
+            labels: labels.unwrap_or_default(),
+            key,
+            detail: parse_detail(detail)?,
+        };
+        self.call(py, async move {
+            inner.refute(&spec_id, &target, &code, &opts).await
+        })
+    }
+
     #[pyo3(signature = (id, *, detail = Vec::new()))]
     fn get_snapshot<'py>(
         &self,

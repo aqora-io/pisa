@@ -144,6 +144,16 @@ describe("snapshots", () => {
     });
     expect(amended.snapshot?.version).toBe("v");
   });
+
+  it("sends a proof onto the head of the spec it names", async () => {
+    const spec = await client.createSpec("import Foo\ntheorem web_named : 1 = 1 := sorry", { verify: false });
+    const id = spec.snapshot?.id;
+    if (id === undefined) throw new Error(`not kept: ${JSON.stringify(spec)}`);
+    const first = await client.createProof(id, "import Foo\ntheorem web_named : 1 = 1 := rfl", { verify: false });
+    const proof = "import Foo\ntheorem web_named : 1 = 1 := by rfl";
+    const second = await client.createProof(id, proof, { verify: false });
+    expect(second.snapshot?.replaces?.snapshot_id).toBe(first.snapshot?.id);
+  });
 });
 
 describe("documents", () => {

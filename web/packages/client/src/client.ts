@@ -36,6 +36,7 @@ import type {
   QueryResult,
   RebuildSnapshotsRequest,
   RebuildSnapshotsResponse,
+  Replaces,
   Resolution,
   ResolveResponse,
   ResubmitSnapshotsRequest,
@@ -188,6 +189,26 @@ export type CreateSnapshotOptions = RunOptions &
     CreateSnapshotRequest,
     "verify" | "labels" | "key" | "replaces" | "fork" | "holes" | "amends" | "refutes" | "detail" | "name"
   >;
+
+/** A spec: code with `sorry`s to prove, whose `holes` its proofs may fill. */
+export type CreateSpecOptions = RunOptions &
+  Pick<CreateSnapshotRequest, "holes" | "name" | "verify" | "labels" | "key" | "detail">;
+
+/** A proof, built on the version of what it replaces. `allow` names the
+ *  definitions it may change besides the spec's holes. */
+export type CreateProofOptions = Omit<RunOptions, "version"> &
+  Pick<CreateSnapshotRequest, "fork" | "verify" | "labels" | "key" | "detail"> & { allow?: string[] };
+
+/** An amendment. Without `holes` it keeps the amended spec's; `[]` leaves
+ *  none. */
+export type AmendSpecOptions = Omit<RunOptions, "version"> &
+  Pick<CreateSnapshotRequest, "holes" | "name" | "labels" | "key" | "detail">;
+
+/** A refutation. */
+export type RefuteOptions = Omit<RunOptions, "version"> & Pick<CreateSnapshotRequest, "labels" | "key" | "detail">;
+
+/** How many heads `createProof` follows after a conflict. */
+const FOLLOW_HEADS = 3;
 
 export interface VerifyOptions extends RequestOptions {
   /** Seconds Lean may run for each module. */
@@ -392,6 +413,52 @@ export class PisaClient {
   /** `createSnapshot` as a job. */
   submitCreateSnapshot(code: string, options: CreateSnapshotOptions = {}): Promise<Job<CreateSnapshotResponse>> {
     return this.submit(["snapshots"], this.createSnapshotRequest(code, options), options);
+  }
+
+  /** Keeps a spec: code with `sorry`s to prove, whose `holes`, the
+   *  definitions it leaves open, its proofs may fill. */
+  createSpec(code: string, options: CreateSpecOptions = {}): Promise<CreateSnapshotResponse> {
+    return this.createSnapshot(code, options);
+  }
+
+  /** Keeps `code` as a proof that replaces snapshot `replacesId`, a spec or
+   *  a head of its run, keeping its statements. When that is replaced
+   *  already, the answer is refused as a `conflict` naming the run's
+   *  `heads`; with one head, this sends the same code again replacing it,
+   *  up to 3 times, as code that imports runs by name resolves against the
+   *  heads at each create. With `fork`, it starts a branch and follows
+   *  nothing. It returns the last answer: kept, or refused, with `refused`
+   *  saying what to do next. */
+  async createProof(replacesId: SnapshotId, code: string, options: CreateProofOptions = {}): Promise<CreateSnapshotResponse> {
+    const { allow, ...rest } = options;
+    // One key for every attempt: one that keeps nothing doesn't use it up.
+    const key = options.key ?? clientKey();
+    const tried = [replacesId];
+    for (;;) {
+      const replaces: Replaces = { snapshot_id: tried[tried.length - 1] ?? replacesId };
+      if (allow !== undefined && allow.length > 0) replaces.allow = { definitions: allow };
+      const answer = await this.createSnapshot(code, { ...rest, key, replaces });
+      const heads = answer.heads ?? [];
+      const head = heads[0];
+      const follow =
+        answer.refused === "conflict" && !options.fork && heads.length === 1 && head !== undefined;
+      if (!follow || tried.includes(head) || tried.length > FOLLOW_HEADS) return answer;
+      tried.push(head);
+    }
+  }
+
+  /** Keeps `code` as a spec that amends spec `specId`, for `reason`, 1 to
+   *  4,096 characters: it supersedes it, and the amended spec's run takes no
+   *  more proofs (carry them over with `resubmitSnapshots`). */
+  amendSpec(specId: SnapshotId, reason: string, code: string, options: AmendSpecOptions = {}): Promise<CreateSnapshotResponse> {
+    return this.createSnapshot(code, { ...options, amends: { snapshot_id: specId, reason } });
+  }
+
+  /** Keeps `code` as the refutation of `target`, a theorem of spec `specId`:
+   *  code that builds on the spec and proves the negation of the target's
+   *  statement. */
+  refute(specId: SnapshotId, target: string, code: string, options: RefuteOptions = {}): Promise<CreateSnapshotResponse> {
+    return this.createSnapshot(code, { ...options, refutes: { snapshot_id: specId, target } });
   }
 
   /** A snapshot, with its module's code, check and exports. `detail:

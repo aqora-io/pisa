@@ -306,6 +306,43 @@ describe("PisaClient", () => {
     expect(sent[0]?.["pisa-scope"]).toBe("user=42,org=7");
   });
 
+  it("names each kind of create", async () => {
+    const { client, sent } = recording(() => json({ check: {} }));
+    await client.createSpec("s", { holes: ["f"], name: "n" });
+    await client.amendSpec("v1~s", "w is false", "a", { holes: [] });
+    await client.refute("v1~s", "w", "r");
+    expect(sent.map((s) => s.body)).toEqual([
+      { code: "s", version: "v1", key: KEY, holes: ["f"], name: "n" },
+      { code: "a", key: KEY, holes: [], amends: { snapshot_id: "v1~s", reason: "w is false" } },
+      { code: "r", key: KEY, refutes: { snapshot_id: "v1~s", target: "w" } },
+    ]);
+  });
+
+  it("sends a proof again onto the one head a conflict names, with one key", async () => {
+    const replies = [
+      json({ check: {}, refused: "conflict", heads: ["v1~h"] }),
+      json({ check: {}, snapshot: { id: "v1~p" } }),
+    ];
+    const { client, sent } = recording(() => replies.shift() ?? json({ check: {} }));
+    const made = await client.createProof("v1~s", "proof", { allow: ["f"] });
+    expect(made.snapshot?.id).toBe("v1~p");
+    const allow = { definitions: ["f"] };
+    expect(sent.map((s) => s.body)).toEqual([
+      { code: "proof", key: KEY, replaces: { snapshot_id: "v1~s", allow } },
+      { code: "proof", key: KEY, replaces: { snapshot_id: "v1~h", allow } },
+    ]);
+    const keys = sent.map((s) => (s.body as { key: string }).key);
+    expect(keys[1]).toBe(keys[0]);
+
+    // Two heads, or a fork: the caller chooses.
+    const two = recording(() => json({ check: {}, refused: "conflict", heads: ["v1~a", "v1~b"] }));
+    expect((await two.client.createProof("v1~s", "proof")).heads).toEqual(["v1~a", "v1~b"]);
+    expect(two.sent).toHaveLength(1);
+    const fork = recording(() => json({ check: {}, refused: "conflict", heads: ["v1~a"] }));
+    await fork.client.createProof("v1~s", "proof", { fork: true });
+    expect(fork.sent).toHaveLength(1);
+  });
+
   it("names the run a create starts", async () => {
     const { client, sent } = recording(() => json({ check: { ok: true } }));
     await client.createSnapshot("x", { name: "proj.lemma", holes: ["f"] });

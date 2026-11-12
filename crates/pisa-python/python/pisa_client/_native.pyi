@@ -790,6 +790,70 @@ class Client:
         name: str | None = None,
     ) -> Job:
         """Like `create_snapshot`, as a job."""
+    def create_spec(
+        self,
+        code: str,
+        *,
+        holes: list[str] | None = None,
+        name: str | None = None,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> CreateSnapshotResponse:
+        """Keeps a spec: code with `sorry`s to prove, whose `holes`, the
+        definitions it leaves open, its proofs may fill. `name` names the
+        run it starts."""
+    def create_proof(
+        self,
+        replaces_id: str,
+        code: str,
+        *,
+        allow: list[str] | None = None,
+        fork: bool = False,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> CreateSnapshotResponse:
+        """Keeps `code` as a proof that replaces snapshot `replaces_id`, a
+        spec or a head of its run, keeping its statements. When that is
+        replaced already, the answer is refused as a "conflict" naming the
+        run's `heads`; with one head, the same code is sent again replacing
+        it, up to 3 times, as code that imports runs by name resolves
+        against the heads at each create; with `fork`, it starts a branch and
+        follows nothing. `allow` names the definitions it may change besides
+        the spec's holes. Returns the last answer: kept, or refused, with
+        `refused` saying what to do next."""
+    def amend_spec(
+        self,
+        spec_id: str,
+        reason: str,
+        code: str,
+        *,
+        holes: list[str] | None = None,
+        name: str | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> CreateSnapshotResponse:
+        """Keeps `code` as a spec that amends spec `spec_id`, for `reason`:
+        it supersedes it, and the amended spec's run takes no more proofs
+        (carry them over with `resubmit_snapshots`). `holes` None keeps the
+        amended spec's, and [] leaves none."""
+    def refute(
+        self,
+        spec_id: str,
+        target: str,
+        code: str,
+        *,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> CreateSnapshotResponse:
+        """Keeps `code` as the refutation of `target`, a theorem of spec
+        `spec_id`: code that builds on the spec and proves the negation of
+        the target's statement."""
     def get_snapshot(
         self, id: str, *, detail: list[Literal["declarations"]] = []
     ) -> SnapshotDetail:
@@ -1239,6 +1303,70 @@ class AsyncClient:
         name: str | None = None,
     ) -> Future[Job]:
         """Like `create_snapshot`, as a job."""
+    def create_spec(
+        self,
+        code: str,
+        *,
+        holes: list[str] | None = None,
+        name: str | None = None,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> Future[CreateSnapshotResponse]:
+        """Keeps a spec: code with `sorry`s to prove, whose `holes`, the
+        definitions it leaves open, its proofs may fill. `name` names the
+        run it starts."""
+    def create_proof(
+        self,
+        replaces_id: str,
+        code: str,
+        *,
+        allow: list[str] | None = None,
+        fork: bool = False,
+        verify: bool | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> Future[CreateSnapshotResponse]:
+        """Keeps `code` as a proof that replaces snapshot `replaces_id`, a
+        spec or a head of its run, keeping its statements. When that is
+        replaced already, the answer is refused as a "conflict" naming the
+        run's `heads`; with one head, the same code is sent again replacing
+        it, up to 3 times, as code that imports runs by name resolves
+        against the heads at each create; with `fork`, it starts a branch and
+        follows nothing. `allow` names the definitions it may change besides
+        the spec's holes. Returns the last answer: kept, or refused, with
+        `refused` saying what to do next."""
+    def amend_spec(
+        self,
+        spec_id: str,
+        reason: str,
+        code: str,
+        *,
+        holes: list[str] | None = None,
+        name: str | None = None,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> Future[CreateSnapshotResponse]:
+        """Keeps `code` as a spec that amends spec `spec_id`, for `reason`:
+        it supersedes it, and the amended spec's run takes no more proofs
+        (carry them over with `resubmit_snapshots`). `holes` None keeps the
+        amended spec's, and [] leaves none."""
+    def refute(
+        self,
+        spec_id: str,
+        target: str,
+        code: str,
+        *,
+        labels: dict[str, str] | None = None,
+        key: str | None = None,
+        detail: list[Literal["declarations"]] = [],
+    ) -> Future[CreateSnapshotResponse]:
+        """Keeps `code` as the refutation of `target`, a theorem of spec
+        `spec_id`: code that builds on the spec and proves the negation of
+        the target's statement."""
     def get_snapshot(
         self, id: str, *, detail: list[Literal["declarations"]] = []
     ) -> Future[SnapshotDetail]:
