@@ -88,6 +88,7 @@ export type {
   RebuildItem,
   RebuildNotDeleted,
   RebuildReplaced,
+  RebuildSuperseded,
   RebuildSkipped,
   RebuildSnapshotsRequest,
   RebuildSnapshotsResponse,

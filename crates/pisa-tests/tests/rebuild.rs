@@ -1036,6 +1036,49 @@ async fn a_run_that_leaves_the_labels_is_reported() {
     assert!(r.get("replaced").is_none(), "{r}");
 }
 
+/// A head of a run whose spec was amended takes no copy: that run takes no
+/// more, and the rebuild goes on without it, and says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rebuild_passes_over_a_run_whose_spec_was_amended() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let b = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
+    )
+    .await;
+    let labels = json!({"p": "1"});
+    let s = create(
+        &c,
+        json!({"code": on(&b, "theorem s : 2 = 2 := sorry"), "labels": labels}),
+    )
+    .await;
+    let h = create(
+        &c,
+        json!({"code": on(&b, "theorem s : 2 = 2 := rfl"), "labels": labels,
+               "replaces": {"snapshot_id": entry(&s)}}),
+    )
+    .await;
+    let s2 = create(
+        &c,
+        json!({"code": on(&b, "theorem s : 2 = 2 := sorry\ntheorem z : 3 = 3 := sorry"),
+               "labels": labels, "amends": {"snapshot_id": entry(&s), "reason": "z too"}}),
+    )
+    .await;
+    let b2 = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
+    )
+    .await;
+    let superseded = json!([{"snapshot_id": entry(&h), "by": entry(&s2)}]);
+    let r = rebuild(&c, &b, &b2, json!({"dry_run": true})).await;
+    assert_eq!(r["superseded"], superseded, "{r}");
+    assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&s2))], "{r}");
+    let r = rebuild(&c, &b, &b2, json!({})).await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["superseded"], superseded, "{r}");
+    assert_eq!(new_entries(&r).len(), 1, "{r}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn retire_keeps_from() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;

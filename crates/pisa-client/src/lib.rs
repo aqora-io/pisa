@@ -64,10 +64,10 @@ pub use pisa_protocol::api::{
     LeftOutReason, LinePos, ListAcceptancesResponse, ListDependentsResponse, ListSnapshotsResponse,
     Message, NameRunRequest, NamedRun, PairError, PairErrorKind, Pos, ProbeAt, ProbeResult,
     ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced, RebuildSkipped,
-    RebuildSnapshotsResponse, Refutation, Refutes, Replacement, Replaces, ResubmitItem,
-    ResubmitSnapshotsResponse, ReviewDeclaration, ReviewOrigin, RunImport, Session, Severity,
-    Snapshot, SnapshotDetail, Sorry, State, Superseded, TacticInfo, TermInfo, VerifyFailure,
-    VerifySnapshotResponse,
+    RebuildSnapshotsResponse, RebuildSuperseded, Refutation, Refutes, Replacement, Replaces,
+    ResubmitItem, ResubmitSnapshotsResponse, ReviewDeclaration, ReviewOrigin, RunImport, Session,
+    Severity, Snapshot, SnapshotDetail, Sorry, State, Superseded, TacticInfo, TermInfo,
+    VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Hit, Query, QueryResult, Resolution, SearchHealth,

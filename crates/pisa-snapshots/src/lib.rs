@@ -14,8 +14,8 @@ use pisa_protocol::api::{
     Allow, Amendment, AuditAssumption, AuditComparison, AuditFork, AuditLink,
     AuditSnapshotsResponse, AuditTarget, AuditUnproved, Declaration, Error, ErrorKind, Export,
     ListDependentsResponse, ListSnapshotsResponse, NamedRun, RebuildItem, RebuildReplaced,
-    RebuildSnapshotsResponse, Refutation, Replacement, Replaces, RunImport, Snapshot,
-    SnapshotDetail, SnapshotId, Superseded,
+    RebuildSnapshotsResponse, RebuildSuperseded, Refutation, Replacement, Replaces, RunImport,
+    Snapshot, SnapshotDetail, SnapshotId, Superseded,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::labels::{MAX_LABELS, MAX_LIMIT, check_labels, is_cursor, snapshot_id_error};

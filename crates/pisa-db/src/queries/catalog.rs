@@ -527,6 +527,21 @@ async fn add(
                 "the amended snapshot was deleted while this one was being built".to_string(),
             )));
         }
+        // An amendment goes with the spec that makes it, so a record here is
+        // one of a spec that is still there.
+        let amended: bool = diesel::select(exists(
+            amendments::table
+                .filter(amendments::version.eq(v))
+                .filter(amendments::amends.eq(&a.amends)),
+        ))
+        .get_result(conn)
+        .await?;
+        if amended {
+            return Err(Fail::Api(Error::new(
+                ErrorKind::Conflict,
+                "the spec was amended by another while this amendment was being built".to_string(),
+            )));
+        }
         diesel::insert_into(amendments::table)
             .values((
                 amendments::version.eq(v),

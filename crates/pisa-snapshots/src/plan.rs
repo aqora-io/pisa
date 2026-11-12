@@ -184,6 +184,7 @@ impl Reader {
         let has_labels = |e: &EntryMeta| job.labels.iter().all(|(k, v)| e.labels.get(k) == Some(v));
         let mut matching: HashMap<String, Vec<(String, EntryMeta)>> = HashMap::new();
         let mut replaced: Vec<RebuildReplaced> = Vec::new();
+        let mut superseded: Vec<RebuildSuperseded> = Vec::new();
         let on = self.catalog.entries_on(&modules, &filter).await?;
         let on_ids: Vec<String> = on.iter().map(|(e, _)| e.clone()).collect();
         let mut replacers_of = self.catalog.replacers_among(&on_ids).await?;
@@ -194,6 +195,16 @@ impl Reader {
             let key = format!("rebuild:{old}:{new}:{e}");
             let replacers = replacers_of.remove(&e).unwrap_or_default();
             if replacers.iter().all(|(_, r)| r.key.as_ref() == Some(&key)) {
+                // A head of a run whose spec was amended takes no copy: that
+                // run takes no more, and goes on from the current spec.
+                let root = self.run_root(&e).await?;
+                if let Some(by) = self.superseding(&root).await? {
+                    superseded.push(RebuildSuperseded {
+                        snapshot_id: self.id(&e),
+                        by: self.id(&by),
+                    });
+                    continue;
+                }
                 matching
                     .entry(entry_meta.module.clone())
                     .or_default()
@@ -405,6 +416,7 @@ impl Reader {
             changed_definitions,
             plan: planned.into_iter().map(|p| p.item).collect(),
             replaced,
+            superseded,
             ..Default::default()
         })
     }

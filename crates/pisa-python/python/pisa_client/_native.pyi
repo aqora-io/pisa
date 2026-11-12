@@ -506,12 +506,19 @@ class RebuildReplaced(TypedDict):
     snapshot_id: str
     replaced_by: list[str]
 
+class RebuildSuperseded(TypedDict):
+    """A head a rebuild left out, as its run's spec was amended: `by` is the
+    spec now current."""
+    snapshot_id: str
+    by: str
+
 class RebuildSnapshotsResponse(TypedDict):
     ok: bool
     changes: list[str]
     changed_definitions: NotRequired[list[str]]
     plan: list[RebuildItem]
     replaced: NotRequired[list[RebuildReplaced]]
+    superseded: NotRequired[list[RebuildSuperseded]]
     created: NotRequired[list[RebuildCreated]]
     failed: NotRequired[list[RebuildFailed]]
     skipped: NotRequired[list[RebuildSkipped]]

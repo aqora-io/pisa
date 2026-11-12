@@ -209,6 +209,11 @@ To the release that checks old modules for clashing imports:
   documents and sessions refuse such a header too.
 - A re-check with `again` that the kernel rejects clears `verified` on the
   module and on what builds on it.
+- A spec is amended once: a second amendment of a spec is a `conflict`.
+  Specs amended more than once before keep their amendments; the newest is
+  current.
+- A rebuild leaves the heads of a run whose spec was amended out, in
+  `superseded`, rather than failing on them.
 
 To the release that keeps requests to their scope and runs to their names:
 - The first process of this release migrates the catalog: `labels` on
@@ -366,7 +371,7 @@ pnpm -C web generate
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created, run?}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `source?`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
-| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
+| `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, superseded?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/settle` | `{against, allow?, dry_run?, verify?, timeout?}` → as `POST /snapshots/rebuild`; async with `Prefer: respond-async`; see [Settling a run](#settling) |
 | `POST /snapshots/resubmit` | `{from, to, dry_run?, labels?, verify?, timeout?}` → `{ok, items: [{snapshot_id, module, key, passes, reasons?, changes?, replacement?, new_snapshot_id?, check?}]}`; async with `Prefer: respond-async`; see [Amending a spec](#amending) |
 | `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?, contradicted?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added, holes?: {before, after}}], superseded?: [{spec, by}], refutations?: [{snapshot_id, spec, target, theorem, gone?}], unsettled?: [{head, swaps: [{snapshot_id, head}], blockers?}]}`, each target with `linked_status?` and `through?: [{name, snapshot_id, head}]`; see [Statuses](#statuses), [Auditing a run](#spec-audit) and [Through links](#through-links) |
@@ -1332,11 +1337,13 @@ reason}`, the spec it amends and why (1 to 4,096 characters):
   (`holes: {before, after}`) when they differ. The response's `amendment` has it, and an
   audit against either spec lists it in `amendments`. Deleting the new spec
   deletes the record; deleting the amended one keeps it.
-- **It supersedes the amended spec.** The current spec is the newest
-  amendment, followed through the amendments made of it. An audit against an
-  amended spec says so in `superseded` and isn't `clean`, and a create that
-  replaces into its run, a fork included, is a `conflict` whose message names
-  the current spec and whose `heads` are that spec's run's heads.
+- **It supersedes the amended spec.** The current spec is the amendment,
+  followed through the amendments made of it. An audit against an amended
+  spec says so in `superseded` and isn't `clean`, and a create that replaces
+  into its run, a fork included, is a `conflict` whose message names the
+  current spec and whose `heads` are that spec's run's heads.
+- **Once.** A spec is amended once: a second amendment of it is a `conflict`
+  that names the current spec, which is the one to amend.
 - **Carrying the run over.** `POST /snapshots/resubmit {from, to}`, with
   `to` a spec that amends `from`, compares each head of `from`'s run with
   `to`, as an audit against `to` would, allowing `to`'s holes to change. A
@@ -1429,6 +1436,9 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   runs and runs alike, `replaced` lists it as `{snapshot_id, replaced_by}`,
   with those replacers. Rebuild that run with its heads' labels. It doesn't
   change `ok`.
+- **Runs whose spec was amended.** A head of such a run isn't copied either,
+  as the run takes no more snapshots: `superseded` lists it as
+  `{snapshot_id, by}`, with the spec now current. It doesn't change `ok`.
 - **Levels.** An item's `level` is the wave its create runs in: one more than
   the highest among the items whose modules it imports, so 1 for one that
   imports only `from`'s module.

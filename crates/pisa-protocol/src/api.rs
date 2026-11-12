@@ -1405,6 +1405,10 @@ pub struct RebuildSnapshotsResponse {
     /// their heads' labels follows. It doesn't change `ok`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replaced: Vec<RebuildReplaced>,
+    /// The heads left out because their run's spec was amended, each with
+    /// the spec now current. They don't change `ok`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded: Vec<RebuildSuperseded>,
     /// For a run, the items created, in plan order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<RebuildCreated>,
@@ -1423,6 +1427,14 @@ pub struct RebuildSnapshotsResponse {
     /// With `retire`, the ids of the old snapshots deleted, top down.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired: Vec<String>,
+}
+
+/// A head left out of a rebuild because its run's spec was amended: the run
+/// takes no more snapshots, and goes on from `by`, the spec now current.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RebuildSuperseded {
+    pub snapshot_id: String,
+    pub by: String,
 }
 
 /// A labelled snapshot left out of a rebuild because one without every label

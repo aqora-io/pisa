@@ -294,6 +294,27 @@ impl Snapshots {
                 };
                 match self.reader.replacing(&amended).await {
                     Ok(mut amended) => {
+                        // A spec is amended once: the amendment is the spec
+                        // now, and what comes next amends that.
+                        match self.reader.superseding(&amended.entry).await {
+                            Ok(None) => {}
+                            Ok(Some(current)) => {
+                                response.check.error = Some(Error::new(
+                                    ErrorKind::Conflict,
+                                    format!(
+                                        "{} is amended already; the spec now current is {}: \
+                                         amend that one",
+                                        a.snapshot_id,
+                                        self.id(&current)
+                                    ),
+                                ));
+                                return response;
+                            }
+                            Err(e) => {
+                                response.check.error = Some(e);
+                                return response;
+                            }
+                        }
                         let holes = std::mem::take(&mut amended.holes);
                         Some(Amending {
                             amended,

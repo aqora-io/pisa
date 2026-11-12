@@ -150,17 +150,16 @@ async fn a_run_hears_of_its_refutations_and_keeps_them_through_an_amendment() {
 async fn an_amendment_that_changes_what_the_target_uses_leaves_its_refutation() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = "import Foo\n\ndef cost : Nat := 7\ntheorem bound : cost ≤ 5 := sorry";
-    let spec_r = create(&c, json!({"code": spec})).await;
-    let code = on(&spec_r, "theorem r : ¬ (cost ≤ 5) := by decide");
-    let body = json!({"code": code, "refutes": refutes(&id(&spec_r), "bound")});
-    create(&c, body).await;
-    let amends = |code: &str, holes: Value| {
-        let amends = json!({"snapshot_id": id(&spec_r), "reason": "cost was wrong"});
-        json!({"code": code, "amends": amends, "holes": holes})
-    };
     let cheaper = "import Foo\n\ndef cost : Nat := 3\ntheorem bound : cost ≤ 5 := sorry";
-    let holed = "import Foo\n\ndef cost : Nat := sorry\ntheorem bound : cost ≤ 5 := sorry";
-    for body in [amends(cheaper, Value::Null), amends(holed, json!(["cost"]))] {
+    // The same statement, its definition now a hole.
+    for (code, holes) in [(cheaper, Value::Null), (spec, json!(["cost"]))] {
+        // A spec of its own each time, refuted, as a spec is amended once.
+        let spec_r = create(&c, json!({"code": spec})).await;
+        let refuting = on(&spec_r, "theorem r : ¬ (cost ≤ 5) := by decide");
+        let body = json!({"code": refuting, "refutes": refutes(&id(&spec_r), "bound")});
+        create(&c, body).await;
+        let amends = json!({"snapshot_id": id(&spec_r), "reason": "cost was wrong"});
+        let body = json!({"code": code, "amends": amends, "holes": holes});
         let amended = id(&create(&c, body).await);
         let audit = get(&c, &format!("/snapshots/audit?against={amended}")).await;
         assert!(audit.get("refutations").is_none(), "{audit}");

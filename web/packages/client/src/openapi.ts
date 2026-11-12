@@ -2222,6 +2222,19 @@ export interface components {
              *     failed or was skipped. Other branches go on.
              */
             skipped?: components["schemas"]["RebuildSkipped"][];
+            /**
+             * @description The heads left out because their run's spec was amended, each with
+             *     the spec now current. They don't change `ok`.
+             */
+            superseded?: components["schemas"]["RebuildSuperseded"][];
+        };
+        /**
+         * @description A head left out of a rebuild because its run's spec was amended: the run
+         *     takes no more snapshots, and goes on from `by`, the spec now current.
+         */
+        RebuildSuperseded: {
+            by: string;
+            snapshot_id: string;
         };
         /** @description A snapshot's refutation of a spec's target, as its create checked it. */
         Refutation: {
@@ -2826,6 +2839,7 @@ export type RebuildReplaced = components['schemas']['RebuildReplaced'];
 export type RebuildSkipped = components['schemas']['RebuildSkipped'];
 export type RebuildSnapshotsRequest = components['schemas']['RebuildSnapshotsRequest'];
 export type RebuildSnapshotsResponse = components['schemas']['RebuildSnapshotsResponse'];
+export type RebuildSuperseded = components['schemas']['RebuildSuperseded'];
 export type Refutation = components['schemas']['Refutation'];
 export type Refutes = components['schemas']['Refutes'];
 export type Replacement = components['schemas']['Replacement'];

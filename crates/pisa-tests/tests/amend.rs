@@ -78,24 +78,34 @@ async fn an_amendment_records_what_changed_what_it_adds_and_why() {
         (&json!(["cost"]), &json!(true))
     );
     assert!(s.get("replaces").is_none(), "{r}");
+    // A spec is amended once: a second amendment names the current one.
+    let twice = create(&c, json!({"code": SPEC, "amends": amends(&old, "again")})).await;
+    assert!(twice.get("snapshot").is_none(), "{twice}");
+    assert_eq!(twice["check"]["error"]["kind"], "conflict", "{twice}");
+    let message = twice["check"]["error"]["message"].as_str().unwrap();
+    assert!(message.contains(&new), "{message}");
     // A key replay answers it again, and so does the same code, kept.
-    let keyed = json!({"key": "amend-1", "code": AMENDED, "amends": amends(&old, "again")});
+    let keyed = json!({"key": "amend-1", "code": SPEC, "amends": amends(&new, "again")});
     let first = create(&c, keyed.clone()).await;
     let again = create(&c, keyed).await;
     assert_eq!(again["amendment"], first["amendment"]);
     assert_eq!(first["amendment"]["reason"], "again");
-    let same = create(&c, json!({"code": SPEC, "amends": amends(&old, "nothing")})).await;
+    let first = id(&first);
+    let same = create(
+        &c,
+        json!({"code": SPEC, "amends": amends(&first, "nothing")}),
+    )
+    .await;
     assert_eq!(
         (&same["amendment"]["changes"], &same["amendment"]["added"]),
         (&json!([]), &json!([])),
         "{same}"
     );
-    let first = id(&first);
     let same = id(&same);
 
     // The record goes with the spec that amends, and outlives the amended.
-    delete(&c, &first).await;
     delete(&c, &same).await;
+    delete(&c, &first).await;
     assert_eq!(amendments(&c).await, [bare(&new)]);
     delete(&c, &old).await;
     assert_eq!(amendments(&c).await, [bare(&new)]);
@@ -429,20 +439,23 @@ async fn an_amendment_keeps_the_holes_it_doesnt_change() {
     assert_eq!(r["snapshot"]["holes"], json!(["cost"]), "{r}");
     assert!(r["amendment"].get("holes").is_none(), "{r}");
     // Naming some replaces them, and the record has both.
+    let first = id(&r);
     let two = "import Foo\n\ndef cost : Nat := sorry\ndef rate : Nat := sorry\ntheorem t : cost = cost := sorry";
-    let body = json!({"code": two, "holes": ["cost", "rate"], "amends": amends(&old, "rate too")});
+    let body =
+        json!({"code": two, "holes": ["cost", "rate"], "amends": amends(&first, "rate too")});
     let r = create(&c, body).await;
     assert_eq!(r["snapshot"]["holes"], json!(["cost", "rate"]), "{r}");
     let changed = json!({"before": ["cost"], "after": ["cost", "rate"]});
     assert_eq!(r["amendment"]["holes"], changed, "{r}");
     // An empty list, with `amends` only, leaves none.
+    let second = id(&r);
     let fixed = "import Foo\n\ndef cost : Nat := 3\ntheorem t : cost = cost := sorry";
-    let body = json!({"code": fixed, "holes": [], "amends": amends(&old, "cost is 3")});
+    let body = json!({"code": fixed, "holes": [], "amends": amends(&second, "cost is 3")});
     let r = create(&c, body).await;
     assert!(r["snapshot"].get("holes").is_none(), "{r}");
     assert_eq!(
         r["amendment"]["holes"],
-        json!({"before": ["cost"], "after": []}),
+        json!({"before": ["cost", "rate"], "after": []}),
         "{r}"
     );
     let (status, r) = c
@@ -454,7 +467,7 @@ async fn an_amendment_keeps_the_holes_it_doesnt_change() {
         "{r}"
     );
     // An audit lists the record as the create answered it.
-    let audit = audit_against(&c, &old).await;
+    let audit = audit_against(&c, &first).await;
     let recorded: Vec<&Value> = audit["amendments"].as_array().unwrap().iter().collect();
     assert!(recorded.iter().any(|a| a["holes"] == changed), "{audit}");
 }

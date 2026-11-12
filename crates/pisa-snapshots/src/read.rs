@@ -296,7 +296,7 @@ impl Reader {
 
     /// The spec the run `entry` is on starts from: `entry`, or what its
     /// chain of replacements leads back to, which may be deleted since.
-    async fn run_root(&self, entry: &str) -> Result<String, Error> {
+    pub(crate) async fn run_root(&self, entry: &str) -> Result<String, Error> {
         let mut at = entry.to_string();
         // Links point at older entries, so the chain ends.
         while let Some(meta) = self.catalog.find_entry(&at).await? {

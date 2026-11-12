@@ -2639,12 +2639,35 @@
               "$ref": "#/components/schemas/RebuildSkipped"
             },
             "type": "array"
+          },
+          "superseded": {
+            "description": "The heads left out because their run's spec was amended, each with\nthe spec now current. They don't change `ok`.",
+            "items": {
+              "$ref": "#/components/schemas/RebuildSuperseded"
+            },
+            "type": "array"
           }
         },
         "required": [
           "ok",
           "changes",
           "plan"
+        ],
+        "type": "object"
+      },
+      "RebuildSuperseded": {
+        "description": "A head left out of a rebuild because its run's spec was amended: the run\ntakes no more snapshots, and goes on from `by`, the spec now current.",
+        "properties": {
+          "by": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "by"
         ],
         "type": "object"
       },
