@@ -37,6 +37,15 @@ async fn audit(c: &Cluster, specs: &[&Value]) -> Value {
     r
 }
 
+/// Why target `name` of `audit` reads `theorem` as recorded.
+fn unlinked(audit: &Value, name: &str, theorem: &str) -> String {
+    let unlinked = target(audit, name)["unlinked"].as_array().cloned();
+    let unlinked = unlinked.unwrap_or_else(|| panic!("{name} says nothing: {audit}"));
+    let found = unlinked.iter().find(|u| u["name"] == theorem);
+    let found = found.unwrap_or_else(|| panic!("no {theorem} for {name}: {audit}"));
+    found["reason"].as_str().unwrap().to_string()
+}
+
 fn target<'a>(audit: &'a Value, name: &str) -> &'a Value {
     let targets = audit["targets"].as_array().unwrap();
     targets
@@ -70,6 +79,8 @@ async fn a_theorem_holds_through_the_head_that_proves_its_lemma() {
     // Until the lemma is proved, the theorem is sorry, through links too.
     let before = audit(&c, &[&spec_l, &spec_t]).await;
     assert_eq!(target(&before, "top")["status"], "sorry", "{before}");
+    let why = unlinked(&before, "top", "lemma_l");
+    assert!(why.contains("nothing replaces"), "{why}");
     assert!(
         target(&before, "top").get("linked_status").is_none(),
         "{before}"
@@ -83,6 +94,7 @@ async fn a_theorem_holds_through_the_head_that_proves_its_lemma() {
     .await;
     let after = audit(&c, &[&spec_l, &spec_t]).await;
     let top = target(&after, "top");
+    assert!(top.get("unlinked").is_none(), "{after}");
     assert_eq!(
         (&top["status"], &top["linked_status"], &top["accepted"]),
         (&json!("sorry"), &json!("proved"), &json!(false)),
@@ -115,6 +127,8 @@ async fn what_a_lemma_cant_be_read_through_stays_as_recorded() {
         target(&forked, "top").get("linked_status").is_none(),
         "{forked}"
     );
+    let why = unlinked(&forked, "top", "lemma_l");
+    assert!(why.contains("more than one head"), "{why}");
 
     // A head that changes a definition of the lemma's module.
     let spec_l = create(
@@ -136,6 +150,8 @@ async fn what_a_lemma_cant_be_read_through_stays_as_recorded() {
         target(&changed, "top_m").get("linked_status").is_none(),
         "{changed}"
     );
+    let why = unlinked(&changed, "top_m", "lemma_m");
+    assert!(why.contains("rate"), "{why}");
 
     // An inheritor the kernel hasn't re-checked.
     let spec_l = create(
@@ -162,6 +178,8 @@ async fn what_a_lemma_cant_be_read_through_stays_as_recorded() {
         target(&unverified, "top_u").get("linked_status").is_none(),
         "{unverified}"
     );
+    let why = unlinked(&unverified, "top_u", "lemma_u");
+    assert!(why.contains("isn't verified"), "{why}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

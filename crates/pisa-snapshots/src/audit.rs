@@ -473,6 +473,7 @@ impl Reader {
                         accepted,
                         refuted_by: Vec::new(),
                         linked_status: None,
+                        unlinked: Vec::new(),
                         through: Vec::new(),
                         contradicted: false,
                     });

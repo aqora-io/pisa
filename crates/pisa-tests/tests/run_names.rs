@@ -70,8 +70,9 @@ async fn code_imports_a_run_by_name_and_follows_its_head() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = lemma(&c).await;
 
+    // The lemma is sorried, so the check isn't ok; the proof itself is done.
     let r = check(&c, USES).await;
-    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(r["declarations"][0]["own_status"], "proved", "{r}");
     assert_eq!(r["runs"], run("proj.lemma", &spec), "{r}");
     // The module hashes the code as resolved; the snapshot keeps both.
     let made = create(&c, json!({"code": USES})).await;
@@ -374,8 +375,8 @@ async fn an_async_check_answers_with_what_its_names_resolved_to() {
     let path = format!("/jobs/{}?wait=30", job["id"].as_str().unwrap());
     let r = get(&c, &path).await;
     assert_eq!(
-        (&r["ok"], &r["runs"]),
-        (&json!(true), &run("proj.lemma", &spec)),
+        (&r["declarations"][0]["own_status"], &r["runs"]),
+        (&json!("proved"), &run("proj.lemma", &spec)),
         "{r}"
     );
 }

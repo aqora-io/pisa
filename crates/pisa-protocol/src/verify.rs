@@ -81,6 +81,12 @@ pub struct Declaration {
     /// `sorry` through the run that proves the theorem.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherits: Vec<Inherited>,
+    /// What its own axioms make it, as `status` is from all of them: a
+    /// finished proof on a sorried theorem of another snapshot is `sorry`
+    /// and its own status `proved`. Present when it `inherits` something;
+    /// otherwise its status is its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub own_status: Option<ProofStatus>,
 }
 
 /// A theorem of another snapshot module that a declaration gets axioms
@@ -129,8 +135,11 @@ impl Serialize for Declaration {
         if full && let Some(own_axioms) = &self.own_axioms {
             m.serialize_entry("own_axioms", own_axioms)?;
         }
-        if full && !self.inherits.is_empty() {
+        if !self.inherits.is_empty() {
             m.serialize_entry("inherits", &self.inherits)?;
+        }
+        if let Some(own_status) = &self.own_status {
+            m.serialize_entry("own_status", own_status)?;
         }
         m.end()
     }
@@ -138,7 +147,8 @@ impl Serialize for Declaration {
 
 impl Declaration {
     /// The declaration as a response gives it unless asked for in full: its
-    /// name, kind and status, and the axioms it uses outside `allowed`.
+    /// name, kind and status, the axioms it uses outside `allowed`, and its
+    /// own status and what it inherits through.
     pub fn summarised(self, allowed: &[String]) -> Declaration {
         Declaration {
             name: self.name,
@@ -158,7 +168,8 @@ impl Declaration {
             parent: None,
             negates: None,
             own_axioms: None,
-            inherits: Vec::new(),
+            inherits: self.inherits,
+            own_status: self.own_status,
         }
     }
 }
@@ -254,6 +265,7 @@ impl ReportedDeclaration {
             negates: self.negates,
             own_axioms: self.own_axioms,
             inherits: self.inherits,
+            own_status: None,
         }
     }
 }
@@ -547,25 +559,31 @@ mod tests {
     }
 
     #[test]
-    fn own_axioms_and_inherits_are_written_in_full_only() {
+    fn a_summary_keeps_the_own_status_and_what_it_inherits() {
         let described: DescribedDeclaration = serde_json::from_value(serde_json::json!({
             "name": "t", "kind": "theorem", "axioms": ["sorryAx"], "assumes": [],
             "type": "T", "value": null, "type_refs": [], "value_refs": [],
             "own_axioms": [], "inherits": [{"name": "l", "module": "PisaSnap.sx"}]}))
         .unwrap();
-        let d = ReportedDeclaration::from(described).with_status(ProofStatus::Sorry);
+        let mut d = ReportedDeclaration::from(described).with_status(ProofStatus::Sorry);
+        d.own_status = Some(ProofStatus::Proved);
         let json = serde_json::to_value(&d).unwrap();
         assert_eq!(json["own_axioms"], serde_json::json!([]));
-        assert_eq!(
-            json["inherits"],
-            serde_json::json!([{"name": "l", "module": "PisaSnap.sx"}])
-        );
+        let inherits = serde_json::json!([{"name": "l", "module": "PisaSnap.sx"}]);
+        assert_eq!(json["inherits"], inherits);
+        assert_eq!(json["own_status"], "proved");
         assert_eq!(serde_json::from_value::<Declaration>(json).unwrap(), d);
+        // A summary keeps what tells its own status from what it inherits.
         let summary = serde_json::to_value(d.summarised(&[])).unwrap();
-        assert!(summary.get("own_axioms").is_none() && summary.get("inherits").is_none());
+        assert!(summary.get("own_axioms").is_none(), "{summary}");
+        assert_eq!(
+            (&summary["own_status"], &summary["inherits"]),
+            (&serde_json::json!("proved"), &inherits)
+        );
         // A record from before has neither.
         let json = serde_json::to_value(decl("t", "T", None)).unwrap();
         assert!(json.get("own_axioms").is_none() && json.get("inherits").is_none());
+        assert!(json.get("own_status").is_none());
     }
 
     #[test]

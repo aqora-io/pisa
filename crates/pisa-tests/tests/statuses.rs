@@ -156,3 +156,34 @@ async fn statuses_tell_assumptions_from_sorry_and_the_rest() {
     assert_eq!(audit["summary"]["unverified_modules"], 2);
     assert_eq!(audit["assumptions"][0]["verified"], true);
 }
+
+/// A proof on a sorried snapshot reads `sorry`, as its axioms do; its own
+/// status says whether its own proof is done, and `inherits` through what
+/// theorem the `sorry` comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_tells_a_declarations_own_status_from_what_it_inherits() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let skeleton = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 1 = 1 := sorry"}),
+    )
+    .await;
+    let code = on(&skeleton, "theorem u : 1 = 1 := t");
+    let inherits = json!([{"name": "t", "module": skeleton["snapshot"]["module"]}]);
+    let own = |u: &Value| {
+        (
+            u["status"].clone(),
+            u["own_status"].clone(),
+            u["inherits"].clone(),
+        )
+    };
+    let expected = (json!("sorry"), json!("proved"), inherits);
+    let (_, checked) = c.post("/check", json!({"code": code})).await;
+    assert_eq!(own(decl(&checked, "u")), expected, "{checked}");
+    let created = create(&c, json!({"code": code})).await;
+    assert_eq!(own(decl(&created["check"], "u")), expected, "{created}");
+    // Code on no snapshot has nothing to inherit.
+    let plain = json!({"code": "import Foo\n\ntheorem v : 1 = 1 := rfl"});
+    let (_, checked) = c.post("/check", plain).await;
+    assert!(decl(&checked, "v").get("own_status").is_none(), "{checked}");
+}

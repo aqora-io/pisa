@@ -1049,7 +1049,12 @@ async fn client_names_a_run_and_imports_it_by_name() {
 
     let code = "import PisaRun.cl.lemma\n\nneeds cl_lemma\ntheorem cl_t : 1 = 1 := cl_lemma";
     let checked = client.check(code).await.unwrap();
-    assert!(checked.ok, "{checked:?}");
+    // The lemma is sorried, so the check isn't ok; the proof itself is done.
+    assert_eq!(
+        checked.declarations[0].own_status,
+        Some(ProofStatus::Proved),
+        "{checked:?}"
+    );
     assert_eq!(checked.runs[0].module, spec.module);
     assert_eq!(checked.runs[0].snapshot_id, spec.id);
     let made = client.create_snapshot(code).await.unwrap();

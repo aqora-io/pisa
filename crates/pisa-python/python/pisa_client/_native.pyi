@@ -33,8 +33,9 @@ class Inherited(TypedDict):
     module: str
 
 class Declaration(TypedDict):
-    """Without `detail=["declarations"]`, only `name`, `kind`, `status`, and
-    the `axioms` outside the worker's allowed ones."""
+    """Without `detail=["declarations"]`, only `name`, `kind`, `status`, the
+    `axioms` outside the worker's allowed ones, and `inherits` and
+    `own_status` when it inherits through other snapshots' theorems."""
     name: str
     kind: str
     axioms: list[str]
@@ -52,6 +53,10 @@ class Declaration(TypedDict):
     own_axioms: NotRequired[list[str]]
     """The axioms it gets other than through `inherits`."""
     inherits: NotRequired[list[Inherited]]
+    own_status: NotRequired[ProofStatus]
+    """What its own axioms make it, when it inherits through `inherits`: a
+    finished proof on a sorried theorem is `sorry`, its own status
+    `proved`."""
 
 Change = Literal[
     "missing", "kind", "type", "value", "derived", "added_assumption", "assumption", "ambiguous"
@@ -299,6 +304,13 @@ class AuditTarget(TypedDict):
     # run's head, where that differs: it holds once the run is settled.
     linked_status: NotRequired[ProofStatus]
     through: NotRequired[list[AuditThrough]]
+    # Why each theorem it inherits through wasn't read through links.
+    unlinked: NotRequired[list[AuditUnlinked]]
+
+class AuditUnlinked(TypedDict):
+    name: str
+    module: NotRequired[str]
+    reason: str
 
 class AuditThrough(TypedDict):
     name: str

@@ -720,6 +720,13 @@
             },
             "type": "array"
           },
+          "unlinked": {
+            "description": "For a target that isn't `proved`, the theorems it inherits axioms\nthrough that aren't read through links, each with why.",
+            "items": {
+              "$ref": "#/components/schemas/AuditUnlinked"
+            },
+            "type": "array"
+          },
           "verified": {
             "description": "The head's module has passed the kernel re-check.",
             "type": "boolean"
@@ -752,6 +759,26 @@
           "name",
           "snapshot_id",
           "head"
+        ],
+        "type": "object"
+      },
+      "AuditUnlinked": {
+        "description": "A theorem a target inherits axioms through that isn't read through links,\nand why: it counts with the axioms recorded for it. For a head that can't\nsay what its target inherits, the target itself, with no module.",
+        "properties": {
+          "module": {
+            "description": "Its module, `PisaSnap.s…`.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "reason"
         ],
         "type": "object"
       },
@@ -1198,6 +1225,10 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "own_status": {
+            "$ref": "#/components/schemas/ProofStatus",
+            "description": "What its own axioms make it, as `status` is from all of them: a\nfinished proof on a sorried theorem of another snapshot is `sorry`\nand its own status `proved`. Present when it `inherits` something;\notherwise its status is its own."
           },
           "parent": {
             "description": "The inductive type it is made from, when it is one of the\ndeclarations Lean makes for one: a constructor, the recursor,\n`casesOn`, `noConfusion`, `injEq`, `sizeOf_spec`, a projection and\nthe like. A change to it is a change to that type.",

@@ -1064,6 +1064,11 @@ export interface components {
             status: components["schemas"]["ProofStatus"];
             /** @description The theorems read through links for `linked_status`. */
             through?: components["schemas"]["AuditThrough"][];
+            /**
+             * @description For a target that isn't `proved`, the theorems it inherits axioms
+             *     through that aren't read through links, each with why.
+             */
+            unlinked?: components["schemas"]["AuditUnlinked"][];
             /** @description The head's module has passed the kernel re-check. */
             verified: boolean;
         };
@@ -1075,6 +1080,17 @@ export interface components {
             head: string;
             name: string;
             snapshot_id: string;
+        };
+        /**
+         * @description A theorem a target inherits axioms through that isn't read through links,
+         *     and why: it counts with the axioms recorded for it. For a head that can't
+         *     say what its target inherits, the target itself, with no module.
+         */
+        AuditUnlinked: {
+            /** @description Its module, `PisaSnap.s…`. */
+            module?: string;
+            name: string;
+            reason: string;
         };
         AuditUnproved: {
             /** @description Its axioms outside the allowed list. */
@@ -1415,6 +1431,13 @@ export interface components {
              *     before it was recorded, and in a check's report.
              */
             own_axioms?: string[];
+            /**
+             * @description What its own axioms make it, as `status` is from all of them: a
+             *     finished proof on a sorried theorem of another snapshot is `sorry`
+             *     and its own status `proved`. Present when it `inherits` something;
+             *     otherwise its status is its own.
+             */
+            own_status?: components["schemas"]["ProofStatus"];
             /**
              * @description The inductive type it is made from, when it is one of the
              *     declarations Lean makes for one: a constructor, the recursor,
@@ -2774,6 +2797,7 @@ export type AuditSummary = components['schemas']['AuditSummary'];
 export type AuditSwap = components['schemas']['AuditSwap'];
 export type AuditTarget = components['schemas']['AuditTarget'];
 export type AuditThrough = components['schemas']['AuditThrough'];
+export type AuditUnlinked = components['schemas']['AuditUnlinked'];
 export type AuditUnproved = components['schemas']['AuditUnproved'];
 export type AuditUnsettled = components['schemas']['AuditUnsettled'];
 export type Change = components['schemas']['Change'];

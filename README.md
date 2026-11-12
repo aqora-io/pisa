@@ -960,6 +960,13 @@ A snapshot's `status`, on creates, listings and `GET /snapshots/{id}`, is the
 worst of its module's declarations', in that order, and its check is `ok` only
 if that is `proved`.
 
+A declaration on a snapshot gets axioms through the theorems of it that it
+uses: a finished proof of a lemma on a sorried skeleton is `sorry`. Checks
+and creates on snapshots list those theorems in `inherits` (`{name,
+module}`), and say in `own_status` what its own axioms make it: `proved` for
+that finished proof. An audit reads such a status through the run that
+proves the theorem (see [Through links](#through-links)).
+
 `GET /snapshots/audit?label=project:foo` says what the snapshots with the
 labels rest on, from their records, without running Lean:
 - `summary` counts their declarations by status, each module's once, without
@@ -1121,6 +1128,12 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
   claim; `accepted` and `clean` still rest on `status`, the records, until
   the run is [settled](#settling). Where a condition fails, or the lemmas
   justify each other, the lemma counts with the axioms its records name.
+  - **`unlinked`** says, for a target that isn't `proved`, why each lemma it
+    inherits through wasn't read so, `{name, module, reason}`: nothing
+    replaces its snapshot yet, its run forks, a module isn't verified, the
+    head states it differently or changes a definition that wasn't `sorry`,
+    or it is refuted. A head that isn't verified, or was described before
+    builds said what a declaration inherits, says so for itself.
   - **`unsettled`** lists the heads with such a target, each `{head, swaps,
     blockers?}`: `swaps` are the snapshots whose modules the head builds on,
     each with the head of its run that a settle builds on instead.
@@ -1529,7 +1542,8 @@ POST /snapshots/settle {"against": ["…~9c0e…", "…~5d1f…"], "dry_run": tr
   swap's head that is itself unsettled is copied first, and the heads that
   build on it build on its copy. Keys are `settle:<snapshot or module>:<new
   module>`, so sending the settle again replays what is done.
-- **Refused.** Nothing to settle is an empty plan, `ok: true`. A head with
+- **Refused.** Nothing to settle is an empty plan, `ok: true`; the audit's
+  `unlinked` says why a target that isn't `proved` has nothing to settle. A head with
   `blockers`, or swaps that would make a cycle, refuse the whole plan:
   `ok: false`, and `changes` says why, one line each.
 - **Running it.** As a rebuild runs, and answers, with `created`, `failed`

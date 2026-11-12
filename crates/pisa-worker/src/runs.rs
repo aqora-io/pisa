@@ -810,6 +810,7 @@ mod tests {
             negates: None,
             own_axioms: None,
             inherits: Vec::new(),
+            own_status: None,
         }
     }
 

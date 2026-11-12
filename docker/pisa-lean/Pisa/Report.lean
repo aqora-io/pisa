@@ -563,17 +563,24 @@ def describeAll (mod : Name) (names : Array Name) (fromKernel := false)
 
 /-- The same as `describeAll`, except that a declaration that can't be
 described, such as one Lean kept with a metavariable after an error, is
-given as its name and why, not described. -/
+given as its name and why, not described. On code that imports a snapshot
+module, each declaration has its own axioms and what it inherits, as a
+build's report has (see `Axioms.ownOf`); on other code all its axioms are
+its own, and it says nothing of them. -/
 def describeEach (mod : Name) (names : Array Name) : CoreM (Array Json × Array Json) := do
   let env ← getEnv
   let own := names.foldl (·.insert ·) ({} : NameSet)
+  let onSnapshot := env.header.moduleNames.any (`PisaSnap).isPrefixOf
+  let moduleOf (c : Name) : Option Name :=
+    (env.getModuleIdxFor? c).map fun i => env.header.moduleNames[i.toNat]!
+  let linked := if onSnapshot then Axioms.ownOf env mod moduleOf names else {}
   let mut out := #[]
   let mut failed := #[]
   for n in names do
     let some ci := env.find? n | continue
     if auxiliary n ci then continue
     try
-      out := out.push (← describe mod n ci (← collectAxioms n) own)
+      out := out.push (← describe mod n ci (← collectAxioms n) own (linked.find? n))
     catch e =>
       failed := failed.push (Json.mkObj [("name", toJson n), ("error", toJson (← e.toMessageData.toString))])
   return (out, failed)

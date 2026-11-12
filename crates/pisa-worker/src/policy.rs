@@ -7,7 +7,9 @@
 
 use pisa_protocol::header::import_parts;
 use pisa_protocol::repl::{CommandResponse, Message, Severity};
-use pisa_protocol::verify::{DescribedDeclaration, ProofStatus, ReportedDeclaration, Verification};
+use pisa_protocol::verify::{
+    Declaration, DescribedDeclaration, ProofStatus, ReportedDeclaration, Verification,
+};
 
 use crate::catalog::SnapshotDecl;
 
@@ -325,7 +327,14 @@ impl Policy {
                     .into_iter()
                     .map(|d| {
                         let status = self.status(&d);
-                        d.with_status(status)
+                        // Without what it inherits, its status is its own.
+                        let own = (d.own_axioms.as_ref())
+                            .filter(|_| !d.inherits.is_empty())
+                            .map(|own| ProofStatus::of(own, &d.assumes, &self.allowed_axioms));
+                        Declaration {
+                            own_status: own,
+                            ..d.with_status(status)
+                        }
                     })
                     .collect();
             }
@@ -863,6 +872,48 @@ mod tests {
         let v = p.judge_decls(false, Some(vec![decl(&["kunneth"], &["kunneth"])]));
         assert_eq!(v.declarations[0].status, ProofStatus::Conditional);
         assert!(!v.ok);
+    }
+
+    /// A declaration that inherits through another module has its own
+    /// status besides; one that inherits nothing has only its status.
+    #[test]
+    fn own_status_is_given_beside_what_a_declaration_inherits() {
+        use pisa_protocol::verify::Inherited;
+        let p = policy();
+        let decl = |own: &[&str], inherits: bool| ReportedDeclaration {
+            name: "t".into(),
+            axioms: vec!["sorryAx".into()],
+            own_axioms: Some(own.iter().map(|a| a.to_string()).collect()),
+            inherits: inherits
+                .then(|| Inherited {
+                    name: "l".into(),
+                    module: "PisaSnap.sx".into(),
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let v = p.judge_decls(
+            false,
+            Some(vec![
+                decl(&[], true),
+                decl(&["sorryAx"], true),
+                decl(&["sorryAx"], false),
+            ]),
+        );
+        let statuses: Vec<_> = v
+            .declarations
+            .iter()
+            .map(|d| (d.status, d.own_status))
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                (ProofStatus::Sorry, Some(ProofStatus::Proved)),
+                (ProofStatus::Sorry, Some(ProofStatus::Sorry)),
+                (ProofStatus::Sorry, None),
+            ]
+        );
     }
 
     #[test]

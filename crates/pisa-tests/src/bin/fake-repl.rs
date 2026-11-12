@@ -20,13 +20,17 @@
 //! the snapshots they import.
 //! The worker's axiom report (`run_cmd _root_.Pisa.reportNew`) lists each
 //! `theorem`, `def` and `axiom` seen since the imports (see
-//! `pisa_tests::declarations`). It reads the code as `pisa_tests::as_reported`
+//! `pisa_tests::declarations`), on a snapshot header with what each inherits
+//! (`pisa_tests::linked_declarations`). It reads the code as `pisa_tests::as_reported`
 //! gives it, so `-- reported-as: LINE` makes it show `LINE` in place of the
 //! next line, where the verifier sees the code.
 
 use std::io::{BufRead, Write};
 
-use pisa_tests::{as_reported, declarations, declares, imported_code, needs, unknown_identifier};
+use pisa_tests::{
+    as_reported, declarations, declares, imported_code, imports, linked_declarations, needs,
+    unknown_identifier,
+};
 use serde_json::{Value, json};
 
 struct State {
@@ -120,7 +124,14 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
     // since the imports declares.
     if cmd.starts_with("run_cmd _root_.Pisa.reportNew") {
         s.envs.push(prev.clone());
-        let decls = declarations(&as_reported(&prev.local));
+        // On a snapshot, as Lean's report does, with each declaration's own
+        // axioms and what it inherits.
+        let code = as_reported(&prev.local);
+        let on_snapshot = imports(&code).iter().any(|m| m.starts_with("PisaSnap."));
+        let decls = match on_snapshot {
+            true => linked_declarations(&code),
+            false => declarations(&code),
+        };
         // `-- report-fails: NAME` has the report fail to describe NAME.
         let fails: Vec<&str> = prev
             .local

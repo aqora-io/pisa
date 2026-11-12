@@ -568,7 +568,9 @@ def test_run_names(url):
     assert spec["run"] == "py.lemma", spec
     code = "import PisaRun.py.lemma\n\nneeds py_lemma\ntheorem py_t : 1 = 1 := py_lemma"
     checked = client.check(code)
-    assert checked["ok"] and checked["runs"] == [
+    # The lemma is sorried, so the check isn't ok; the proof itself is done.
+    assert checked["declarations"][0]["own_status"] == "proved", checked
+    assert checked["runs"] == [
         {"name": "py.lemma", "module": spec["module"], "snapshot_id": spec["id"]}], checked
     made = client.create_snapshot(code)
     assert made["runs"] == checked["runs"], made

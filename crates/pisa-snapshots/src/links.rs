@@ -13,7 +13,7 @@
 //! theorem counts with the axioms recorded for it.
 
 use pisa_db::catalog::ModuleRecord;
-use pisa_protocol::api::{AuditSwap, AuditTarget, AuditThrough, AuditUnsettled};
+use pisa_protocol::api::{AuditSwap, AuditTarget, AuditThrough, AuditUnlinked, AuditUnsettled};
 
 use super::*;
 
@@ -25,8 +25,9 @@ struct Resolution {
     head: String,
     head_module: String,
     /// The theorems whose statements the head's changes reach, and those
-    /// refuted on the entry, by [`normalised`] name: neither resolves.
-    unresolved: HashSet<String>,
+    /// refuted on the entry, by [`normalised`] name, with why: neither
+    /// resolves.
+    unresolved: HashMap<String, String>,
     /// The definitions the head changed: `sorry`-valued holes it filled.
     changed: Vec<String>,
 }
@@ -38,6 +39,8 @@ struct Effective {
     axioms: BTreeSet<String>,
     assumes: BTreeSet<String>,
     through: Vec<(AuditThrough, String)>,
+    /// The theorems it inherits through that weren't read through links.
+    unread: Vec<AuditUnlinked>,
     /// A cycle was cut below it, so it isn't kept for reuse.
     cut: bool,
 }
@@ -59,7 +62,26 @@ impl Effective {
                 self.through.push(t);
             }
         }
+        for u in other.unread {
+            if !self
+                .unread
+                .iter()
+                .any(|x| x.name == u.name && x.module == u.module)
+            {
+                self.unread.push(u);
+            }
+        }
         self.cut |= other.cut;
+    }
+
+    /// Not reading theorem `name` of `module` through links, for `reason`.
+    fn unread(mut self, name: &str, module: &str, reason: String) -> Effective {
+        self.unread.push(AuditUnlinked {
+            name: name.to_string(),
+            module: Some(module.to_string()),
+            reason,
+        });
+        self
     }
 }
 
@@ -68,7 +90,7 @@ impl Effective {
 struct Linker<'a> {
     reader: &'a Reader,
     records: &'a Records,
-    resolved: &'a HashMap<String, Option<Resolution>>,
+    resolved: &'a HashMap<String, Result<Resolution, String>>,
     done: HashMap<(String, String), Effective>,
     visiting: HashSet<(String, String)>,
 }
@@ -93,7 +115,12 @@ impl Linker<'_> {
         }
         let d = declared(self.records.held(m)?, name)?.clone();
         let Some(own) = &d.own_axioms else {
-            return Some(Effective::recorded(&d));
+            let why = format!(
+                "{} was described before what a declaration inherits was recorded: verify it \
+                 again",
+                snapshot::module(m)
+            );
+            return Some(Effective::recorded(&d).unread(name, &snapshot::module(m), why));
         };
         // Two proofs can't justify each other.
         if self.visiting.contains(&key) {
@@ -121,9 +148,12 @@ impl Linker<'_> {
     /// inherits through: read on the head of its run where it resolves, else
     /// in its own module.
     fn inherited(&mut self, module: &str, name: &str) -> Effective {
-        let worst = || Effective {
-            axioms: ["sorryAx".to_string()].into(),
-            ..Default::default()
+        let worst = || {
+            let e = Effective {
+                axioms: ["sorryAx".to_string()].into(),
+                ..Default::default()
+            };
+            e.unread(name, module, "its module's record is gone".into())
         };
         let Ok(Some(m)) = snapshot::parse_module(module) else {
             return worst();
@@ -139,21 +169,32 @@ impl Linker<'_> {
         if self.visiting.contains(&(m.clone(), c.name.clone())) {
             let mut e = Effective::recorded(&c);
             e.cut = true;
-            return e;
+            return e.unread(name, module, "two proofs can't justify each other".into());
         }
-        let resolution = self.resolved.get(&m).cloned().flatten();
-        let on_head = resolution.as_ref().and_then(|r| {
-            if r.unresolved.contains(normalised(&c.name).as_ref()) {
-                return None;
-            }
-            let head = declared(self.records.held(&r.head_module)?, &c.name)?;
-            (head.kind == "theorem" && head.type_hash == c.type_hash)
-                .then(|| (r.clone(), head.name.clone()))
-        });
+        let on_head = match self.resolved.get(&m) {
+            Some(Ok(r)) => match r.unresolved.get(normalised(&c.name).as_ref()) {
+                Some(why) => Err(why.clone()),
+                None => {
+                    let head = (self.records.held(&r.head_module))
+                        .and_then(|rec| declared(rec, &c.name))
+                        .filter(|head| head.kind == "theorem" && head.type_hash == c.type_hash);
+                    match head {
+                        Some(head) => Ok((r.clone(), head.name.clone())),
+                        None => Err(format!(
+                            "{} doesn't state it the same",
+                            self.reader.id(&r.head)
+                        )),
+                    }
+                }
+            },
+            Some(Err(why)) => Err(why.clone()),
+            None => Err("its run wasn't read".into()),
+        };
         match on_head {
-            Some((r, head_name)) => {
+            Ok((r, head_name)) => {
                 let Some(mut e) = self.effective(&r.head_module, &head_name) else {
-                    return Effective::recorded(&c);
+                    let why = format!("the record of {} is gone", self.reader.id(&r.head));
+                    return Effective::recorded(&c).unread(name, module, why);
                 };
                 let through = AuditThrough {
                     name: c.name.clone(),
@@ -163,9 +204,10 @@ impl Linker<'_> {
                 e.through.insert(0, (through, r.head_module.clone()));
                 e
             }
-            None => self
+            Err(why) => self
                 .effective(&m, &c.name)
-                .unwrap_or_else(|| Effective::recorded(&c)),
+                .unwrap_or_else(|| Effective::recorded(&c))
+                .unread(name, module, why),
         }
     }
 }
@@ -182,7 +224,7 @@ impl Reader {
         run: &Run,
         preferred: &HashSet<String>,
         records: &mut Records,
-    ) -> Result<Option<Resolution>, Error> {
+    ) -> Result<Result<Resolution, String>, Error> {
         let mut reached: Vec<(String, String, String)> = Vec::new();
         for (e, _) in entries.iter().filter(|(_, meta)| meta.module == m) {
             if run.replacers(e).is_empty() {
@@ -199,34 +241,59 @@ impl Reader {
         let modules = |r: &[(String, String, String)]| -> BTreeSet<String> {
             r.iter().map(|(_, _, hm)| hm.clone()).collect()
         };
-        if modules(&reached).len() > 1 {
-            reached.retain(|(e, _, _)| preferred.contains(e));
+        if reached.is_empty() {
+            return Ok(Err("nothing replaces its snapshot yet".into()));
         }
-        if modules(&reached).len() != 1 {
-            return Ok(None);
+        let forked = |r: &[(String, String, String)]| {
+            let heads: BTreeSet<String> = r.iter().map(|(_, h, _)| self.id(h)).collect();
+            let heads: Vec<String> = heads.into_iter().collect();
+            format!("its run reaches more than one head: {}", heads.join(", "))
+        };
+        if modules(&reached).len() > 1 {
+            let all = forked(&reached);
+            reached.retain(|(e, _, _)| preferred.contains(e));
+            if modules(&reached).len() != 1 {
+                return Ok(Err(all));
+            }
         }
         let (entry, head, head_module) = reached.swap_remove(0);
         let m = m.to_string();
         records.load(&self.catalog, [&m, &head_module]).await?;
         let verified = |x: &str| records.held(x).is_some_and(|r| r.verified);
-        if !verified(&m) || !verified(&head_module) {
-            return Ok(None);
+        if !verified(&m) {
+            return Ok(Err(format!("{} isn't verified", self.id(&entry))));
+        }
+        if !verified(&head_module) {
+            return Ok(Err(format!("{} isn't verified", self.id(&head))));
         }
         let holes = run
             .entry(&entry)
             .map(|meta| meta.holes.clone())
             .unwrap_or_default();
-        let Some(Ok(replacement)) = self.rederive(&m, &head_module, &holes, records).await? else {
-            return Ok(None);
+        let replacement = match self.rederive(&m, &head_module, &holes, records).await? {
+            Some(Ok(replacement)) => replacement,
+            Some(Err(_)) => {
+                let why = format!("{} doesn't keep its module's statements", self.id(&head));
+                return Ok(Err(why));
+            }
+            None => return Ok(Err("a record on the way is gone or not verified".into())),
         };
         let Some(record) = records.held(&m) else {
-            return Ok(None);
+            return Ok(Err("its module's record is gone".into()));
         };
-        let sorried = |n: &String| {
+        let sorried = |n: &&String| {
             declared(record, n).is_some_and(|d| d.axioms.iter().any(|a| a == "sorryAx"))
         };
-        if !replacement.changed_definitions.iter().all(sorried) {
-            return Ok(None);
+        let valued: Vec<&String> = (replacement.changed_definitions.iter())
+            .filter(|n| !sorried(n))
+            .collect();
+        if !valued.is_empty() {
+            let valued: Vec<&str> = valued.iter().map(|n| n.as_str()).collect();
+            return Ok(Err(format!(
+                "{} changes {}, whose value wasn't sorry",
+                self.id(&head),
+                valued.join(", ")
+            )));
         }
         let below: HashSet<String> = records
             .closure(&self.catalog, &m)
@@ -240,10 +307,15 @@ impl Reader {
             .into_iter()
             .collect();
         if !below.is_subset(&head_closure) {
-            return Ok(None);
+            let why = format!(
+                "{} doesn't build on all its module builds on",
+                self.id(&head)
+            );
+            return Ok(Err(why));
         }
-        let mut unresolved: HashSet<String> = (replacement.affected.iter())
-            .map(|n| normalised(n).into_owned())
+        let affected = format!("{}'s changes reach its statement", self.id(&head));
+        let mut unresolved: HashMap<String, String> = (replacement.affected.iter())
+            .map(|n| (normalised(n).into_owned(), affected.clone()))
             .collect();
         for (_, r) in self
             .catalog
@@ -251,10 +323,11 @@ impl Reader {
             .await?
         {
             if r.spec == entry {
-                unresolved.insert(normalised(&r.target).into_owned());
+                let why = format!("it is refuted on {}", self.id(&entry));
+                unresolved.insert(normalised(&r.target).into_owned(), why);
             }
         }
-        Ok(Some(Resolution {
+        Ok(Ok(Resolution {
             entry,
             head,
             head_module,
@@ -295,7 +368,7 @@ impl Reader {
         };
         let head_modules: Vec<String> = heads.iter().map(|(_, m)| m.clone()).collect();
         let mut frontier = inherits(records, &head_modules);
-        let mut resolved: HashMap<String, Option<Resolution>> = HashMap::new();
+        let mut resolved: HashMap<String, Result<Resolution, String>> = HashMap::new();
         let preferred: HashSet<String> = run.ids().cloned().collect();
         while !frontier.is_empty() {
             let ms: Vec<String> = frontier
@@ -315,15 +388,12 @@ impl Reader {
                     .resolve(m, &entries, &runs, &preferred, records)
                     .await?;
                 next.push(m.clone());
-                if let Some(r) = &r {
+                if let Ok(r) = &r {
                     next.push(r.head_module.clone());
                 }
                 resolved.insert(m.clone(), r);
             }
             frontier = inherits(records, &next);
-        }
-        if resolved.values().all(Option::is_none) {
-            return Ok(Vec::new());
         }
 
         let mut linker = Linker {
@@ -339,13 +409,41 @@ impl Reader {
             let Some(m) = module_of.get(&t.head) else {
                 continue;
             };
-            let Some(head) = linker.records.held(m).filter(|r| r.verified) else {
+            if t.status == ProofStatus::Proved {
+                continue;
+            }
+            let Some(head) = linker.records.held(m) else {
                 continue;
             };
             let Some(d) = declared(head, &t.name) else {
                 continue;
             };
-            if d.own_axioms.is_none() || d.inherits.is_empty() {
+            // A head that can't be read says why, for each theorem it
+            // inherits through, or, from before that was recorded, for itself.
+            if !head.verified {
+                let why = format!("{} isn't verified", t.head);
+                t.unlinked = (d.inherits.iter())
+                    .map(|i| AuditUnlinked {
+                        name: i.name.clone(),
+                        module: Some(i.module.clone()),
+                        reason: why.clone(),
+                    })
+                    .collect();
+                continue;
+            }
+            if d.own_axioms.is_none() {
+                t.unlinked = vec![AuditUnlinked {
+                    name: d.name.clone(),
+                    module: None,
+                    reason: format!(
+                        "{} was described before what a declaration inherits was recorded: \
+                         verify it again",
+                        t.head
+                    ),
+                }];
+                continue;
+            }
+            if d.inherits.is_empty() {
                 continue;
             }
             let name = d.name.clone();
@@ -355,6 +453,9 @@ impl Reader {
             let axioms: Vec<String> = e.axioms.into_iter().collect();
             let assumes: Vec<String> = e.assumes.into_iter().collect();
             let status = ProofStatus::of(&axioms, &assumes, &self.allowed_axioms);
+            if status != ProofStatus::Proved {
+                t.unlinked = e.unread;
+            }
             if status == t.status {
                 continue;
             }
@@ -403,7 +504,7 @@ impl Reader {
         &self,
         m: &str,
         swaps: &[AuditSwap],
-        resolved: &HashMap<String, Option<Resolution>>,
+        resolved: &HashMap<String, Result<Resolution, String>>,
         spec_modules: &[&String],
         heads: &[(String, String)],
         allow: &[String],
@@ -411,7 +512,7 @@ impl Reader {
     ) -> Result<Vec<String>, Error> {
         let mut blockers = Vec::new();
         let used: Vec<(&String, &Resolution)> = (resolved.iter())
-            .filter_map(|(old, r)| r.as_ref().map(|r| (old, r)))
+            .filter_map(|(old, r)| r.as_ref().ok().map(|r| (old, r)))
             .filter(|(_, r)| swaps.iter().any(|s| s.head == self.id(&r.head)))
             .collect();
         let audited: HashSet<&String> = heads.iter().map(|(e, _)| e).collect();
@@ -420,7 +521,7 @@ impl Reader {
                 .flat_map(|rec| &rec.result.declarations)
                 .flat_map(|d| &d.inherits)
                 .filter_map(|i| snapshot::parse_module(&i.module).ok().flatten())
-                .any(|x| resolved.get(&x).is_some_and(Option::is_some));
+                .any(|x| resolved.get(&x).is_some_and(Result::is_ok));
             if nested && !audited.contains(&r.head) {
                 blockers.push(format!(
                     "{} builds on snapshots that need settling too: add the spec of its run, \

@@ -164,7 +164,15 @@ impl Built {
 /// The verdict on `body`, checked as `/check` checks it: under the header the
 /// worker gives it, then the axiom report on what it declares.
 fn checked(body: &str) -> pisa_protocol::verify::Verification {
-    let snapshots = Snapshots::new();
+    checked_on(&Snapshots::new(), "", body)
+}
+
+/// [`checked`] on `header`, which may import `snapshots`' modules.
+fn checked_on(
+    snapshots: &Snapshots,
+    header: &str,
+    body: &str,
+) -> pisa_protocol::verify::Verification {
     let file = snapshots.root.path().join("checked.lean");
     std::fs::write(
         &file,
@@ -173,7 +181,7 @@ fn checked(body: &str) -> pisa_protocol::verify::Verification {
 {body}
 {AXIOM_REPORT}
 ",
-            header_command("")
+            header_command(header)
         ),
     )
     .unwrap();
@@ -1265,6 +1273,50 @@ fn linked(decls: &serde_json::Value) -> Linked {
             (name, (strings(&d["own_axioms"]), inherits.collect()))
         })
         .collect()
+}
+
+/// A check on a snapshot says what each declaration inherits through its
+/// theorems, and what its own axioms make it; one on no snapshot has nothing
+/// to inherit and says nothing of it.
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_check_on_a_snapshot_tells_its_own_status() {
+    use pisa_protocol::verify::{Inherited, ProofStatus};
+    let snapshots = Snapshots::new();
+    let lemmas = snapshots.build("theorem lemma_l : 1 + 1 = 2 := sorry\n");
+    let module = snapshot::module(&lemmas.id);
+    let body = "theorem by_lemma : 1 + 1 = 2 := lemma_l\n\ntheorem own : 1 = 1 := sorry\n\n\
+                theorem both : 1 + 1 = 2 := by\n  have := lemma_l\n  sorry\n";
+    let v = checked_on(&snapshots, &format!("import {module}"), body);
+    let find = |name: &str| v.declarations.iter().find(|d| d.name == name).unwrap();
+    let by_lemma = find("by_lemma");
+    assert_eq!(
+        (by_lemma.status, by_lemma.own_status),
+        (ProofStatus::Sorry, Some(ProofStatus::Proved)),
+        "{by_lemma:?}"
+    );
+    let inherited = Inherited {
+        name: "lemma_l".into(),
+        module: module.clone(),
+    };
+    assert_eq!(by_lemma.inherits, std::slice::from_ref(&inherited));
+    // Its status is its own when it inherits nothing.
+    let own = find("own");
+    assert_eq!(
+        (own.status, own.own_status),
+        (ProofStatus::Sorry, None),
+        "{own:?}"
+    );
+    assert!(own.inherits.is_empty(), "{own:?}");
+    let both = find("both");
+    assert_eq!(
+        (both.status, both.own_status),
+        (ProofStatus::Sorry, Some(ProofStatus::Sorry)),
+        "{both:?}"
+    );
+    assert_eq!(both.inherits, [inherited]);
+    let plain = checked("theorem p : 1 = 1 := rfl\n");
+    assert_eq!(plain.declarations[0].own_status, None, "{plain:?}");
 }
 
 #[test]

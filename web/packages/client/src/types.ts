@@ -28,6 +28,7 @@ export type {
   AuditTarget,
   AuditThrough,
   AuditUnproved,
+  AuditUnlinked,
   AuditUnsettled,
   Change,
   CheckBatchItem,

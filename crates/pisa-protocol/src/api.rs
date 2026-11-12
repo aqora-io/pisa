@@ -354,8 +354,10 @@ pub enum Detail {
     /// code, which can take several times as long as the check.
     Terms,
     /// Every field of each of [`CheckResult::declarations`]. Without it a
-    /// declaration has its `name`, `kind` and `status`, and only the axioms
-    /// it uses outside the worker's allowed ones.
+    /// declaration has its `name`, `kind` and `status`, only the axioms it
+    /// uses outside the worker's allowed ones, and, when it inherits axioms
+    /// through theorems of other snapshots, those (`inherits`) and its
+    /// `own_status`.
     Declarations,
 }
 
@@ -1974,6 +1976,10 @@ pub struct AuditTarget {
     /// The theorems read through links for `linked_status`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub through: Vec<AuditThrough>,
+    /// For a target that isn't `proved`, the theorems it inherits axioms
+    /// through that aren't read through links, each with why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlinked: Vec<AuditUnlinked>,
 }
 
 /// A theorem a target inherits axioms through, read on another head: the
@@ -1983,6 +1989,18 @@ pub struct AuditThrough {
     pub name: String,
     pub snapshot_id: String,
     pub head: String,
+}
+
+/// A theorem a target inherits axioms through that isn't read through links,
+/// and why: it counts with the axioms recorded for it. For a head that can't
+/// say what its target inherits, the target itself, with no module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditUnlinked {
+    pub name: String,
+    /// Its module, `PisaSnap.s…`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    pub reason: String,
 }
 
 /// A head whose targets hold only through links, and what settling it swaps.
