@@ -1904,12 +1904,14 @@ dependencies = [
 name = "pisa-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "pisa-protocol",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

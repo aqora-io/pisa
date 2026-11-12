@@ -5,6 +5,7 @@ export {
   type CheckOptions,
   type CheckSessionOptions,
   type ClientOptions,
+  type RetryPolicy,
   type CreateSnapshotOptions,
   type DeleteSnapshotOptions,
   type GetDeclarationOptions,

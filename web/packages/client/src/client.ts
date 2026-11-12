@@ -68,7 +68,37 @@ export interface ClientOptions {
    *  else it is `not_found`. Run names and idempotency keys are unique
    *  within a scope. */
   scope?: Record<string, string>;
+  /** How requests are sent again (see `RetryPolicy`): `false` sends each
+   *  once; by default, or with `true`, the default policy; fields given
+   *  change it. */
+  retry?: boolean | Partial<RetryPolicy>;
 }
+
+/** When and how often the client sends a request again: after a 429, which
+ *  says nothing ran, and, for a request that is safe to send twice (a read,
+ *  a check, a tactic, goals, probes, a verify, a create, which carries a key,
+ *  or a dry run), after a 502, 503 or 504 or a failed connection. Each wait
+ *  is random, up to twice the last one's bound, from `baseDelayMs` to
+ *  `maxDelayMs`, and at least the server's `Retry-After`. No attempt starts
+ *  later than `deadlineMs` after the first. */
+export interface RetryPolicy {
+  /** Attempts in all, the first included. */
+  attempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  deadlineMs: number;
+}
+
+const DEFAULT_RETRY: RetryPolicy = { attempts: 4, baseDelayMs: 1000, maxDelayMs: 30_000, deadlineMs: 300_000 };
+
+/** The `Retry-After` the server sends with a 429 or a 503, in seconds: the
+ *  least wait before a batch's items that no worker took are sent again. */
+const RETRY_AFTER = 2;
+
+/** Whether a request may be sent again: `safe`, after a 429, a 502, 503 or
+ *  504, or a failed connection; `unsafe`, after a 429 only, as it may have
+ *  run; `never`. */
+type Repeat = "safe" | "unsafe" | "never";
 
 /** What any request takes. */
 export interface RequestOptions {
@@ -241,6 +271,8 @@ export class PisaClient {
   readonly url: string;
   readonly version: string | undefined;
   readonly timeout: number | undefined;
+  /** How requests are sent again, or `undefined` if each is sent once. */
+  readonly retry: RetryPolicy | undefined;
   private readonly fetcher: typeof fetch;
   private readonly headers: Record<string, string>;
 
@@ -248,6 +280,8 @@ export class PisaClient {
     this.url = options.url.replace(/\/+$/, "");
     this.version = options.version;
     this.timeout = options.timeout;
+    const retry = options.retry ?? true;
+    this.retry = retry === false ? undefined : { ...DEFAULT_RETRY, ...(retry === true ? {} : retry) };
     this.fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.headers = { ...options.headers };
     const scope = Object.entries(options.scope ?? {});
@@ -256,7 +290,7 @@ export class PisaClient {
 
   /** The server's health. A draining server's 503 is returned, not thrown. */
   async health(options: RequestOptions = {}): Promise<Health> {
-    const r = await this.send("GET", ["health"], undefined, undefined, options.signal);
+    const r = await this.send("GET", ["health"], undefined, undefined, options.signal, {}, "never");
     const body = await readJson(r);
     if (r.status === 503 && isObject(body) && typeof body["status"] === "string") {
       return body as unknown as Health;
@@ -279,9 +313,28 @@ export class PisaClient {
   /** Checks several pieces of code, up to 128; every one gets a result, in
    *  order. */
   async checkBatch(codes: string[], options: CheckOptions = {}): Promise<CheckResult[]> {
-    const body = { items: codes.map((code) => ({ code })), ...this.run(options), ...asked(options) };
-    const r = await this.call<CheckBatchResponse>("POST", ["check", "batch"], body, options);
-    return r.results;
+    const rest = { ...this.run(options), ...asked(options) };
+    const batch = async (items: string[]) => {
+      const body = { items: items.map((code) => ({ code })), ...rest };
+      return (await this.call<CheckBatchResponse>("POST", ["check", "batch"], body, options)).results;
+    };
+    const results = await batch(codes);
+    // An item no worker took in time, or whose worker was lost, is sent again
+    // alone, as a 429 or a 503 of `check` would be.
+    const started = Date.now();
+    for (let made = 1; ; made += 1) {
+      const failed = results.flatMap((r, i) =>
+        r.error?.kind === "capacity" || r.error?.kind === "unavailable" ? [i] : [],
+      );
+      const wait = this.retry && delay(this.retry, made, Date.now() - started, RETRY_AFTER * 1000);
+      if (failed.length === 0 || wait === undefined) return results;
+      await sleep(wait, options.signal);
+      const again = await batch(failed.map((i) => codes[i] ?? ""));
+      failed.forEach((i, j) => {
+        const r = again[j];
+        if (r !== undefined) results[i] = r;
+      });
+    }
   }
 
   /** Starts a session on code with `sorry`s, each of which becomes a state. */
@@ -670,22 +723,14 @@ export class PisaClient {
   }
 
   /** Waits for `job` to finish, however long it takes, and returns what its
-   *  request would have, or throws what it would have thrown. A few network
-   *  failures in a row are tried again. */
+   *  request would have, or throws what it would have thrown. Each look is
+   *  sent again as the client's `retry` says. */
   async waitJob<T>(job: Job<T>, options: WaitJobOptions = {}): Promise<T> {
     const { wait = JOB_WAIT, onPending, ...request } = options;
-    let dropped = 0;
     for (;;) {
-      try {
-        const polled = await this.pollJob(job, { ...request, wait });
-        if (polled.done) return polled.answer;
-        onPending?.(polled.job);
-        dropped = 0;
-      } catch (e) {
-        if (!isPisaError(e, "network") || dropped >= 3) throw e;
-        dropped += 1;
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+      const polled = await this.pollJob(job, { ...request, wait });
+      if (polled.done) return polled.answer;
+      onPending?.(polled.job);
     }
   }
 
@@ -734,7 +779,9 @@ export class PisaClient {
     const body: CreateSnapshotRequest = { code, ...run };
     if (options.verify !== undefined) body.verify = options.verify;
     if (options.labels !== undefined) body.labels = options.labels;
-    if (options.key !== undefined) body.key = options.key;
+    // A key of the client's, if the call has none, so that sending the
+    // create again can't keep a second snapshot.
+    body.key = options.key ?? clientKey();
     if (options.replaces !== undefined) body.replaces = options.replaces;
     if (options.fork !== undefined) body.fork = options.fork;
     if (options.holes !== undefined) body.holes = options.holes;
@@ -798,6 +845,7 @@ export class PisaClient {
     return ok<T>(r, await readJson(r));
   }
 
+  /** Sends a request, again as `retry` allows for one classed `repeat`. */
   private async send(
     method: string,
     path: string[],
@@ -805,6 +853,42 @@ export class PisaClient {
     query: URLSearchParams | undefined,
     signal: AbortSignal | undefined,
     extra: Record<string, string> = {},
+    repeat: Repeat = repeatOf(method, path, body),
+  ): Promise<Response> {
+    const started = Date.now();
+    for (let made = 1; ; made += 1) {
+      let answer: Response | undefined;
+      let failure: unknown;
+      try {
+        answer = await this.sendOnce(method, path, body, query, signal, extra);
+      } catch (e) {
+        if (!isPisaError(e, "network")) throw e;
+        failure = e;
+      }
+      const again =
+        answer === undefined
+          ? repeat === "safe"
+          : (answer.status === 429 && repeat !== "never") ||
+            (repeat === "safe" && answer.status >= 502 && answer.status <= 504);
+      const retryAfter = Number(answer?.headers.get("retry-after") ?? NaN);
+      const floor = Number.isFinite(retryAfter) ? retryAfter * 1000 : 0;
+      const wait = again && this.retry ? delay(this.retry, made, Date.now() - started, floor) : undefined;
+      if (wait === undefined) {
+        if (answer === undefined) throw failure;
+        return answer;
+      }
+      await answer?.body?.cancel();
+      await sleep(wait, signal);
+    }
+  }
+
+  private async sendOnce(
+    method: string,
+    path: string[],
+    body: unknown,
+    query: URLSearchParams | undefined,
+    signal: AbortSignal | undefined,
+    extra: Record<string, string>,
   ): Promise<Response> {
     const search = query?.toString();
     const url = `${this.url}/${path.map(encodeURIComponent).join("/")}${search ? `?${search}` : ""}`;
@@ -822,6 +906,53 @@ export class PisaClient {
       throw new PisaError("network", `no answer from ${url}: ${String(e)}`, undefined, { cause: e });
     }
   }
+}
+
+/** Whether a request may be sent again, by its method and path: reads,
+ *  checks, tactics, goals, probes, verifies, creates, searches and dry runs
+ *  are `safe`; other writes `unsafe`. */
+function repeatOf(method: string, path: string[], body: unknown): Repeat {
+  if (method === "GET") return "safe";
+  if (method !== "POST") return "unsafe";
+  const [first, , third] = path;
+  const route = path.length === 3 ? `${first}/*/${third}` : path.join("/");
+  if (["check", "check/batch", "snapshots", "search", "resolve"].includes(route)) return "safe";
+  if (["states/*/tactic", "sessions/*/check", "snapshots/*/verify"].includes(route)) return "safe";
+  if (["documents/*/goals", "documents/*/probes"].includes(route)) return "safe";
+  const dryRun = isObject(body) && body["dry_run"] === true;
+  return dryRun ? "safe" : "unsafe";
+}
+
+/** How long to wait before the next attempt, after `made` attempts and
+ *  `elapsedMs` since the first, at least `floorMs`; `undefined` when no
+ *  attempt is left. */
+function delay(policy: RetryPolicy, made: number, elapsedMs: number, floorMs: number): number | undefined {
+  if (made >= policy.attempts) return undefined;
+  const bound = Math.min(policy.maxDelayMs, policy.baseDelayMs * 2 ** (made - 1));
+  const wait = Math.max(bound * Math.random(), floorMs);
+  return elapsedMs + wait <= policy.deadlineMs ? wait : undefined;
+}
+
+/** Waits `ms`, or throws `aborted` when `signal` fires first. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new PisaError("aborted", "the request was aborted"));
+    const stop = () => {
+      clearTimeout(timer);
+      reject(new PisaError("aborted", "the request was aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", stop, { once: true });
+  });
+}
+
+/** A key for a create that has none: `client:` and 32 hex digits. */
+function clientKey(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return `client:${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("")}`;
 }
 
 /** What a check asks for beyond its verdict. */
@@ -862,5 +993,7 @@ function answerOf<T>(status: number, statusText: string, body: unknown): T {
   if (isObject(error) && typeof error["kind"] === "string" && ERROR_KINDS.has(error["kind"])) {
     throw new PisaError(error["kind"] as ErrorKind, String(error["message"] ?? ""), status);
   }
-  throw new PisaError("bad_response", `HTTP ${status} ${statusText}`.trim(), status);
+  // A gateway's error: the server behind it may answer later.
+  const kind = status >= 502 && status <= 504 ? "unavailable" : "bad_response";
+  throw new PisaError(kind, `HTTP ${status} ${statusText}`.trim(), status);
 }

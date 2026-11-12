@@ -80,6 +80,9 @@ const DEFAULT_TIMEOUT: u64 = 60;
 /// proxies cut requests off, which async requests are there to avoid.
 const JOB_WAIT: Duration = Duration::from_secs(25);
 
+/// How much longer than its wait a look at a job may take.
+const JOB_SLACK: Duration = Duration::from_secs(30);
+
 /// A request sent with `Prefer: respond-async`: its job, whose answer is a
 /// `T`. Anyone with its id can read the answer or cancel it, so keep it
 /// secret; the server keeps the answer for an hour after the job is done.
@@ -307,19 +310,139 @@ impl Error {
     }
 }
 
+/// When and how often a client sends a request again: after a 429, which
+/// says nothing ran, and, for a request that is safe to send twice, after a
+/// 502, 503 or 504, or a connection that failed or dropped. Each wait is
+/// random, up to twice the last one's bound, from `base_delay` to
+/// `max_delay`, and at least the server's `Retry-After`. No attempt starts
+/// later than `deadline` after the first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+    /// Attempts in all, the first included: 1 sends each request once.
+    pub attempts: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+    pub deadline: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        RetryPolicy {
+            attempts: 4,
+            base_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            deadline: Duration::from_secs(300),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Each request once, as it is.
+    pub fn none() -> Self {
+        RetryPolicy {
+            attempts: 1,
+            ..RetryPolicy::default()
+        }
+    }
+
+    /// How long to wait before the next attempt, after `made` attempts and
+    /// `elapsed` since the first, with the server's `retry_after`, if any;
+    /// `None` when no attempt is left. `jitter`, in `[0, 1)`, picks the wait
+    /// below its bound.
+    fn delay(
+        &self,
+        made: u32,
+        elapsed: Duration,
+        retry_after: Option<Duration>,
+        jitter: f64,
+    ) -> Option<Duration> {
+        if made >= self.attempts {
+            return None;
+        }
+        let doubled = 2u32.saturating_pow(made.saturating_sub(1));
+        let bound = self.max_delay.min(self.base_delay.saturating_mul(doubled));
+        let wait = bound.mul_f64(jitter).max(retry_after.unwrap_or_default());
+        (elapsed + wait <= self.deadline).then_some(wait)
+    }
+}
+
+/// Whether a request may be sent again; see [`RetryPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Repeat {
+    /// Sending it twice does what sending it once does: a read, a check, a
+    /// tactic, or a create, which carries a key. Sent again after a 429, a
+    /// 502, 503 or 504, or a connection that failed or dropped.
+    Safe,
+    /// Sent again only when nothing ran: after a 429, or a connection that
+    /// never opened.
+    Unsafe,
+    /// Never sent again, as `/health`, whose 503 is an answer.
+    Never,
+}
+
+/// A response, read whole.
+struct Answer {
+    status: reqwest::StatusCode,
+    body: bytes::Bytes,
+}
+
+impl Answer {
+    /// The error a non-2xx answer is.
+    fn ok(self) -> Result<Self, Error> {
+        match self.status.is_success() {
+            true => Ok(self),
+            false => Err(server_failure(
+                self.status,
+                &String::from_utf8_lossy(&self.body),
+            )),
+        }
+    }
+
+    /// The answer as JSON, or the error it is.
+    fn json<T: DeserializeOwned>(self) -> Result<T, Error> {
+        let answer = self.ok()?;
+        serde_json::from_slice(&answer.body).map_err(|e| Error::Server {
+            status: answer.status.as_u16(),
+            kind: ErrorKind::Internal,
+            message: format!("an answer that doesn't read: {e}"),
+        })
+    }
+}
+
+/// The HTTP client for a server, sending `headers` with each request: it
+/// gives up connecting after 10 s, and notices a dead connection in about a
+/// minute. It sets no limit on an answer, as a create may take minutes.
+fn http_client(headers: reqwest::header::HeaderMap) -> Result<reqwest::Client, Error> {
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_keepalive_interval(Duration::from_secs(10))
+        .tcp_keepalive_retries(3)
+        .build()
+        .map_err(|e| Error::Invalid(e.to_string()))
+}
+
+/// A random number in `[0, 1)`.
+fn jitter() -> f64 {
+    (uuid::Uuid::new_v4().as_u128() >> 75) as f64 / (1u64 << 53) as f64
+}
+
 /// A server's base URL and the HTTP client that talks to it.
 #[derive(Debug, Clone)]
 struct Endpoint {
     http: reqwest::Client,
     base: Url,
+    retry: RetryPolicy,
 }
 
 impl Endpoint {
     fn new(base_url: &str) -> Result<Self, Error> {
         let base = Url::parse(base_url).map_err(|e| Error::Url(e.to_string()))?;
         Ok(Endpoint {
-            http: reqwest::Client::new(),
+            http: http_client(reqwest::header::HeaderMap::new())?,
             base,
+            retry: RetryPolicy::default(),
         })
     }
 
@@ -333,70 +456,118 @@ impl Endpoint {
         Ok(url)
     }
 
+    /// Sends `req` and reads its answer whole, sending it again as the
+    /// policy and `repeat` allow.
+    async fn send(&self, req: reqwest::RequestBuilder, repeat: Repeat) -> Result<Answer, Error> {
+        let started = tokio::time::Instant::now();
+        let mut made = 0;
+        loop {
+            let attempt = req
+                .try_clone()
+                .ok_or_else(|| Error::Invalid("a request that can't be sent again".into()))?;
+            made += 1;
+            let (outcome, retry_after) = match attempt.send().await {
+                Ok(r) => {
+                    let status = r.status();
+                    let retry_after = (r.headers().get(reqwest::header::RETRY_AFTER))
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse().ok())
+                        .map(Duration::from_secs);
+                    let body = r.bytes().await.map(|body| Answer { status, body });
+                    (body, retry_after)
+                }
+                Err(e) => (Err(e), None),
+            };
+            let again = match (&outcome, repeat) {
+                (_, Repeat::Never) => false,
+                (Ok(a), _) if a.status == reqwest::StatusCode::TOO_MANY_REQUESTS => true,
+                (Ok(a), Repeat::Safe) => matches!(a.status.as_u16(), 502..=504),
+                (Ok(_), Repeat::Unsafe) => false,
+                (Err(e), Repeat::Safe) => {
+                    e.is_connect() || e.is_timeout() || e.is_request() || e.is_body()
+                }
+                (Err(e), Repeat::Unsafe) => e.is_connect(),
+            };
+            let wait = again
+                .then(|| (self.retry).delay(made, started.elapsed(), retry_after, jitter()))
+                .flatten();
+            match wait {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => return Ok(outcome?),
+            }
+        }
+    }
+
     async fn health(&self) -> Result<Health, Error> {
-        let r = self.http.get(self.url("health")?).send().await?;
-        let status = r.status();
-        if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
-            return Ok(server_error(r).await?.json().await?);
+        let a = self.send(self.http.get(self.url("health")?), Repeat::Never);
+        let a = a.await?;
+        if a.status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            return a.json();
         }
         // A draining server answers 503 with its health: an answer, where a
         // 503 from anything else, such as a proxy, is an error.
-        let text = r.text().await?;
-        serde_json::from_str(&text).map_err(|_| server_failure(status, &text))
+        let text = String::from_utf8_lossy(&a.body);
+        serde_json::from_str(&text).map_err(|_| server_failure(a.status, &text))
     }
 
     async fn get<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
-        let r = self.http.get(url).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        self.send(self.http.get(url), Repeat::Safe).await?.json()
     }
 
     async fn delete<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
-        let r = self.http.delete(url).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        self.send(self.http.delete(url), Repeat::Unsafe)
+            .await?
+            .json()
     }
 
     /// A DELETE whose success has no body, such as a 204.
     async fn delete_empty(&self, url: Url) -> Result<(), Error> {
-        server_error(self.http.delete(url).send().await?).await?;
+        self.send(self.http.delete(url), Repeat::Unsafe)
+            .await?
+            .ok()?;
         Ok(())
     }
 
     /// A GET whose answer isn't JSON, such as a tar.gz.
     async fn get_bytes(&self, url: Url) -> Result<Vec<u8>, Error> {
-        let r = self.http.get(url).send().await?;
-        Ok(server_error(r).await?.bytes().await?.to_vec())
+        let a = self.send(self.http.get(url), Repeat::Safe).await?;
+        Ok(a.ok()?.body.to_vec())
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
         body: &B,
+        repeat: Repeat,
     ) -> Result<T, Error> {
-        let r = self.http.post(self.url(path)?).json(body).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        self.post_to(self.url(path)?, body, repeat).await
     }
 
     /// POSTs `body`, if any, with `Prefer: respond-async`; returns the job
     /// the server queued. Any other success, i.e. an answer at once, is an
     /// [`Error::Server`] of kind [`ErrorKind::Internal`], as is an answer
     /// that isn't pisa's.
-    async fn submit<B: Serialize, T>(&self, url: Url, body: Option<&B>) -> Result<Job<T>, Error> {
+    async fn submit<B: Serialize, T>(
+        &self,
+        url: Url,
+        body: Option<&B>,
+        repeat: Repeat,
+    ) -> Result<Job<T>, Error> {
         let mut req = self.http.post(url).header("prefer", "respond-async");
         if let Some(body) = body {
             req = req.json(body);
         }
-        let r = server_error(req.send().await?).await?;
-        let status = r.status();
-        if status != reqwest::StatusCode::ACCEPTED {
+        let a = self.send(req, repeat).await?.ok()?;
+        if a.status != reqwest::StatusCode::ACCEPTED {
             return Err(Error::Server {
-                status: status.as_u16(),
+                status: a.status.as_u16(),
                 kind: ErrorKind::Internal,
                 message: "the server answered at once instead of queueing a job, as it does \
                     for a dry run"
                     .into(),
             });
         }
-        let job: api::Job = r.json().await?;
+        let job: api::Job = a.json()?;
         Ok(Job::new(job.id, job.kind))
     }
 
@@ -404,14 +575,15 @@ impl Endpoint {
         &self,
         url: Url,
         body: &B,
+        repeat: Repeat,
     ) -> Result<T, Error> {
-        let r = self.http.post(url).json(body).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        self.send(self.http.post(url).json(body), repeat)
+            .await?
+            .json()
     }
 
-    async fn post_url<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
-        let r = self.http.post(url).send().await?;
-        Ok(server_error(r).await?.json().await?)
+    async fn post_url<T: DeserializeOwned>(&self, url: Url, repeat: Repeat) -> Result<T, Error> {
+        self.send(self.http.post(url), repeat).await?.json()
     }
 
     async fn patch<B: Serialize, T: DeserializeOwned>(
@@ -419,13 +591,13 @@ impl Endpoint {
         url: Url,
         body: &B,
     ) -> Result<T, Error> {
-        let r = self.http.patch(url).json(body).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        let req = self.http.patch(url).json(body);
+        self.send(req, Repeat::Unsafe).await?.json()
     }
 
     async fn put<B: Serialize, T: DeserializeOwned>(&self, url: Url, body: &B) -> Result<T, Error> {
-        let r = self.http.put(url).json(body).send().await?;
-        Ok(server_error(r).await?.json().await?)
+        let req = self.http.put(url).json(body);
+        self.send(req, Repeat::Unsafe).await?.json()
     }
 }
 
@@ -467,11 +639,15 @@ impl Client {
                 .map_err(|e| Error::Invalid(format!("the scope can't be a header: {e}")))?;
             headers.insert(pisa_protocol::scope::HEADER, value);
         }
-        self.endpoint.http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .map_err(|e| Error::Invalid(e.to_string()))?;
+        self.endpoint.http = http_client(headers)?;
         Ok(self)
+    }
+
+    /// Sends requests again as `retry` says, instead of the default policy:
+    /// [`RetryPolicy::none`] sends each once.
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.endpoint.retry = retry;
+        self
     }
 
     /// Lean's time limit per request, in seconds (default 60).
@@ -498,7 +674,8 @@ impl Client {
         code: &str,
         options: &CheckOptions,
     ) -> Result<CheckResult, Error> {
-        self.post("check", &self.check_request(code, options)).await
+        let req = self.check_request(code, options);
+        self.post("check", &req, Repeat::Safe).await
     }
 
     /// Like [`Client::check`], as a job: see [`Client::wait_job`].
@@ -514,7 +691,7 @@ impl Client {
     ) -> Result<Job<CheckResult>, Error> {
         let req = self.check_request(code, options);
         self.endpoint
-            .submit(self.endpoint.url("check")?, Some(&req))
+            .submit(self.endpoint.url("check")?, Some(&req), Repeat::Safe)
             .await
     }
 
@@ -562,21 +739,54 @@ impl Client {
             detail: options.detail.clone(),
             at: options.at.clone(),
         };
-        let resp: CheckBatchResponse = self.post("check/batch", &req).await?;
-        Ok(resp.results)
+        let resp: CheckBatchResponse = self.post("check/batch", &req, Repeat::Safe).await?;
+        let mut results = resp.results;
+        // An item no worker took in time, or whose worker was lost, is sent
+        // again alone, as a 429 or a 503 of `/check` would be.
+        let started = tokio::time::Instant::now();
+        let retry_after = Duration::from_secs(api::RETRY_AFTER_SECS);
+        for made in 1.. {
+            let failed: Vec<usize> = (results.iter().enumerate())
+                .filter(|(_, r)| {
+                    (r.error.as_ref()).is_some_and(|e| {
+                        matches!(e.kind, ErrorKind::Capacity | ErrorKind::Unavailable)
+                    })
+                })
+                .map(|(i, _)| i)
+                .collect();
+            let retry = self.endpoint.retry;
+            let wait = retry.delay(made, started.elapsed(), Some(retry_after), jitter());
+            let (false, Some(wait)) = (failed.is_empty(), wait) else {
+                break;
+            };
+            tokio::time::sleep(wait).await;
+            let again = CheckBatchRequest {
+                items: failed.iter().map(|&i| req.items[i].clone()).collect(),
+                ..req.clone()
+            };
+            let resp: CheckBatchResponse = self.post("check/batch", &again, Repeat::Safe).await?;
+            for (i, r) in failed.into_iter().zip(resp.results) {
+                results[i] = r;
+            }
+        }
+        Ok(results)
     }
 
     /// Runs code containing `sorry` and returns one proof state per `sorry`.
     pub async fn start_session(&self, code: &str) -> Result<Session, Error> {
-        self.post("sessions", &self.start_session_request(code))
-            .await
+        self.post(
+            "sessions",
+            &self.start_session_request(code),
+            Repeat::Unsafe,
+        )
+        .await
     }
 
     /// Like [`Client::start_session`], as a job.
     pub async fn submit_start_session(&self, code: &str) -> Result<Job<Session>, Error> {
         let req = self.start_session_request(code);
         self.endpoint
-            .submit(self.endpoint.url("sessions")?, Some(&req))
+            .submit(self.endpoint.url("sessions")?, Some(&req), Repeat::Unsafe)
             .await
     }
 
@@ -598,6 +808,7 @@ impl Client {
         self.post(
             &format!("states/{state_id}/tactic"),
             &self.apply_tactic_request(tactic),
+            Repeat::Safe,
         )
         .await
     }
@@ -610,7 +821,7 @@ impl Client {
     ) -> Result<Job<ApplyTacticResponse>, Error> {
         let url = self.endpoint.url(&format!("states/{state_id}/tactic"))?;
         let req = self.apply_tactic_request(tactic);
-        self.endpoint.submit(url, Some(&req)).await
+        self.endpoint.submit(url, Some(&req), Repeat::Safe).await
     }
 
     fn apply_tactic_request(&self, tactic: &str) -> ApplyTacticRequest {
@@ -635,7 +846,7 @@ impl Client {
         detail: &[Detail],
     ) -> Result<CheckResult, Error> {
         let req = self.check_session_request(code, detail);
-        self.post(&format!("sessions/{session_id}/check"), &req)
+        self.post(&format!("sessions/{session_id}/check"), &req, Repeat::Safe)
             .await
     }
 
@@ -647,7 +858,7 @@ impl Client {
     ) -> Result<Job<CheckResult>, Error> {
         let url = self.endpoint.url(&format!("sessions/{session_id}/check"))?;
         let req = self.check_session_request(code, &[]);
-        self.endpoint.submit(url, Some(&req)).await
+        self.endpoint.submit(url, Some(&req), Repeat::Safe).await
     }
 
     fn check_session_request(&self, code: &str, detail: &[Detail]) -> CheckSessionRequest {
@@ -676,8 +887,12 @@ impl Client {
         code: &str,
         opts: &CreateSnapshotOptions,
     ) -> Result<CreateSnapshotResponse, Error> {
-        self.post("snapshots", &self.create_snapshot_request(code, opts))
-            .await
+        self.post(
+            "snapshots",
+            &self.create_snapshot_request(code, opts),
+            Repeat::Safe,
+        )
+        .await
     }
 
     /// Like [`Client::create_snapshot`], as a job.
@@ -697,7 +912,7 @@ impl Client {
     ) -> Result<Job<CreateSnapshotResponse>, Error> {
         let req = self.create_snapshot_request(code, opts);
         self.endpoint
-            .submit(self.endpoint.url("snapshots")?, Some(&req))
+            .submit(self.endpoint.url("snapshots")?, Some(&req), Repeat::Safe)
             .await
     }
 
@@ -719,7 +934,9 @@ impl Client {
             timeout: self.timeout,
             verify: opts.verify,
             labels: opts.labels.clone(),
-            key: opts.key.clone(),
+            // A key of the client's, if the call has none, so that sending
+            // the create again can't keep a second snapshot.
+            key: Some(opts.key.clone().unwrap_or_else(client_key)),
             replaces: opts.replaces.clone(),
             fork: opts.fork,
             holes: (!opts.holes.is_empty()).then(|| opts.holes.clone()),
@@ -735,7 +952,9 @@ impl Client {
     /// timeout for each module. A module the kernel rejects, or that runs out
     /// of time, is reported in `failure`, not as an error.
     pub async fn verify_snapshot(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
-        self.endpoint.post_url(self.verify_url(id)?).await
+        (self.endpoint)
+            .post_url(self.verify_url(id)?, Repeat::Safe)
+            .await
     }
 
     /// Like [`Client::verify_snapshot`], but re-checks the modules that are
@@ -745,7 +964,7 @@ impl Client {
     pub async fn verify_snapshot_again(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
         let mut url = self.verify_url(id)?;
         url.query_pairs_mut().append_pair("again", "true");
-        self.endpoint.post_url(url).await
+        self.endpoint.post_url(url, Repeat::Safe).await
     }
 
     /// Like [`Client::verify_snapshot`], as a job.
@@ -754,7 +973,7 @@ impl Client {
         id: &str,
     ) -> Result<Job<VerifySnapshotResponse>, Error> {
         self.endpoint
-            .submit(self.verify_url(id)?, None::<&()>)
+            .submit(self.verify_url(id)?, None::<&()>, Repeat::Safe)
             .await
     }
 
@@ -781,11 +1000,13 @@ impl Client {
         let mut url = self.job_url(&job.id)?;
         url.query_pairs_mut()
             .append_pair("wait", &wait.as_secs().to_string());
-        let r = self.endpoint.http.get(url).send().await?;
-        if r.status() == reqwest::StatusCode::ACCEPTED {
-            return Ok(JobPoll::Pending(r.json().await?));
+        // A look that outlives its wait is a dead connection.
+        let req = self.endpoint.http.get(url).timeout(wait + JOB_SLACK);
+        let a = self.endpoint.send(req, Repeat::Safe).await?;
+        if a.status == reqwest::StatusCode::ACCEPTED {
+            return Ok(JobPoll::Pending(a.json()?));
         }
-        let done: api::GetJobResponse = server_error(r).await?.json().await?;
+        let done: api::GetJobResponse = a.json()?;
         let status = reqwest::StatusCode::from_u16(done.http_status)
             .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR);
         if !status.is_success() {
@@ -801,19 +1022,12 @@ impl Client {
     }
 
     /// Waits for `job` to finish, however long it takes, and returns what
-    /// its request would have answered. A few dropped connections in a row
-    /// are tried again.
+    /// its request would have answered. Each look is sent again as the
+    /// client's [`RetryPolicy`] says.
     pub async fn wait_job<T: DeserializeOwned>(&self, job: &Job<T>) -> Result<T, Error> {
-        let mut dropped = 0;
         loop {
-            match self.poll_job(job, JOB_WAIT).await {
-                Ok(JobPoll::Done(answer)) => return Ok(answer),
-                Ok(JobPoll::Pending(_)) => dropped = 0,
-                Err(Error::Http(e)) if dropped < 3 && !e.is_decode() && !e.is_status() => {
-                    dropped += 1;
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-                Err(e) => return Err(e),
+            if let JobPoll::Done(answer) = self.poll_job(job, JOB_WAIT).await? {
+                return Ok(answer);
             }
         }
     }
@@ -915,7 +1129,8 @@ impl Client {
         opts: &RebuildOptions,
     ) -> Result<RebuildSnapshotsResponse, Error> {
         let req = self.rebuild_snapshots_request(from, to, labels, opts);
-        self.post("snapshots/rebuild", &req).await
+        self.post("snapshots/rebuild", &req, run_repeat(req.dry_run))
+            .await
     }
 
     /// Like [`Client::rebuild_snapshots`], as a job. A dry run isn't one: the
@@ -931,7 +1146,11 @@ impl Client {
     ) -> Result<Job<RebuildSnapshotsResponse>, Error> {
         let req = self.rebuild_snapshots_request(from, to, labels, opts);
         self.endpoint
-            .submit(self.endpoint.url("snapshots/rebuild")?, Some(&req))
+            .submit(
+                self.endpoint.url("snapshots/rebuild")?,
+                Some(&req),
+                Repeat::Unsafe,
+            )
             .await
     }
 
@@ -948,7 +1167,8 @@ impl Client {
         opts: &ResubmitOptions,
     ) -> Result<ResubmitSnapshotsResponse, Error> {
         let req = self.resubmit_request(from, to, opts);
-        self.post("snapshots/resubmit", &req).await
+        self.post("snapshots/resubmit", &req, run_repeat(req.dry_run))
+            .await
     }
 
     /// Like [`Client::resubmit_snapshots`], as a job; a dry run isn't one,
@@ -961,7 +1181,11 @@ impl Client {
     ) -> Result<Job<ResubmitSnapshotsResponse>, Error> {
         let req = self.resubmit_request(from, to, opts);
         self.endpoint
-            .submit(self.endpoint.url("snapshots/resubmit")?, Some(&req))
+            .submit(
+                self.endpoint.url("snapshots/resubmit")?,
+                Some(&req),
+                Repeat::Unsafe,
+            )
             .await
     }
 
@@ -981,7 +1205,8 @@ impl Client {
         S: AsRef<str>,
     {
         let req = self.settle_request(against, opts);
-        self.post("snapshots/settle", &req).await
+        self.post("snapshots/settle", &req, run_repeat(req.dry_run))
+            .await
     }
 
     /// Like [`Client::settle_run`], as a job; a dry run isn't one, as for
@@ -997,7 +1222,11 @@ impl Client {
     {
         let req = self.settle_request(against, opts);
         self.endpoint
-            .submit(self.endpoint.url("snapshots/settle")?, Some(&req))
+            .submit(
+                self.endpoint.url("snapshots/settle")?,
+                Some(&req),
+                Repeat::Unsafe,
+            )
             .await
     }
 
@@ -1152,7 +1381,9 @@ impl Client {
         S: AsRef<str>,
     {
         let body = self.accept_request(against, options)?;
-        self.endpoint.post("snapshots/accept", &body).await
+        (self.endpoint)
+            .post("snapshots/accept", &body, Repeat::Unsafe)
+            .await
     }
 
     /// Like [`Client::accept_run`], as a job.
@@ -1167,7 +1398,7 @@ impl Client {
     {
         let body = self.accept_request(against, options)?;
         let url = self.endpoint.url("snapshots/accept")?;
-        self.endpoint.submit(url, Some(&body)).await
+        self.endpoint.submit(url, Some(&body), Repeat::Unsafe).await
     }
 
     /// An acceptance [`Client::accept_run`] stored, by its id.
@@ -1275,7 +1506,7 @@ impl Client {
             version: self.version.clone(),
             timeout: self.timeout,
         };
-        self.endpoint.post("documents", &body).await
+        self.endpoint.post("documents", &body, Repeat::Unsafe).await
     }
 
     /// Replaces a document's code, which is at `revision`; answers the next
@@ -1318,7 +1549,7 @@ impl Client {
             timeout: self.timeout,
         };
         let url = self.document_url(id, Some("goals"))?;
-        self.endpoint.post_to(url, &body).await
+        self.endpoint.post_to(url, &body, Repeat::Safe).await
     }
 
     /// Runs each of `candidates` at `at` on the document as it is, `revision`
@@ -1338,7 +1569,7 @@ impl Client {
             budget: None,
         };
         let url = self.document_url(id, Some("probes"))?;
-        self.endpoint.post_to(url, &body).await
+        self.endpoint.post_to(url, &body, Repeat::Safe).await
     }
 
     fn document_url(&self, id: &str, then: Option<&str>) -> Result<Url, Error> {
@@ -1413,7 +1644,7 @@ impl Client {
             queries,
             version: self.version.clone(),
         };
-        let resp: SearchResponse = self.post("search", &req).await?;
+        let resp: SearchResponse = self.post("search", &req, Repeat::Safe).await?;
         Ok(resp.results)
     }
 
@@ -1428,7 +1659,7 @@ impl Client {
             names: names.into_iter().map(Into::into).collect(),
             version: self.version.clone(),
         };
-        let resp: ResolveResponse = self.post("resolve", &req).await?;
+        let resp: ResolveResponse = self.post("resolve", &req, Repeat::Safe).await?;
         Ok(resp.results)
     }
 
@@ -1459,8 +1690,18 @@ impl Client {
         &self,
         path: &str,
         body: &B,
+        repeat: Repeat,
     ) -> Result<T, Error> {
-        self.endpoint.post(path, body).await
+        self.endpoint.post(path, body, repeat).await
+    }
+}
+
+/// How a rebuild, a settle or a resubmit may be sent again: a dry run is
+/// a read; a run isn't sent twice at once.
+fn run_repeat(dry_run: bool) -> Repeat {
+    match dry_run {
+        true => Repeat::Safe,
+        false => Repeat::Unsafe,
     }
 }
 
@@ -1475,19 +1716,15 @@ fn add_labels(url: &mut Url, labels: &BTreeMap<String, String>) {
     }
 }
 
-async fn server_error(r: reqwest::Response) -> Result<reqwest::Response, Error> {
-    let status = r.status();
-    if status.is_success() {
-        return Ok(r);
-    }
-    let text = r.text().await.unwrap_or_default();
-    Err(server_failure(status, &text))
-}
-
-/// The error for a non-2xx response with this body.
+/// The error for a non-2xx response with this body. A gateway's 502, 503 or
+/// 504, whose body isn't pisa's, is [`ErrorKind::Unavailable`]: the server
+/// behind it may answer later.
 fn server_failure(status: reqwest::StatusCode, text: &str) -> Error {
     let (kind, message) = match serde_json::from_str::<ErrorResponse>(text) {
         Ok(e) => (e.error.kind, e.error.message),
+        Err(_) if matches!(status.as_u16(), 502..=504) => {
+            (ErrorKind::Unavailable, text.to_string())
+        }
         Err(_) => (ErrorKind::Internal, text.to_string()),
     };
     Error::Server {
@@ -1495,6 +1732,11 @@ fn server_failure(status: reqwest::StatusCode, text: &str) -> Error {
         kind,
         message,
     }
+}
+
+/// A key for a create that has none: `client:` and 32 hex digits.
+fn client_key() -> String {
+    format!("client:{}", uuid::Uuid::new_v4().simple())
 }
 
 #[cfg(test)]
@@ -1567,5 +1809,68 @@ mod tests {
             c.accept_request(["b~s"], &asked).unwrap().timeout,
             Some(900)
         );
+    }
+
+    #[test]
+    fn a_create_carries_a_key_of_its_own_unless_given_one() {
+        let c = Client::new("http://h/").unwrap();
+        let key = |opts: &CreateSnapshotOptions| c.create_snapshot_request("x", opts).key.unwrap();
+        let (a, b) = (
+            key(&CreateSnapshotOptions::default()),
+            key(&CreateSnapshotOptions::default()),
+        );
+        assert_ne!(a, b);
+        let hex = a.strip_prefix("client:").unwrap();
+        assert!(
+            hex.len() == 32 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{a}"
+        );
+        let given = CreateSnapshotOptions {
+            key: Some("mine".into()),
+            ..Default::default()
+        };
+        assert_eq!(key(&given), "mine");
+    }
+
+    #[test]
+    fn a_retry_waits_longer_each_time_within_its_bounds() {
+        let policy = RetryPolicy::default();
+        let s = Duration::from_secs;
+        let at_most = |made, jitter| policy.delay(made, s(0), None, jitter).unwrap();
+        // Up to 1 s, then 2, 4…, never more than 30.
+        assert_eq!(at_most(1, 0.5), Duration::from_millis(500));
+        assert_eq!(at_most(2, 0.5), s(1));
+        assert_eq!(at_most(3, 0.5), s(2));
+        let long = RetryPolicy {
+            attempts: 20,
+            ..policy
+        };
+        assert_eq!(long.delay(12, s(0), None, 0.5), Some(s(15)));
+        // The server's Retry-After is the least wait.
+        assert_eq!(policy.delay(1, s(0), Some(s(2)), 0.5), Some(s(2)));
+        // No attempt is left after the last, or past the deadline.
+        assert_eq!(policy.delay(4, s(0), None, 0.5), None);
+        assert_eq!(policy.delay(1, s(299), Some(s(2)), 0.5), None);
+        assert_eq!(RetryPolicy::none().delay(1, s(0), None, 0.5), None);
+        for _ in 0..100 {
+            let j = jitter();
+            assert!((0.0..1.0).contains(&j), "{j}");
+        }
+    }
+
+    #[test]
+    fn a_gateways_error_may_answer_later() {
+        let failure = |status: u16, text: &str| {
+            let status = reqwest::StatusCode::from_u16(status).unwrap();
+            server_failure(status, text).kind()
+        };
+        assert_eq!(
+            failure(502, "<html>bad gateway</html>"),
+            Some(ErrorKind::Unavailable)
+        );
+        assert_eq!(failure(504, ""), Some(ErrorKind::Unavailable));
+        assert_eq!(failure(500, "oops"), Some(ErrorKind::Internal));
+        let pisa = r#"{"error": {"kind": "capacity", "message": "busy"}}"#;
+        assert_eq!(failure(429, pisa), Some(ErrorKind::Capacity));
     }
 }

@@ -87,4 +87,4 @@ export {
   snapshotsOptions,
 } from "./options.ts";
 export { PisaProvider, usePisaClient } from "./provider.tsx";
-export { retryQuery } from "./retry.ts";
+export { queryRetry, retryQuery } from "./retry.ts";

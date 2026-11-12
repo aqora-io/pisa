@@ -10,7 +10,7 @@ use pisa_client::{
     AcceptOptions, Allow, Amends, AuditOptions, CheckOptions, Client, CreateSnapshotOptions,
     DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions, HealthStatus, Job, JobKind,
     JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt, ProofStatus, RebuildOptions,
-    Refutes, Replaces, ResubmitOptions, SettleOptions,
+    Refutes, Replaces, ResubmitOptions, RetryPolicy, SettleOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -706,7 +706,10 @@ async fn missing_version_is_out_of_capacity() {
     let mut cfg = common::router_config();
     cfg.max_wait_secs = 1;
     let c = Cluster::start_with(cfg, &[("w0", "v", 1)], |w| w).await;
-    let client = Client::new(&c.url("/")).unwrap().with_version("nope");
+    let client = Client::new(&c.url("/"))
+        .unwrap()
+        .with_version("nope")
+        .with_retry(RetryPolicy::none());
     match client.check("#check Nat").await {
         Err(Error::Server { status, kind, .. }) => {
             assert_eq!((status, kind), (429, ErrorKind::Capacity))
@@ -1112,4 +1115,184 @@ async fn a_client_keeps_to_its_scope() {
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));
     let bad = BTreeMap::from([("user".to_string(), "a,b".to_string())]);
     assert!(Client::new(&c.url("/")).unwrap().with_scope(&bad).is_err());
+}
+
+/// A server that answers each request with the next of `replies`, raw HTTP
+/// responses, one connection each, and records the requests as method,
+/// path and JSON body.
+async fn scripted(
+    replies: Vec<String>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Recorded>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = seen.clone();
+    tokio::spawn(async move {
+        for reply in replies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0; 4096];
+            // The head, then as much body as it says.
+            let (head, body) = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                request.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                let Some(end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let length = (text[..end].lines())
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse().ok())?
+                    })
+                    .unwrap_or(0usize);
+                if request.len() >= end + 4 + length {
+                    break (
+                        text[..end].to_string(),
+                        text[end + 4..end + 4 + length].to_string(),
+                    );
+                }
+            };
+            let mut line = head.lines().next().unwrap().split(' ');
+            let (method, path) = (
+                line.next().unwrap().to_string(),
+                line.next().unwrap().to_string(),
+            );
+            let body = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            recorded
+                .lock()
+                .unwrap()
+                .push(Recorded { method, path, body });
+            socket.write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    (url, seen)
+}
+
+#[derive(Debug, Clone)]
+struct Recorded {
+    method: String,
+    path: String,
+    body: serde_json::Value,
+}
+
+/// A raw HTTP response with `status`, `headers` and a JSON or text `body`.
+fn reply(status: &str, headers: &str, body: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+const CHECKED: &str =
+    r#"{"ok": true, "time": 0, "messages": [], "sorries": [], "reasons": [], "declarations": []}"#;
+
+/// A client of `url` that retries at once.
+fn eager(url: &str) -> Client {
+    Client::new(url).unwrap().with_retry(RetryPolicy {
+        base_delay: Duration::from_millis(1),
+        ..RetryPolicy::default()
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_sends_again_what_is_safe_to_and_waits_as_told() {
+    // A 503 that says to wait a second, then the answer.
+    let lost = r#"{"error": {"kind": "unavailable", "message": "the worker was lost"}}"#;
+    let (url, seen) = scripted(vec![
+        reply("503 Service Unavailable", "retry-after: 1\r\n", lost),
+        reply("200 OK", "", CHECKED),
+    ])
+    .await;
+    let started = std::time::Instant::now();
+    let checked = eager(&url).check("#check Nat").await.unwrap();
+    assert!(checked.ok);
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // A create is sent again with the same key, its own.
+    let created = r#"{"check": {"ok": true, "time": 0, "declarations": []}}"#;
+    let (url, seen) = scripted(vec![
+        reply("502 Bad Gateway", "", "<html>bad gateway</html>"),
+        reply("200 OK", "", created),
+    ])
+    .await;
+    eager(&url).create_snapshot("def x := 1").await.unwrap();
+    let seen = seen.lock().unwrap().clone();
+    let keys: Vec<&serde_json::Value> = seen.iter().map(|r| &r.body["key"]).collect();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
+    assert!(keys[0].as_str().unwrap().starts_with("client:"), "{keys:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_sends_again_what_may_have_run_only_when_nothing_did() {
+    let named = r#"{"name": "r", "root": "v~a", "heads": ["v~a"]}"#;
+    // Naming a run again after a 502 might name it twice: the error is
+    // returned, a gateway's, which may answer later.
+    let (url, seen) = scripted(vec![reply("502 Bad Gateway", "", "bad gateway")]).await;
+    match eager(&url).name_run("r", "v~a").await {
+        Err(Error::Server { status, kind, .. }) => {
+            assert_eq!((status, kind), (502, ErrorKind::Unavailable))
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    // A 429 says nothing ran: sent again.
+    let busy = r#"{"error": {"kind": "capacity", "message": "no worker took it"}}"#;
+    let (url, seen) = scripted(vec![
+        reply("429 Too Many Requests", "retry-after: 0\r\n", busy),
+        reply("200 OK", "", named),
+    ])
+    .await;
+    let run = eager(&url).name_run("r", "v~a").await.unwrap();
+    assert_eq!(run.heads, ["v~a"]);
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    // Turned off, nothing is sent again.
+    let (url, seen) = scripted(vec![reply("429 Too Many Requests", "", busy)]).await;
+    let off = Client::new(&url).unwrap().with_retry(RetryPolicy::none());
+    assert_eq!(
+        off.check("#check Nat").await.unwrap_err().kind(),
+        Some(ErrorKind::Capacity)
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_sends_again_only_the_items_no_worker_took() {
+    let item = |error: Option<&str>| match error {
+        Some(kind) => format!(
+            r#"{{"ok": false, "time": 0, "error": {{"kind": "{kind}", "message": ""}}, "declarations": []}}"#
+        ),
+        None => CHECKED.to_string(),
+    };
+    let first = format!(
+        r#"{{"results": [{}, {}]}}"#,
+        item(None),
+        item(Some("capacity"))
+    );
+    let second = format!(r#"{{"results": [{}]}}"#, item(None));
+    let (url, seen) = scripted(vec![
+        reply("200 OK", "", &first),
+        reply("200 OK", "", &second),
+    ])
+    .await;
+    let results = eager(&url).check_batch(["a", "b"]).await.unwrap();
+    assert!(results.iter().all(|r| r.ok), "{results:?}");
+    let seen = seen.lock().unwrap().clone();
+    let items: Vec<&serde_json::Value> = seen.iter().map(|r| &r.body["items"]).collect();
+    assert_eq!(
+        items,
+        [
+            &serde_json::json!([{"code": "a"}, {"code": "b"}]),
+            &serde_json::json!([{"code": "b"}]),
+        ]
+    );
+    assert!(
+        seen.iter()
+            .all(|r| r.method == "POST" && r.path == "/check/batch")
+    );
 }

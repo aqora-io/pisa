@@ -634,6 +634,7 @@ class Client:
         version: str | None = None,
         timeout: int = 60,
         scope: dict[str, str] | None = None,
+        retry: bool = True,
     ) -> None:
         """`version` selects a worker pool label or alias for checks,
         sessions, creates, listings, audits and searches; session, state and
@@ -642,7 +643,12 @@ class Client:
         `timeout` is Lean's limit per request in seconds. `scope` sends every
         request in that scope (the `Pisa-Scope` header): what it creates
         carries these labels, and what it names or reaches must, else
-        NotFoundError; run names and keys are unique within a scope."""
+        NotFoundError; run names and keys are unique within a scope.
+        `retry` sends a request again, with growing waits, after a 429, and,
+        for one that is safe to send twice (reads, checks, tactics, goals,
+        probes, creates), after a gateway's 502, 503 or 504 or a dropped
+        connection; a create without a `key` gets one of the client's, so a
+        retry can't keep it twice. `retry=False` sends each request once."""
     def health(self) -> Health:
         """The server's health. A draining server's 503 is returned, with
         `status` "draining", not raised."""

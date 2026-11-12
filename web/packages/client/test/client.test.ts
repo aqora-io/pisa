@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import { PisaClient, isCapacityError, isPisaError, type RebuildCreated, type RebuildItem, type Replaces } from "../src/index.ts";
+import {
+  PisaClient,
+  isCapacityError,
+  isPisaError,
+  type ClientOptions,
+  type RebuildCreated,
+  type RebuildItem,
+  type Replaces,
+} from "../src/index.ts";
+
+/** A key the client made for a create that had none. */
+const KEY = expect.stringMatching(/^client:[0-9a-f]{32}$/);
 
 interface Sent {
   url: string;
@@ -9,12 +20,18 @@ interface Sent {
   headers: Record<string, string>;
 }
 
-/** A client whose fetch records each request and answers with `reply`. */
-function recording(reply: (sent: Sent) => Response | Promise<Response>, url = "/api/") {
+/** A client whose fetch records each request and answers with `reply`. It
+ *  sends each request once, unless `retry` says otherwise. */
+function recording(
+  reply: (sent: Sent) => Response | Promise<Response>,
+  url = "/api/",
+  retry: ClientOptions["retry"] = false,
+) {
   const sent: Sent[] = [];
   const client = new PisaClient({
     url,
     version: "v1",
+    retry,
     fetch: async (input, init) => {
       const s: Sent = {
         url: String(input),
@@ -118,9 +135,9 @@ describe("PisaClient", () => {
     expect(sent.map((s) => s.body)).toEqual([
       // A replacement runs on the replaced snapshot's version unless asked.
       { code: "theorem t : 1 = 1 := rfl", key: "k", replaces: { snapshot_id: "v1~e1" } },
-      { code: "def f := 2", replaces: { snapshot_id: "v1~e2", allow: { definitions: ["f"] } } },
-      { code: "theorem t : 1 = 1 := by simp", replaces: { snapshot_id: "v1~e1" }, fork: true },
-      { code: "def f := sorry", version: "v1", holes: ["f"] },
+      { code: "def f := 2", key: KEY, replaces: { snapshot_id: "v1~e2", allow: { definitions: ["f"] } } },
+      { code: "theorem t : 1 = 1 := by simp", key: KEY, replaces: { snapshot_id: "v1~e1" }, fork: true },
+      { code: "def f := sorry", version: "v1", key: KEY, holes: ["f"] },
     ]);
   });
 
@@ -129,8 +146,8 @@ describe("PisaClient", () => {
     await client.submitCreateSnapshot("def f := 3", { replaces: { snapshot_id: "w~e" } });
     await client.submitCreateSnapshot("def f := 3", { replaces: { snapshot_id: "w~e" }, version: "w" });
     expect(sent.map((s) => s.body)).toEqual([
-      { code: "def f := 3", replaces: { snapshot_id: "w~e" } },
-      { code: "def f := 3", version: "w", replaces: { snapshot_id: "w~e" } },
+      { code: "def f := 3", key: KEY, replaces: { snapshot_id: "w~e" } },
+      { code: "def f := 3", version: "w", key: KEY, replaces: { snapshot_id: "w~e" } },
     ]);
   });
 
@@ -268,8 +285,8 @@ describe("PisaClient", () => {
     await client.resubmitSnapshots("v2~s", "v2~t", { dryRun: true, labels: { run: "b" } });
     await client.submitResubmitSnapshots("v2~s", "v2~t", { verify: true, timeout: 30 });
     expect(sent.map((s) => [s.url, s.body])).toEqual([
-      ["/api/snapshots", { code: "x", amends: { snapshot_id: "v2~s", reason: "w is false" } }],
-      ["/api/snapshots", { code: "y", refutes: { snapshot_id: "v2~s", target: "w" } }],
+      ["/api/snapshots", { code: "x", key: KEY, amends: { snapshot_id: "v2~s", reason: "w is false" } }],
+      ["/api/snapshots", { code: "y", key: KEY, refutes: { snapshot_id: "v2~s", target: "w" } }],
       ["/api/snapshots/resubmit", { from: "v2~s", to: "v2~t", dry_run: true, labels: { run: "b" } }],
       ["/api/snapshots/resubmit", { from: "v2~s", to: "v2~t", timeout: 30, verify: true }],
     ]);
@@ -292,7 +309,7 @@ describe("PisaClient", () => {
   it("names the run a create starts", async () => {
     const { client, sent } = recording(() => json({ check: { ok: true } }));
     await client.createSnapshot("x", { name: "proj.lemma", holes: ["f"] });
-    expect(sent.map((s) => s.body)).toEqual([{ code: "x", version: "v1", holes: ["f"], name: "proj.lemma" }]);
+    expect(sent.map((s) => s.body)).toEqual([{ code: "x", version: "v1", key: KEY, holes: ["f"], name: "proj.lemma" }]);
   });
 
   it("reads a run by its name, and names one", async () => {
@@ -408,7 +425,7 @@ describe("PisaClient", () => {
     ]);
   });
 
-  it("throws the server's error, or bad_response for one that isn't pisa's", async () => {
+  it("throws the server's error, a gateway's as unavailable, or bad_response for one that isn't pisa's", async () => {
     let reply = json({ error: { kind: "capacity", message: "No available REPLs" } }, 429);
     const { client } = recording(() => reply);
     const busy = await client.check("x").catch((e: unknown) => e);
@@ -416,7 +433,7 @@ describe("PisaClient", () => {
     expect(busy).toMatchObject({ kind: "capacity", status: 429, message: "No available REPLs" });
 
     reply = new Response("<html>Bad Gateway</html>", { status: 502, statusText: "Bad Gateway" });
-    expect(await client.check("x").catch((e: unknown) => e)).toMatchObject({ kind: "bad_response", status: 502 });
+    expect(await client.check("x").catch((e: unknown) => e)).toMatchObject({ kind: "unavailable", status: 502 });
     reply = new Response("not json", { status: 200 });
     expect(await client.check("x").catch((e: unknown) => e)).toMatchObject({ kind: "bad_response", status: 200 });
   });
@@ -446,7 +463,7 @@ describe("PisaClient", () => {
     const { client } = recording(() => reply);
     expect(await client.health()).toEqual({ status: "draining", workers: 2, search: null });
     reply = new Response("Service Unavailable", { status: 503 });
-    expect(await client.health().catch((e: unknown) => e)).toMatchObject({ kind: "bad_response", status: 503 });
+    expect(await client.health().catch((e: unknown) => e)).toMatchObject({ kind: "unavailable", status: 503 });
   });
 
   it("submits a request as a job, and waits for its answer", async () => {
@@ -518,3 +535,88 @@ describe("PisaClient", () => {
   });
 });
 
+describe("retries", () => {
+  const busy = () => json({ error: { kind: "capacity", message: "no worker took it" } }, 429);
+  const checked = { ok: true, time: 0, messages: [], sorries: [], reasons: [], declarations: [] };
+  /** A client that sends again at once, answered by `replies` in turn. */
+  const scripted = (...replies: (() => Response)[]) =>
+    recording((s) => {
+      const reply = replies.shift();
+      if (reply === undefined) throw new Error(`no reply left for ${s.method} ${s.url}`);
+      return reply();
+    }, "/api/", { baseDelayMs: 1 });
+
+  it("sends again what is safe to, waiting as the server says", async () => {
+    const lost = () =>
+      new Response(JSON.stringify({ error: { kind: "unavailable", message: "lost" } }), {
+        status: 503,
+        headers: { "retry-after": "0" },
+      });
+    const { client, sent } = scripted(lost, () => json(checked));
+    expect((await client.check("x")).ok).toBe(true);
+    expect(sent).toHaveLength(2);
+  });
+
+  it("sends again what may have run only on a 429, and nothing when told not to", async () => {
+    const gateway = () => new Response("<html>bad gateway</html>", { status: 502 });
+    let { client, sent } = scripted(gateway);
+    expect(await client.acceptRun(["v1~s"]).catch((e: unknown) => e)).toMatchObject({ kind: "unavailable", status: 502 });
+    expect(sent).toHaveLength(1);
+    ({ client, sent } = scripted(busy, () => json({ id: "v1~a", accepted: true, pairs: [] })));
+    expect((await client.acceptRun(["v1~s"])).accepted).toBe(true);
+    expect(sent).toHaveLength(2);
+    const off = recording(busy);
+    expect(await off.client.check("x").catch((e: unknown) => e)).toMatchObject({ kind: "capacity" });
+    expect(off.sent).toHaveLength(1);
+    expect(off.client.retry).toBeUndefined();
+  });
+
+  it("sends a create again with the key it made", async () => {
+    const { client, sent } = scripted(busy, () => json({ check: checked }));
+    await client.createSnapshot("def x := 1");
+    expect(sent).toHaveLength(2);
+    expect(sent[0]?.body).toMatchObject({ key: KEY });
+    expect((sent[1]?.body as { key: string }).key).toBe((sent[0]?.body as { key: string }).key);
+  });
+
+  it("sends a batch's items that no worker took again, alone", async () => {
+    const failed = { ...checked, ok: false, error: { kind: "capacity", message: "" } };
+    const { client, sent } = scripted(
+      () => json({ results: [checked, failed] }),
+      () => json({ results: [checked] }),
+    );
+    const results = await client.checkBatch(["a", "b"]);
+    expect(results.map((r) => r.ok)).toEqual([true, true]);
+    expect(sent.map((s) => (s.body as { items: unknown }).items)).toEqual([[{ code: "a" }, { code: "b" }], [{ code: "b" }]]);
+  }, 10_000);
+
+  it("stops waiting when the request is aborted", async () => {
+    const controller = new AbortController();
+    const { client } = recording(
+      () => {
+        setTimeout(() => controller.abort(), 10);
+        return new Response("<html>bad gateway</html>", { status: 502 });
+      },
+      "/api/",
+      { baseDelayMs: 60_000 },
+    );
+    const thrown = await client.check("x", { signal: controller.signal }).catch((e: unknown) => e);
+    expect(thrown).toMatchObject({ kind: "aborted" });
+  });
+
+  it("sends a read again after a network failure, and a write that may have run not", async () => {
+    let failures = 1;
+    const { client, sent } = recording(
+      () => {
+        if (failures-- > 0) throw new TypeError("fetch failed");
+        return json({ snapshots: [] });
+      },
+      "/api/",
+      { baseDelayMs: 1 },
+    );
+    expect((await client.listSnapshots()).snapshots).toEqual([]);
+    expect(sent).toHaveLength(2);
+    failures = 1;
+    expect(await client.openDocument("x").catch((e: unknown) => e)).toMatchObject({ kind: "network" });
+  });
+});

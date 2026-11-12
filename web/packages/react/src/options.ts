@@ -32,7 +32,7 @@ import type {
 } from "@aqora/pisa-client";
 import type { InfiniteData, QueryKey, UseInfiniteQueryOptions, UseQueryOptions } from "@tanstack/react-query";
 
-import { retryQuery } from "./retry.ts";
+import { queryRetry } from "./retry.ts";
 
 export type PisaQueryOptions<T> = UseQueryOptions<T, PisaError, T, QueryKey>;
 
@@ -95,7 +95,7 @@ export function checkOptions(client: PisaClient, input: CheckInput): PisaQueryOp
       return { code, result: await client.check(code, { ...options, signal }) };
     },
     staleTime: (q) => (isTransient(q.state.data?.result) ? 0 : Infinity),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -125,7 +125,7 @@ export function checkBatchOptions(client: PisaClient, input: CheckBatchInput): P
       });
     },
     staleTime: (q) => (q.state.data?.some((c) => isTransient(c.result)) === true ? 0 : Infinity),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -158,7 +158,7 @@ export function searchOptions(client: PisaClient, query: Query, input: VersionIn
     // being embedded gets the dense lane if asked again.
     staleTime: (q) => (q.state.data?.dense_pending === true ? 0 : compact.snapshots === undefined ? Infinity : 30_000),
     enabled: hasTerms(compact),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -168,7 +168,7 @@ export function resolveOptions(client: PisaClient, names: string[], input: Versi
     queryFn: ({ signal }) => client.resolve(names, { ...input, signal }),
     staleTime: Infinity,
     enabled: names.length > 0,
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -186,7 +186,7 @@ export function declarationOptions(
     queryFn: ({ signal }) =>
       client.getDeclaration(name, { ...input, ...(module !== undefined && { module }), signal }),
     staleTime: Infinity,
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -212,7 +212,7 @@ export function snapshotOptions(
   return {
     queryKey: [...pisaKeys.snapshot(client, id), { detail }] as QueryKey,
     queryFn: ({ signal }) => client.getSnapshot(id, { ...(detail.length > 0 && { detail }), signal }),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -226,7 +226,7 @@ export function dependentsOptions(
   return {
     queryKey: [...pisaKeys.snapshots(client), "dependents", id, params.labels ?? {}] as QueryKey,
     queryFn: ({ signal }) => client.listDependents(id, params, { signal }),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -247,7 +247,7 @@ export function auditOptions(
   return {
     queryKey: [...pisaKeys.snapshots(client), "audit", version, asked] as QueryKey,
     queryFn: ({ signal }) => client.auditSnapshots(params, { ...input, signal }),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -257,7 +257,7 @@ export function acceptancesOptions(client: PisaClient, spec: SnapshotId): PisaQu
   return {
     queryKey: [...pisaKeys.snapshots(client), "acceptances", spec] as QueryKey,
     queryFn: ({ signal }) => client.listAcceptances(spec, { signal }),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -277,7 +277,7 @@ export function rebuildPlanOptions(client: PisaClient, input: RebuildPlanInput):
     queryKey: [...pisaKeys.snapshots(client), "rebuild", { from, to, labels, allow_changes: allowChanges }] as QueryKey,
     queryFn: ({ signal }) =>
       client.rebuildSnapshots(from, to, labels, { dryRun: true, ...(allowChanges && { allowChanges }), signal }),
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -315,7 +315,7 @@ export function documentGoalsOptions(
         { ...(input.timeout !== undefined && { timeout: input.timeout }), signal },
       ),
     staleTime: revision !== undefined ? Infinity : 0,
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }
 
@@ -331,6 +331,6 @@ export function snapshotsOptions(
       client.listSnapshots({ ...params, ...(pageParam !== undefined && { after: pageParam }) }, { ...input, signal }),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next,
-    retry: retryQuery,
+    retry: queryRetry(client),
   };
 }

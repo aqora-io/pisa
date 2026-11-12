@@ -62,18 +62,28 @@ const { hits } = await pisa.search({ description: "trace of a density matrix is 
 ```
 
 - **Errors.** Every method throws a `PisaError` whose `kind` is one of the
-  server's error kinds, or `network`, `aborted` or `bad_response`. The helpers
-  `isLeanError`, `isLimitError`, `isCapacityError` and `isNotFoundError` group
-  the kinds.
+  server's error kinds, or `network`, `aborted` or `bad_response`. A
+  gateway's 502, 503 or 504 is `unavailable`. The helpers `isLeanError`,
+  `isLimitError`, `isCapacityError` and `isNotFoundError` group the kinds.
+- **Retries.** A request is sent again, after a random wait that grows each
+  time and is at least the server's `Retry-After`: after a 429, which says
+  nothing ran, and, for one safe to send twice (reads, checks, tactics,
+  goals, probes, verifies, creates and dry runs), after a 502, 503 or 504 or a
+  network failure. Up to 4 attempts within 5 minutes; `retry: false` sends
+  each request once, and `retry: { attempts, baseDelayMs, maxDelayMs,
+  deadlineMs }` changes the policy. A create without a `key` gets one of the
+  client's, `client:` and 32 hex digits, so a retry can't keep it twice. A
+  batch's items that no worker took are sent again alone.
 - **Cancelling.** Every method takes a `signal`. Aborting gives the job up only
   if no worker has claimed it yet.
 - **Long requests.** Behind a proxy that cuts requests off, `submitCheck`,
   `submitStartSession`, `submitApplyTactic`, `submitCheckSession`,
-  `submitCreateSnapshot`, `submitVerifySnapshot`, `submitRebuildSnapshots`
-  and `submitJudgeRun` ask for an async request and return its `Job` at once.
-  `waitJob(job)` then returns what the call would have, or throws what it would
-  have thrown; `pollJob(job, { wait })` looks once, and `cancelJob(job)`
-  withdraws a job no worker has started. A job's answer is kept for an hour.
+  `submitCreateSnapshot`, `submitVerifySnapshot`, `submitRebuildSnapshots`,
+  `submitSettleRun`, `submitResubmitSnapshots` and `submitAcceptRun` ask for
+  an async request and return its `Job` at once. `waitJob(job)` then returns
+  what the call would have, or throws what it would have thrown, looking every
+  25 s; `pollJob(job, { wait })` looks once, and `cancelJob(job)` withdraws a
+  job no worker has started. A job's answer is kept for an hour.
   `waitJob(job, { wait: 5, onPending })` sees its progress, `queued` then
   `running`, every 5 seconds.
   ```ts

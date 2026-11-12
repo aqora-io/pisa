@@ -2,7 +2,8 @@ import type { ErrorKind } from "./types.ts";
 
 /** What went wrong: an error kind the server sent, or `network` (no answer),
  *  `aborted` (the request's signal fired), or `bad_response` (an answer that
- *  isn't pisa's, e.g. a proxy's error page). */
+ *  isn't pisa's). A gateway's 502, 503 or 504, such as a proxy's error page,
+ *  is `unavailable`. */
 export type PisaErrorKind = ErrorKind | "network" | "aborted" | "bad_response";
 
 export class PisaError extends Error {

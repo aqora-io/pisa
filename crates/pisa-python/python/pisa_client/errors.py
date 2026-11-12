@@ -27,8 +27,10 @@ class LimitError(PisaError):
 
 
 class CapacityError(PisaError):
-    """No worker could take the request, or the metadata store failed
-    (kinds ``capacity`` and ``unavailable``); retry later."""
+    """No worker could take the request, the metadata store failed, or a
+    gateway in front of the server answered 502, 503 or 504 (kinds
+    ``capacity`` and ``unavailable``); retry later. The client has already
+    retried as far as its ``retry`` policy goes."""
 
 
 class NotFoundError(PisaError):

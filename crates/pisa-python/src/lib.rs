@@ -219,16 +219,20 @@ struct Client {
 #[pymethods]
 impl Client {
     #[new]
-    #[pyo3(signature = (url, *, version = None, timeout = 60, scope = None))]
+    #[pyo3(signature = (url, *, version = None, timeout = 60, scope = None, retry = true))]
     fn new(
         url: &str,
         version: Option<String>,
         timeout: u64,
         scope: Option<BTreeMap<String, String>>,
+        retry: bool,
     ) -> PyResult<Self> {
         let mut inner = pisa_client::Client::new(url)
             .map_err(|e| PyValueError::new_err(e.to_string()))?
             .with_timeout(timeout);
+        if !retry {
+            inner = inner.with_retry(pisa_client::RetryPolicy::none());
+        }
         if let Some(v) = version {
             inner = inner.with_version(v);
         }

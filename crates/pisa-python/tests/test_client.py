@@ -219,7 +219,7 @@ def test_errors(url):
         Client(url).apply_tactic("v~abc~0123", "rfl")
 
     with pytest.raises(CapacityError) as e:
-        Client(url, version="nope").check("#check Nat")
+        Client(url, version="nope", retry=False).check("#check Nat")
     assert e.value.status == 429
 
     with pytest.raises(ValueError):
@@ -228,6 +228,53 @@ def test_errors(url):
     with pytest.raises(PisaError) as e:
         Client(f"http://127.0.0.1:{free_port()}").health()
     assert e.value.kind is None
+
+
+def stub(replies):
+    """A server that answers each request with the next of `replies`,
+    (status, headers, body), and records them as (method, path)."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def answer(self):
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            seen.append((self.command, self.path))
+            status, headers, body = replies[len(seen) - 1]
+            self.send_response(status)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        do_GET = do_POST = do_PUT = answer
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return f"http://127.0.0.1:{server.server_port}", seen, server
+
+
+def test_a_gateways_errors_are_retried_and_read_as_capacity():
+    checked = '{"ok": true, "time": 0, "messages": [], "sorries": [], "reasons": [], "declarations": []}'
+    json = {"content-type": "application/json"}
+    url, seen, server = stub([(503, {"retry-after": "0"}, "no upstream"), (200, json, checked)])
+    try:
+        assert Client(url).check("#check Nat")["ok"]
+        assert seen == [("POST", "/check")] * 2
+    finally:
+        server.shutdown()
+    url, seen, server = stub([(502, {}, "<html>bad gateway</html>")])
+    try:
+        with pytest.raises(CapacityError) as e:
+            Client(url, retry=False).check("#check Nat")
+        assert (e.value.kind, e.value.status) == ("unavailable", 502) and len(seen) == 1
+    finally:
+        server.shutdown()
 
 
 def test_threads_share_a_client(url):

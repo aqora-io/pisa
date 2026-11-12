@@ -100,6 +100,8 @@ servers don't share a cache.
 **Caching and retries.**
 - A check is cached for good, unless it failed in a way that may not recur.
 - Searches over snapshots go stale after 30 s.
-- Queries retry once after a 503 and twice after a network error. A 429
-  already means the server waited for a worker, so it isn't retried.
-- Mutations aren't retried.
+- The client sends requests again itself (see its `retry`), so queries
+  aren't run again on top of it. A client with `retry: false` falls back on
+  `retryQuery`: once after a 503 and twice after a network error, and never
+  after a 429, which already means the server waited for a worker.
+- Mutations aren't run again; the client's own retries cover them.

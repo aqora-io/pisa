@@ -149,4 +149,10 @@ describe("query options", () => {
     expect(tries(new PisaError("capacity", "", 429))).toBe(0);
     expect(tries(new PisaError("lean", "", 422))).toBe(0);
   });
+
+  it("doesn't run a query again when its client already sends requests again", () => {
+    expect(checkOptions(client, { code: "x" }).retry).toBe(false);
+    const once = new PisaClient({ url: "http://pisa.test", version: "v", retry: false });
+    expect(checkOptions(once, { code: "x" }).retry).toBe(retryQuery);
+  });
 });
