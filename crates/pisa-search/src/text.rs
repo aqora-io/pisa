@@ -40,7 +40,7 @@ pub fn latex_to_unicode(src: &str) -> String {
                 let cmd: String = chars[start..j].iter().collect();
                 i = j;
                 if let Some((sym, end)) = blackboard(&cmd, &chars, j) {
-                    // `\mathbb{R}` or `\mathbb R` → `ℝ`.
+                    // `\mathbb{R}` or `\mathbb R` → `ℝ`, `\mathcal{H}` → `ℋ`.
                     out.push(' ');
                     out.push(sym);
                     out.push(' ');
@@ -59,6 +59,8 @@ pub fn latex_to_unicode(src: &str) -> String {
                     out.push_str(&cmd);
                     out.push(' ');
                 }
+                // `i` is past the command's name: what follows is read next.
+                continue;
             }
             '{' | '}' | '$' | '&' => out.push(' '),
             '~' => out.push(' '),
@@ -248,7 +250,7 @@ fn latex_symbol(cmd: &str) -> Option<&'static str> {
 /// The number system `\mathbb` names after `j`, in braces or not, and where
 /// what it names ends.
 fn blackboard(cmd: &str, chars: &[char], j: usize) -> Option<(char, usize)> {
-    if cmd != "mathbb" {
+    if cmd != "mathbb" && cmd != "mathcal" {
         return None;
     }
     let mut k = j;
@@ -261,15 +263,42 @@ fn blackboard(cmd: &str, chars: &[char], j: usize) -> Option<(char, usize)> {
     if braced && chars.get(end) != Some(&'}') {
         return None;
     }
-    let sym = match letter {
-        'R' => 'ℝ',
-        'C' => 'ℂ',
-        'N' => 'ℕ',
-        'Z' => 'ℤ',
-        'Q' => 'ℚ',
-        _ => return None,
+    let sym = if cmd == "mathcal" {
+        calligraphic(*letter)?
+    } else {
+        match letter {
+            'R' => 'ℝ',
+            'C' => 'ℂ',
+            'N' => 'ℕ',
+            'Z' => 'ℤ',
+            'Q' => 'ℚ',
+            _ => return None,
+        }
     };
     Some((sym, end + usize::from(braced)))
+}
+
+/// The script capital of `letter`: the Letterlike Symbols block has eight,
+/// and Mathematical Alphanumeric Symbols the rest.
+fn calligraphic(letter: char) -> Option<char> {
+    Some(match letter {
+        'B' => 'ℬ',
+        'E' => 'ℰ',
+        'F' => 'ℱ',
+        'H' => 'ℋ',
+        'I' => 'ℐ',
+        'L' => 'ℒ',
+        'M' => 'ℳ',
+        'R' => 'ℛ',
+        'A'..='Z' => char::from_u32(0x1D49C + (letter as u32 - 'A' as u32))?,
+        _ => return None,
+    })
+}
+
+/// A modifier or subscript letter (`ᴴ`, `ᵀ`, `ᵥ`, `ₙ`, `ₖ`), which marks
+/// notation when it ends a word.
+fn is_modifier(c: char) -> bool {
+    matches!(c as u32, 0x02B0..=0x02FF | 0x1D2C..=0x1D6A | 0x1D9B..=0x1DBF | 0x2090..=0x209C)
 }
 
 /// Folds ASCII operator spellings into their Unicode forms and blackboard
@@ -331,7 +360,13 @@ pub fn tokens(text: &str) -> Vec<String> {
     let mut ident = String::new();
     let flush = |ident: &mut String, out: &mut Vec<String>| {
         let id = ident.trim_matches(|c| c == '.' || c == '\'');
-        if !id.is_empty() {
+        // `Aᴴ` is `A` and `ᴴ`, as well as the word.
+        let base = id.trim_end_matches(is_modifier);
+        if !base.is_empty() && base.len() < id.len() {
+            out.extend(split_name(base));
+            out.extend(id[base.len()..].chars().map(|c| c.to_string()));
+            out.push(id.to_lowercase());
+        } else if !id.is_empty() {
             let parts = split_name(id);
             let whole = id.to_lowercase();
             let compound = parts.len() > 1;
@@ -483,6 +518,36 @@ mod tests {
             tokens(&latex_to_unicode(r"f : \mathbb C \to \mathbb{Z}")),
             ["f", "ℂ", "→", "ℤ"]
         );
+    }
+
+    /// What follows a command is read, not skipped: the next command, an
+    /// operator, a bracket.
+    #[test]
+    fn a_command_keeps_what_follows_it() {
+        assert_eq!(
+            tokens(&latex_to_unicode(r"\alpha\beta+\gamma")),
+            ["α", "β", "+", "γ"]
+        );
+        assert_eq!(tokens(&latex_to_unicode(r"|\psi\rangle")), ["|", "ψ", "⟩"]);
+        assert_eq!(tokens(&latex_to_unicode(r"f(\rho)")), ["f", "ρ"]);
+    }
+
+    /// A calligraphic letter stays a letter, as `\mathcal{H}` names a space.
+    #[test]
+    fn calligraphic_letters_survive() {
+        assert_eq!(
+            tokens(&latex_to_unicode(r"\mathcal{H}_A \otimes \mathcal K")),
+            ["ℋ", "a", "⊗", "𝒦"]
+        );
+    }
+
+    /// Trailing modifier letters, as in `Aᴴ` or `Sᵥₙ`, are their own tokens
+    /// too, so notation like `ᴴ` reads as a symbol; the word stays whole.
+    #[test]
+    fn modifier_letters_split_off_a_word() {
+        assert_eq!(tokens("Aᴴ * B"), ["a", "ᴴ", "aᴴ", "*", "b"]);
+        assert_eq!(tokens("Sᵥₙ ρ"), ["s", "ᵥ", "ₙ", "sᵥₙ", "ρ"]);
+        assert_eq!(tokens("ρ ⊗ₖ σ"), ["ρ", "⊗", "ₖ", "σ"]);
     }
 
     #[test]

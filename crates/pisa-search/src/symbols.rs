@@ -3,7 +3,8 @@
 //!
 //! ```toml
 //! [[symbol]]
-//! tokens = ["tr", "trace"]          # normalized query tokens (see `text::tokens`)
+//! tokens = ["tr", "trace"]          # normalized query tokens (see `text::tokens`);
+//!                                   # "partial trace" needs both words
 //! constants = ["Matrix.trace"]
 //! context = ["matrix", "density"]   # optional: full weight only with one of these
 //! ```
@@ -59,7 +60,8 @@ impl Symbols {
     pub fn constants(&self, tokens: &[String]) -> Vec<(String, f32)> {
         let mut out: Vec<(String, f32)> = Vec::new();
         for e in &self.entries {
-            if !e.tokens.iter().any(|t| tokens.contains(t)) {
+            let has = |t: &String| t.split(' ').all(|w| tokens.iter().any(|q| q == w));
+            if !e.tokens.iter().any(has) {
                 continue;
             }
             let weight = if e.context.is_empty() || e.context.iter().any(|c| tokens.contains(c)) {
@@ -116,6 +118,74 @@ mod tests {
         assert_eq!(s.constant_names().count(), 2);
     }
 
+    /// An entry's token of several words matches only when all of them are
+    /// in the query.
+    #[test]
+    fn a_phrase_matches_only_with_all_its_words() {
+        let s = Symbols::parse(
+            r#"
+            [[symbol]]
+            tokens = ["partial trace", "ptrace"]
+            constants = ["MState.traceLeft"]
+            [[symbol]]
+            tokens = ["| ⟩"]
+            constants = ["Ket"]
+            "#,
+        )
+        .unwrap();
+        let means = |text: &str| -> Vec<String> {
+            let q = tokens(&latex_to_unicode(text));
+            s.constants(&q).into_iter().map(|(c, _)| c).collect()
+        };
+        assert_eq!(means("the partial trace of ρ"), ["MState.traceLeft"]);
+        assert_eq!(means("ptrace"), ["MState.traceLeft"]);
+        assert!(means("a partial derivative").is_empty());
+        assert!(means("trace").is_empty());
+        assert_eq!(means(r"|\psi\rangle"), ["Ket"]);
+        assert!(means("⟨a, b⟩").is_empty());
+    }
+
+    /// Quantum information's words and notation mean QuantumInfo's
+    /// constants; each named here exists in the index.
+    #[test]
+    fn shipped_quantum_information_vocabulary() {
+        let s = Symbols::parse(DEFAULT).unwrap();
+        let means = |text: &str| -> Vec<String> {
+            let q = tokens(&latex_to_unicode(text));
+            s.constants(&q).into_iter().map(|(c, _)| c).collect()
+        };
+        for (text, constant) in [
+            ("partial trace over B", "MState.traceRight"),
+            (r"\operatorname{Tr}_A \rho_{AB}", "MState.traceLeft"),
+            ("fidelity of two states", "MState.fidelity"),
+            ("von Neumann entropy", "Sᵥₙ"),
+            ("quantum relative entropy", "qRelativeEnt"),
+            ("mutual information", "qMutualInfo"),
+            ("Kraus operators", "MatrixMap.of_kraus"),
+            ("quantum channel", "CPTPMap"),
+            ("CPTP map", "CPTPMap"),
+            ("completely positive map", "MatrixMap.IsCompletelyPositive"),
+            ("POVM", "POVM"),
+            ("qubit", "Qubit"),
+            ("Hadamard gate", "Qubit.H"),
+            ("CNOT", "Qubit.CNOT"),
+            ("⟨ψ|", "Bra"),
+            ("density matrix", "MState"),
+            ("separable state", "MState.IsSeparable"),
+            ("maximally entangled state", "Ket.MES"),
+            ("A ⊗ₖ B", "Matrix.kronecker"),
+            ("ρ ⊗ᴹ σ", "MState.prod"),
+            ("Aᴴ", "Matrix.conjTranspose"),
+            ("Hermitian matrix", "HermitianMat"),
+        ] {
+            assert!(
+                means(text).contains(&constant.to_string()),
+                "{text}: {:?}",
+                means(text)
+            );
+        }
+    }
+
     #[test]
     fn shipped_dictionary_parses() {
         assert!(Symbols::parse(DEFAULT).unwrap().constant_names().count() > 20);
@@ -132,8 +202,8 @@ mod tests {
         assert_eq!(means("⟪x, y⟫"), ["Inner.inner"]);
         assert_eq!(means("inner"), ["Inner.inner"]);
         assert_eq!(means("⟨a, b⟩"), Vec::<String>::new());
-        // A bra-ket's bar isn't an absolute value.
-        assert_eq!(means("|ψ⟩"), Vec::<String>::new());
+        // A bra-ket's bar isn't an absolute value: the two read as a ket.
+        assert_eq!(means("|ψ⟩"), ["Ket"]);
         assert_eq!(means("abs"), ["abs"]);
         // Names that exist.
         assert!(means("adjoint").contains(&"Star.star".to_string()));

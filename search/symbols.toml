@@ -2,7 +2,8 @@
 # mean. Soft hints for the structural lane, never filters. Tokens are as
 # `pisa_search::text::tokens` produces them (lowercase words, Unicode symbols;
 # LaTeX is converted first, so `\otimes` arrives as `⊗`). `context` words give
-# an entry full weight; without them it counts half.
+# an entry full weight; without them it counts half. A token of several words,
+# as "partial trace", matches only when the query has all of them.
 #
 # Seed list: review and extend. Unknown constants are dropped at load.
 
@@ -13,7 +14,7 @@ constants = ["Matrix.trace", "LinearMap.trace"]
 context = ["matrix", "operator", "density", "state", "ρ"]
 
 [[symbol]]
-tokens = ["†", "dagger", "adjoint", "conjugate"]
+tokens = ["†", "ᴴ", "dagger", "adjoint", "conjugate"]
 constants = ["Matrix.conjTranspose", "Star.star", "ContinuousLinearMap.adjoint", "LinearMap.adjoint"]
 
 [[symbol]]
@@ -26,7 +27,7 @@ constants = ["Matrix.det", "LinearMap.det"]
 
 [[symbol]]
 tokens = ["hermitian", "self", "selfadjoint"]
-constants = ["Matrix.IsHermitian", "IsSelfAdjoint"]
+constants = ["Matrix.IsHermitian", "IsSelfAdjoint", "HermitianMat"]
 
 [[symbol]]
 tokens = ["unitary"]
@@ -235,3 +236,123 @@ constants = ["PauliMatrix.pauliMatrix"]
 tokens = ["hamiltonian"]
 constants = ["ClassicalMechanics.HarmonicOscillator.hamiltonian"]
 context = ["oscillator", "harmonic", "classical"]
+
+# Quantum information (QuantumInfo and PhyslibAlpha)
+[[symbol]]
+tokens = ["partial trace", "ptrace", "tr a", "tr b"]
+constants = ["MState.traceLeft", "MState.traceRight", "Matrix.traceLeft", "Matrix.traceRight", "HermitianMat.traceLeft", "HermitianMat.traceRight", "CPTPMap.traceLeft", "CPTPMap.traceRight", "partialTraceLeft"]
+context = ["partial", "ρ", "state", "density", "subsystem", "bipartite"]
+
+[[symbol]]
+tokens = ["fidelity"]
+constants = ["MState.fidelity"]
+
+[[symbol]]
+tokens = ["von neumann", "neumann entropy", "quantum entropy"]
+constants = ["Sᵥₙ"]
+
+[[symbol]]
+tokens = ["relative entropy", "umegaki", "divergence"]
+constants = ["qRelativeEnt", "SandwichedRelRentropy"]
+context = ["quantum", "relative", "ρ", "σ", "state"]
+
+[[symbol]]
+tokens = ["mutual information"]
+constants = ["qMutualInfo"]
+
+[[symbol]]
+tokens = ["conditional entropy"]
+constants = ["qConditionalEnt"]
+
+[[symbol]]
+tokens = ["coherent information"]
+constants = ["coherentInfo"]
+
+[[symbol]]
+tokens = ["kraus"]
+constants = ["MatrixMap.of_kraus", "CPTPMap.of_kraus_CPTPMap", "CPMap.of_kraus_CPMap"]
+
+[[symbol]]
+tokens = ["cptp", "quantum channel", "channel"]
+constants = ["CPTPMap"]
+context = ["quantum", "cptp", "kraus", "ρ", "state", "trace"]
+
+[[symbol]]
+tokens = ["completely positive"]
+constants = ["MatrixMap.IsCompletelyPositive"]
+
+[[symbol]]
+tokens = ["trace preserving", "tp"]
+constants = ["MatrixMap.IsTracePreserving"]
+context = ["trace", "channel", "map", "cptp"]
+
+[[symbol]]
+tokens = ["choi"]
+constants = ["CPTPMap.choi"]
+
+[[symbol]]
+tokens = ["povm", "povms"]
+constants = ["POVM", "POVM.measure"]
+
+[[symbol]]
+tokens = ["measurement"]
+constants = ["POVM", "POVM.measure"]
+context = ["quantum", "state", "ρ", "outcome", "povm"]
+
+[[symbol]]
+tokens = ["qubit", "qubits"]
+constants = ["Qubit"]
+
+[[symbol]]
+tokens = ["hadamard"]
+constants = ["Qubit.H"]
+context = ["gate", "qubit", "quantum"]
+
+[[symbol]]
+tokens = ["cnot", "controlled not"]
+constants = ["Qubit.CNOT"]
+
+[[symbol]]
+# `|ψ⟩` and `⟨ψ|`: a bar with an angle bracket, not an absolute value or an
+# anonymous constructor.
+tokens = ["| ⟩", "ket", "kets"]
+constants = ["Ket"]
+
+[[symbol]]
+tokens = ["⟨ |", "bra", "bras"]
+constants = ["Bra"]
+
+[[symbol]]
+tokens = ["braket", "bra ket"]
+constants = ["Braket.dot"]
+
+[[symbol]]
+tokens = ["density matrix", "density operator", "mixed state", "quantum state"]
+constants = ["MState", "densityMatrix"]
+
+[[symbol]]
+tokens = ["purification", "purify"]
+constants = ["MState.purify"]
+
+[[symbol]]
+tokens = ["separable"]
+constants = ["MState.IsSeparable"]
+context = ["state", "quantum", "entangled", "bipartite", "ρ"]
+
+[[symbol]]
+tokens = ["maximally entangled", "entangled state", "bell state"]
+constants = ["Ket.MES"]
+
+[[symbol]]
+tokens = ["entanglement formation"]
+constants = ["EoF"]
+
+[[symbol]]
+# `A ⊗ₖ B`, Mathlib's Kronecker product of matrices.
+tokens = ["⊗ ₖ", "kronecker"]
+constants = ["Matrix.kronecker", "Matrix.kroneckerMap"]
+
+[[symbol]]
+# `ρ ⊗ᴹ σ`, the product of two states.
+tokens = ["⊗ ᴹ", "product state"]
+constants = ["MState.prod"]
