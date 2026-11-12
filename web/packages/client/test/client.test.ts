@@ -194,9 +194,11 @@ describe("PisaClient", () => {
     const { client, sent } = recording(() => json({ summary: {}, assumptions: [], not_proved: [], clean: true }));
     await client.auditSnapshots({ against: ["v2~s0"], review: true });
     await client.auditSnapshots({ against: ["v2~s0"], review: false });
+    await client.auditSnapshots({ against: ["v2~s0"], review: true, reviewLimit: 50 });
     expect(sent.map((s) => s.url)).toEqual([
       "/api/snapshots/audit?against=v2%7Es0&review=true",
       "/api/snapshots/audit?against=v2%7Es0",
+      "/api/snapshots/audit?against=v2%7Es0&review=true&review_limit=50",
     ]);
   });
 

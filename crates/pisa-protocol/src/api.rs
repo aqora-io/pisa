@@ -656,6 +656,15 @@ pub struct CheckSessionRequest {
 /// The most candidates a probe can try.
 pub const MAX_CANDIDATES: usize = 64;
 
+/// The declarations a review list holds over all its entries unless an
+/// audit's `review_limit` says otherwise, and the most it may say.
+pub const DEFAULT_REVIEW_LIMIT: usize = 1000;
+pub const MAX_REVIEW_LIMIT: usize = 10_000;
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
 /// `POST /documents`: opens code on Lean Beam, for the goals at positions in
 /// it and candidate tactics probed there. A worker keeps it open, and the
 /// code is stored so that another can reopen it. Nothing a document says is a
@@ -1624,6 +1633,9 @@ pub struct AuditSnapshotsResponse {
     /// on the head.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub review: Vec<AuditReview>,
+    /// How many declarations the review list left out, past `review_limit`.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub review_left_out: u64,
     /// With `against`: the spec snapshots and heads whose records the kernel
     /// hasn't re-checked, so the audit can't compare them and the run isn't
     /// `clean`. Verify each with `POST /snapshots/{id}/verify`.

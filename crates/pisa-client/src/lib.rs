@@ -190,6 +190,10 @@ pub struct AuditOptions {
     /// Also list, for each spec snapshot and head, what a reviewer reads:
     /// [`AuditSnapshotsResponse::review`].
     pub review: bool,
+    /// With `review`, the most declarations the list holds over all its
+    /// entries, 1 to 10,000; the server's 1,000 unless set.
+    /// [`AuditSnapshotsResponse::review_left_out`] counts the rest.
+    pub review_limit: Option<u32>,
 }
 
 /// Options for [`Client::accept_run`].
@@ -1100,6 +1104,10 @@ impl Client {
         let mut url = self.run_url("snapshots/audit", against, &options.allow)?;
         if options.review {
             url.query_pairs_mut().append_pair("review", "true");
+        }
+        if let Some(n) = options.review_limit {
+            url.query_pairs_mut()
+                .append_pair("review_limit", &n.to_string());
         }
         self.endpoint.get(url).await
     }

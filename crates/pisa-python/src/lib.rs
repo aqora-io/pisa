@@ -449,7 +449,7 @@ impl Client {
         )
     }
 
-    #[pyo3(signature = (labels = None, *, against = None, allow = None, review = false))]
+    #[pyo3(signature = (labels = None, *, against = None, allow = None, review = false, review_limit = None))]
     fn audit_snapshots<'py>(
         &self,
         py: Python<'py>,
@@ -457,6 +457,7 @@ impl Client {
         against: Option<Vec<String>>,
         allow: Option<Vec<String>>,
         review: bool,
+        review_limit: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = labels.unwrap_or_default();
         let allow = allow.unwrap_or_default();
@@ -465,7 +466,11 @@ impl Client {
                 "labels and against don't combine: audit a project by its labels, or a run against its spec",
             )),
             Some(against) => call(py, async move {
-                let opts = pisa_client::AuditOptions { allow, review };
+                let opts = pisa_client::AuditOptions {
+                    allow,
+                    review,
+                    review_limit,
+                };
                 self.inner
                     .audit_snapshots_against_with(&against, &opts)
                     .await

@@ -13,11 +13,11 @@ use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     ACCEPT_BUILD_TIMEOUT, ACCEPT_TIMEOUT, AcceptRequest, AcceptResponse, Accepted, ApiErrors,
     AuditSnapshotsResponse, CheckResult, CreateSnapshotRequest, CreateSnapshotResponse,
-    DeleteSnapshotResponse, Detail, Error, ErrorKind, JobKind, JobStatus, ListAcceptancesResponse,
-    ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, PreferAsync,
-    RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
-    ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
-    UpdateSnapshotRequest, VerifySnapshotResponse,
+    DEFAULT_REVIEW_LIMIT, DeleteSnapshotResponse, Detail, Error, ErrorKind, JobKind, JobStatus,
+    ListAcceptancesResponse, ListDependentsResponse, ListSnapshotsResponse, MAX_REASON,
+    MAX_REVIEW_LIMIT, PreferAsync, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
+    ResubmitSnapshotsRequest, ResubmitSnapshotsResponse, SettleRunRequest, Snapshot,
+    SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -475,6 +475,7 @@ fn list_query(query: &str) -> Result<(Option<String>, ListQuery), String> {
         ("allow" = Option<Vec<String>>, Query, description = "With `against`, a definition the run's heads may change, as `allow` names it in `replaces` (`_private.h` for a private one); repeatable. The links' own allows don't count: by default only the spec's holes may change"),
         ("version" = Option<String>, Query, description = "The version whose snapshots to audit; when absent, the server's default, or else the one version the live workers serve. With `against`, the ids' version, which it must be if given."),
         ("review" = Option<bool>, Query, description = "With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value"),
+        ("review_limit" = Option<u32>, Query, description = "With `review`, the most declarations the review list holds over all its entries, 1 to 10000, 1000 by default; `review_left_out` counts the rest"),
     ),
     responses((status = 200, description = "The audit", body = AuditSnapshotsResponse), ApiErrors),
 )]
@@ -529,9 +530,26 @@ pub async fn audit(
     }
     let mut audit = reader.audit_against(&against, &allow).await?;
     if review {
-        audit.review = pisa_snapshots::review::review(&reader, &audit.comparisons, &allow).await?;
+        let limit = review_limit_query(query)?;
+        let reviewed = pisa_snapshots::review::review(&reader, &audit.comparisons, &allow, limit);
+        (audit.review, audit.review_left_out) = reviewed.await?;
     }
     Ok(Json(audit))
+}
+
+/// How many declarations an audit's review list may hold.
+fn review_limit_query(query: &str) -> Result<usize, ApiError> {
+    let given = form_urlencoded::parse(query.as_bytes()).find(|(name, _)| name == "review_limit");
+    let Some((_, value)) = given else {
+        return Ok(DEFAULT_REVIEW_LIMIT);
+    };
+    match value.parse::<usize>() {
+        Ok(n) if (1..=MAX_REVIEW_LIMIT).contains(&n) => Ok(n),
+        _ => Err(ApiError::new(
+            ErrorKind::BadRequest,
+            format!("review_limit is 1 to {MAX_REVIEW_LIMIT}, not {value}"),
+        )),
+    }
 }
 
 /// Whether an audit's query asks for the review list.

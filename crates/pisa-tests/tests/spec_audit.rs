@@ -1378,3 +1378,36 @@ async fn the_review_says_why_a_value_is_missing() {
         .unwrap_or_else(|| panic!("{cost}"));
     assert!(why.contains("no export"), "{why}");
 }
+
+/// The review list holds at most `review_limit` declarations, 1,000 unless
+/// given, over all its entries, and says how many it left out.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_review_list_has_a_cap() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef cost : Nat := sorry\ndef rate : Nat := sorry\n\
+                theorem t : cost = rate := sorry";
+    let s = create(&c, json!({"code": spec, "holes": ["cost", "rate"]})).await;
+    let head =
+        "import Foo\n\ndef cost : Nat := 3\ndef rate : Nat := 3\ntheorem t : cost = rate := rfl";
+    create(&c, json!({"code": head, "replaces": replacing(&s)})).await;
+    let listed = |r: &Value| -> usize {
+        let review = r["review"].as_array().unwrap();
+        review
+            .iter()
+            .map(|e| e["declarations"].as_array().unwrap().len())
+            .sum()
+    };
+    let path = format!("/snapshots/audit?against={}&review=true", id(&s));
+    let (_, all) = get(&c, &path).await;
+    let total = listed(&all);
+    assert!(total >= 3, "{all}");
+    assert!(all.get("review_left_out").is_none(), "{all}");
+    let (status, one) = get(&c, &format!("{path}&review_limit=1")).await;
+    assert_eq!(status, 200, "{one}");
+    assert_eq!(listed(&one), 1, "{one}");
+    assert_eq!(one["review_left_out"], json!(total - 1), "{one}");
+    for bad in ["0", "10001", "x"] {
+        let (status, e) = get(&c, &format!("{path}&review_limit={bad}")).await;
+        assert_eq!(status, 400, "{bad}: {e}");
+    }
+}

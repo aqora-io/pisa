@@ -379,6 +379,8 @@ class AuditSnapshotsResponse(TypedDict):
     links: NotRequired[list[AuditLink]]
     comparisons: NotRequired[list[AuditComparison]]
     review: NotRequired[list[AuditReview]]
+    # How many declarations the review list left out, past `review_limit`.
+    review_left_out: NotRequired[int]
     unverified: NotRequired[list[str]]
     amendments: NotRequired[list[Amendment]]
     # A superseded spec's run takes no more submissions, and isn't clean.
@@ -826,6 +828,7 @@ class Client:
         against: list[str] | None = None,
         allow: list[str] | None = None,
         review: bool = False,
+        review_limit: int | None = None,
     ) -> AuditSnapshotsResponse:
         """What the snapshots with every label in `labels` rest on: their
         declarations by `status` (`proved`, `conditional` on assumptions,
@@ -841,7 +844,9 @@ class Client:
         allows don't count);
         the counts are the heads'. With `review`, also what a reviewer reads
         on each head: the declarations the spec's statements use, each hole
-        with its value. `labels` and `against` don't combine, `against`
+        with its value: at most `review_limit` declarations over all the
+        entries, 1 to 10,000 (1,000 unless given), and `review_left_out`
+        counts the rest. `labels` and `against` don't combine, `against`
         can't be empty, and `allow` and `review` need `against` (ValueError)."""
     def export_run(self, against: list[str], *, allow: list[str] | None = None) -> bytes:
         """The run that spec snapshots `against` start, as a Lake project for

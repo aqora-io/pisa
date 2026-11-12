@@ -135,6 +135,10 @@ export interface AuditParams {
   /** With `against`: also list each head's declarations, with its holes'
    *  values, for a reader to compare with the spec. */
   review?: boolean;
+  /** With `review`: the most declarations the list holds over all its
+   *  entries, 1 to 10000 (the server's 1000 unless given);
+   *  `review_left_out` counts the rest. */
+  reviewLimit?: number;
 }
 
 /** An acceptance's limits: `timeout` for each pair (600 by default) and
@@ -380,6 +384,7 @@ export class PisaClient {
     for (const id of params.against ?? []) query.append("against", id);
     for (const name of params.allow ?? []) query.append("allow", name);
     if (params.review) query.set("review", "true");
+    if (params.reviewLimit !== undefined) query.set("review_limit", String(params.reviewLimit));
     return this.call("GET", ["snapshots", "audit"], undefined, options, query);
   }
 

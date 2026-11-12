@@ -379,7 +379,7 @@ pnpm -C web generate
 | `POST /snapshots/rebuild` | `{from, to, labels, dry_run?, allow_changes?, retire?, verify?, timeout?}` → `{ok, changes, changed_definitions?, plan: [{level, snapshot_id?, module, new_module, new_header, code, labels, key, replaces?, affected?}], replaced?, superseded?, created?, failed?, skipped?, not_deleted?, retired?}`; async with `Prefer: respond-async`; see [Rebuilding](#rebuilding) |
 | `POST /snapshots/settle` | `{against, allow?, dry_run?, verify?, timeout?}` → as `POST /snapshots/rebuild`; async with `Prefer: respond-async`; see [Settling a run](#settling) |
 | `POST /snapshots/resubmit` | `{from, to, dry_run?, labels?, verify?, timeout?}` → `{ok, items: [{snapshot_id, module, key, passes, reasons?, changes?, replacement?, new_snapshot_id?, check?}]}`; async with `Prefer: respond-async`; see [Amending a spec](#amending) |
-| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?, contradicted?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], unverified?, amendments?: [{snapshot_id, amends, reason, changes, added, holes?: {before, after}}], superseded?: [{spec, by}], refutations?: [{snapshot_id, spec, target, theorem, gone?}], unsettled?: [{head, swaps: [{snapshot_id, head}], blockers?}]}`, each target with `linked_status?` and `through?: [{name, snapshot_id, head}]`; see [Statuses](#statuses), [Auditing a run](#spec-audit) and [Through links](#through-links) |
+| `GET /snapshots/audit` | `?label=k:v` (repeated), `version?` → `{summary: {proved, conditional, sorry, rejected, unverified_modules}, assumptions: [{name, signature?, snapshot_id?, verified, used_by}], not_proved: [{name, snapshot_id, status, axioms}]}`; or `?against=<id>` (repeated), `allow=<name>` (repeated), `review?`, `review_limit?` → the same, the assumptions with `in_spec`, and `{clean, heads?, forks?: [{snapshot_id, replaced_by}], targets?: [{name, spec, head, status, verified, accepted, refuted_by?, contradicted?}], links?: [{snapshot_id, replaces: {snapshot_id, allow}, replacement: {filled, changed_definitions?, affected?}}], comparisons?: [{spec, head, reasons?, changes?, replacement?}], review?: [{spec, head, declarations, library}], review_left_out?, unverified?, amendments?: [{snapshot_id, amends, reason, changes, added, holes?: {before, after}}], superseded?: [{spec, by}], refutations?: [{snapshot_id, spec, target, theorem, gone?}], unsettled?: [{head, swaps: [{snapshot_id, head}], blockers?}]}`, each target with `linked_status?` and `through?: [{name, snapshot_id, head}]`; see [Statuses](#statuses), [Auditing a run](#spec-audit) and [Through links](#through-links) |
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
@@ -1106,6 +1106,10 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
     workers do as they start and every hour.
   - **`library`** names the constants of Lean, Mathlib and the like that
     they use, which the version fixes.
+  - **The cap.** The list holds at most `review_limit` declarations over all
+    its entries, 1 to 10,000 and 1,000 unless given, in their order; a
+    value outside that range is a 400. `review_left_out` counts the
+    declarations past the cap, and is absent when there are none.
   - **Trust.** The text is what the builds printed, for reading.
     `comparisons`, from verified records, is what acceptance rests on.
   - **What to look for.** A proof can be valid and still miss the claim:
@@ -1229,9 +1233,10 @@ accepting a run takes both:
   `GET /snapshots/accept/{id}` reads it again; `GET /snapshots/accept?spec=<id>`
   lists a spec snapshot's, newest first. It names the code it judged, which
   stays named when snapshots go: each pair's `spec_module` and
-  `head_module`, and the audit with its review list. Read back, it says
-  `stale` once the run's heads are no longer the ones it judged, a spec is
-  amended, or a target is refuted that its audit didn't list. A result
+  `head_module`, and the audit with its review list, at the default cap.
+  Read back, it says `stale` once the run's heads are no longer the ones it
+  judged, a spec is amended, or a target is refuted that its audit didn't
+  list. A result
   over the record's 6 MiB is stored without its pairs' `output`, then
   without the review, and `truncated` says which. A pair that imports
   Mathlib takes about 25 s, or 45 s paranoid, so send it with

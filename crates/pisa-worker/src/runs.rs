@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_protocol::api::{
-    AcceptPair, AcceptResponse, AuditSnapshotsResponse, Error, ErrorKind, LeftOut, LeftOutReason,
-    PairError, PairErrorKind,
+    AcceptPair, AcceptResponse, AuditSnapshotsResponse, DEFAULT_REVIEW_LIMIT, Error, ErrorKind,
+    LeftOut, LeftOutReason, PairError, PairErrorKind,
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
@@ -228,7 +228,8 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     // What the leader reads beside the verdict, kept with it, read with the
     // audit: a snapshot deleted while comparator runs takes nothing from it.
     let reader = pool.snapshots().reader();
-    audit.review = review(reader, &audit.comparisons, &job.allow).await?;
+    (audit.review, audit.review_left_out) =
+        review(reader, &audit.comparisons, &job.allow, DEFAULT_REVIEW_LIMIT).await?;
     let key = key(&run);
     // One judgment at a time of a run, in its directory.
     let lock = pool.snapshots().lock(&format!("run:{key}"));

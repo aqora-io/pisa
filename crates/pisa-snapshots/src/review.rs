@@ -65,8 +65,27 @@ pub fn closure(start: &[String], records: &HashMap<String, Declaration>) -> Vec<
 
 /// The review list of each of the audit's `comparisons`, a spec snapshot and
 /// a head it reaches, with the spec's holes and `allow` as the definitions
-/// shown by value.
+/// shown by value: at most `limit` declarations over all the entries, in
+/// their order, and how many it left out.
 pub async fn review(
+    snapshots: &Reader,
+    comparisons: &[AuditComparison],
+    allow: &[String],
+    limit: usize,
+) -> Result<(Vec<AuditReview>, u64), Error> {
+    let mut out = all_reviews(snapshots, comparisons, allow).await?;
+    let mut left = limit;
+    let mut left_out = 0;
+    for entry in &mut out {
+        let keep = entry.declarations.len().min(left);
+        left_out += (entry.declarations.len() - keep) as u64;
+        entry.declarations.truncate(keep);
+        left -= keep;
+    }
+    Ok((out, left_out))
+}
+
+async fn all_reviews(
     snapshots: &Reader,
     comparisons: &[AuditComparison],
     allow: &[String],

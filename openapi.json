@@ -582,6 +582,12 @@
             },
             "type": "array"
           },
+          "review_left_out": {
+            "description": "How many declarations the review list left out, past `review_limit`.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "summary": {
             "$ref": "#/components/schemas/AuditSummary"
           },
@@ -6207,6 +6213,17 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "description": "With `review`, the most declarations the review list holds over all its entries, 1 to 10000, 1000 by default; `review_left_out` counts the rest",
+            "in": "query",
+            "name": "review_limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
             }
           },
           {

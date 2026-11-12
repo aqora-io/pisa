@@ -468,6 +468,9 @@ def test_review_export_and_accept(url):
     audit = client.audit_snapshots(against=[spec["id"]], review=True)
     cost = {d["name"]: d for d in audit["review"][0]["declarations"]}["py_cost"]
     assert cost["hole"] and cost["value"] == "3", cost
+    capped = client.audit_snapshots(against=[spec["id"]], review=True, review_limit=1)
+    assert sum(len(e["declarations"]) for e in capped["review"]) == 1, capped
+    assert capped["review_left_out"] > 0, capped
     with pytest.raises(ValueError):
         client.audit_snapshots(review=True)
 

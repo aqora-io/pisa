@@ -969,6 +969,11 @@ export interface components {
              *     on the head.
              */
             review?: components["schemas"]["AuditReview"][];
+            /**
+             * Format: int64
+             * @description How many declarations the review list left out, past `review_limit`.
+             */
+            review_left_out?: number;
             summary: components["schemas"]["AuditSummary"];
             /**
              * @description With `against`: each spec snapshot that an amendment supersedes, with
@@ -4936,6 +4941,8 @@ export interface operations {
                 version?: string;
                 /** @description With `against`, `true` adds `review`: for each spec snapshot and head, the declarations the spec's statements depend on there, each hole with its value */
                 review?: boolean;
+                /** @description With `review`, the most declarations the review list holds over all its entries, 1 to 10000, 1000 by default; `review_left_out` counts the rest */
+                review_limit?: number;
             };
             header?: {
                 /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */

@@ -865,6 +865,18 @@ async fn client_reviews_exports_and_accepts_a_run() {
         .find(|d| d.name == "f")
         .unwrap();
     assert_eq!((f.hole, f.value.as_deref()), (true, Some("2")));
+    let capped = AuditOptions {
+        review: true,
+        review_limit: Some(1),
+        ..Default::default()
+    };
+    let audit = client
+        .audit_snapshots_against_with([&spec.id], &capped)
+        .await
+        .unwrap();
+    let listed: usize = audit.review.iter().map(|e| e.declarations.len()).sum();
+    assert_eq!(listed, 1, "{audit:?}");
+    assert!(audit.review_left_out > 0, "{audit:?}");
 
     let tarball = client.export_run([&spec.id], &[]).await.unwrap();
     assert_eq!(&tarball[..2], [0x1f, 0x8b], "a gzip");
