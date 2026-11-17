@@ -642,3 +642,27 @@ async fn a_commit_whose_key_is_on_the_same_module_returns_that_entry() {
     assert!(!has_files(&s, &ours).await, "this build's files go");
     assert!(has_files(&s, &theirs).await);
 }
+
+#[tokio::test]
+async fn the_store_is_probed_for_reachability() {
+    let dir = tempfile::tempdir().unwrap();
+    let reachable = snapshots(Db::memory().await, dir.path());
+    assert!(reachable.store_reachable().await);
+
+    // Nothing listens on the discard port.
+    let down = object_store::aws::AmazonS3Builder::new()
+        .with_endpoint("http://127.0.0.1:9")
+        .with_allow_http(true)
+        .with_bucket_name("b")
+        .with_access_key_id("k")
+        .with_secret_access_key("s")
+        .with_region("r")
+        .with_retry(object_store::RetryConfig {
+            max_retries: 0,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let unreachable = snapshots_on(Arc::new(down), Db::memory().await, dir.path());
+    assert!(!unreachable.store_reachable().await);
+}

@@ -89,6 +89,7 @@ async fn without_qdrant_there_is_no_search() {
             "sweeps_refused": [],
             "revision": "unknown",
             "worker_revisions": [],
+            "dependencies": {"database": "ok", "store": "unknown"},
             "search": null
         })
     );
@@ -172,4 +173,56 @@ async fn browsers_may_call_only_from_the_configured_origins() {
         .unwrap();
     let url = format!("http://{}/check", server.running.http_addr);
     assert_eq!(preflight(&url, "http://app.example").await, None);
+}
+
+#[tokio::test]
+async fn health_answers_quickly_while_the_database_stalls() {
+    let db = Db::memory().await;
+    let server = start_on(config(SearchArgs::default()), db.clone())
+        .await
+        .unwrap();
+    let url = format!("http://{}/health", server.running.http_addr);
+    let _stalled = db.stall().await;
+    let started = std::time::Instant::now();
+    let (status, health) = get(&url).await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(status, 200, "{health}");
+    assert_eq!(
+        health["dependencies"],
+        json!({"database": "unreachable", "store": "unknown"})
+    );
+    assert_eq!(health["workers"], Value::Null, "{health}");
+    assert_eq!(health["worker_revisions"], Value::Null, "{health}");
+}
+
+#[tokio::test]
+async fn health_answers_quickly_while_qdrant_and_the_database_stall() {
+    // Qdrant takes the connection and never answers.
+    let qdrant = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let search = SearchArgs {
+        qdrant: Some(format!("http://{}", qdrant.local_addr().unwrap())),
+        env_id: Some("e".into()),
+        ..Default::default()
+    };
+    let db = Db::memory().await;
+    let server = start_on(config(search), db.clone()).await.unwrap();
+    let url = format!("http://{}/health", server.running.http_addr);
+    let _stalled = db.stall().await;
+    let started = std::time::Instant::now();
+    let r = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await
+        .unwrap();
+    let (status, health): (u16, Value) = (r.status().as_u16(), r.json().await.unwrap());
+    // The two wait at once, about 2 s, not one after the other.
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(status, 200, "{health}");
+    assert_eq!(health["search"]["ready"], false, "{health}");
+    assert_eq!(health["search"]["qdrant"], false, "{health}");
+    assert_eq!(
+        health["dependencies"]["database"], "unreachable",
+        "{health}"
+    );
 }

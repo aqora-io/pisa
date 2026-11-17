@@ -72,7 +72,9 @@ pub async fn start_on(cfg: ServerConfig, db: Db) -> anyhow::Result<Server> {
 
 /// The API's health, with the live workers: 200 whenever it is up, as
 /// checks don't need search, until the server drains. `search` says whether
-/// search can serve.
+/// search can serve. Search's state is read while the API's is, and each
+/// waits about 2 s at most, so a stalled Qdrant or database delays the
+/// answer by that long, not for good.
 #[utoipa::path(
     get, path = "/health", operation_id = "health", tag = "health",
     summary = "The server's health",
@@ -86,10 +88,14 @@ pub async fn start_on(cfg: ServerConfig, db: Db) -> anyhow::Result<Server> {
 async fn health(
     State((app, search)): State<(Arc<App>, Option<Arc<Search>>)>,
 ) -> (StatusCode, Json<Health>) {
-    let (status, mut health) = app.health().await;
-    if let Some(search) = search {
-        health.search = Some(search.health().await.1);
-    }
+    let search = async {
+        match search {
+            Some(search) => Some(search.health().await.1),
+            None => None,
+        }
+    };
+    let ((status, mut health), search) = tokio::join!(app.health(), search);
+    health.search = search;
     (status, Json(health))
 }
 

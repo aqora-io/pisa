@@ -367,9 +367,38 @@ pub struct Health {
     #[serde(default)]
     #[schema(required = true)]
     pub worker_revisions: Option<Vec<String>>,
+    /// Whether the database and the module store are reachable.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub dependencies: Dependencies,
     /// Search's state; `null` if the server doesn't search.
     #[schema(required = true)]
     pub search: Option<crate::search::SearchHealth>,
+}
+
+/// What the server knows of the services it depends on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Dependencies {
+    /// Whether the server's queries to the database are answered, within
+    /// 2 seconds.
+    #[schema(required = true)]
+    pub database: DependencyState,
+    /// Whether the live workers reach the module store, as each last probed
+    /// it, about every minute: `unreachable` if any can't.
+    #[schema(required = true)]
+    pub store: DependencyState,
+}
+
+/// Whether a dependency is reachable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyState {
+    Ok,
+    Unreachable,
+    /// Nobody has said: no live worker has probed the store yet, or the
+    /// database that holds what they said can't be read.
+    #[default]
+    Unknown,
 }
 
 /// A version whose sweeps of the store's snapshot files are refused.

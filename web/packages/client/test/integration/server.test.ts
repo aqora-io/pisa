@@ -288,6 +288,7 @@ describe("the server", () => {
     // Its worker runs without cgroups; its new store has nothing to sweep.
     expect(health.unlimited_workers).toHaveLength(1);
     expect(health.worker_revisions).toEqual(["unknown"]);
+    expect(health.dependencies.database).toBe("ok");
     expect(health.sweeps_refused).toEqual([]);
     const search = await client.search({ description: "x" }).catch((e: unknown) => e);
     expect(search).toMatchObject({ kind: "not_found", status: 404 });

@@ -232,6 +232,9 @@ To the release that restarts after a reboot and names its commit:
 - `/health` adds `revision`, the server's commit, and `worker_revisions`, the
   distinct commits of the live workers, `null` if the queue can't be read.
   A worker registers its commit, and `unknown` is any that doesn't say.
+- `/health` adds `dependencies`, `{database, store}`, each `ok`, `unreachable`
+  or `unknown`. With the database stalled it answers within about 2 seconds,
+  with `database: unreachable` and `null` for what it couldn't read.
 
 To the release that answers jobs in an envelope and retries in the clients:
 - `GET /jobs/{id}` of a done job answers 200 with `{id, kind, status:
@@ -450,7 +453,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -2426,8 +2429,9 @@ embedding goes on in the background, for up to 60 s, and the result has
 the last 1,024 query vectors, and a search for text that is already being
 embedded waits for that request rather than sending another. If Qdrant
 doesn't answer, search requests are a 503 and `/health`'s `search.qdrant` is
-false; the server stays ready, as the rest of its API works and every replica
-shares the one Qdrant.
+false; `/health` waits for Qdrant for 2 seconds, while it reads the database,
+so it still answers within about 2 seconds. The server stays ready, as the
+rest of its API works and every replica shares the one Qdrant.
 
 ```python
 from pisa_client import Client

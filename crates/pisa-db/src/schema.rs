@@ -227,6 +227,8 @@ diesel::table! {
         documents_open -> Integer,
         unlimited -> Bool,
         revision -> Text,
+        store_reachable -> Nullable<Bool>,
+        store_checked_micros -> Nullable<BigInt>,
     }
 }
 

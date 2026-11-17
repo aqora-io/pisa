@@ -1621,6 +1621,24 @@ export interface components {
              */
             removed: string[];
         };
+        /** @description What the server knows of the services it depends on. */
+        Dependencies: {
+            /**
+             * @description Whether the server's queries to the database are answered, within
+             *     2 seconds.
+             */
+            database: components["schemas"]["DependencyState"];
+            /**
+             * @description Whether the live workers reach the module store, as each last probed
+             *     it, about every minute: `unreachable` if any can't.
+             */
+            store: components["schemas"]["DependencyState"];
+        };
+        /**
+         * @description Whether a dependency is reachable.
+         * @enum {string}
+         */
+        DependencyState: "ok" | "unreachable" | "unknown";
         /** @description A natural-language description of a declaration. */
         Description: {
             /** @description Other names it goes by. */
@@ -1876,6 +1894,8 @@ export interface components {
         GoalsMode: "before" | "after";
         /** @description `GET /health`: 200, or 503 once the server is stopping. */
         Health: {
+            /** @description Whether the database and the module store are reachable. */
+            dependencies: components["schemas"]["Dependencies"];
             /**
              * Format: int64
              * @description The jobs waiting on the queue for a worker, of every version; `null`
@@ -3093,6 +3113,8 @@ export type Declaration = components['schemas']['Declaration'];
 export type DeclarationChange = components['schemas']['DeclarationChange'];
 export type DeclarationDetail = components['schemas']['DeclarationDetail'];
 export type DeleteSnapshotResponse = components['schemas']['DeleteSnapshotResponse'];
+export type Dependencies = components['schemas']['Dependencies'];
+export type DependencyState = components['schemas']['DependencyState'];
 export type Description = components['schemas']['Description'];
 export type Detail = components['schemas']['Detail'];
 export type Document = components['schemas']['Document'];

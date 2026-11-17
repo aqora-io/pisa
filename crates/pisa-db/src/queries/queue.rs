@@ -11,6 +11,8 @@ use diesel::{
 use diesel_async::RunQueryDsl;
 use serde_json::Value;
 
+use pisa_protocol::api::DependencyState;
+
 use crate::catalog::now_micros;
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
@@ -419,6 +421,48 @@ pub(crate) async fn live_revisions(
         .await?)
 }
 
+pub(crate) async fn report_store(
+    db: &Handle,
+    q: &str,
+    worker: &str,
+    reachable: bool,
+) -> Result<(), DbError> {
+    let now = now();
+    retry(|| async {
+        diesel::update(workers::table.find((q, worker)))
+            .set((
+                workers::store_reachable.eq(Some(reachable)),
+                workers::store_checked_micros.eq(Some(now)),
+            ))
+            .execute(&mut *conn(db).await?)
+            .await?;
+        Ok(())
+    })
+    .await
+}
+
+pub(crate) async fn store_state(
+    db: &Handle,
+    q: &str,
+    stale: Duration,
+) -> Result<DependencyState, DbError> {
+    let reports = workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::seen_micros.ge(now() - micros(stale)))
+        .filter(workers::store_reachable.is_not_null())
+        .select(workers::store_reachable)
+        .distinct()
+        .load::<Option<bool>>(&mut *conn(db).await?)
+        .await?;
+    Ok(if reports.contains(&Some(false)) {
+        DependencyState::Unreachable
+    } else if reports.is_empty() {
+        DependencyState::Unknown
+    } else {
+        DependencyState::Ok
+    })
+}
+
 pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, DbError> {
     let cutoff = now - micros(SWEEP_GRACE);
     retry(|| async {
@@ -486,6 +530,8 @@ pub(crate) async fn register(
                 workers::beam_slots.eq(r.beam_slots as i32),
                 workers::unlimited.eq(r.unlimited),
                 workers::revision.eq(&r.revision),
+                workers::store_reachable.eq(None::<bool>),
+                workers::store_checked_micros.eq(None::<i64>),
                 workers::warm.eq(Value::Array(Vec::new())),
                 workers::draining.eq(false),
                 workers::seen_micros.eq(now),

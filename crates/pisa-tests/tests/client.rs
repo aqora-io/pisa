@@ -13,6 +13,7 @@ use pisa_client::{
     Pos, ProbeAt, ProofOptions, ProofStatus, RebuildOptions, Refusal, RefuteOptions, Refutes,
     Replaces, ResubmitOptions, RetryPolicy, SettleOptions, SpecOptions,
 };
+use pisa_protocol::api::DependencyState;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn client_covers_checks_and_sessions() {
@@ -95,6 +96,15 @@ async fn health_names_workers_without_limits_and_a_refused_sweep() {
     assert_eq!(health.unlimited_workers, Some(vec!["w0".to_string()]));
     assert_eq!(health.revision, pisa_protocol::revision::REVISION);
     assert_eq!(health.worker_revisions, Some(vec!["unknown".to_string()]));
+    assert_eq!(health.dependencies.database, DependencyState::Ok);
+    // The worker probes the store as it starts.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while client.health().await.unwrap().dependencies.store != DependencyState::Ok {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("health shows the store reachable");
     let refused = &health.sweeps_refused.unwrap()[0];
     assert_eq!(refused.version, c.version("v"));
     assert!(refused.reason.contains("another-catalog"), "{refused:?}");

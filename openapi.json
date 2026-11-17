@@ -1442,6 +1442,33 @@
         ],
         "type": "object"
       },
+      "Dependencies": {
+        "description": "What the server knows of the services it depends on.",
+        "properties": {
+          "database": {
+            "$ref": "#/components/schemas/DependencyState",
+            "description": "Whether the server's queries to the database are answered, within\n2 seconds."
+          },
+          "store": {
+            "$ref": "#/components/schemas/DependencyState",
+            "description": "Whether the live workers reach the module store, as each last probed\nit, about every minute: `unreachable` if any can't."
+          }
+        },
+        "required": [
+          "database",
+          "store"
+        ],
+        "type": "object"
+      },
+      "DependencyState": {
+        "description": "Whether a dependency is reachable.",
+        "enum": [
+          "ok",
+          "unreachable",
+          "unknown"
+        ],
+        "type": "string"
+      },
       "Description": {
         "description": "A natural-language description of a declaration.",
         "properties": {
@@ -1938,6 +1965,10 @@
       "Health": {
         "description": "`GET /health`: 200, or 503 once the server is stopping.",
         "properties": {
+          "dependencies": {
+            "$ref": "#/components/schemas/Dependencies",
+            "description": "Whether the database and the module store are reachable."
+          },
           "queued": {
             "description": "The jobs waiting on the queue for a worker, of every version; `null`\nif it can't be read.",
             "format": "int64",
@@ -2014,6 +2045,7 @@
           "sweeps_refused",
           "revision",
           "worker_revisions",
+          "dependencies",
           "search"
         ],
         "type": "object"

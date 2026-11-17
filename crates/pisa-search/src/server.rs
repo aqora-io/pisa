@@ -40,6 +40,10 @@ const MAX_REASON: usize = 2000;
 /// The longest wait between tries to open the engine.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
+/// How long a health check waits for Qdrant to answer, as a server's
+/// `/health` waits for each read of the database: longer counts as no answer.
+const QDRANT_HEALTH: Duration = Duration::from_secs(2);
+
 /// How a server searches, if it does.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct SearchArgs {
@@ -237,8 +241,14 @@ impl Search {
     }
 
     /// Search's state, for a server's `/health`, and whether it can serve.
+    /// Qdrant gets [`QDRANT_HEALTH`] to answer.
     pub async fn health(&self) -> (bool, SearchHealth) {
-        let qdrant = self.q.healthy().await;
+        let qdrant = tokio::time::timeout(QDRANT_HEALTH, self.q.healthy())
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!("Qdrant took more than {QDRANT_HEALTH:?} to answer");
+                false
+            });
         let engine = self.engine.get();
         let ready = engine.is_some() && qdrant;
         let health = SearchHealth {

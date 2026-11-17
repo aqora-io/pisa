@@ -122,6 +122,9 @@ fn ids(modules: &[Module]) -> impl Iterator<Item = &String> {
     modules.iter().map(|m| &m.id)
 }
 
+/// How long [`Snapshots::store_reachable`] waits for the store.
+const STORE_PROBE: Duration = Duration::from_secs(10);
+
 impl Snapshots {
     /// `root` is the search-path root of snapshot modules; it must exist and
     /// contain an empty `PisaSnap/`. A lookup in the store vouches for a
@@ -171,6 +174,24 @@ impl Snapshots {
     /// The snapshot id of entry `entry`, as the API answers it.
     pub(crate) fn id(&self, entry: &str) -> String {
         self.reader.id(entry)
+    }
+
+    /// Whether the module store answers a request, which is a listing of its
+    /// first object, within [`STORE_PROBE`].
+    pub async fn store_reachable(&self) -> bool {
+        let mut listing = self.store.list(None);
+        let first = futures::StreamExt::next(&mut listing);
+        match tokio::time::timeout(STORE_PROBE, first).await {
+            Ok(Some(Err(e))) => {
+                tracing::warn!("the module store did not answer: {e}");
+                false
+            }
+            Ok(_) => true,
+            Err(_) => {
+                tracing::warn!("the module store did not answer within {STORE_PROBE:?}");
+                false
+            }
+        }
     }
 
     /// The entry snapshot id `id` names, if it is of this worker's version.

@@ -43,6 +43,8 @@ export type {
   DeclarationChange,
   DeclarationDetail,
   DeleteSnapshotResponse,
+  Dependencies,
+  DependencyState,
   Description,
   Detail,
   Document,

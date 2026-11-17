@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use pisa_protocol::api::DependencyState;
 use serde_json::Value;
 
 use crate::backend::dispatch;
@@ -280,6 +281,18 @@ impl Queue {
         dispatch!(&self.db, live_revisions(&self.name, stale))
     }
 
+    /// Records whether `worker`'s last probe of the module store reached it.
+    pub async fn report_store(&self, worker: &str, reachable: bool) -> Result<(), DbError> {
+        dispatch!(&self.db, report_store(&self.name, worker, reachable))
+    }
+
+    /// The module store as the workers seen within `stale` last saw it:
+    /// `Unreachable` if any can't reach it, `Ok` if all of them can, and
+    /// `Unknown` if none has probed.
+    pub async fn store_state(&self, stale: Duration) -> Result<DependencyState, DbError> {
+        dispatch!(&self.db, store_state(&self.name, stale))
+    }
+
     /// The versions of the workers seen within `stale`, in order.
     pub async fn live_versions(&self, stale: Duration) -> Result<Vec<String>, DbError> {
         dispatch!(&self.db, live_versions(&self.name, stale))
@@ -437,6 +450,44 @@ mod tests {
                 .unwrap();
             }
             assert_eq!(q.live_revisions(LEASE).await.unwrap(), ["def"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_store_is_as_the_live_workers_last_saw_it() {
+        for q in queues().await {
+            assert_eq!(
+                q.store_state(LEASE).await.unwrap(),
+                DependencyState::Unknown
+            );
+            q.register(&reg("w1", "v", 1, 0, false)).await.unwrap();
+            q.register(&reg("w2", "v", 1, 0, false)).await.unwrap();
+            // Registered, but not yet probed.
+            assert_eq!(
+                q.store_state(LEASE).await.unwrap(),
+                DependencyState::Unknown
+            );
+            q.report_store("w1", true).await.unwrap();
+            assert_eq!(q.store_state(LEASE).await.unwrap(), DependencyState::Ok);
+            q.report_store("w2", false).await.unwrap();
+            assert_eq!(
+                q.store_state(LEASE).await.unwrap(),
+                DependencyState::Unreachable
+            );
+            // Workers not seen lately don't count.
+            assert_eq!(
+                q.store_state(Duration::ZERO).await.unwrap(),
+                DependencyState::Unknown
+            );
+            q.report_store("w2", true).await.unwrap();
+            assert_eq!(q.store_state(LEASE).await.unwrap(), DependencyState::Ok);
+            // A new process under the name hasn't probed yet.
+            q.register(&reg("w2", "v", 1, 0, false)).await.unwrap();
+            q.report_store("w1", false).await.unwrap();
+            assert_eq!(
+                q.store_state(LEASE).await.unwrap(),
+                DependencyState::Unreachable
+            );
         }
     }
 

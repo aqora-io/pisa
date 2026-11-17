@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::extract::{FromRequest, Request, State};
 use axum::http::StatusCode;
@@ -16,8 +17,8 @@ use pisa_db::catalog::Catalog;
 use pisa_db::queue::LIVE;
 use pisa_protocol::api::{
     self, Accepted, ApiErrors, CheckBatchRequest, CheckBatchResponse, CheckRequest, CheckResult,
-    Detail, Error, ErrorKind, ErrorResponse, Health, HealthStatus, JobKind, MAX_AT, MAX_BATCH, Pos,
-    PreferAsync, RunImport, SweepRefused,
+    Dependencies, DependencyState, Detail, Error, ErrorKind, ErrorResponse, Health, HealthStatus,
+    JobKind, MAX_AT, MAX_BATCH, Pos, PreferAsync, RunImport, SweepRefused,
 };
 use pisa_protocol::header::split_header;
 use pisa_protocol::scope::Scope;
@@ -302,37 +303,41 @@ impl App {
     /// The API's health: up, or 503 once draining, with the number of live
     /// workers on the queue, those without limits, the versions whose
     /// sweeps are refused and the commits the workers were built from, each
-    /// `null` if it can't be read, and the commit of the server.
+    /// `null` if it can't be read, the commit of the server, and whether the
+    /// database and the module store are reachable. Each read of the
+    /// database gets [`HEALTH_READ`] to answer, so a stalled database delays
+    /// the answer by that long, not for good.
     pub async fn health(&self) -> (StatusCode, Health) {
-        let counts = self.dispatcher.workers().await;
         let (code, status) = if self.draining.load(Ordering::Acquire) {
             (StatusCode::SERVICE_UNAVAILABLE, HealthStatus::Draining)
         } else {
             (StatusCode::OK, HealthStatus::Ok)
         };
         let queue = self.dispatcher.queue();
-        let unlimited_workers = match queue.unlimited_workers(LIVE).await {
-            Ok(names) => Some(names),
-            Err(e) => {
-                tracing::warn!("reading the workers without limits failed: {e}");
-                None
-            }
-        };
-        let worker_revisions = match queue.live_revisions(LIVE).await {
-            Ok(revisions) => Some(revisions),
-            Err(e) => {
-                tracing::warn!("reading the workers' revisions failed: {e}");
-                None
-            }
+        let (counts, unlimited_workers, worker_revisions, sweeps_refused, store) = tokio::join!(
+            bounded("the queue's state", self.dispatcher.workers()),
+            read("the workers without limits", queue.unlimited_workers(LIVE)),
+            read("the workers' revisions", queue.live_revisions(LIVE)),
+            bounded("the refused sweeps", self.sweeps_refused()),
+            read("the store's state", queue.store_state(LIVE)),
+        );
+        let database = if counts.is_some() {
+            DependencyState::Ok
+        } else {
+            DependencyState::Unreachable
         };
         let health = Health {
             status,
             workers: counts.map(|(workers, _)| workers),
             queued: counts.map(|(_, queued)| queued),
             unlimited_workers,
-            sweeps_refused: self.sweeps_refused().await,
+            sweeps_refused,
             revision: pisa_protocol::revision::REVISION.to_string(),
             worker_revisions,
+            dependencies: Dependencies {
+                database,
+                store: store.unwrap_or_default(),
+            },
             search: None,
         };
         (code, health)
@@ -365,6 +370,33 @@ impl App {
             }
         }
     }
+}
+
+/// How long `/health` waits for each read of the database.
+const HEALTH_READ: Duration = Duration::from_secs(2);
+
+/// What `read` gives, or `None` if it takes longer than [`HEALTH_READ`].
+async fn bounded<T>(what: &str, read: impl Future<Output = Option<T>>) -> Option<T> {
+    match tokio::time::timeout(HEALTH_READ, read).await {
+        Ok(read) => read,
+        Err(_) => {
+            tracing::warn!("reading {what} took more than {HEALTH_READ:?}");
+            None
+        }
+    }
+}
+
+/// As [`bounded`], for a read that may fail, which it logs.
+async fn read<T, E: std::fmt::Display>(
+    what: &str,
+    read: impl Future<Output = Result<T, E>>,
+) -> Option<T> {
+    bounded(what, async {
+        read.await
+            .map_err(|e| tracing::warn!("reading {what} failed: {e}"))
+            .ok()
+    })
+    .await
 }
 
 /// Runs a request within the scope its `Pisa-Scope` header gives (see

@@ -43,6 +43,10 @@ const CANDIDATES: usize = 64;
 /// How many of the headers most in demand a new worker pre-warms.
 const PREWARM_POPULAR: usize = 2;
 
+/// How often a worker probes the module store and tells the queue, which
+/// `/health` shows.
+const STORE_PROBE_EVERY: Duration = Duration::from_secs(60);
+
 /// What a worker leaves to others and what it claims, from [`pick`].
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Picked {
@@ -392,6 +396,19 @@ impl Shared {
                 }
             })
         });
+        let store_probe = AbortOnDrop({
+            let shared = self.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(STORE_PROBE_EVERY);
+                loop {
+                    tick.tick().await;
+                    let reachable = shared.pool.snapshots().store_reachable().await;
+                    if let Err(e) = shared.queue.report_store(&shared.me, reachable).await {
+                        tracing::warn!("reporting the store's state failed: {e}");
+                    }
+                }
+            })
+        });
         tracing::info!(queue = %self.queue.name(), "taking jobs");
 
         let mut notices = self.queue.db().notices().await;
@@ -441,6 +458,7 @@ impl Shared {
             tracing::warn!(running, "drain timed out with jobs unanswered");
         }
         drop(heartbeat);
+        drop(store_probe);
         if let Err(e) = self.queue.unregister(&self.me).await {
             tracing::warn!("unregistering failed: {e}");
         }

@@ -657,6 +657,17 @@ class SearchHealth(TypedDict):
     leader: bool
     error: NotRequired[str]
 
+# `ok`, `unreachable`, or `unknown` if nobody has said.
+DependencyState = Literal["ok", "unreachable", "unknown"]
+
+class Dependencies(TypedDict):
+    # Whether the server's queries to the database are answered, within 2
+    # seconds.
+    database: DependencyState
+    # Whether the live workers reach the module store, as each last probed it
+    # (about every minute): `unreachable` if any can't.
+    store: DependencyState
+
 class SweepRefused(TypedDict):
     version: str
     reason: str
@@ -673,6 +684,7 @@ class Health(TypedDict):
     revision: str
     # The commits the live workers were built from, each once, in order.
     worker_revisions: list[str] | None
+    dependencies: Dependencies
     search: SearchHealth | None
 
 class JobDone(TypedDict):
