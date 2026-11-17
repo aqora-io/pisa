@@ -564,8 +564,12 @@ tactics at a `sorry`:
     run there, with `reopened: true`. The candidate Beam failed on has its
     error. If the document can't reopen, the rest have that error.
   - The policy refuses a candidate as it refuses code, in its `error`, and
-    the others still run. A candidate Lean Beam fails to run has an
-    `unavailable` error, which isn't Lean's answer.
+    the others still run. A candidate that reaches Lean's recursion or
+    heartbeat limit has a `recursion_limit` or `heartbeat_limit` error, with
+    `limit` naming the option (`maxRecDepth` or `maxHeartbeats`), its
+    `value` and the `phase` Lean was in: it is the candidate's own, as it
+    comes again on a retry. A candidate Lean Beam fails to run in any other
+    way has an `unavailable` error, which isn't Lean's answer.
   - `closed` means the candidate ran without errors, left no goals, and
     doesn't say `sorry` or `admit`. It is no verdict: Lean Beam checks
     neither termination nor what a tactic elaborated to. Check the finished
@@ -615,7 +619,9 @@ proofs one tactic at a time, as a tree of states:
 - `POST /states/{id}/tactic` runs a tactic on a state, in the context of the
   session's code, so it sees what the code declares before the `sorry`.
   - It answers the new state, which can be continued; a tactic that fails is
-    a 422 `lean`, with Lean's errors in its message. Lean Beam failing on
+    a 422 `lean`, with Lean's errors in its message. A tactic that reaches
+    Lean's recursion or heartbeat limit is a 422 `recursion_limit` or
+    `heartbeat_limit`, with `limit` as for probes. Lean Beam failing on
     its own is not Lean's answer: the state is replayed and the tactic run
     once more, and a second failure is a 503 `unavailable`.
   - A state stays valid after others are made from it, so a client can try
@@ -657,6 +663,7 @@ limit in seconds (default 60).
 | --- | --- | --- |
 | `lean`, `policy` | 422 | Lean or the policy refused the input, e.g. an unknown tactic |
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
+| `recursion_limit`, `heartbeat_limit` | 422 | Lean reached `maxRecDepth` or `maxHeartbeats`; `limit` has the option, its value and the phase. The input fails as it is, so don't retry it |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
 | `bad_request`, `not_found` | 400, 404 | Malformed request; unknown or expired job, state or session; unknown snapshot or declaration |
 | `conflict` | 409 | A create replaces a snapshot that another already replaces, in-band in `check.error` (see [Replacing](#replacing)); or a document is at another revision than the request names |

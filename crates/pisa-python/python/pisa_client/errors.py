@@ -23,7 +23,8 @@ class LeanError(PisaError):
 
 class LimitError(PisaError):
     """The input ran into a resource limit (kinds ``timeout``,
-    ``out_of_memory`` and ``crash``)."""
+    ``out_of_memory``, ``crash``, ``recursion_limit`` and
+    ``heartbeat_limit``)."""
 
 
 class CapacityError(PisaError):
@@ -44,6 +45,8 @@ _CLASSES = {
     "timeout": LimitError,
     "out_of_memory": LimitError,
     "crash": LimitError,
+    "recursion_limit": LimitError,
+    "heartbeat_limit": LimitError,
     "capacity": CapacityError,
     "unavailable": CapacityError,
     "not_found": NotFoundError,

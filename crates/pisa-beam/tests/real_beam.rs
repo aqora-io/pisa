@@ -237,3 +237,32 @@ async fn goals_tell_a_finished_proof_from_no_proof() {
     assert_eq!(pisa_beam::goal::render(&mid[0]), "n : Nat\n⊢ n + 1 = n + 1");
     assert!(goals(at(4, 2), Mode::After).await.unwrap().is_empty());
 }
+
+/// A looping `simp` fails as a Beam tool error, which the worker reads as
+/// Lean's recursion limit, and the next probe runs.
+#[tokio::test]
+#[ignore = "needs elan and the Pisa library's toolchain"]
+async fn a_looping_simp_is_a_tool_error_with_leans_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
+    let text = "example (a b n : Nat) : (a + b) % n = 0 := by\n  sorry\n";
+    ws.write("Docs/R.lean", text).unwrap();
+    let doc = ws.doc("Docs/R.lean");
+    let beam = beam(&ws, None).await;
+    let sync = beam.sync(doc, true, T).await.unwrap();
+    let todo = beam.todo(doc, sync.version, &["sorry"], T).await.unwrap();
+    let at = todo.items[0].run_at_position.unwrap();
+    let looped = beam
+        .run_at(doc, sync.version, at, "simp only [Nat.add_mod]", T)
+        .await;
+    let Err(pisa_beam::BeamError::Tool { code, message, .. }) = looped else {
+        panic!("not a tool error: {looped:?}");
+    };
+    println!("Beam's code: {code}");
+    assert!(
+        message.contains("maximum recursion depth has been reached"),
+        "{message}"
+    );
+    let next = beam.run_at(doc, sync.version, at, "skip", T).await.unwrap();
+    assert!(next.success, "{:?}", next.messages);
+}

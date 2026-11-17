@@ -344,8 +344,8 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     /// The server refused the request; `kind` says why. A submit that the
     /// server answered at once, not by queueing a job, is `internal` with the
-    /// answer's status. Kinds `lean`,
-    /// `policy`, `timeout`, `out_of_memory` and `crash` mean the input itself
+    /// answer's status. Kinds `lean`, `policy`, `timeout`, `out_of_memory`,
+    /// `crash`, `recursion_limit` and `heartbeat_limit` mean the input itself
     /// failed, which during proof search is an ordinary dead end.
     #[error("{kind:?} ({status}): {message}")]
     Server {

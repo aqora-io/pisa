@@ -1647,6 +1647,10 @@
           "kind": {
             "$ref": "#/components/schemas/ErrorKind"
           },
+          "limit": {
+            "$ref": "#/components/schemas/LeanLimit",
+            "description": "The limit Lean reached, for `recursion_limit` and `heartbeat_limit`."
+          },
           "message": {
             "type": "string"
           }
@@ -1662,6 +1666,8 @@
           "timeout",
           "out_of_memory",
           "crash",
+          "recursion_limit",
+          "heartbeat_limit",
           "policy",
           "lean",
           "capacity",
@@ -2077,6 +2083,30 @@
         ],
         "type": "string"
       },
+      "LeanLimit": {
+        "description": "A limit Lean reached while running the input.",
+        "properties": {
+          "option": {
+            "description": "The Lean option that sets it: `maxRecDepth` or `maxHeartbeats`.",
+            "type": "string"
+          },
+          "phase": {
+            "description": "Where Lean was when it stopped, as it names it, e.g. `whnf`.",
+            "type": "string"
+          },
+          "value": {
+            "description": "The option's value when Lean stopped. For `maxRecDepth` it is the\nlast the code set, else Lean's default of 512.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "option",
+          "value"
+        ],
+        "type": "object"
+      },
       "LeftOut": {
         "description": "A target, hole or assumption that a pair's comparator configuration\nleaves out, and why.",
         "properties": {
@@ -2338,7 +2368,7 @@
           },
           "error": {
             "$ref": "#/components/schemas/Error",
-            "description": "Why it didn't run: the policy refused it, or the time ran out."
+            "description": "Why it didn't run: the policy refused it, the time ran out, or Lean\nreached its recursion or heartbeat limit (`recursion_limit` and\n`heartbeat_limit`, with `limit`), which another run of it reaches\ntoo."
           },
           "goals": {
             "description": "The goals it left, when it ran without errors.",

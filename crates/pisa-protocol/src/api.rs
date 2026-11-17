@@ -65,6 +65,12 @@ pub enum ErrorKind {
     OutOfMemory,
     /// The Lean process died.
     Crash,
+    /// Lean reached its recursion limit, `maxRecDepth`, so the input fails
+    /// as it is. The error's `limit` has the option and its value.
+    RecursionLimit,
+    /// Lean used up its heartbeats, `maxHeartbeats`, so the input fails as
+    /// it is. The error's `limit` has the option and its value.
+    HeartbeatLimit,
     /// The verification policy refused the input before running it.
     Policy,
     /// Lean refused the input, e.g. an unknown tactic or a header that does
@@ -90,6 +96,8 @@ impl ErrorKind {
             ErrorKind::Timeout
             | ErrorKind::OutOfMemory
             | ErrorKind::Crash
+            | ErrorKind::RecursionLimit
+            | ErrorKind::HeartbeatLimit
             | ErrorKind::Policy
             | ErrorKind::Lean => 422,
             ErrorKind::Capacity => 429,
@@ -118,6 +126,22 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
+    /// The limit Lean reached, for `recursion_limit` and `heartbeat_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<LeanLimit>,
+}
+
+/// A limit Lean reached while running the input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LeanLimit {
+    /// The Lean option that sets it: `maxRecDepth` or `maxHeartbeats`.
+    pub option: String,
+    /// The option's value when Lean stopped. For `maxRecDepth` it is the
+    /// last the code set, else Lean's default of 512.
+    pub value: u64,
+    /// Where Lean was when it stopped, as it names it, e.g. `whnf`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 impl Error {
@@ -125,6 +149,7 @@ impl Error {
         Error {
             kind,
             message: message.into(),
+            limit: None,
         }
     }
 
@@ -889,7 +914,10 @@ pub struct ProbeResult {
     #[schema(required = true)]
     #[serde(default)]
     pub messages: Vec<Message>,
-    /// Why it didn't run: the policy refused it, or the time ran out.
+    /// Why it didn't run: the policy refused it, the time ran out, or Lean
+    /// reached its recursion or heartbeat limit (`recursion_limit` and
+    /// `heartbeat_limit`, with `limit`), which another run of it reaches
+    /// too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
 }
@@ -1278,7 +1306,13 @@ impl CreateSnapshotResponse {
         let kind = self.check.error.as_ref().map(|e| e.kind);
         Some(match kind {
             None | Some(ErrorKind::Lean | ErrorKind::Policy) => Refusal::Proof,
-            Some(ErrorKind::Timeout | ErrorKind::OutOfMemory | ErrorKind::Crash) => Refusal::Limit,
+            Some(
+                ErrorKind::Timeout
+                | ErrorKind::OutOfMemory
+                | ErrorKind::Crash
+                | ErrorKind::RecursionLimit
+                | ErrorKind::HeartbeatLimit,
+            ) => Refusal::Limit,
             Some(ErrorKind::Conflict) if !self.heads.is_empty() => Refusal::Conflict,
             Some(ErrorKind::Conflict | ErrorKind::BadRequest | ErrorKind::NotFound) => {
                 Refusal::Request
@@ -2456,6 +2490,8 @@ mod tests {
             (Timeout, Refusal::Limit),
             (OutOfMemory, Refusal::Limit),
             (Crash, Refusal::Limit),
+            (RecursionLimit, Refusal::Limit),
+            (HeartbeatLimit, Refusal::Limit),
             (BadRequest, Refusal::Request),
             (NotFound, Refusal::Request),
             (Conflict, Refusal::Request),
@@ -2514,6 +2550,23 @@ mod tests {
             })
         );
         assert_eq!(ErrorKind::OutOfMemory.status(), 422);
+        for kind in [ErrorKind::RecursionLimit, ErrorKind::HeartbeatLimit] {
+            assert_eq!(kind.status(), 422);
+            assert_eq!(kind.retry_after(), None);
+        }
+        let limited = Error {
+            limit: Some(LeanLimit {
+                option: "maxRecDepth".into(),
+                value: 512,
+                phase: None,
+            }),
+            ..Error::new(ErrorKind::RecursionLimit, "deep")
+        };
+        assert_eq!(
+            serde_json::to_value(&limited).unwrap(),
+            json!({"kind": "recursion_limit", "message": "deep",
+                   "limit": {"option": "maxRecDepth", "value": 512}})
+        );
         assert_eq!(
             serde_json::to_value(ErrorKind::OutOfMemory).unwrap(),
             json!("out_of_memory")

@@ -276,6 +276,8 @@ const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
   "timeout",
   "out_of_memory",
   "crash",
+  "recursion_limit",
+  "heartbeat_limit",
   "policy",
   "lean",
   "capacity",

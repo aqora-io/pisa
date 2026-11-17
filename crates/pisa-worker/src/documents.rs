@@ -39,6 +39,7 @@ use crate::check::policy_error;
 use crate::config::WorkerConfig;
 use crate::db::Db;
 use crate::launcher::Launcher;
+use crate::limits::lean_limit;
 use crate::policy::header_command;
 use crate::pool::Pool;
 use crate::records::{DocumentRow, Records};
@@ -275,9 +276,17 @@ impl Documents {
         }
     }
 
-    /// The error for `e` from slot `slot`'s process `beam`. A process that
-    /// failed is stopped, so that its documents reopen in a new one.
-    async fn failure(&self, slot: usize, beam: &Arc<Beam>, e: BeamError, budget: Budget) -> Error {
+    /// The error for `e` from slot `slot`'s process `beam`, which ran
+    /// `code_text`. A process that failed is stopped, so that its documents
+    /// reopen in a new one.
+    async fn failure(
+        &self,
+        slot: usize,
+        beam: &Arc<Beam>,
+        e: BeamError,
+        budget: Budget,
+        code_text: &str,
+    ) -> Error {
         match e {
             BeamError::Timeout => {
                 self.timed_out(slot, beam).await;
@@ -287,10 +296,13 @@ impl Documents {
                 Error::new(ErrorKind::Unavailable, format!("Lean Beam is busy: {m}"))
             }
             // Lean's own answer comes back as a result; an error is Beam's.
-            BeamError::Tool { message, .. } => Error::new(
-                ErrorKind::Unavailable,
-                format!("Lean Beam failed: {message}"),
-            ),
+            BeamError::Tool { code, message, .. } => lean_limit(&code, &message, code_text)
+                .unwrap_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unavailable,
+                        format!("Lean Beam failed: {message}"),
+                    )
+                }),
             BeamError::Exited { .. } | BeamError::Dead | BeamError::Io(_)
                 if (self.slots[slot].stopped.lock().unwrap().as_ref())
                     .is_some_and(|stopped| Arc::ptr_eq(stopped, beam)) =>
@@ -325,8 +337,16 @@ impl Documents {
     }
 
     /// The error for `e` on the open document `doc`, which is closed here
-    /// unless Beam still has it as it was.
-    async fn fail(&self, doc: &mut Option<Open>, id: &str, e: BeamError, budget: Budget) -> Error {
+    /// unless Beam still has it as it was. `code_text` is what ran besides
+    /// the document.
+    async fn fail(
+        &self,
+        doc: &mut Option<Open>,
+        id: &str,
+        e: BeamError,
+        budget: Budget,
+        code_text: &str,
+    ) -> Error {
         let Some(open) = doc.as_ref() else {
             return Error::new(ErrorKind::Internal, format!("Lean Beam: {e}"));
         };
@@ -335,7 +355,8 @@ impl Documents {
             e,
             BeamError::Timeout | BeamError::Busy(_) | BeamError::Tool { .. }
         );
-        let error = self.failure(slot, &beam, e, budget).await;
+        let ran = format!("{}\n{code_text}", open.map.text());
+        let error = self.failure(slot, &beam, e, budget, &ran).await;
         if !kept {
             self.unload(doc, id).await;
         }
@@ -459,7 +480,7 @@ impl Documents {
                 Ok(())
             }
             Err(e) => {
-                let error = self.failure(slot, &beam, e, budget).await;
+                let error = self.failure(slot, &beam, e, budget, code).await;
                 *doc = None;
                 self.placed.lock().unwrap().remove(id);
                 let _ = beam.close(ws.doc(&path), CLOSE_TIMEOUT).await;
@@ -692,7 +713,7 @@ impl Documents {
                 reopened: reopened.is_some(),
             }),
             Err(e) => Err(after_reopen(
-                self.fail(&mut doc, id, e, budget).await,
+                self.fail(&mut doc, id, e, budget, "").await,
                 reopened,
             )),
         }
@@ -778,12 +799,21 @@ impl Documents {
                     self.timed_out(open.slot, &open.beam).await;
                     refused(Error::timeout(limit.secs))
                 }
-                Err(BeamError::Tool { message, .. }) => refused(Error::new(
-                    ErrorKind::Unavailable,
-                    format!("Lean Beam failed to run it: {message}"),
-                )),
+                Err(BeamError::Tool { code, message, .. }) => refused(
+                    lean_limit(
+                        &code,
+                        &message,
+                        &format!("{}\n{candidate}", open.map.text()),
+                    )
+                    .unwrap_or_else(|| {
+                        Error::new(
+                            ErrorKind::Unavailable,
+                            format!("Lean Beam failed to run it: {message}"),
+                        )
+                    }),
+                ),
                 // Busy, or the process died on it.
-                Err(e) => refused(self.fail(&mut doc, id, e, limit).await),
+                Err(e) => refused(self.fail(&mut doc, id, e, limit, candidate).await),
             });
         }
         Ok(api::DocumentProbes {

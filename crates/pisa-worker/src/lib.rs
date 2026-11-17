@@ -17,6 +17,7 @@ pub mod claims;
 pub mod config;
 pub mod documents;
 pub mod launcher;
+pub mod limits;
 pub mod policy;
 pub mod pool;
 pub mod runs;

@@ -34,9 +34,9 @@ export function isLeanError(e: unknown): e is PisaError {
   return isPisaError(e, "lean", "policy");
 }
 
-/** Lean ran out of time or memory, or crashed. */
+/** Lean ran out of time or memory, crashed, or reached its recursion or heartbeat limit. */
 export function isLimitError(e: unknown): e is PisaError {
-  return isPisaError(e, "timeout", "out_of_memory", "crash");
+  return isPisaError(e, "timeout", "out_of_memory", "crash", "recursion_limit", "heartbeat_limit");
 }
 
 /** No worker took the job in time, or the server is unavailable: try again

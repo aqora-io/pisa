@@ -1675,10 +1675,12 @@ export interface components {
         };
         Error: {
             kind: components["schemas"]["ErrorKind"];
+            /** @description The limit Lean reached, for `recursion_limit` and `heartbeat_limit`. */
+            limit?: components["schemas"]["LeanLimit"];
             message: string;
         };
         /** @enum {string} */
-        ErrorKind: "timeout" | "out_of_memory" | "crash" | "policy" | "lean" | "capacity" | "unavailable" | "bad_request" | "not_found" | "conflict" | "internal";
+        ErrorKind: "timeout" | "out_of_memory" | "crash" | "recursion_limit" | "heartbeat_limit" | "policy" | "lean" | "capacity" | "unavailable" | "bad_request" | "not_found" | "conflict" | "internal";
         /** @description The body of every non-2xx response. */
         ErrorResponse: {
             error: components["schemas"]["Error"];
@@ -1885,6 +1887,19 @@ export interface components {
         JobOutcome: components["schemas"]["ErrorResponse"] | components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"] | components["schemas"]["ResubmitSnapshotsResponse"];
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
+        /** @description A limit Lean reached while running the input. */
+        LeanLimit: {
+            /** @description The Lean option that sets it: `maxRecDepth` or `maxHeartbeats`. */
+            option: string;
+            /** @description Where Lean was when it stopped, as it names it, e.g. `whnf`. */
+            phase?: string;
+            /**
+             * Format: int64
+             * @description The option's value when Lean stopped. For `maxRecDepth` it is the
+             *     last the code set, else Lean's default of 512.
+             */
+            value: number;
+        };
         /**
          * @description A target, hole or assumption that a pair's comparator configuration
          *     leaves out, and why.
@@ -2026,7 +2041,12 @@ export interface components {
              *     `/check`.
              */
             closed: boolean;
-            /** @description Why it didn't run: the policy refused it, or the time ran out. */
+            /**
+             * @description Why it didn't run: the policy refused it, the time ran out, or Lean
+             *     reached its recursion or heartbeat limit (`recursion_limit` and
+             *     `heartbeat_limit`, with `limit`), which another run of it reaches
+             *     too.
+             */
             error?: components["schemas"]["Error"];
             /** @description The goals it left, when it ran without errors. */
             goals: string[];
@@ -2912,6 +2932,7 @@ export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
 export type JobStatus = components['schemas']['JobStatus'];
+export type LeanLimit = components['schemas']['LeanLimit'];
 export type LeftOut = components['schemas']['LeftOut'];
 export type LeftOutReason = components['schemas']['LeftOutReason'];
 export type LinePos = components['schemas']['LinePos'];

@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::db::DbError;
+use crate::limits::lean_limit;
 use crate::records::StateRow;
 use crate::sessions::SessionMeta;
 
@@ -180,7 +181,7 @@ impl Documents {
                 match self.start_of(&mut doc, session, state, row.clone()).await {
                     Ok(from) => from,
                     Err(Stop::Beam(e)) => {
-                        let e = self.fail(&mut doc, session, e, replay).await;
+                        let e = self.fail(&mut doc, session, e, replay, "").await;
                         return Err(after_reopen(e, reopened));
                     }
                     Err(Stop::Error(e)) => return Err(after_reopen(e, reopened)),
@@ -192,14 +193,17 @@ impl Documents {
                     break (r, at, replayed);
                 }
                 // Lean's answer is a result, so this is Beam's own failure,
-                // perhaps of the handle: replay the state once without it.
-                Err(BeamError::Tool { message, .. }) if !retried => {
+                // perhaps of the handle: replay the state once without it. A
+                // limit Lean reached comes again on a replay.
+                Err(BeamError::Tool { code, message, .. })
+                    if !retried && lean_limit(&code, &message, &j.tactic).is_none() =>
+                {
                     tracing::info!(session, state, "Lean Beam failed on a step: {message}");
                     self.forget(&mut doc, session, state).await;
                     retried = true;
                 }
                 Err(e) => {
-                    let e = self.fail(&mut doc, session, e, budget).await;
+                    let e = self.fail(&mut doc, session, e, budget, &j.tactic).await;
                     return Err(after_reopen(e, reopened));
                 }
             }

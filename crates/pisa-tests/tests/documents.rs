@@ -217,6 +217,39 @@ async fn goals_and_probes_land_where_the_code_says() {
     assert_eq!(at_line.pos, pos(4, 2));
 }
 
+/// A candidate that reaches one of Lean's limits has its own kind, and the
+/// candidates after it still run.
+#[tokio::test(flavor = "multi_thread")]
+async fn lean_s_limits_are_errors_of_their_own_not_an_outage() {
+    let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await;
+    let id = new_id();
+    open(&c, &id, CODE).await;
+    let p = probe(
+        &c,
+        &id,
+        ProbeAt::Sorry { sorry: 0 },
+        &["RECURSION", "HEARTBEAT", "skip"],
+    )
+    .await;
+    let r = &p.results;
+    let deep = r[0].error.as_ref().unwrap();
+    assert_eq!(deep.kind, ErrorKind::RecursionLimit);
+    assert_eq!(
+        serde_json::to_value(deep.limit.as_ref().unwrap()).unwrap(),
+        json!({"option": "maxRecDepth", "value": 512})
+    );
+    let slow = r[1].error.as_ref().unwrap();
+    assert_eq!(slow.kind, ErrorKind::HeartbeatLimit);
+    assert_eq!(
+        serde_json::to_value(slow.limit.as_ref().unwrap()).unwrap(),
+        json!({"option": "maxHeartbeats", "value": 200000, "phase": "whnf"})
+    );
+    assert!(r[2].ok && r[2].error.is_none(), "{:?}", r[2]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn each_probe_candidate_has_its_own_time_limit() {
     let c = Cluster::start_with(common::router_config(), &[("w0", "v", 1)], |cfg| {

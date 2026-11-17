@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   PisaClient,
   isCapacityError,
+  isLimitError,
   isPisaError,
   type ClientOptions,
   type RebuildCreated,
@@ -473,6 +474,18 @@ describe("PisaClient", () => {
     expect(await client.check("x").catch((e: unknown) => e)).toMatchObject({ kind: "unavailable", status: 502 });
     reply = new Response("not json", { status: 200 });
     expect(await client.check("x").catch((e: unknown) => e)).toMatchObject({ kind: "bad_response", status: 200 });
+  });
+
+  it("keeps a recursion or heartbeat limit's kind and message", async () => {
+    let kind = "recursion_limit";
+    const { client } = recording(() =>
+      json({ error: { kind, message: "maximum recursion depth", limit: { option: "maxRecDepth", value: 512 } } }, 422),
+    );
+    for (kind of ["recursion_limit", "heartbeat_limit"]) {
+      const e = await client.check("x").catch((e: unknown) => e);
+      expect(e).toMatchObject({ kind, status: 422, message: "maximum recursion depth" });
+      expect(isLimitError(e)).toBe(true);
+    }
   });
 
   it("tells a network failure from an abort", async () => {

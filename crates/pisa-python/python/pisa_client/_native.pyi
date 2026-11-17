@@ -2,13 +2,20 @@ from asyncio import Future
 from typing import Literal, NotRequired, TypedDict
 
 ErrorKind = Literal[
-    "timeout", "out_of_memory", "crash", "policy", "lean",
+    "timeout", "out_of_memory", "crash", "recursion_limit", "heartbeat_limit",
+    "policy", "lean",
     "capacity", "unavailable", "bad_request", "not_found", "conflict", "internal",
 ]
+
+class LeanLimit(TypedDict):
+    option: str
+    value: int
+    phase: NotRequired[str]
 
 class Error(TypedDict):
     kind: ErrorKind
     message: str
+    limit: NotRequired[LeanLimit]
 
 class Pos(TypedDict):
     line: int

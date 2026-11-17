@@ -7,6 +7,8 @@
 //! - `BUSY`: refuse without running, as Beam does when full;
 //! - `STALE`: a document-version mismatch;
 //! - `FAIL`: a tool error;
+//! - `RECURSION`: Lean's `maxRecDepth` error, as a tool error;
+//! - `HEARTBEAT`: Lean's `maxHeartbeats` error (200000, at `whnf`);
 //! - `FLAKY`: a tool error the first time the text comes, not after;
 //! - `CRASH`: exit with a message on stderr;
 //! - `rfl` or `trivial`: the tactic closes the goal; `fail` or `omega`: it
@@ -151,6 +153,20 @@ fn call(tools: &Value, params: &Value) -> Result<Value, Value> {
     }
     if text.contains("STALE") {
         return tool_err("contentModified", "document version 1 is stale; accepted 2");
+    }
+    if text.contains("RECURSION") {
+        return tool_err(
+            "internalError",
+            "maximum recursion depth has been reached\nuse `set_option maxRecDepth <num>` to \
+             increase limit\nuse `set_option diagnostics true` to get diagnostic information",
+        );
+    }
+    if text.contains("HEARTBEAT") {
+        return tool_err(
+            "internalError",
+            "(deterministic) timeout at `whnf`, maximum number of heartbeats (200000) has been \
+             reached\nUse `set_option maxHeartbeats <num>` to set the limit.",
+        );
     }
     if text.contains("FAIL") {
         return tool_err("invalidParams", "fake failure");
