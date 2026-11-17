@@ -122,13 +122,18 @@ impl ErrorKind {
 /// wait is enough; clients back off further on their own.
 pub const RETRY_AFTER_SECS: u64 = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
     /// The limit Lean reached, for `recursion_limit` and `heartbeat_limit`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<LeanLimit>,
+    /// Where an open's time went before it failed, for a document that
+    /// didn't open, `timeout` included: the phase that ran out has the time
+    /// up to the failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<Box<Timing>>,
 }
 
 /// A limit Lean reached while running the input.
@@ -150,6 +155,7 @@ impl Error {
             kind,
             message: message.into(),
             limit: None,
+            timing: None,
         }
     }
 
@@ -503,6 +509,8 @@ pub struct Timing {
     pub execution: f64,
     /// Tracing what Lean did: a check's `tactics` and `at`, from a second
     /// run of its body, and a document's goals at positions (`lean_goals`).
+    /// For a document's open, the diagnostics and the sorries' goals.
+    #[schema(required = true)]
     #[serde(default)]
     pub tracing: f64,
     /// Verifying what ran: a check's axiom report, a create's kernel
@@ -1701,7 +1709,7 @@ pub struct RebuildFailed {
 }
 
 /// A snapshot a rebuild run was to delete and couldn't.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct RebuildNotDeleted {
     pub snapshot_id: String,
     pub error: Error,

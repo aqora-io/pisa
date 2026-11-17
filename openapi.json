@@ -1702,6 +1702,10 @@
           },
           "message": {
             "type": "string"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where an open's time went before it failed, for a document that\ndidn't open, `timeout` included: the phase that ran out has the time\nup to the failure."
           }
         },
         "required": [
@@ -3808,7 +3812,7 @@
             "type": "number"
           },
           "tracing": {
-            "description": "Tracing what Lean did: a check's `tactics` and `at`, from a second\nrun of its body, and a document's goals at positions (`lean_goals`).",
+            "description": "Tracing what Lean did: a check's `tactics` and `at`, from a second\nrun of its body, and a document's goals at positions (`lean_goals`).\nFor a document's open, the diagnostics and the sorries' goals.",
             "format": "double",
             "type": "number"
           },
@@ -3822,6 +3826,7 @@
           "queue",
           "load",
           "execution",
+          "tracing",
           "verification",
           "total"
         ],

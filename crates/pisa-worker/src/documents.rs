@@ -411,14 +411,10 @@ impl Documents {
         if let Some(why) = why {
             tracing::info!(document = id, why, "opening a document again");
             let budget = Budget::new(row.timeout);
-            let loaded = self.load(doc, id, &row.code, row.revision, budget).await;
-            loaded.map_err(|e| {
-                let message = format!(
-                    "opening the document again, as {why}, failed: {}",
-                    e.message
-                );
-                Error::new(e.kind, message)
-            })?;
+            let loaded = self
+                .load(doc, id, &row.code, row.revision, budget, Instant::now())
+                .await;
+            loaded.map_err(|e| reopen_failed(e, why))?;
         }
         if !self.records.hold_document(id, &self.me, now_secs()).await? {
             self.unload(doc, id).await;
@@ -431,7 +427,9 @@ impl Documents {
     }
 
     /// Opens `code` as `doc` at `revision` within `budget`, which replays
-    /// take too: in the slot it is open in, or in the least full slot.
+    /// take too: in the slot it is open in, or in the least full slot. The
+    /// startup counts from `since`. Says where the time went, also in the
+    /// error of a load that fails.
     async fn load(
         &self,
         doc: &mut Option<Open>,
@@ -439,6 +437,31 @@ impl Documents {
         code: &str,
         revision: u64,
         budget: Budget,
+        since: Instant,
+    ) -> Result<Timing, Error> {
+        let mut phases = Phases::default();
+        match self
+            .load_phases(doc, id, code, revision, budget, since, &mut phases)
+            .await
+        {
+            Ok(()) => Ok(phases.timing(since)),
+            Err(mut e) => {
+                e.timing = Some(Box::new(phases.timing(since)));
+                Err(e)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn load_phases(
+        &self,
+        doc: &mut Option<Open>,
+        id: &str,
+        code: &str,
+        revision: u64,
+        budget: Budget,
+        since: Instant,
+        phases: &mut Phases,
     ) -> Result<(), Error> {
         let split = split_header(code);
         self.pool.snapshots().ensure(&split.header, None).await?;
@@ -462,7 +485,8 @@ impl Documents {
                 format!("writing the document's file: {e}"),
             )
         })?;
-        match sync(&beam, ws.doc(&path), &map, budget).await {
+        phases.load = Some(since.elapsed());
+        match sync(&beam, ws.doc(&path), &map, budget, phases).await {
             Ok((version, messages, sorries)) => {
                 self.answered(slot);
                 *doc = Some(Open {
@@ -591,9 +615,12 @@ impl Documents {
 
     async fn open(&self, j: DocumentOpenJob) -> Result<api::Document, Error> {
         self.scan_code(&j.code)?;
+        let started = Instant::now();
         let budget = Budget::new(j.timeout_secs);
         let mut doc = self.lock(&j.document).await;
-        self.load(&mut doc, &j.document, &j.code, 1, budget).await?;
+        let timing = self
+            .load(&mut doc, &j.document, &j.code, 1, budget, started)
+            .await?;
         let stored = self
             .records
             .put_document(
@@ -609,7 +636,10 @@ impl Documents {
             self.unload(&mut doc, &j.document).await;
             return Err(e.into());
         }
-        Ok(self.describe(&j.document, doc.as_ref().unwrap()))
+        Ok(api::Document {
+            timing,
+            ..self.describe(&j.document, doc.as_ref().unwrap())
+        })
     }
 
     /// Opens the new code, then stores it if the document is still at the
@@ -622,11 +652,13 @@ impl Documents {
             ));
         }
         self.scan_code(&j.code)?;
+        let started = Instant::now();
         let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
         let mut doc = self.lock(id).await;
         self.row(id, Some(j.revision)).await?;
-        self.load(&mut doc, id, &j.code, j.revision + 1, budget)
+        let timing = self
+            .load(&mut doc, id, &j.code, j.revision + 1, budget, started)
             .await?;
         let stored = self
             .records
@@ -641,7 +673,10 @@ impl Documents {
             )
             .await;
         match stored {
-            Ok(Some(_)) => Ok(self.describe(id, doc.as_ref().unwrap())),
+            Ok(Some(_)) => Ok(api::Document {
+                timing,
+                ..self.describe(id, doc.as_ref().unwrap())
+            }),
             Ok(None) => {
                 self.unload(&mut doc, id).await;
                 Err(match self.row(id, None).await {
@@ -895,16 +930,44 @@ pub async fn run(documents: Option<&Documents>, job: Job) -> JobResult {
     }
 }
 
+/// How long the steps of a load took, as far as it got.
+#[derive(Default)]
+struct Phases {
+    /// Until the file was written: `None` while that is still running.
+    load: Option<Duration>,
+    execution: Duration,
+    tracing: Duration,
+}
+
+impl Phases {
+    /// The timing of a load that began at `since`, a failed one's included.
+    fn timing(&self, since: Instant) -> Timing {
+        Timing {
+            load: round6(self.load.unwrap_or_else(|| since.elapsed()).as_secs_f64()),
+            execution: round6(self.execution.as_secs_f64()),
+            tracing: round6(self.tracing.as_secs_f64()),
+            ..Timing::default()
+        }
+    }
+}
+
 /// Syncs the file Beam reads for `map`: its version, messages and sorries.
 async fn sync(
     beam: &Beam,
     doc: Doc<'_>,
     map: &CodeMap,
     budget: Budget,
+    phases: &mut Phases,
 ) -> Result<(u64, Vec<api::Message>, Vec<(api::Sorry, LspPos)>), BeamError> {
-    let synced = beam.sync(doc, true, budget.left()).await?;
+    let running = Instant::now();
+    let synced = beam.sync(doc, true, budget.left()).await;
+    phases.execution = running.elapsed();
+    let synced = synced?;
     let version = synced.version;
-    let todo = beam.todo(doc, version, &["sorry"], budget.left()).await?;
+    let tracing = Instant::now();
+    let todo = beam.todo(doc, version, &["sorry"], budget.left()).await;
+    phases.tracing = tracing.elapsed();
+    let todo = todo?;
     let messages = synced
         .diagnostics
         .items
@@ -918,8 +981,11 @@ async fn sync(
         let goals = match item.proof_state {
             Some(state) => state.goals,
             None => {
-                beam.goals(doc, version, at, Mode::Before, budget.left())
-                    .await?
+                let goals = beam
+                    .goals(doc, version, at, Mode::Before, budget.left())
+                    .await;
+                phases.tracing = tracing.elapsed();
+                goals?
             }
         };
         let sorry = api::Sorry {
@@ -977,14 +1043,25 @@ fn render(goals: &[Goal]) -> String {
 /// `e`, saying the document was opened again first, as `why`, if it was.
 fn after_reopen(e: Error, why: Option<&str>) -> Error {
     match why {
-        Some(why) => Error::new(
-            e.kind,
-            format!(
+        Some(why) => Error {
+            message: format!(
                 "{} (the document was opened again first, as {why})",
                 e.message
             ),
-        ),
+            ..e
+        },
         None => e,
+    }
+}
+
+/// `e`, from opening a document again as `why`.
+fn reopen_failed(e: Error, why: &str) -> Error {
+    Error {
+        message: format!(
+            "opening the document again, as {why}, failed: {}",
+            e.message
+        ),
+        ..e
     }
 }
 
@@ -1199,6 +1276,36 @@ fn first_tactic(line: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recursion_limit() -> Error {
+        Error {
+            limit: Some(pisa_protocol::api::LeanLimit {
+                option: "maxRecDepth".into(),
+                value: 512,
+                phase: None,
+            }),
+            timing: Some(Box::new(Timing {
+                load: 1.5,
+                ..Timing::default()
+            })),
+            ..Error::new(ErrorKind::RecursionLimit, "maximum recursion depth")
+        }
+    }
+
+    #[test]
+    fn an_error_after_a_reopen_keeps_its_limit_and_timing() {
+        let e = after_reopen(recursion_limit(), Some("it was edited elsewhere"));
+        assert_eq!(e.kind, ErrorKind::RecursionLimit);
+        assert!(e.message.contains("opened again first"), "{}", e.message);
+        assert_eq!(e.limit, recursion_limit().limit);
+        assert_eq!(e.timing, recursion_limit().timing);
+
+        let e = reopen_failed(recursion_limit(), "its Lean Beam restarted");
+        assert_eq!(e.kind, ErrorKind::RecursionLimit);
+        assert!(e.message.contains("failed: maximum recursion depth"));
+        assert_eq!(e.limit, recursion_limit().limit);
+        assert_eq!(e.timing, recursion_limit().timing);
+    }
 
     fn map(code: &str) -> CodeMap {
         CodeMap::new(code, &split_header(code))

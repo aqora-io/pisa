@@ -1723,6 +1723,12 @@ export interface components {
             /** @description The limit Lean reached, for `recursion_limit` and `heartbeat_limit`. */
             limit?: components["schemas"]["LeanLimit"];
             message: string;
+            /**
+             * @description Where an open's time went before it failed, for a document that
+             *     didn't open, `timeout` included: the phase that ran out has the time
+             *     up to the failure.
+             */
+            timing?: components["schemas"]["Timing"];
         };
         /** @enum {string} */
         ErrorKind: "timeout" | "out_of_memory" | "crash" | "recursion_limit" | "heartbeat_limit" | "policy" | "lean" | "capacity" | "unavailable" | "bad_request" | "not_found" | "conflict" | "internal";
@@ -2918,6 +2924,7 @@ export interface components {
              * Format: double
              * @description Tracing what Lean did: a check's `tactics` and `at`, from a second
              *     run of its body, and a document's goals at positions (`lean_goals`).
+             *     For a document's open, the diagnostics and the sorries' goals.
              */
             tracing: number;
             /**

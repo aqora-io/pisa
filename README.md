@@ -575,7 +575,12 @@ elaborated file. Then ask for the goals at positions, and try candidate
 tactics at a `sorry`:
 - `POST /documents` opens the code, and answers Lean's errors and warnings
   (`messages`) and the `sorries`, each with its goal. The `id` carries the
-  version, as a snapshot's does.
+  version, as a snapshot's does. Its `timing` says where the open's time
+  went: `load` is the startup (waiting for the document's lock, a Lean Beam
+  process starting, the file), `execution` Lean elaborating the code and its
+  header import, and `tracing` the diagnostics and the goals of its `sorry`s.
+  An open that fails, a 422 `timeout` when it runs out of its `timeout`
+  included, has the phases up to the failure in the error's `timing`.
 - `/documents/{id}/goals` takes 1 to 64 positions, as checks do. A position
   with only a `line` is that line's first tactic, after any `·` or `.`
   bullet, and the answer gives the column it used. There are no goals in the

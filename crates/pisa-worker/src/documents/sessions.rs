@@ -92,7 +92,7 @@ impl Documents {
         let id = &j.document;
         let mut doc = self.lock(id).await;
         let opening = Instant::now();
-        self.load(&mut doc, id, &j.code, 1, budget).await?;
+        self.load(&mut doc, id, &j.code, 1, budget, opening).await?;
         let execution = round6(opening.elapsed().as_secs_f64());
         let now = now_secs();
         let meta = SessionMeta {

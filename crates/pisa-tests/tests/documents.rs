@@ -869,3 +869,34 @@ async fn probes_and_goals_say_where_their_time_went() {
     assert!(g.timing.load >= 0.7, "{:?}", g.timing);
     assert!(g.timing.total >= g.timing.load, "{:?}", g.timing);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_says_where_its_time_went() {
+    let c = beam_cluster().await;
+    let id = new_id();
+    let code = CODE.replace("\n\n", "\n-- SLOW_SYNC 1500\n");
+    let d = open(&c, &id, &code).await;
+    assert!(d.timing.execution >= 1.5, "{:?}", d.timing);
+    assert!(d.timing.load > 0.0, "{:?}", d.timing);
+    assert!(d.timing.tracing >= 0.0, "{:?}", d.timing);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_open_past_its_budget_says_where_its_time_went() {
+    let c = beam_cluster().await;
+    let code = CODE.replace("\n\n", "\n-- SLOW_SYNC 3000\n");
+    let (status, e) = c
+        .post(
+            "/documents",
+            json!({"code": code, "version": "v", "timeout": 1}),
+        )
+        .await;
+    assert_eq!(status, 422, "{e}");
+    assert_eq!(e["error"]["kind"], "timeout", "{e}");
+    let timing = &e["error"]["timing"];
+    // The sync ran until the budget ran out.
+    let execution = timing["execution"].as_f64().unwrap();
+    assert!(execution >= 0.5, "{e}");
+    assert!(timing["load"].as_f64().unwrap() > 0.0, "{e}");
+    assert!(timing["total"].as_f64().unwrap() >= execution, "{e}");
+}

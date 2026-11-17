@@ -16,6 +16,8 @@ class Error(TypedDict):
     kind: ErrorKind
     message: str
     limit: NotRequired[LeanLimit]
+    # Where an open's time went before it failed, `timeout` included.
+    timing: NotRequired[Timing]
 
 class Pos(TypedDict):
     line: int

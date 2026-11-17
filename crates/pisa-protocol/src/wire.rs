@@ -336,7 +336,7 @@ pub enum JobResult {
 impl JobResult {
     /// The timing the answer carries, for the worker to fill `queue` and
     /// `total` in. `None` for an answer with none: those of jobs that don't
-    /// run Lean, and failures.
+    /// run Lean, and failures but a document's, which carry the phases measured.
     pub fn timing_mut(&mut self) -> Option<&mut api::Timing> {
         match self {
             JobResult::Check(outcome) => Some(&mut outcome.timing),
@@ -345,6 +345,7 @@ impl JobResult {
             JobResult::TacticApplied(Ok(applied)) => Some(&mut applied.timing),
             JobResult::SnapshotCreated(created) => Some(&mut created.timing),
             JobResult::Document(Ok(document)) => Some(&mut document.timing),
+            JobResult::Document(Err(e)) => e.timing.as_deref_mut(),
             JobResult::DocumentGoals(Ok(goals)) => Some(&mut goals.timing),
             JobResult::DocumentProbes(Ok(probes)) => Some(&mut probes.timing),
             _ => None,
