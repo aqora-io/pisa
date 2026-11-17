@@ -406,7 +406,7 @@ class AuditSnapshotsResponse(TypedDict):
     unsettled: NotRequired[list[AuditUnsettled]]
 
 class PairError(TypedDict):
-    kind: Literal["refused", "build_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge"]
+    kind: Literal["refused", "build_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge", "unsupported"]
     message: str
 
 class LeftOut(TypedDict):
@@ -418,6 +418,14 @@ class LeftOut(TypedDict):
         "private_in_statement",
         "axiom_not_in_head",
     ]
+
+class KernelVerdict(TypedDict):
+    """What one kernel said of a solution."""
+    name: str
+    verdict: Literal["accepted", "rejected", "unsupported", "cannot_run"]
+    # For `unsupported`, pisa's fixed text on why it didn't run the kernel; for
+    # a pair comparator failed, the line comparator printed for it.
+    reason: NotRequired[str]
 
 class AcceptPair(TypedDict):
     """Comparator's verdict on a spec snapshot and a head it reaches."""
@@ -435,6 +443,11 @@ class AcceptPair(TypedDict):
     error: NotRequired[PairError]
     exit_code: NotRequired[int]
     output: str
+    # An accepted pair lists the kernels pisa configured, each `accepted`, and
+    # `unsupported` for any left out; a failed pair lists them as comparator
+    # printed them, in the order it ran them, which the solution's output can
+    # imitate: only `accepted` and `exit_code` say what comparator decided.
+    kernels: NotRequired[list[KernelVerdict]]
     theorems: int
     left_out: NotRequired[list[LeftOut]]
 

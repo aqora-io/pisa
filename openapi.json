@@ -31,6 +31,13 @@
             "description": "The head's module.",
             "type": "string"
           },
+          "kernels": {
+            "description": "The kernels that checked the solution. For an accepted pair, the\nkernels pisa configured, each `accepted`, and `unsupported` for any\nit left out; this isn't read from comparator's output. For a pair\ncomparator failed, the kernels as comparator printed them, in the\norder it ran them, which the solution's own output can imitate: only\n`accepted` and `exit_code` say what comparator decided. Lean's default\nkernel is last. Empty if comparator ran no kernel, or didn't run.",
+            "items": {
+              "$ref": "#/components/schemas/KernelVerdict"
+            },
+            "type": "array"
+          },
           "left_out": {
             "description": "What the configuration leaves out of what it would name, and why.",
             "items": {
@@ -2083,6 +2090,36 @@
         ],
         "type": "string"
       },
+      "KernelOutcome": {
+        "enum": [
+          "accepted",
+          "rejected",
+          "unsupported",
+          "cannot_run"
+        ],
+        "type": "string"
+      },
+      "KernelVerdict": {
+        "description": "What one kernel said of a solution: as pisa configured it, for an accepted\npair, and else as comparator printed it, for the reader.",
+        "properties": {
+          "name": {
+            "description": "The kernel's name, e.g. `nanoda` or `Lean default`.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;\nfor a pair comparator failed, the line comparator printed for it.",
+            "type": "string"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/KernelOutcome"
+          }
+        },
+        "required": [
+          "name",
+          "verdict"
+        ],
+        "type": "object"
+      },
       "LeanLimit": {
         "description": "A limit Lean reached while running the input.",
         "properties": {
@@ -2316,7 +2353,8 @@
           "timeout",
           "out_of_memory",
           "cannot_run",
-          "nothing_to_judge"
+          "nothing_to_judge",
+          "unsupported"
         ],
         "type": "string"
       },

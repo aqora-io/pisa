@@ -9,6 +9,10 @@
 //!   comparator refuses one that isn't a definition;
 //! - a module that says `BUILD_FAIL` fails to build, and one that says
 //!   `CANNOT_RUN` keeps it from starting (exit 2);
+//! - it runs the kernels `--paranoid` names, or those of the configuration's
+//!   `external_kernels`, and then Lean's own: a solution that says
+//!   `KERNEL_DECLINE` has con-leche and con-ron decline it (exit 2), and one
+//!   that says `KERNEL_REJECT` has nanoda reject it;
 //! - a module that says `SLOW_BUILD` takes 3 s to build, the first time.
 //!
 //! It prints its arguments first, for tests to read. It "builds" each module
@@ -21,6 +25,34 @@ use std::process::exit;
 fn fail(message: &str) -> ! {
     eprintln!("error: {message}");
     exit(1);
+}
+
+/// Runs the kernels as comparator does, each printing `Running`, its own
+/// output and its verdict, Lean's default kernel last, and then fails with
+/// the first failure: `names` are the kernels `--paranoid` runs, or a
+/// configuration's `external_kernels`. nanoda rejects a solution that says
+/// `KERNEL_REJECT`, and con-leche and con-ron decline one that says
+/// `KERNEL_DECLINE`, as they do a non-standard axiom (exit 2).
+fn kernels(names: &[String], solution: &str) {
+    let mut failure = None;
+    for kernel in names.iter().map(String::as_str).chain(["Lean default"]) {
+        println!("Running {kernel} kernel on solution");
+        let (verdict, exit) = match kernel {
+            "nanoda" if solution.contains("KERNEL_REJECT") => ("rejected", Some(1)),
+            "con-leche" | "con-ron" if solution.contains("KERNEL_DECLINE") => {
+                eprintln!("{kernel}: declined: non-standard axiom (lit) (--verified)");
+                ("rejected", Some(2))
+            }
+            _ => ("accepts", None),
+        };
+        println!("{kernel} kernel {verdict} the solution");
+        if let Some(code) = exit {
+            failure = failure.or(Some(format!("{kernel} exited with {code}")));
+        }
+    }
+    if let Some(failure) = failure {
+        fail(&failure);
+    }
 }
 
 fn main() {
@@ -85,5 +117,28 @@ fn main() {
     if solution.contains("sorry") {
         fail("Illegal axiom detected: 'sorryAx'");
     }
+    let names: Vec<String> = if args.iter().any(|a| a == "--paranoid") {
+        [
+            "Lean paranoid",
+            "lean4lean",
+            "nanoda",
+            "con-leche",
+            "con-ron",
+        ]
+        .map(String::from)
+        .to_vec()
+    } else {
+        let external = config["external_kernels"].as_object();
+        external
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    println!(
+        "Exporting #[t] from {}",
+        config["solution_module"].as_str().unwrap_or_default()
+    );
+    kernels(&names, solution);
     println!("Your solution is okay!");
 }

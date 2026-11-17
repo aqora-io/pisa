@@ -68,6 +68,8 @@ export type {
   JobKind,
   JobOutcome,
   JobStatus,
+  KernelOutcome,
+  KernelVerdict,
   LeanLimit,
   LeftOut,
   LeftOutReason,

@@ -572,9 +572,35 @@ impl Launcher {
         })
     }
 
+    /// The `bin` of the toolchain that builds the project in `dir`, where
+    /// Lean's bundled kernels are, found as `lean --print-prefix` there says.
+    pub async fn toolchain_bin(&self, dir: &Path) -> std::io::Result<PathBuf> {
+        // Both `lean` and `lake` resolve through elan in `dir`, by its `lean-toolchain`.
+        let mut cmd = Command::new(&self.lean);
+        cmd.arg("--print-prefix")
+            .current_dir(dir)
+            .env_clear()
+            .stdin(Stdio::null());
+        for key in LAKE_ENV {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        let out = cmd.output().await?;
+        let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.status.success() || prefix.is_empty() {
+            return Err(std::io::Error::other(format!(
+                "`lean --print-prefix` gave no prefix: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(PathBuf::from(prefix).join("bin"))
+    }
+
     /// Runs `lake` with `args` in `dir`, in `slot`'s cgroup but outside the
     /// sandbox, for at most `timeout`: `lake comparator` sandboxes the code it
-    /// judges itself.
+    /// judges itself. Its stdout and stderr share one pipe, so that the
+    /// output keeps the order they were written in.
     pub async fn lake(
         &self,
         slot: usize,
@@ -582,13 +608,14 @@ impl Launcher {
         dir: &Path,
         timeout: Duration,
     ) -> std::io::Result<Ran> {
+        let (reader, writer) = std::io::pipe()?;
         let mut cmd = Command::new(&self.lake);
         cmd.args(args)
             .current_dir(dir)
             .env_clear()
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(writer.try_clone()?)
+            .stderr(writer)
             .kill_on_drop(true);
         for key in LAKE_ENV {
             if let Some(value) = std::env::var_os(key) {
@@ -599,8 +626,12 @@ impl Launcher {
             cg.apply(slot, &mut cmd)?;
         }
         let mut child = cmd.spawn()?;
+        // The command holds the pipe's writing ends until it is dropped.
+        drop(cmd);
         // Read as it runs, so that what it printed before a timeout stays.
-        let (stdout, stderr) = (read_all(child.stdout.take()), read_all(child.stderr.take()));
+        let output = read_all(Some(tokio::net::unix::pipe::Receiver::from_owned_fd(
+            reader.into(),
+        )?));
         let code = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(status) => status?.code(),
             Err(_) => {
@@ -610,10 +641,7 @@ impl Launcher {
         };
         // A process Lake started may outlive it and keep the pipes open, so
         // take what was read by then.
-        let mut output = String::new();
-        for read in [stdout, stderr] {
-            output.push_str(&String::from_utf8_lossy(&read.finish().await));
-        }
+        let mut output = String::from_utf8_lossy(&output.finish().await).into_owned();
         if code.is_none() {
             output.push_str(&format!("\nlake ran for more than {}s", timeout.as_secs()));
         }

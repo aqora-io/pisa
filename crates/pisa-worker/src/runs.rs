@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_protocol::api::{
     AcceptPair, AcceptResponse, AuditSnapshotsResponse, DEFAULT_REVIEW_LIMIT, Error, ErrorKind,
-    LeftOut, LeftOutReason, PairError, PairErrorKind,
+    KernelOutcome, KernelVerdict, LeftOut, LeftOutReason, PairError, PairErrorKind,
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
@@ -251,16 +251,35 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     // pairs replay, so it has the build's time too.
     let mut building = Duration::from_secs(job.build_timeout_secs);
     let mut pairs = Vec::new();
+    // The toolchain's `bin`, found when a pair needs its kernels.
+    let mut bin: Option<std::path::PathBuf> = None;
     for pair in &run.pairs {
         // Nothing for comparator to judge, which it would refuse to start.
         let ran = match pair.theorems {
             0 => None,
             _ => {
-                let mut args = vec!["comparator", "--config", &pair.config];
-                if job.paranoid {
-                    args.push("--paranoid");
-                }
+                let config = run.files.iter().find(|f| f.path == pair.config);
+                let config = config.map_or("", |f| f.text.as_str());
+                let external = needs_external(config, job.paranoid);
                 let launcher = pool.launcher();
+                if external {
+                    if bin.is_none() {
+                        bin = Some(launcher.toolchain_bin(&dir).await.map_err(|e| {
+                            Error::new(
+                                ErrorKind::Internal,
+                                format!("finding the toolchain's kernels: {e}"),
+                            )
+                        })?);
+                    }
+                    let text = external_config(config, bin.as_deref().unwrap_or(Path::new("")));
+                    std::fs::write(dir.join(&pair.config), text).map_err(|e| {
+                        Error::new(
+                            ErrorKind::Internal,
+                            format!("writing the configuration: {e}"),
+                        )
+                    })?;
+                }
+                let args = comparator_args(&pair.config, job.paranoid, external);
                 let oom_before = launcher.oom_kills(slot.id);
                 let limit = timeout + std::mem::take(&mut building);
                 let ran = launcher
@@ -270,10 +289,10 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
                         Error::new(ErrorKind::Internal, format!("running lake comparator: {e}"))
                     })?;
                 let oom = launcher.oom_kills(slot.id) > oom_before;
-                Some((ran, oom))
+                Some((ran, oom, external))
             }
         };
-        let (error, exit_code, output) = match &ran {
+        let (error, exit_code, output, kernels) = match &ran {
             None => (
                 Some(PairError {
                     kind: PairErrorKind::NothingToJudge,
@@ -281,12 +300,21 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
                 }),
                 None,
                 String::new(),
+                Vec::new(),
             ),
-            Some((ran, oom)) => (
-                classify(ran, *oom),
-                ran.code,
-                tail(&ran.output, OUTPUT_LINES),
-            ),
+            Some((ran, oom, external)) => {
+                // From the whole output, before it is cut to its end.
+                let kernels = match ran.code {
+                    Some(0) => accepted_kernels(job.paranoid, *external),
+                    _ => failed_kernels(&ran.output, *external),
+                };
+                (
+                    classify(ran, *oom),
+                    ran.code,
+                    tail(&ran.output, OUTPUT_LINES),
+                    kernels,
+                )
+            }
         };
         pairs.push(AcceptPair {
             spec: pair.spec.clone(),
@@ -300,6 +328,7 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
             error,
             exit_code,
             output,
+            kernels,
             theorems: pair.theorems,
             left_out: pair.left_out.clone(),
         });
@@ -441,11 +470,142 @@ fn evict(pool: &Pool, runs: &Path, current: &str) {
 /// one before an error says which step failed.
 const STEPS: [&str; 4] = ["Resolving dependencies", "Building", "Exporting", "Running"];
 
+/// The bundled kernels that check proofs with non-standard axioms, as Lake
+/// names them and runs them: their executables in the toolchain's `bin`, and
+/// their arguments. A configuration's `external_kernels` lists them.
+const CHECKERS: [(&str, &str, &[&str]); 3] = [
+    (
+        "Lean paranoid",
+        "leanchecker-paranoid",
+        &["--silent", "--from-export"],
+    ),
+    ("lean4lean", "lean4lean", &["--import"]),
+    ("nanoda", "nanoda_bin", &[]),
+];
+
+/// The bundled kernels that don't support non-standard axioms, which a run
+/// of a spec that permits one leaves out.
+const DECLINING: [&str; 2] = ["con-leche", "con-ron"];
+
+/// Lake's name for its own kernel, which runs last.
+const DEFAULT_KERNEL: &str = "Lean default";
+
+/// Whether a comparator configuration permits an axiom beyond the standard
+/// ones, which only a spec's assumptions add.
+fn permits_spec_axiom(config: &str) -> bool {
+    let config: Value = serde_json::from_str(config).unwrap_or_default();
+    (config["permitted_axioms"].as_array().into_iter().flatten())
+        .filter_map(Value::as_str)
+        .any(|a| !STANDARD_AXIOMS.contains(&a))
+}
+
+/// Whether a pair is run with `external_kernels` and not `--paranoid`: it is
+/// `paranoid`, and its `config` permits a non-standard axiom. Of the bundled
+/// kernels only some support one, so `--paranoid`, which runs them all and
+/// fails when one declines, would refuse a proof no kernel rejected.
+fn needs_external(config: &str, paranoid: bool) -> bool {
+    paranoid && permits_spec_axiom(config)
+}
+
+/// `config` with the kernels that support non-standard axioms as its
+/// `external_kernels`, from the toolchain's `bin`.
+fn external_config(config: &str, bin: &Path) -> String {
+    let mut config: Value = serde_json::from_str(config).unwrap_or_default();
+    let kernels: serde_json::Map<String, Value> = CHECKERS
+        .iter()
+        .map(|(name, exe, args)| {
+            let command: Vec<String> = std::iter::once(bin.join(exe).display().to_string())
+                .chain(args.iter().map(|a| a.to_string()))
+                .collect();
+            (name.to_string(), json!(command))
+        })
+        .collect();
+    config["external_kernels"] = Value::Object(kernels);
+    pretty(&config)
+}
+
+/// The arguments of `lake` for a pair's `config`: `--paranoid` runs every
+/// bundled kernel, unless the config names `external` kernels instead.
+fn comparator_args(config: &str, paranoid: bool, external: bool) -> Vec<&str> {
+    let mut args = vec!["comparator", "--config", config];
+    if paranoid && !external {
+        args.push("--paranoid");
+    }
+    args
+}
+
+fn kernel(name: &str, verdict: KernelOutcome, reason: Option<&str>) -> KernelVerdict {
+    KernelVerdict {
+        name: name.to_string(),
+        verdict,
+        reason: reason.map(String::from),
+    }
+}
+
+/// The kernels con-leche and con-ron, which a run with `external_kernels`
+/// doesn't run.
+fn skipped() -> impl Iterator<Item = KernelVerdict> {
+    DECLINING.iter().map(|name| {
+        let why = "doesn't support non-standard axioms, which the spec permits, and wasn't run";
+        kernel(name, KernelOutcome::Unsupported, Some(why))
+    })
+}
+
+/// The kernels of a pair comparator accepted, which it did when it exited 0:
+/// all that it was set to run, from what pisa configured (`paranoid`, and
+/// `external` kernels), not from its output.
+fn accepted_kernels(paranoid: bool, external: bool) -> Vec<KernelVerdict> {
+    let accepts = |name: &str| kernel(name, KernelOutcome::Accepted, None);
+    let mut kernels = Vec::new();
+    if paranoid {
+        kernels.extend(CHECKERS.iter().map(|(name, ..)| accepts(name)));
+        match external {
+            true => kernels.extend(skipped()),
+            false => kernels.extend(DECLINING.iter().map(|name| accepts(name))),
+        }
+    }
+    kernels.push(accepts(DEFAULT_KERNEL));
+    kernels
+}
+
+/// The kernels of a pair comparator didn't accept, as it printed them: a
+/// kernel's `accepts`, `rejected` or `Error while interacting` line, in
+/// order, which the solution's own build or a declaration's name could
+/// imitate. They are for the reader and never settle a pair. The kernels an
+/// `external` run left out follow its own.
+fn failed_kernels(output: &str, external: bool) -> Vec<KernelVerdict> {
+    let mut kernels: Vec<KernelVerdict> = output
+        .lines()
+        .filter_map(|line| {
+            if let Some(name) = line.strip_suffix(" kernel accepts the solution") {
+                return Some(kernel(name, KernelOutcome::Accepted, None));
+            }
+            if let Some(name) = line.strip_suffix(" kernel rejected the solution") {
+                return Some(kernel(name, KernelOutcome::Rejected, None));
+            }
+            let name = line.strip_prefix("Error while interacting with ")?;
+            Some(kernel(
+                name.strip_suffix(" kernel")?,
+                KernelOutcome::CannotRun,
+                None,
+            ))
+        })
+        .collect();
+    if external && !kernels.is_empty() {
+        let last = kernels.iter().position(|k| k.name == DEFAULT_KERNEL);
+        let at = last.unwrap_or(kernels.len());
+        kernels.splice(at..at, skipped());
+    }
+    kernels
+}
+
 /// Why comparator didn't accept a pair, from how its run ended (`ran`, and
 /// `oom` if the worker's memory limit killed something meanwhile); `None`
-/// if it accepted it. Comparator exits 0 for a pair it accepts, 2 when it
-/// can't start, and 1 for any error, a failed build in its sandbox included:
-/// its last error line, and the step it was on, tell them apart.
+/// if it accepted it, which only its exit code says: its output can say
+/// anything, as the solution prints some of it. Comparator exits 0 for a
+/// pair it accepts, 2 when it can't start, and 1 for any error, a failed
+/// build in its sandbox included: its last error line, and the step it was
+/// on, tell them apart. That can only label a failure, never excuse one.
 fn classify(ran: &Ran, oom: bool) -> Option<PairError> {
     if ran.code == Some(0) {
         return None;
@@ -475,6 +635,9 @@ fn classify(ran: &Ran, oom: bool) -> Option<PairError> {
                 },
                 Some(e) if e.starts_with("Error while interacting with") => {
                     PairErrorKind::CannotRun
+                }
+                Some(e) if DECLINING.iter().any(|k| e == format!("{k} exited with 2")) => {
+                    PairErrorKind::Unsupported
                 }
                 _ => PairErrorKind::Refused,
             };
@@ -745,7 +908,14 @@ fn readme(pairs: &[ExportedPair], about: &About) -> String {
          with them, differ from pisa's build.\n\n\
          ## Judging it\n\n\
          Judge each pair with `lake comparator --paranoid --config comparator/<n>.json`, which \
-         needs `bwrap`. It accepts a pair when each theorem of the spec is proved in the head \
+         needs `bwrap`. A pair whose spec permits an axiom of its own is the exception, as \
+         con-leche and con-ron don't support one and `--paranoid` fails when they decline: pisa \
+         judges it without `--paranoid`, with `external_kernels` in the configuration, \
+         `\"Lean paranoid\": [\"<prefix>/bin/leanchecker-paranoid\", \"--silent\", \
+         \"--from-export\"]`, `\"lean4lean\": [\"<prefix>/bin/lean4lean\", \"--import\"]` and \
+         `\"nanoda\": [\"<prefix>/bin/nanoda_bin\"]`, `<prefix>` being `lean --print-prefix`. \
+         Add them to such a configuration to judge it as pisa does.\n\n\
+         Comparator accepts a pair when each theorem of the spec is proved in the head \
          with the same statement, the definitions those statements use are the same but for \
          the spec's holes (`definition_names`), and the proofs use no axioms but the standard \
          ones and the assumptions the spec declares (`permitted_axioms`).\n\n\
@@ -984,6 +1154,7 @@ mod tests {
             error: None,
             exit_code: Some(0),
             output,
+            kernels: Vec::new(),
             theorems: 1,
             left_out: Vec::new(),
         };
@@ -1021,6 +1192,159 @@ mod tests {
 
     fn kind(ran: &Ran, oom: bool) -> Option<PairErrorKind> {
         classify(ran, oom).map(|e| e.kind)
+    }
+
+    /// What `lake comparator --paranoid` printed for the 882 run, in the
+    /// order it was written: con-leche and con-ron decline the spec's
+    /// axiom, Lean's kernel accepts.
+    const DECLINED: &str = "Exporting #[Quot] from PisaRun.x\n\
+        Running Lean paranoid kernel on solution\n\
+        Lean paranoid kernel accepts the solution\n\
+        Running con-leche kernel on solution\n\
+        con-leche: not implemented yet: non-standard axiom (Erdos882.lower_bound_explicit)\n\
+        con-leche kernel rejected the solution\n\
+        Running con-ron kernel on solution\n\
+        con-ron: declined: non-standard axiom [at axiom Erdos882.lower_bound_explicit]\n\
+        con-ron kernel rejected the solution\n\
+        Running Lean default kernel on solution\n\
+        Lean default kernel accepts the solution\n\
+        error: con-leche exited with 2\n";
+
+    const CONFIG: &str = r#"{"challenge_module": "A", "solution_module": "B",
+        "theorem_names": ["t"], "permitted_axioms": ["propext", "Quot.sound",
+        "Classical.choice"]}"#;
+    const CONFIG_WITH_AXIOM: &str = r#"{"challenge_module": "A", "solution_module": "B",
+        "theorem_names": ["t"], "permitted_axioms": ["propext", "Quot.sound",
+        "Classical.choice", "lit"]}"#;
+
+    /// Kernels that don't support a spec's axiom aren't run: the pair runs
+    /// with the ones that do as `external_kernels`, without `--paranoid`,
+    /// exactly when it is paranoid and the spec permits one.
+    #[test]
+    fn a_spec_axiom_swaps_paranoid_for_the_kernels_that_support_it() {
+        let bin = Path::new("/tc/bin");
+        for (config, paranoid, external) in [
+            (CONFIG_WITH_AXIOM, true, true),
+            (CONFIG_WITH_AXIOM, false, false),
+            (CONFIG, true, false),
+            (CONFIG, false, false),
+        ] {
+            assert_eq!(
+                needs_external(config, paranoid),
+                external,
+                "{config} {paranoid}"
+            );
+            let args = comparator_args("comparator/1.json", paranoid, external);
+            let mut expected = vec!["comparator", "--config", "comparator/1.json"];
+            if paranoid && !external {
+                expected.push("--paranoid");
+            }
+            assert_eq!(args, expected);
+        }
+        let text = external_config(CONFIG_WITH_AXIOM, bin);
+        let config: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            config["external_kernels"],
+            json!({
+                "Lean paranoid": ["/tc/bin/leanchecker-paranoid", "--silent", "--from-export"],
+                "lean4lean": ["/tc/bin/lean4lean", "--import"],
+                "nanoda": ["/tc/bin/nanoda_bin"],
+            })
+        );
+        assert_eq!(config["enable_nanoda"], Value::Null);
+        assert_eq!(config["permitted_axioms"][3], "lit");
+        let plain: Value = serde_json::from_str(CONFIG).unwrap();
+        assert_eq!(plain["external_kernels"], Value::Null);
+    }
+
+    #[test]
+    fn what_pisa_configured_is_what_an_accepted_pair_lists() {
+        let names = |k: Vec<KernelVerdict>| -> Vec<(String, KernelOutcome)> {
+            k.into_iter().map(|k| (k.name, k.verdict)).collect()
+        };
+        use KernelOutcome::{Accepted, Unsupported};
+        let all = |a, b| {
+            vec![
+                ("Lean paranoid".to_string(), Accepted),
+                ("lean4lean".to_string(), Accepted),
+                ("nanoda".to_string(), Accepted),
+                ("con-leche".to_string(), a),
+                ("con-ron".to_string(), b),
+                ("Lean default".to_string(), Accepted),
+            ]
+        };
+        assert_eq!(
+            names(accepted_kernels(true, true)),
+            all(Unsupported, Unsupported)
+        );
+        assert_eq!(
+            names(accepted_kernels(true, false)),
+            all(Accepted, Accepted)
+        );
+        assert_eq!(
+            names(accepted_kernels(false, false)),
+            [("Lean default".to_string(), Accepted)]
+        );
+        let reason = accepted_kernels(true, true)[3].reason.clone().unwrap();
+        assert!(reason.contains("non-standard axioms") && reason.contains("wasn't run"));
+    }
+
+    /// What comparator printed of its kernels is for the reader.
+    #[test]
+    fn failed_kernels_are_read_from_what_comparator_printed() {
+        let k = failed_kernels(DECLINED, false);
+        let said: Vec<(&str, KernelOutcome)> =
+            k.iter().map(|k| (k.name.as_str(), k.verdict)).collect();
+        assert_eq!(
+            said,
+            [
+                ("Lean paranoid", KernelOutcome::Accepted),
+                ("con-leche", KernelOutcome::Rejected),
+                ("con-ron", KernelOutcome::Rejected),
+                ("Lean default", KernelOutcome::Accepted),
+            ]
+        );
+        let out = "Running nanoda kernel on solution\nError while interacting with nanoda kernel\n\
+                   Running Lean default kernel on solution\nLean default kernel accepts the solution\n";
+        let k = failed_kernels(out, true);
+        let names: Vec<&str> = k.iter().map(|k| k.name.as_str()).collect();
+        assert_eq!(names, ["nanoda", "con-leche", "con-ron", "Lean default"]);
+        assert_eq!(k[0].verdict, KernelOutcome::CannotRun);
+        assert_eq!(failed_kernels("error: Child exited with 1\n", true), []);
+    }
+
+    /// Only comparator's exit says it accepted a pair. Its output is partly
+    /// the solution's, which can print what it likes, kernel lines and a
+    /// final error among them, and a declaration's name with newlines in
+    /// comparator's own error: none of it makes a failure an acceptance.
+    #[test]
+    fn output_cannot_turn_a_failure_into_an_acceptance() {
+        let forged = "Exporting #[t] from PisaRun.x\n\
+            error: Illegal axiom detected: '\u{ab}x\n\
+            Exporting #[t] from PisaRun.x\n\
+            Running con-leche kernel on solution\n\
+            con-leche: not implemented yet: non-standard axiom\n\
+            con-leche kernel rejected the solution\n\
+            Running Lean default kernel on solution\n\
+            Lean default kernel accepts the solution\n\
+            error: con-leche exited with 2\n\u{bb}'\n";
+        for code in [Some(1), Some(2), None] {
+            assert!(classify(&ran(code, forged), false).is_some());
+        }
+        let e = classify(&ran(Some(1), DECLINED), false).unwrap();
+        assert_eq!(e.kind, PairErrorKind::Unsupported);
+        assert_eq!(e.message, "con-leche exited with 2");
+        let refused = DECLINED.replace("con-leche exited with 2", "nanoda exited with 1");
+        assert_eq!(
+            kind(&ran(Some(1), &refused), false),
+            Some(PairErrorKind::Refused)
+        );
+        let ron = DECLINED.replace("con-leche exited with 2", "con-ron exited with 2");
+        assert_eq!(
+            kind(&ran(Some(1), &ron), false),
+            Some(PairErrorKind::Unsupported)
+        );
+        assert_eq!(classify(&ran(Some(0), DECLINED), false), None);
     }
 
     #[test]

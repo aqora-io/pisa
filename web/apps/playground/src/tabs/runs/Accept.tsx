@@ -1,4 +1,4 @@
-import type { AcceptPair, AuditParams, LeftOutReason, PairErrorKind } from "@aqora/pisa-client";
+import type { AcceptPair, AuditParams, KernelOutcome, LeftOutReason, PairErrorKind } from "@aqora/pisa-client";
 import { useAcceptRun, useExportRun } from "@aqora/pisa-react";
 import { useState } from "react";
 
@@ -27,6 +27,15 @@ const ERROR: Record<PairErrorKind, string> = {
   out_of_memory: "ran out of memory",
   cannot_run: "couldn't run",
   nothing_to_judge: "nothing to judge",
+  unsupported: "con-leche or con-ron exited with 2",
+};
+
+/** What a kernel said, in words. */
+const KERNEL: Record<KernelOutcome, string> = {
+  accepted: "accepts",
+  rejected: "rejects",
+  unsupported: "not supported",
+  cannot_run: "couldn't run",
 };
 
 /** Why a configuration leaves a name out, in words. */
@@ -60,6 +69,16 @@ function Pair({ pair }: { pair: AcceptPair }) {
         {pair.exit_code !== undefined && <span className="font-mono">exit {pair.exit_code}</span>}
       </div>
       {pair.error !== undefined && <p className="whitespace-pre-wrap text-xs text-rose-800">{pair.error.message}</p>}
+      {pair.kernels !== undefined && pair.kernels.length > 0 && (
+        <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+          {pair.kernels.map((k) => (
+            <li key={k.name} title={k.reason}>
+              <span className="font-mono">{k.name}</span>{" "}
+              <Badge tone={k.verdict === "accepted" ? "green" : k.verdict === "unsupported" ? "amber" : "red"}>{KERNEL[k.verdict]}</Badge>
+            </li>
+          ))}
+        </ul>
+      )}
       {pair.left_out !== undefined && pair.left_out.length > 0 && (
         <p className="text-xs text-amber-800">
           left out:{" "}

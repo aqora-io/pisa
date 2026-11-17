@@ -575,6 +575,16 @@ export interface components {
             head: string;
             /** @description The head's module. */
             head_module?: string;
+            /**
+             * @description The kernels that checked the solution. For an accepted pair, the
+             *     kernels pisa configured, each `accepted`, and `unsupported` for any
+             *     it left out; this isn't read from comparator's output. For a pair
+             *     comparator failed, the kernels as comparator printed them, in the
+             *     order it ran them, which the solution's own output can imitate: only
+             *     `accepted` and `exit_code` say what comparator decided. Lean's default
+             *     kernel is last. Empty if comparator ran no kernel, or didn't run.
+             */
+            kernels?: components["schemas"]["KernelVerdict"][];
             /** @description What the configuration leaves out of what it would name, and why. */
             left_out?: components["schemas"]["LeftOut"][];
             /** @description The end of what it printed. */
@@ -1887,6 +1897,22 @@ export interface components {
         JobOutcome: components["schemas"]["ErrorResponse"] | components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"] | components["schemas"]["ResubmitSnapshotsResponse"];
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
+        /** @enum {string} */
+        KernelOutcome: "accepted" | "rejected" | "unsupported" | "cannot_run";
+        /**
+         * @description What one kernel said of a solution: as pisa configured it, for an accepted
+         *     pair, and else as comparator printed it, for the reader.
+         */
+        KernelVerdict: {
+            /** @description The kernel's name, e.g. `nanoda` or `Lean default`. */
+            name: string;
+            /**
+             * @description For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;
+             *     for a pair comparator failed, the line comparator printed for it.
+             */
+            reason?: string;
+            verdict: components["schemas"]["KernelOutcome"];
+        };
         /** @description A limit Lean reached while running the input. */
         LeanLimit: {
             /** @description The Lean option that sets it: `maxRecDepth` or `maxHeartbeats`. */
@@ -2015,7 +2041,7 @@ export interface components {
             message: string;
         };
         /** @enum {string} */
-        PairErrorKind: "refused" | "build_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge";
+        PairErrorKind: "refused" | "build_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge" | "unsupported";
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
          *     in Unicode code points, not UTF-16 units.
@@ -2932,6 +2958,8 @@ export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
 export type JobStatus = components['schemas']['JobStatus'];
+export type KernelOutcome = components['schemas']['KernelOutcome'];
+export type KernelVerdict = components['schemas']['KernelVerdict'];
 export type LeanLimit = components['schemas']['LeanLimit'];
 export type LeftOut = components['schemas']['LeftOut'];
 export type LeftOutReason = components['schemas']['LeftOutReason'];

@@ -1936,11 +1936,48 @@ pub struct AcceptPair {
     pub exit_code: Option<i32>,
     /// The end of what it printed.
     pub output: String,
+    /// The kernels that checked the solution. For an accepted pair, the
+    /// kernels pisa configured, each `accepted`, and `unsupported` for any
+    /// it left out; this isn't read from comparator's output. For a pair
+    /// comparator failed, the kernels as comparator printed them, in the
+    /// order it ran them, which the solution's own output can imitate: only
+    /// `accepted` and `exit_code` say what comparator decided. Lean's default
+    /// kernel is last. Empty if comparator ran no kernel, or didn't run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kernels: Vec<KernelVerdict>,
     /// How many of the spec's theorems the configuration names.
     pub theorems: u64,
     /// What the configuration leaves out of what it would name, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_out: Vec<LeftOut>,
+}
+
+/// What one kernel said of a solution: as pisa configured it, for an accepted
+/// pair, and else as comparator printed it, for the reader.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct KernelVerdict {
+    /// The kernel's name, e.g. `nanoda` or `Lean default`.
+    pub name: String,
+    pub verdict: KernelOutcome,
+    /// For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;
+    /// for a pair comparator failed, the line comparator printed for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KernelOutcome {
+    /// The kernel checked the solution and accepts it.
+    Accepted,
+    /// The kernel exited with an error.
+    Rejected,
+    /// The kernel doesn't support what the spec permits, a non-standard
+    /// axiom (con-leche and con-ron don't), so pisa didn't run it: no
+    /// verdict on the proof.
+    Unsupported,
+    /// Comparator couldn't run the kernel.
+    CannotRun,
 }
 
 /// Why comparator didn't accept a pair: its verdict, or what kept it from
@@ -1970,6 +2007,11 @@ pub enum PairErrorKind {
     CannotRun,
     /// The spec names no theorem comparator can judge, so it didn't run.
     NothingToJudge,
+    /// Comparator's final error line says con-leche or con-ron exited with 2,
+    /// in a run that ran them: they don't support a non-standard axiom, so
+    /// there is no verdict on the proof from those kernels, and the pair isn't
+    /// accepted.
+    Unsupported,
 }
 
 /// A target, hole or assumption that a pair's comparator configuration

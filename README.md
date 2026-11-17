@@ -1280,11 +1280,29 @@ accepting a run takes both:
   not accepted says why in `error.kind`: `refused`, comparator's verdict;
   `build_failed`, a module that didn't build in its sandbox; `timeout`;
   `out_of_memory`; `cannot_run`, comparator couldn't start or run its checks;
+  `unsupported`, comparator's last error line says con-leche or con-ron
+  exited with 2, in a run that ran them: they don't support a non-standard
+  axiom;
   or `nothing_to_judge`, a spec that names no theorem comparator can judge,
   for which it doesn't run. Only `refused` is a verdict on the proofs. The run
   is `accepted` when the audit is `clean` (`clean`, with the whole `audit`
   and the `heads` both judged), comparator accepted every pair, and there is
-  one at least. The result is stored with an `id`, and
+  one at least. Only comparator's exit code decides whether a pair is accepted,
+  never what it printed, which the solution's own build and the names in its
+  declarations can imitate.
+  With `paranoid`, comparator also runs the kernels Lean bundles, except when
+  the spec permits a non-standard axiom: con-leche and con-ron don't support
+  one, and `--paranoid` fails when they decline. Then pisa writes the
+  configuration with `external_kernels` Lean paranoid, lean4lean and nanoda,
+  from the toolchain's `bin`, runs it without `--paranoid`, and leaves
+  con-leche and con-ron out. Lean's own kernel always runs last. A pair's
+  `kernels` list each kernel's verdict: for an accepted pair, what pisa
+  configured, each `accepted`, and con-leche and con-ron `unsupported`, with a
+  `reason`, when they were left out. For a pair comparator failed, they are
+  as comparator printed them, for the reader. A pair whose final error line
+  says con-leche or con-ron exited with 2, kernels a spec without an axiom of
+  its own doesn't leave out, is `unsupported`; any other failure is
+  `refused`. The result is stored with an `id`, and
   `GET /snapshots/accept/{id}` reads it again; `GET /snapshots/accept?spec=<id>`
   lists a spec snapshot's, newest first. It names the code it judged, which
   stays named when snapshots go: each pair's `spec_module` and

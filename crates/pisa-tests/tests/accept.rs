@@ -8,7 +8,7 @@ mod common;
 use std::time::Duration;
 
 use common::Cluster;
-use pisa_protocol::api::{AcceptResponse, LeftOut, LeftOutReason, PairErrorKind};
+use pisa_protocol::api::{AcceptResponse, KernelOutcome, LeftOut, LeftOutReason, PairErrorKind};
 use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotAcceptJob, SnapshotExportJob};
 use pisa_worker::queue::{NewJob, Poll};
 use serde_json::{Value, json};
@@ -569,6 +569,84 @@ async fn a_pair_not_accepted_says_why() {
     assert!(!r.accepted, "{r:?}");
     assert_eq!(kind(&r), Some(PairErrorKind::NothingToJudge));
     assert_eq!((r.pairs[0].theorems, r.pairs[0].exit_code), (0, None));
+}
+
+/// A paranoid pair of a spec that permits a non-standard axiom runs the
+/// kernels that support one, not `--paranoid`, which fails when con-leche and
+/// con-ron decline it. Comparator's exit says the verdict, and the pair says
+/// which kernels it ran and which it left out. Without a spec axiom it runs
+/// `--paranoid`, and a decline is `unsupported`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_spec_axiom_runs_the_kernels_that_support_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let judge = async |axiom: &str, marker: &str| {
+        let spec = create(
+            &c,
+            json!({"code": format!("import Foo\n\n{axiom}theorem t : 2 = 2 := sorry")}),
+        )
+        .await;
+        let code = format!("import Foo\n\n-- {marker}\n{axiom}theorem t : 2 = 2 := rfl");
+        create(
+            &c,
+            json!({"code": code, "replaces": {"snapshot_id": id(&spec)}}),
+        )
+        .await;
+        accept(&c, &[&id(&spec)], &[], true, 60).await
+    };
+    let verdicts = |r: &AcceptResponse| -> Vec<(String, KernelOutcome)> {
+        let kernels = r.pairs[0].kernels.iter();
+        kernels.map(|k| (k.name.clone(), k.verdict)).collect()
+    };
+    use KernelOutcome::{Accepted, Rejected, Unsupported};
+    let named = |v: &[(&str, KernelOutcome)]| -> Vec<(String, KernelOutcome)> {
+        v.iter().map(|(n, o)| (n.to_string(), *o)).collect()
+    };
+
+    let r = judge("axiom lit : 1 = 1\n", "KERNEL_DECLINE").await;
+    let pair = &r.pairs[0];
+    assert!(r.accepted && pair.accepted && pair.error.is_none(), "{r:?}");
+    assert_eq!(pair.exit_code, Some(0));
+    assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
+    assert!(!pair.output.contains("con-leche kernel"), "{}", pair.output);
+    assert!(
+        pair.output.contains("Running nanoda kernel"),
+        "{}",
+        pair.output
+    );
+    assert_eq!(
+        verdicts(&r),
+        named(&[
+            ("Lean paranoid", Accepted),
+            ("lean4lean", Accepted),
+            ("nanoda", Accepted),
+            ("con-leche", Unsupported),
+            ("con-ron", Unsupported),
+            ("Lean default", Accepted),
+        ])
+    );
+    let reason = pair.kernels[3].reason.as_deref().unwrap();
+    assert!(reason.contains("non-standard axioms"), "{reason}");
+
+    // A kernel that rejects fails comparator, and the pair is refused.
+    let r = judge("axiom lit : 1 = 1\n", "KERNEL_REJECT").await;
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert!(!r.accepted && !pair.accepted, "{r:?}");
+    assert_eq!(
+        (error.kind, pair.exit_code),
+        (PairErrorKind::Refused, Some(1))
+    );
+    assert_eq!(error.message, "nanoda exited with 1");
+    assert!(verdicts(&r).contains(&("nanoda".to_string(), Rejected)));
+
+    // No spec axiom: `--paranoid` runs con-leche and con-ron, which decline.
+    let r = judge("", "KERNEL_DECLINE").await;
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert!(!r.accepted, "{r:?}");
+    assert_eq!(error.kind, PairErrorKind::Unsupported);
+    assert!(pair.output.contains("--paranoid"), "{}", pair.output);
+    assert!(verdicts(&r).contains(&("con-ron".to_string(), Rejected)));
 }
 
 /// A hole that isn't a plain definition, and an `allow` name the head
