@@ -16,7 +16,8 @@
 
 use std::time::Duration;
 
-use pisa_protocol::api::DependencyState;
+use pisa_protocol::api::{DependencyState, ErrorKind, JobKind};
+use pisa_protocol::wire::JobResult;
 use serde_json::Value;
 
 use crate::backend::dispatch;
@@ -29,8 +30,26 @@ use crate::db::{Db, DbError};
 pub const RESULT_RETENTION: Duration = Duration::from_secs(600);
 
 /// An async job's outcome, which its client reads back, is kept this long
-/// after it is done.
+/// after it is done, but for the kinds [`answer_retention`] keeps longer.
 pub const ASYNC_RETENTION: Duration = Duration::from_secs(3600);
+
+/// The kinds of async job whose answers are kept a day: the answer to a
+/// create or an accept may be the only record of what it made.
+pub(crate) const DAY_KINDS: [&str; 2] = ["create_snapshot", "accept_run"];
+
+/// How long the answer of an async job of `kind` (as `status` names it) is
+/// kept after it is done.
+pub fn answer_retention(kind: &str) -> Duration {
+    if DAY_KINDS.contains(&kind) {
+        Duration::from_secs(24 * 3600)
+    } else {
+        ASYNC_RETENTION
+    }
+}
+
+/// What an async job was and how it ended is kept this long after its row
+/// went, so that a client who asks later is told it expired.
+pub const TOMBSTONE_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
 
 /// Jobs nobody can claim any more, and workers that stopped heartbeating,
 /// are swept after this long.
@@ -132,6 +151,70 @@ pub enum Stage {
     /// `exhausted` if that was all it was allowed, else no worker that could
     /// run it came back in time.
     GaveUp { attempts: u32, exhausted: bool },
+    /// Its row is gone, and a tombstone says what it was and how it ended,
+    /// but never its answer. `finished_micros` is when it ended.
+    Expired {
+        kind: String,
+        outcome: ExpiredOutcome,
+        /// The status its answer had, if it was done or given up; see
+        /// [`ExpiredOutcome::of`].
+        http_status: Option<u16>,
+        finished_micros: i64,
+    },
+}
+
+/// How an expired async job ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpiredOutcome {
+    /// A worker answered it.
+    Done,
+    /// Nobody could run it, or its worker was lost.
+    Lost,
+    /// Its client withdrew it.
+    Cancelled,
+}
+
+impl ExpiredOutcome {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            ExpiredOutcome::Done => "done",
+            ExpiredOutcome::Lost => "lost",
+            ExpiredOutcome::Cancelled => "cancelled",
+        }
+    }
+
+    pub(crate) fn parse(name: &str) -> ExpiredOutcome {
+        match name {
+            "done" => ExpiredOutcome::Done,
+            "cancelled" => ExpiredOutcome::Cancelled,
+            _ => ExpiredOutcome::Lost,
+        }
+    }
+
+    /// How an async job of `kind` (as `status` names it) that ended with
+    /// `result`, claimed `attempts` times, ended, and the status its answer
+    /// had: one given up answered a 429 if no worker took it, else a 503. A
+    /// result that doesn't read was answered as a worker that couldn't run
+    /// the job is; `None` for a kind this release doesn't know.
+    pub(crate) fn of(kind: &str, result: Option<&Value>, attempts: i32) -> (Self, Option<u16>) {
+        let result = match result {
+            Some(Value::Null) | None => {
+                let given_up = match attempts {
+                    0 => ErrorKind::Capacity,
+                    _ => ErrorKind::WorkerLost,
+                };
+                return (ExpiredOutcome::Lost, Some(given_up.status()));
+            }
+            Some(result) => serde_json::from_value(result.clone()).unwrap_or(JobResult::Failed {
+                error: String::new(),
+            }),
+        };
+        let kind = serde_json::from_value::<JobKind>(Value::String(kind.into()));
+        (
+            ExpiredOutcome::Done,
+            kind.ok().map(|k| result.http_status(k)),
+        )
+    }
 }
 
 /// An open job, as a worker picks between them.
@@ -210,9 +293,10 @@ impl Queue {
         dispatch!(&self.db, enqueue_async(&self.name, job, kind))
     }
 
-    /// Where the async job `token` stands, if it is still kept. Reading
-    /// leaves it, except that one nobody may claim any more is closed as
-    /// [`Stage::GaveUp`].
+    /// Where the async job `token` stands, if it is still kept, or was, in
+    /// the current scope. Reading leaves it, except that one nobody may
+    /// claim any more is closed as [`Stage::GaveUp`]. `id` is 0 for
+    /// [`Stage::Expired`].
     pub async fn status(&self, token: &str) -> Result<Option<Status>, DbError> {
         dispatch!(&self.db, status(&self.name, token))
     }
@@ -242,16 +326,17 @@ impl Queue {
     }
 
     /// Deletes results older than [`RESULT_RETENTION`], async outcomes older
-    /// than [`ASYNC_RETENTION`], and jobs and workers nobody has touched for
-    /// [`STALE_RETENTION`]; closes async jobs nobody may claim any more.
-    /// Returns how many rows.
+    /// than their [`answer_retention`], and jobs and workers nobody has
+    /// touched for [`STALE_RETENTION`]; closes async jobs nobody may claim
+    /// any more. An async outcome leaves a tombstone, which goes after
+    /// [`TOMBSTONE_RETENTION`]. Returns how many rows.
     pub async fn sweep(&self) -> Result<usize, DbError> {
         let now = crate::catalog::now_micros() as i64;
         dispatch!(&self.db, sweep_jobs(&self.name, now))
     }
 
-    /// [`Queue::sweep`] as if it were `now` (microseconds).
-    #[cfg(test)]
+    /// [`Queue::sweep`] as if it were `now` (microseconds), for tests that
+    /// can't wait out the retention.
     pub async fn sweep_as_of(&self, now: i64) -> Result<usize, DbError> {
         dispatch!(&self.db, sweep_jobs(&self.name, now))
     }
@@ -1047,7 +1132,8 @@ mod tests {
         for q in queues().await {
             let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
             assert_eq!(q.cancel(&token).await.unwrap(), Some(id));
-            assert!(q.status(&token).await.unwrap().is_none());
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Expired { .. }), "{stage:?}");
 
             let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
             q.claim("w", &[id], LEASE).await.unwrap();
@@ -1090,16 +1176,252 @@ mod tests {
             let stage = q.status(&given_up).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::GaveUp { attempts: 0, .. }));
 
-            // The sweep closed `given_up` at +11 minutes; both are gone an
-            // hour after.
+            // The sweep closed `given_up` at +11 minutes; both are tombstones
+            // an hour after.
             q.sweep_as_of(later(72)).await.unwrap();
-            assert!(q.status(&done).await.unwrap().is_none());
-            assert!(q.status(&given_up).await.unwrap().is_none());
+            for token in [&done, &given_up] {
+                let stage = q.status(token).await.unwrap().unwrap().stage;
+                assert!(matches!(stage, Stage::Expired { .. }), "{stage:?}");
+            }
         }
     }
 
     fn later(minutes: u64) -> i64 {
         (crate::catalog::now_micros() + Duration::from_secs(60 * minutes).as_micros() as u64) as i64
+    }
+
+    fn expired(stage: Stage) -> (String, ExpiredOutcome, Option<u16>) {
+        match stage {
+            Stage::Expired {
+                kind,
+                outcome,
+                http_status,
+                ..
+            } => (kind, outcome, http_status),
+            other => panic!("not expired: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_swept_job_leaves_a_tombstone() {
+        use crate::scope::{Scope, within};
+        for q in queues().await {
+            let a = Scope::parse("user=a").unwrap();
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let (id, token) = within(a.clone(), q.enqueue_async(&job(Some("v"), 1), "check"))
+                .await
+                .unwrap();
+            q.claim("w", &[id], LEASE).await.unwrap();
+            q.complete("w", id, &json!({"kind": "check", "time": 1.0}))
+                .await
+                .unwrap();
+            q.sweep_as_of(later(61)).await.unwrap();
+            let stage = within(a.clone(), q.status(&token))
+                .await
+                .unwrap()
+                .unwrap()
+                .stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Done, Some(200))
+            );
+            // Anyone without a scope sees it; another scope doesn't.
+            assert!(q.status(&token).await.unwrap().is_some());
+            let b = Scope::parse("user=b").unwrap();
+            assert!(within(b.clone(), q.status(&token)).await.unwrap().is_none());
+            assert!(within(b, q.cancel(&token)).await.unwrap().is_none());
+            // Another queue's is its own.
+            let elsewhere = Queue::new(q.db().clone(), "elsewhere");
+            assert!(elsewhere.status(&token).await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_swept_job_keeps_its_status_but_never_its_answer() {
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let (id, token) = q
+                .enqueue_async(&job(Some("v"), 1), "accept_run")
+                .await
+                .unwrap();
+            q.claim("w", &[id], LEASE).await.unwrap();
+            let refused = json!({
+                "kind": "snapshot_accepted",
+                "Err": {"kind": "conflict", "message": "SECRET-ANSWER"}
+            });
+            q.complete("w", id, &refused).await.unwrap();
+            q.sweep_as_of(later(25 * 60)).await.unwrap();
+            let status = q.status(&token).await.unwrap();
+            assert!(!format!("{status:?}").contains("SECRET"));
+            assert_eq!(
+                expired(status.unwrap().stage),
+                ("accept_run".to_string(), ExpiredOutcome::Done, Some(409))
+            );
+        }
+    }
+
+    /// One no worker took keeps the 429 it answered.
+    #[tokio::test]
+    async fn a_job_given_up_leaves_a_tombstone() {
+        for q in queues().await {
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(1);
+            let (_, token) = q.enqueue_async(&new, "check").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            q.heartbeat("w", since, LEASE).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 0, .. }),
+                "{stage:?}"
+            );
+            q.sweep_as_of(later(72)).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Lost, Some(429))
+            );
+        }
+    }
+
+    /// One whose worker was lost keeps the 503 it answered.
+    #[tokio::test]
+    async fn a_lost_job_leaves_a_tombstone() {
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut new = job(Some("v"), 1);
+            new.max_attempts = 1;
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("w", &[id], short).await.unwrap().len(), 1);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 1, .. }),
+                "{stage:?}"
+            );
+            q.sweep_as_of(later(72)).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Lost, Some(503))
+            );
+        }
+    }
+
+    /// A worker that couldn't run the job failed a check or a create in-band,
+    /// with a 200, and anything else with a 500, as is one whose result
+    /// doesn't read.
+    #[tokio::test]
+    async fn a_failed_job_keeps_the_status_it_answered() {
+        let failed = json!({"kind": "failed", "error": "boom"});
+        let unreadable = json!({"kind": "from_a_newer_worker"});
+        let cases = [
+            ("check", &failed, 200),
+            ("check_session", &failed, 200),
+            ("create_snapshot", &failed, 200),
+            ("start_session", &failed, 500),
+            ("accept_run", &failed, 500),
+            ("start_session", &unreadable, 500),
+        ];
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut tokens = Vec::new();
+            for (kind, result, _) in cases {
+                let (id, token) = q.enqueue_async(&job(Some("v"), 1), kind).await.unwrap();
+                q.claim("w", &[id], LEASE).await.unwrap();
+                q.complete("w", id, result).await.unwrap();
+                tokens.push(token);
+            }
+            q.sweep_as_of(later(25 * 60)).await.unwrap();
+            for ((kind, _, status), token) in cases.iter().zip(&tokens) {
+                let stage = q.status(token).await.unwrap().unwrap().stage;
+                assert_eq!(
+                    expired(stage),
+                    (kind.to_string(), ExpiredOutcome::Done, Some(*status)),
+                    "{kind}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_job_leaves_a_tombstone() {
+        for q in queues().await {
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            assert_eq!(q.cancel(&token).await.unwrap(), Some(id));
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Cancelled, None)
+            );
+            // It is not cancelled twice.
+            assert_eq!(q.cancel(&token).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sync_job_leaves_no_tombstone() {
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
+            q.claim("w", &[id], LEASE).await.unwrap();
+            q.complete("w", id, &json!(1)).await.unwrap();
+            q.unregister("w").await.unwrap();
+            q.sweep_as_of(later(11)).await.unwrap();
+            assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
+            // The stopped worker's row goes after an hour.
+            assert_eq!(q.sweep_as_of(later(61)).await.unwrap(), 1);
+            // Nothing is left to sweep: no tombstone was written.
+            assert_eq!(q.sweep_as_of(later(31 * 24 * 60)).await.unwrap(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn tombstones_go_after_thirty_days() {
+        for q in queues().await {
+            let (_, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            q.cancel(&token).await.unwrap();
+            let day = 24 * 60;
+            q.sweep_as_of(later(29 * day)).await.unwrap();
+            assert!(q.status(&token).await.unwrap().is_some());
+            q.sweep_as_of(later(31 * day)).await.unwrap();
+            assert!(q.status(&token).await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_create_is_kept_a_day() {
+        assert_eq!(
+            answer_retention("create_snapshot"),
+            Duration::from_secs(86_400)
+        );
+        assert_eq!(answer_retention("accept_run"), Duration::from_secs(86_400));
+        assert_eq!(answer_retention("check"), ASYNC_RETENTION);
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut tokens = vec![];
+            for kind in ["create_snapshot", "accept_run", "check"] {
+                let (id, token) = q.enqueue_async(&job(Some("v"), 1), kind).await.unwrap();
+                q.claim("w", &[id], LEASE).await.unwrap();
+                q.complete("w", id, &json!(1)).await.unwrap();
+                tokens.push(token);
+            }
+            q.sweep_as_of(later(61)).await.unwrap();
+            let stage = |i: usize| {
+                let q = q.clone();
+                let token = tokens[i].clone();
+                async move { q.status(&token).await.unwrap().unwrap().stage }
+            };
+            assert!(matches!(stage(0).await, Stage::Done(_)));
+            assert!(matches!(stage(1).await, Stage::Done(_)));
+            assert!(matches!(stage(2).await, Stage::Expired { .. }));
+            q.sweep_as_of(later(24 * 60 + 1)).await.unwrap();
+            for i in 0..2 {
+                let stage = stage(i).await;
+                assert!(matches!(stage, Stage::Expired { .. }), "{stage:?}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -358,6 +358,39 @@ pub enum JobResult {
 }
 
 impl JobResult {
+    /// The status of the HTTP answer this result makes to a request of
+    /// `kind`: that of its error if it is one, else 200. A worker that could
+    /// not run the job fails a check or a create in-band, with a 200, and
+    /// anything else with a 500.
+    pub fn http_status(&self, kind: api::JobKind) -> u16 {
+        fn of<T>(result: &Result<T, api::Error>) -> u16 {
+            result.as_ref().err().map_or(200, |e| e.kind.status())
+        }
+        match self {
+            JobResult::Check(_) | JobResult::SessionChecked(_) | JobResult::SnapshotCreated(_) => {
+                200
+            }
+            JobResult::SessionStarted(r) => of(r),
+            JobResult::TacticApplied(r) => of(r),
+            JobResult::SnapshotDeleted(r) => of(r),
+            JobResult::SnapshotVerified(r) => of(r),
+            JobResult::SnapshotRebuild(r) => of(r),
+            JobResult::SnapshotResubmit(r) => of(r),
+            JobResult::SnapshotExport(r) => of(r),
+            JobResult::SnapshotAccepted(r) => of(r),
+            JobResult::Document(r) => of(r),
+            JobResult::DocumentGoals(r) => of(r),
+            JobResult::DocumentProbes(r) => of(r),
+            JobResult::DocumentClosed(r) => of(r),
+            JobResult::Failed { .. } => match kind {
+                api::JobKind::Check | api::JobKind::CheckSession | api::JobKind::CreateSnapshot => {
+                    200
+                }
+                _ => api::ErrorKind::Internal.status(),
+            },
+        }
+    }
+
     /// The timing the answer carries, for the worker to fill `queue` and
     /// `total` in. `None` for an answer with none: those of jobs that don't
     /// run Lean, and failures but a document's, which carry the phases measured.

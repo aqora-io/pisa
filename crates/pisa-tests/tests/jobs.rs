@@ -546,3 +546,88 @@ async fn a_job_that_waited_for_the_worker_says_how_long() {
         "{first}"
     );
 }
+
+/// `method` on `url` in `scope`, with `body` if given: the status and the
+/// JSON answer.
+async fn scoped(
+    c: &Cluster,
+    scope: &str,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut r = c.client.request(method, url).header("pisa-scope", scope);
+    if let Some(body) = body {
+        r = r.json(&body);
+    }
+    let r = r.send().await.unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+/// A create whose answer expired says what it was, to its own scope only,
+/// and sending it again with its key returns the snapshot it made.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_expired_create_says_so_and_its_key_recovers_it() {
+    use reqwest::Method;
+
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let body = json!({"code": "import Foo\n\ntheorem t : 1 = 1 := rfl", "key": "mine"});
+    let (status, _, accepted) = {
+        let r = c
+            .client
+            .post(c.url("/snapshots"))
+            .header("prefer", "respond-async")
+            .header("pisa-scope", "user=a")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        (
+            r.status().as_u16(),
+            r.headers().clone(),
+            r.json::<Value>().await.unwrap(),
+        )
+    };
+    assert_eq!(status, 202, "{accepted}");
+    let url = c.url(&format!("/jobs/{}", accepted["id"].as_str().unwrap()));
+    let (status, done) = scoped(&c, "user=a", Method::GET, &format!("{url}?wait=10"), None).await;
+    assert_eq!(status, 200, "{done}");
+    let made = done["body"]["snapshot"]["id"].as_str().unwrap().to_string();
+
+    // A day and a bit on, the answer is swept.
+    let later = std::time::SystemTime::now() + Duration::from_secs(25 * 3600);
+    let later = later
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
+    c.queue.sweep_as_of(later).await.unwrap();
+
+    for method in [Method::GET, Method::DELETE] {
+        let (status, r) = scoped(&c, "user=a", method, &url, None).await;
+        let message = r["error"]["message"].as_str().unwrap();
+        assert_eq!(
+            (status, &r["error"]["kind"]),
+            (404, &json!("not_found")),
+            "{r}"
+        );
+        assert!(
+            message.contains("expired: a create_snapshot that answered 200 at "),
+            "{message}"
+        );
+        assert!(!message.contains(&made), "{message}");
+    }
+    // Another scope is told no more than for a job that never was.
+    let (status, r) = scoped(&c, "user=b", Method::GET, &url, None).await;
+    let message = r["error"]["message"].as_str().unwrap();
+    assert_eq!(
+        (status, message.contains("it never was")),
+        (404, true),
+        "{r}"
+    );
+    assert!(!message.contains("create_snapshot"), "{message}");
+
+    // The same create again, with its key, returns the same snapshot.
+    let (status, r) = scoped(&c, "user=a", Method::POST, &c.url("/snapshots"), Some(body)).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["snapshot"]["id"], json!(made), "{r}");
+}

@@ -1188,7 +1188,8 @@ class Client:
     ) -> CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse:
         """Wait for the job to finish, however long it takes, and return what
         its request would have returned (or raise what it would have raised).
-        The server keeps the answer for an hour after the job is done."""
+        The server keeps the answer for an hour after the job is done (a day
+        for a snapshot's create and a run's acceptance)."""
     def cancel_job(self, job: Job) -> Job:
         """Withdraw the job if no worker has started it (`status` is then
         `cancelled`); one that is `running` or `done` stays as it is."""
@@ -1729,7 +1730,8 @@ class AsyncClient:
     ) -> Future[CheckResult | Session | ApplyTacticResponse | CreateSnapshotResponse | VerifySnapshotResponse | RebuildSnapshotsResponse]:
         """Wait for the job to finish, however long it takes, and return what
         its request would have returned (or raise what it would have raised).
-        The server keeps the answer for an hour after the job is done."""
+        The server keeps the answer for an hour after the job is done (a day
+        for a snapshot's create and a run's acceptance)."""
     def cancel_job(self, job: Job) -> Future[Job]:
         """Withdraw the job if no worker has started it (`status` is then
         `cancelled`); one that is `running` or `done` stays as it is."""

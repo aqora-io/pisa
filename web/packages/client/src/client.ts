@@ -262,7 +262,8 @@ export interface ResubmitOptions extends RequestOptions {
 
 /** A request sent with `Prefer: respond-async`: its job, whose answer is a
  *  `T`. Anyone with its id can read the answer or cancel it, so keep it
- *  secret; the server keeps the answer for an hour after the job is done. */
+ *  secret; the server keeps the answer for an hour after the job is done (a day
+ *  for a snapshot's create and a run's acceptance). */
 export interface Job<T> extends JobSchema {
   /** The answer's type; never set. */
   readonly answer?: T;

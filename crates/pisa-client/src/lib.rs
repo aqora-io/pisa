@@ -86,7 +86,8 @@ const JOB_SLACK: Duration = Duration::from_secs(30);
 
 /// A request sent with `Prefer: respond-async`: its job, whose answer is a
 /// `T`. Anyone with its id can read the answer or cancel it, so keep it
-/// secret; the server keeps the answer for an hour after the job is done.
+/// secret; the server keeps the answer for an hour after the job is done (a day
+/// for a snapshot's create and a run's acceptance).
 #[derive(Debug)]
 pub struct Job<T> {
     pub id: String,

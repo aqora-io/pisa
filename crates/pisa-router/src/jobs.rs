@@ -1,6 +1,7 @@
 //! Async requests. An endpoint that may run long, asked with
 //! `Prefer: respond-async`, queues its job and answers 202 with it at once;
-//! `/jobs/{id}` then answers, for an hour after the job is done, with the
+//! `/jobs/{id}` then answers, for an hour after the job is done (a day for a
+//! snapshot's create and a run's acceptance), with the
 //! status and the answer the request would have had. Without the header the
 //! endpoint waits, as before.
 
@@ -13,6 +14,7 @@ use axum::http::header::{CACHE_CONTROL, LOCATION};
 use axum::http::request::Parts;
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use pisa_db::queue::ExpiredOutcome;
 use pisa_protocol::api::{
     ApiErrors, ErrorKind, ErrorResponse, GetJobResponse, Job, JobKind, JobStatus, JobWait,
 };
@@ -20,7 +22,7 @@ use pisa_protocol::wire::JobResult;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::dispatch::{DispatchError, Looked, Looking, Prepared};
+use crate::dispatch::{DispatchError, ExpiredJob, Looked, Looking, Prepared, Withdrawn, kind_name};
 use crate::http::{ApiError, App, check_result};
 use crate::{sessions, snapshots};
 
@@ -170,6 +172,59 @@ fn unknown(id: &str) -> Response {
     no_store(ApiError::new(ErrorKind::NotFound, message))
 }
 
+/// A job in the caller's scope that is gone, but that a tombstone says was
+/// there: what it was and how it ended, and where to read how to get it
+/// back.
+fn expired(id: &str, kind: JobKind, job: ExpiredJob) -> Response {
+    no_store(ApiError::new(
+        ErrorKind::NotFound,
+        expired_message(id, kind, job),
+    ))
+}
+
+fn expired_message(id: &str, kind: JobKind, job: ExpiredJob) -> String {
+    let at = rfc3339(job.finished_micros);
+    let capacity = ErrorKind::Capacity.status();
+    let ended = match (job.outcome, job.http_status) {
+        (ExpiredOutcome::Done, Some(status)) => format!("answered {status} at {at}"),
+        (ExpiredOutcome::Done, None) => format!("answered at {at}"),
+        (ExpiredOutcome::Lost, Some(status)) if status == capacity => {
+            format!("was given up at {at}, as no worker took it")
+        }
+        (ExpiredOutcome::Lost, _) => format!("was lost at {at}"),
+        (ExpiredOutcome::Cancelled, _) => format!("was cancelled at {at}"),
+    };
+    let kind = kind_name(kind);
+    format!("job {id} expired: a {kind} that {ended}; see the README's Recovering a lost job")
+}
+
+/// `micros` since the Unix epoch, as RFC 3339 in UTC.
+fn rfc3339(micros: i64) -> String {
+    let seconds = micros.div_euclid(1_000_000);
+    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
+
 /// Whether `id` can be a job's id: 32 hex digits.
 fn is_token(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
@@ -183,7 +238,9 @@ fn is_token(id: &str) -> bool {
         (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it \
         answers 202. It answers within `wait` and five seconds even if the database does \
         not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's \
-        answer is kept for an hour after it is done.",
+        answer is kept for an hour after it is done, a snapshot's create and a run's acceptance \
+        for a day. After that, in the scope it was made in, the 404 says what the job was and how \
+        it ended, for 30 days; see the README's Recovering a lost job.",
     params(("id" = String, Path, description = "The job's id, from the 202"), JobWait),
     responses(
         (status = 200, description = "Done: the request's status and answer", body = GetJobResponse),
@@ -212,6 +269,7 @@ pub async fn get(
                 no_store((StatusCode::ACCEPTED, Json(job)))
             }
             Looking::Done(outcome) => done(id, kind, *outcome),
+            Looking::Expired(job) => expired(&id, kind, job),
         },
         Err(e) => no_store(ApiError::from(e)),
     }
@@ -221,7 +279,7 @@ pub async fn get(
     delete, path = "/jobs/{id}", operation_id = "cancelJob", tag = "jobs",
     summary = "Cancel an async request",
     description = "Withdraws the job if no worker has started it (`cancelled`); one that is \
-        `running` or `done` is left as it is.",
+        `running` or `done` is left as it is. An expired job is the same 404 as `GET`.",
     params(("id" = String, Path, description = "The job's id, from the 202")),
     responses((status = 200, description = "What became of it", body = Job), ApiErrors),
 )]
@@ -231,7 +289,8 @@ pub async fn cancel(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     }
     match app.dispatcher.cancel(&id).await {
         Ok(None) => unknown(&id),
-        Ok(Some((kind, status))) => no_store(Json(Job { id, kind, status })),
+        Ok(Some((kind, Withdrawn::Status(status)))) => no_store(Json(Job { id, kind, status })),
+        Ok(Some((kind, Withdrawn::Expired(job)))) => expired(&id, kind, job),
         Err(e) => no_store(ApiError::from(e)),
     }
 }
@@ -239,6 +298,47 @@ pub async fn cancel(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn times_are_rfc_3339() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_773_750_245_000_000), "2026-03-17T12:24:05Z");
+        assert_eq!(rfc3339(951_782_400_000_000), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn an_expired_job_says_what_it_was_and_how_it_ended() {
+        let says = |kind, outcome, http_status| {
+            let job = ExpiredJob {
+                outcome,
+                http_status,
+                finished_micros: 1_773_750_245_000_000,
+            };
+            expired_message("abc", kind, job)
+        };
+        let see = "; see the README's Recovering a lost job";
+        assert_eq!(
+            says(JobKind::CreateSnapshot, ExpiredOutcome::Done, Some(200)),
+            format!(
+                "job abc expired: a create_snapshot that answered 200 at 2026-03-17T12:24:05Z{see}"
+            )
+        );
+        assert_eq!(
+            says(JobKind::Check, ExpiredOutcome::Lost, Some(429)),
+            format!(
+                "job abc expired: a check that was given up at 2026-03-17T12:24:05Z, as no \
+                 worker took it{see}"
+            )
+        );
+        assert_eq!(
+            says(JobKind::Check, ExpiredOutcome::Lost, Some(503)),
+            format!("job abc expired: a check that was lost at 2026-03-17T12:24:05Z{see}")
+        );
+        assert_eq!(
+            says(JobKind::Check, ExpiredOutcome::Cancelled, None),
+            format!("job abc expired: a check that was cancelled at 2026-03-17T12:24:05Z{see}")
+        );
+    }
 
     #[test]
     fn respond_async_is_found_among_preferences() {

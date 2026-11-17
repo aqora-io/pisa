@@ -215,6 +215,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    expired_jobs (token) {
+        token -> Text,
+        queue -> Text,
+        kind -> Text,
+        labels -> Text,
+        outcome -> Text,
+        http_status -> Nullable<Integer>,
+        finished_micros -> BigInt,
+        swept_micros -> BigInt,
+    }
+}
+
+diesel::table! {
     workers (queue, name) {
         queue -> Text,
         name -> Text,

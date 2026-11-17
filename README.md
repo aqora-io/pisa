@@ -521,7 +521,14 @@ would have:
   status it read, else a 503. A 404 or a 503 is the look's own, never the
   job's. Any server answers for any job.
   The clients look every 25 s, well short of a proxy's 60.
-- An answer is kept for an hour after its job is done; then the job is a 404.
+- An answer is kept for an hour after its job is done, a snapshot's create
+  and a run's acceptance for a day; then the job is a 404. For 30 days
+  after that, asked in the scope it was made in, the 404 says what the job
+  was and how it ended (`expired: a create_snapshot that answered 200 at
+  …`, `was given up at …, as no worker took it`, `was lost at …`, or `was
+  cancelled at …`), never its answer; see [Recovering
+  a lost job](#recovering-a-lost-job). In any other scope, and for an id
+  that never was, it says `unknown job`.
 - `DELETE /jobs/{id}` withdraws a job no worker has started (`cancelled`); a
   `running` or `done` one stays as it is.
 - Anyone with a job's id can read its answer or cancel it, so keep it secret.
@@ -760,6 +767,32 @@ limit in seconds (default 60).
 A 429 or a 503 carries `Retry-After`, in seconds. The clients send a request
 again by themselves (see [Clients](#clients)), and read a gateway's 502, 503
 or 504, whose body isn't pisa's, as `unavailable`.
+
+<a id="recovering-a-lost-job"></a>
+### Recovering a lost job
+
+An [async](#async-requests) job's answer is kept for an hour after it is
+done (a day for a snapshot's create and a run's acceptance), a lost job's
+too: until then `GET /jobs/{id}` answers 200 with an `http_status` of 503
+`worker_lost` (see [When a worker is lost](#worker-lost)). If its client was
+away longer, `GET /jobs/{id}` is a 404 that says what the job was and how it
+ended, for 30 days, in the scope it was made in only (the `Pisa-Scope` it was
+sent with). The answer itself is never kept. What the job made is still
+there:
+- A create sent again with the same `key` replays: it returns the snapshot
+  the first one made (see the table in [When a worker is lost](#worker-lost)). The
+  clients always send a key; with `Prefer: respond-async` a server
+  gives a create without one its own.
+- A create that named a run: `GET /runs/{name}` returns the run and what
+  `import PisaRun.<name>` resolves to, with the same `Pisa-Scope` the
+  create was sent with.
+- An accept is found with `GET /snapshots/accept?spec=<id>`, which lists the
+  spec's stored acceptances, newest first. Match yours on `created`,
+  `against`, `allow` and `paranoid`. Do not send an accept again unless
+  none matches: a finished first run may be stored already.
+- Anything else: send it again, which is safe for every other async
+  request (see the table in [When a worker is lost](#worker-lost)). The 404
+  doesn't carry `resend_safe`; only the lost job's own answer did.
 
 <a id="worker-lost"></a>
 **When a worker is lost.** A job whose workers kept disconnecting, that no

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::{DbError, Notice};
-use pisa_db::queue::{LIVE, NewJob, Poll, Queue, Stage};
+use pisa_db::queue::{ExpiredOutcome, LIVE, NewJob, Poll, Queue, Stage};
 use pisa_protocol::api::{JobKind, JobStatus};
 use pisa_protocol::wire::{self, Job, JobResult};
 
@@ -55,6 +55,27 @@ pub enum Looking {
     Pending(JobStatus),
     /// What its request would have got.
     Done(Box<Result<JobResult, DispatchError>>),
+    /// Its answer is gone: all that is left says how it ended.
+    Expired(ExpiredJob),
+}
+
+/// What is kept of an async job whose answer is gone, and never the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpiredJob {
+    pub outcome: ExpiredOutcome,
+    /// The status its answer had, if it was done or given up: a 429 if no
+    /// worker took it.
+    pub http_status: Option<u16>,
+    /// When it ended, in microseconds since the Unix epoch.
+    pub finished_micros: i64,
+}
+
+/// What became of an async job a client asked to cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdrawn {
+    Status(JobStatus),
+    /// It had expired already.
+    Expired(ExpiredJob),
 }
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -438,6 +459,16 @@ impl Dispatcher {
                     attempts_exhausted: exhausted,
                     resend_safe: kind != JobKind::AcceptRun,
                 }))),
+                Stage::Expired {
+                    outcome,
+                    http_status,
+                    finished_micros,
+                    ..
+                } => Looking::Expired(ExpiredJob {
+                    outcome,
+                    http_status,
+                    finished_micros,
+                }),
                 Stage::Running => Looking::Pending(JobStatus::Running),
                 Stage::Queued { give_up_at } => {
                     // Then the next look closes it.
@@ -450,7 +481,7 @@ impl Dispatcher {
                 *last = Some((kind, *pending));
             }
             let now = tokio::time::Instant::now();
-            if matches!(state, Looking::Done(_)) || now >= deadline {
+            if matches!(state, Looking::Done(_) | Looking::Expired(_)) || now >= deadline {
                 return Ok(Some(Looked { kind, state }));
             }
             let Some(woken) = &woken else {
@@ -466,21 +497,42 @@ impl Dispatcher {
 
     /// Withdraws the async job `token` if no worker holds it. Returns its
     /// kind and what became of it, or `None` if there's no such job.
-    pub async fn cancel(&self, token: &str) -> Result<Option<(JobKind, JobStatus)>, DispatchError> {
+    pub async fn cancel(&self, token: &str) -> Result<Option<(JobKind, Withdrawn)>, DispatchError> {
         let Some(status) = self.queue.status(token).await? else {
             return Ok(None);
         };
         let kind = kind_of(&status.kind)?;
+        let expired = |stage: Stage| match stage {
+            Stage::Expired {
+                outcome,
+                http_status,
+                finished_micros,
+                ..
+            } => Some(ExpiredJob {
+                outcome,
+                http_status,
+                finished_micros,
+            }),
+            _ => None,
+        };
+        if let Some(job) = expired(status.stage) {
+            return Ok(Some((kind, Withdrawn::Expired(job))));
+        }
         if self.queue.cancel(token).await?.is_some() {
-            return Ok(Some((kind, JobStatus::Cancelled)));
+            return Ok(Some((kind, Withdrawn::Status(JobStatus::Cancelled))));
         }
         let state = match self.queue.status(token).await?.map(|s| s.stage) {
             None => JobStatus::Cancelled,
             Some(Stage::Queued { .. }) => JobStatus::Queued,
             Some(Stage::Running) => JobStatus::Running,
             Some(Stage::Done(_) | Stage::GaveUp { .. }) => JobStatus::Done,
+            // Another cancel or the sweep got there first.
+            Some(Stage::Expired { outcome, .. }) => match outcome {
+                ExpiredOutcome::Cancelled => JobStatus::Cancelled,
+                ExpiredOutcome::Done | ExpiredOutcome::Lost => JobStatus::Done,
+            },
         };
-        Ok(Some((kind, state)))
+        Ok(Some((kind, Withdrawn::Status(state))))
     }
 
     fn new_job(&self, p: Prepared) -> Result<NewJob, DispatchError> {
@@ -514,7 +566,7 @@ impl Dispatcher {
 }
 
 /// How the queue records `kind`: as the API names it.
-fn kind_name(kind: JobKind) -> String {
+pub(crate) fn kind_name(kind: JobKind) -> String {
     match serde_json::to_value(kind) {
         Ok(serde_json::Value::String(name)) => name,
         _ => unreachable!("a JobKind serializes as a string"),

@@ -197,14 +197,14 @@ export interface paths {
         };
         /**
          * An async request's answer
-         * @description Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done.
+         * @description Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done, a snapshot's create and a run's acceptance for a day. After that, in the scope it was made in, the 404 says what the job was and how it ended, for 30 days; see the README's Recovering a lost job.
          */
         get: operations["getJob"];
         put?: never;
         post?: never;
         /**
          * Cancel an async request
-         * @description Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is.
+         * @description Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is. An expired job is the same 404 as `GET`.
          */
         delete: operations["cancelJob"];
         options?: never;

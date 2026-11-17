@@ -15,13 +15,14 @@ use serde_json::Value;
 
 use pisa_protocol::api::DependencyState;
 
-use crate::catalog::now_micros;
+use crate::catalog::{Fail, now_micros};
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
-    ASYNC_RETENTION, Candidate, Claimed, Counts, LIVE, LOST_CEILING, NewJob, Peer, Poll,
-    RESULT_RETENTION, Registration, STALE_RETENTION, Stage, Status,
+    ASYNC_RETENTION, Candidate, Claimed, Counts, DAY_KINDS, ExpiredOutcome, LIVE, LOST_CEILING,
+    NewJob, Peer, Poll, RESULT_RETENTION, Registration, STALE_RETENTION, Stage, Status,
+    TOMBSTONE_RETENTION, answer_retention,
 };
-use crate::schema::{documents, jobs, workers};
+use crate::schema::{documents, expired_jobs, jobs, workers};
 
 /// How long a server's own giving up gets before a sweep deletes a job
 /// nobody can claim any more.
@@ -303,20 +304,97 @@ type Row = (
     Option<bool>,
 );
 
-/// Whether the job of `token` is in the request's scope: its token alone
-/// finds it otherwise.
+/// Whether the job of `token`, or its tombstone if its row is gone, is in
+/// the request's scope: its token alone finds it otherwise.
 async fn token_in_scope(db: &Handle, q: &str, token: &str) -> Result<bool, DbError> {
     if crate::scope::current().is_empty() {
         return Ok(true);
     }
+    let mut c = conn(db).await?;
     let labels: Option<String> = jobs::table
         .filter(jobs::queue.eq(q))
         .filter(jobs::token.eq(token))
         .select(jobs::labels)
-        .first(&mut *conn(db).await?)
+        .first(&mut *c)
         .await
         .optional()?;
+    let labels = match labels {
+        Some(labels) => Some(labels),
+        None => expired_jobs::table
+            .filter(expired_jobs::queue.eq(q))
+            .filter(expired_jobs::token.eq(token))
+            .select(expired_jobs::labels)
+            .first(&mut *c)
+            .await
+            .optional()?,
+    };
     Ok(labels.is_some_and(|l| crate::scope::in_scope(&l)))
+}
+
+/// What a tombstone says about the async job `token`, once its row is gone.
+async fn tombstone(c: &mut Conn, q: &str, token: &str) -> Result<Option<(String, Stage)>, DbError> {
+    let row = expired_jobs::table
+        .filter(expired_jobs::queue.eq(q))
+        .filter(expired_jobs::token.eq(token))
+        .select((
+            expired_jobs::kind,
+            expired_jobs::outcome,
+            expired_jobs::http_status,
+            expired_jobs::finished_micros,
+        ))
+        .first::<(String, String, Option<i32>, i64)>(c)
+        .await
+        .optional()?;
+    Ok(row.map(|(kind, outcome, http_status, finished_micros)| {
+        let stage = Stage::Expired {
+            kind: kind.clone(),
+            outcome: ExpiredOutcome::parse(&outcome),
+            http_status: http_status.and_then(|s| u16::try_from(s).ok()),
+            finished_micros,
+        };
+        (kind, stage)
+    }))
+}
+
+/// A tombstone's row, to [`bury`]: token, queue, kind, labels, outcome, the
+/// answer's status, and when it ended.
+type Burial<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    ExpiredOutcome,
+    Option<u16>,
+    i64,
+);
+
+/// Writes the tombstone of an async job whose row is going, in the same
+/// transaction that deletes it. One that is there stays.
+async fn bury(
+    c: &mut Conn,
+    (token, q, kind, labels, outcome, http_status, finished): Burial<'_>,
+) -> QueryResult<usize> {
+    diesel::insert_into(expired_jobs::table)
+        .values((
+            expired_jobs::token.eq(token),
+            expired_jobs::queue.eq(q),
+            expired_jobs::kind.eq(kind),
+            expired_jobs::labels.eq(labels),
+            expired_jobs::outcome.eq(outcome.name()),
+            expired_jobs::http_status.eq(http_status.map(i32::from)),
+            expired_jobs::finished_micros.eq(finished),
+            expired_jobs::swept_micros.eq(now()),
+        ))
+        .on_conflict_do_nothing()
+        .execute(c)
+        .await
+}
+
+fn db_error(fail: Fail) -> DbError {
+    match fail {
+        Fail::Db(e) => e,
+        Fail::Api(e) => DbError::Other(e.message),
+    }
 }
 
 pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<Status>, DbError> {
@@ -348,7 +426,8 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                 .await
                 .optional()?;
             let Some(row) = row else {
-                return Ok(None);
+                let gone = tombstone(&mut c, q, token).await?;
+                return Ok(gone.map(|(kind, stage)| Status { id: 0, kind, stage }));
             };
             let (id, kind, result, worker, lease, attempts, max_attempts, enqueued, max_wait, lost) =
                 row;
@@ -403,25 +482,44 @@ pub(crate) async fn cancel(db: &Handle, q: &str, token: &str) -> Result<Option<i
         return Ok(None);
     }
     let now = now();
-    retry(|| async {
+    let id = retry(|| async {
         let mut c = conn(db).await?;
-        let id = diesel::delete(
-            jobs::table
-                .filter(jobs::queue.eq(q))
-                .filter(jobs::token.eq(token))
-                .filter(jobs::result.is_null())
-                .filter(jobs::worker.is_null().or(jobs::lease_micros.lt(now))),
-        )
-        .returning(jobs::id)
-        .get_result::<i64>(&mut *c)
-        .await
-        .optional()?;
-        if let Some(id) = id {
-            wake(db, &mut c, Notice::Done(id)).await;
-        }
-        Ok(id)
+        let conn = &mut *c;
+        tx!(conn, {
+            let row = diesel::delete(
+                jobs::table
+                    .filter(jobs::queue.eq(q))
+                    .filter(jobs::token.eq(token))
+                    .filter(jobs::result.is_null())
+                    .filter(jobs::worker.is_null().or(jobs::lease_micros.lt(now))),
+            )
+            .returning((jobs::id, jobs::kind, jobs::labels))
+            .get_result::<(i64, Option<String>, String)>(conn)
+            .await
+            .optional()?;
+            let Some((id, kind, labels)) = row else {
+                return Ok(None);
+            };
+            let kind = kind.unwrap_or_default();
+            let burial = (
+                token,
+                q,
+                &*kind,
+                &*labels,
+                ExpiredOutcome::Cancelled,
+                None,
+                now,
+            );
+            bury(conn, burial).await?;
+            Ok(Some(id))
+        })
     })
     .await
+    .map_err(db_error)?;
+    if let Some(id) = id {
+        wake(db, &mut *conn(db).await?, Notice::Done(id)).await;
+    }
+    Ok(id)
 }
 
 pub(crate) async fn give_up(db: &Handle, id: i64) -> Result<Option<(u32, bool)>, DbError> {
@@ -560,14 +658,7 @@ pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, 
         )
         .execute(&mut *c)
         .await?;
-        let kept = diesel::delete(
-            jobs::table
-                .filter(jobs::queue.eq(q))
-                .filter(jobs::token.is_not_null())
-                .filter(jobs::done_micros.lt(now - micros(ASYNC_RETENTION))),
-        )
-        .execute(&mut *c)
-        .await?;
+        let kept = bury_answered(&mut c, q, now).await?;
         let unclaimable = diesel::delete(
             jobs::table
                 .filter(jobs::queue.eq(q))
@@ -595,9 +686,77 @@ pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, 
         )
         .execute(&mut *c)
         .await?;
-        Ok(results + kept + unclaimable + closed + workers)
+        let tombstones = diesel::delete(
+            expired_jobs::table
+                .filter(expired_jobs::queue.eq(q))
+                .filter(expired_jobs::swept_micros.lt(now - micros(TOMBSTONE_RETENTION))),
+        )
+        .execute(&mut *c)
+        .await?;
+        Ok(results + kept + unclaimable + closed + workers + tombstones)
     })
     .await
+}
+
+/// Deletes the async jobs done longer ago than their [`answer_retention`],
+/// each with a tombstone that says how it ended but not what it answered.
+/// Returns how many.
+async fn bury_answered(c: &mut Conn, q: &str, now: i64) -> Result<usize, DbError> {
+    let conn = c;
+    let buried = tx!(conn, {
+        let rows = jobs::table
+            .filter(jobs::queue.eq(q))
+            .filter(jobs::token.is_not_null())
+            .filter(jobs::done_micros.lt(now - micros(ASYNC_RETENTION)))
+            .filter(
+                jobs::kind
+                    .ne_all(DAY_KINDS.to_vec())
+                    .or(jobs::done_micros.lt(now - micros(answer_retention(DAY_KINDS[0])))),
+            )
+            .select((
+                jobs::id,
+                jobs::token,
+                jobs::kind,
+                jobs::labels,
+                jobs::result,
+                jobs::attempts,
+                jobs::done_micros,
+            ))
+            .load::<(
+                i64,
+                Option<String>,
+                Option<String>,
+                String,
+                Option<Value>,
+                i32,
+                Option<i64>,
+            )>(conn)
+            .await?;
+        let mut ids = Vec::with_capacity(rows.len());
+        for (id, token, kind, labels, result, attempts, done) in &rows {
+            let (token, kind) = (
+                token.as_deref().unwrap_or_default(),
+                kind.as_deref().unwrap_or_default(),
+            );
+            let (outcome, http_status) = ExpiredOutcome::of(kind, result.as_ref(), *attempts);
+            let burial = (
+                token,
+                q,
+                kind,
+                &**labels,
+                outcome,
+                http_status,
+                done.unwrap_or(now),
+            );
+            bury(conn, burial).await?;
+            ids.push(*id);
+        }
+        let deleted = diesel::delete(jobs::table.filter(jobs::id.eq_any(&ids)))
+            .execute(conn)
+            .await?;
+        Ok(deleted)
+    });
+    buried.map_err(db_error)
 }
 
 pub(crate) async fn register(
