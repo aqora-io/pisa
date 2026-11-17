@@ -167,7 +167,12 @@ pub(crate) mod pg {
         use super::*;
         include!("queries/queue.rs");
     }
+    mod description_flags {
+        use super::*;
+        include!("queries/description_flags.rs");
+    }
     pub(crate) use catalog::*;
+    pub(crate) use description_flags::*;
     pub(crate) use queue::*;
     pub(crate) use records::*;
 }
@@ -284,7 +289,12 @@ pub(crate) mod sqlite {
         use super::*;
         include!("queries/queue.rs");
     }
+    mod description_flags {
+        use super::*;
+        include!("queries/description_flags.rs");
+    }
     pub(crate) use catalog::*;
+    pub(crate) use description_flags::*;
     pub(crate) use queue::*;
     pub(crate) use records::*;
 }

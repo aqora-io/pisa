@@ -109,6 +109,17 @@ describe.skipIf(qdrant === undefined)("search", () => {
     expect(await client.getDeclaration("Real.sqrt_mul_sefl").catch((e: unknown) => e)).toMatchObject({ kind: "not_found" });
   });
 
+  it("flags only descriptions, which this index has none of", async () => {
+    expect(await client.flagDescription("Matrix.trace_one", "too vague").catch((e: unknown) => e)).toMatchObject({
+      kind: "not_found",
+      message: expect.stringContaining("Matrix.trace_one has no description"),
+    });
+    expect(await client.flagDescription("Matrix.trace_one", " ").catch((e: unknown) => e)).toMatchObject({
+      kind: "bad_request",
+      status: 400,
+    });
+  });
+
   it("searches only its version, and refuses snapshots it doesn't search", async () => {
     expect(await client.search({ description: "trace" }, { version: envId }).then((r) => r.hits.length > 0)).toBe(true);
     expect(await client.search({ description: "trace" }, { version: "other" }).catch((e: unknown) => e)).toMatchObject({

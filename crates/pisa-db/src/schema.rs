@@ -79,6 +79,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    description_flags (id) {
+        id -> BigInt,
+        name -> Text,
+        description_hash -> Text,
+        reason -> Text,
+        created_micros -> BigInt,
+    }
+}
+
+diesel::table! {
     amendments (version, entry) {
         version -> Text,
         entry -> Text,

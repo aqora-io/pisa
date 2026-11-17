@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lru::LruCache;
+use pisa_db::description_flags::DescriptionFlags;
 use pisa_protocol::api::SnapshotId;
 use pisa_protocol::labels::check_labels;
 use pisa_protocol::search::{
@@ -24,6 +25,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use crate::dense::{Embedder, QUERY_INSTRUCTION};
 use crate::encode;
 use crate::index::{BundleManifest, CONCLUSION_FORMAT, StoredDecl};
+use crate::informal_store::description_hash;
 use crate::points::{PointPayload, collection, entries_collection};
 use crate::qdrant::{Qdrant, ScoredPoint, any, is};
 use crate::symbols::Symbols;
@@ -50,6 +52,21 @@ pub const EMBED_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The most query embedding requests running at once.
 const MAX_EMBEDDINGS: usize = 32;
+
+/// How long a search waits for the readers' flag counts, which come from the
+/// metadata store's shared pool; past it the hits carry no counts.
+const FLAG_COUNTS_WAIT: Duration = Duration::from_secs(1);
+
+/// `lookup`, or an error if it takes longer than `limit`.
+async fn bounded<T>(
+    limit: Duration,
+    lookup: impl std::future::Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    match tokio::time::timeout(limit, lookup).await {
+        Ok(found) => found,
+        Err(_) => anyhow::bail!("timed out after {} ms", limit.as_millis()),
+    }
+}
 
 /// The library of snapshot declarations.
 pub const SNAPSHOT_LIBRARY: &str = pisa_protocol::snapshot::ROOT;
@@ -152,6 +169,8 @@ pub struct Engine {
     pub snapshots: Option<String>,
     /// Whether this replica leads the snapshot index.
     pub leader: Arc<AtomicBool>,
+    /// Readers' flags on descriptions, which hits count, if kept.
+    pub description_flags: Option<DescriptionFlags>,
     /// Query vectors by text, and the texts being embedded: the most recently
     /// used [`QUERY_VECTORS`], or all of them while evaluating many weightings.
     pub cache: Arc<Mutex<LruCache<String, Slot>>>,
@@ -289,6 +308,7 @@ impl Engine {
             embedder,
             snapshots: None,
             leader: Arc::default(),
+            description_flags: None,
             cache: Arc::new(Mutex::new(LruCache::new(QUERY_VECTORS))),
             embed_wait: EMBED_WAIT,
             running: Arc::new(Semaphore::new(MAX_EMBEDDINGS)),
@@ -429,6 +449,17 @@ impl Engine {
             picked.push(c);
         }
         let entries = self.hit_entries(queries, &picked).await?;
+        let keys: Vec<(String, String)> = picked.iter().flatten().filter_map(flag_key).collect();
+        let flagged = match self.flag_counts(&keys).await {
+            Ok(counts) => counts,
+            Err(e) => {
+                for r in &mut results {
+                    r.warnings
+                        .push(format!("description flags unavailable: {e}"));
+                }
+                HashMap::new()
+            }
+        };
         for (i, hits) in picked.into_iter().enumerate() {
             results[i].hits = hits
                 .into_iter()
@@ -438,7 +469,8 @@ impl Engine {
                         Some(m) => entries.get(&(i, m.clone())).cloned().unwrap_or_default(),
                         None => Vec::new(),
                     };
-                    hit(n + 1, s, snapshot_ids)
+                    let flags = flag_key(&s).and_then(|k| flagged.get(&k)).copied();
+                    hit(n + 1, s, snapshot_ids, flags.unwrap_or(0))
                 })
                 .collect();
             if queries[i].format == Format::Text {
@@ -448,6 +480,20 @@ impl Engine {
             }
         }
         Ok(results)
+    }
+
+    /// The readers' flags on each of `keys`' descriptions, in one request;
+    /// none if flags aren't kept.
+    async fn flag_counts(
+        &self,
+        keys: &[(String, String)],
+    ) -> anyhow::Result<HashMap<(String, String), u32>> {
+        match &self.description_flags {
+            Some(f) if !keys.is_empty() => {
+                bounded(FLAG_COUNTS_WAIT, async { Ok(f.counts(keys).await?) }).await
+            }
+            _ => Ok(HashMap::new()),
+        }
     }
 
     /// Which of the queries' identifiers name a declaration of the index or
@@ -1020,8 +1066,20 @@ impl Engine {
         let Some(s) = found.into_iter().flatten().next().and_then(scored) else {
             return Ok(None);
         };
+        let flagged = match flag_key(&s) {
+            Some(key) => match self.flag_counts(std::slice::from_ref(&key)).await {
+                Ok(counts) => counts.get(&key).copied().unwrap_or(0),
+                Err(e) => {
+                    tracing::warn!("description flags unavailable: {e}");
+                    0
+                }
+            },
+            None => 0,
+        };
         let d = s.payload;
         let stored = d.stored();
+        let mut flags = flags(&stored, None);
+        flags.description_flags = flagged;
         Ok(Some(DeclarationDetail {
             name: d.name.clone(),
             kind: d.kind.clone(),
@@ -1032,7 +1090,7 @@ impl Engine {
             value: d.value.clone(),
             docstring: d.docstring.clone(),
             description: d.informal.clone().map(Description::from),
-            flags: flags(&stored, None),
+            flags,
             source_url: d.source_url.clone(),
             dependencies: d.deps,
             used_by: d.used_by,
@@ -1058,12 +1116,30 @@ fn scored(p: ScoredPoint) -> Option<Scored> {
     })
 }
 
+/// A point's name and the hash of its description, which readers' flags are
+/// on, if it has one.
+fn flag_key(s: &Scored) -> Option<(String, String)> {
+    let i = s.payload.informal.as_ref()?;
+    let hash = description_hash(
+        &i.informal_name,
+        &i.statement_nl,
+        i.statement_latex.as_deref(),
+    );
+    Some((s.payload.name.clone(), hash))
+}
+
 /// A query's `n`th hit, from its point; `snapshot_ids` are a snapshot
-/// declaration's.
-fn hit(n: usize, s: Scored, snapshot_ids: Vec<String>) -> Hit {
+/// declaration's, and `description_flags` the readers' flags on its
+/// description.
+fn hit(n: usize, s: Scored, snapshot_ids: Vec<String>, description_flags: u32) -> Hit {
     let d = s.payload.stored();
-    let flags = flags(&d, s.sibling);
+    let mut flags = flags(&d, s.sibling);
+    flags.description_flags = description_flags;
     let summary = summary(&d);
+    let description_source = match &d.informal {
+        Some(i) => Some(i.source.clone()),
+        None => summary.as_ref().map(|_| "docstring".to_string()),
+    };
     let snapshot = s.payload.module_id.is_some();
     Hit {
         name: d.name.clone(),
@@ -1075,6 +1151,7 @@ fn hit(n: usize, s: Scored, snapshot_ids: Vec<String>) -> Hit {
         title: d.informal.as_ref().map(|i| i.informal_name.clone()),
         text: render(n, &d, summary.as_deref(), &flags),
         summary,
+        description_source,
         flags,
         score: s.score,
         source_url: d.source_url.clone(),
@@ -1326,19 +1403,14 @@ pub fn flags(d: &StoredDecl, sibling: Option<String>) -> Flags {
         deprecated_to: d.deprecated_to.clone(),
         additive_sibling: sibling.or_else(|| d.additive_sibling.clone()),
         imports: d.imports.clone(),
+        description_flags: 0,
     }
 }
 
 /// The signature without its leading name, universe parameters or instance
 /// arguments (`[Fintype n]`), shortened for display.
 pub fn short_signature(d: &StoredDecl) -> String {
-    let mut sig = d.signature.strip_prefix(&d.name).unwrap_or(&d.signature);
-    // Universe parameters: `.{u_1, u_2}`.
-    if let Some(rest) = sig.strip_prefix(".{")
-        && let Some(end) = rest.find('}')
-    {
-        sig = &rest[end + 1..];
-    }
+    let sig = after_name(&d.name, &d.signature);
     let sig: String = sig.split_whitespace().collect::<Vec<_>>().join(" ");
     let (binders, rest) = binders(&sig);
     let binders: Vec<&str> = binders.into_iter().filter(|b| !is_instance(b)).collect();
@@ -1367,14 +1439,23 @@ pub fn short_signature(d: &StoredDecl) -> String {
 /// The longest signature a hit's text shows, in characters.
 const MAX_SIGNATURE: usize = 400;
 
+/// `signature` past `name` and its universe parameters (`.{u_1, u_2}`).
+pub(crate) fn after_name<'s>(name: &str, signature: &'s str) -> &'s str {
+    let sig = signature.strip_prefix(name).unwrap_or(signature);
+    match sig.strip_prefix(".{").and_then(|rest| rest.split_once('}')) {
+        Some((_, rest)) => rest,
+        None => sig,
+    }
+}
+
 /// `[...]` binders, and `{inst✝ : ...}` ones.
-fn is_instance(binder: &str) -> bool {
+pub(crate) fn is_instance(binder: &str) -> bool {
     binder.starts_with('[')
         || (binder.starts_with('{') && binder[1..].trim_start().starts_with("inst"))
 }
 
 /// A signature's binder groups, and the rest from its type's `:`.
-fn binders(sig: &str) -> (Vec<&str>, &str) {
+pub(crate) fn binders(sig: &str) -> (Vec<&str>, &str) {
     let mut out = Vec::new();
     let mut rest = sig;
     loop {
@@ -1502,6 +1583,13 @@ pub fn render(n: usize, d: &StoredDecl, summary: Option<&str>, flags: &Flags) ->
     if let Some(h) = &flags.imports {
         notes.push(format!("load with `{h}` instead of the default imports"));
     }
+    match flags.description_flags {
+        0 => {}
+        1 => notes.push("description flagged once: check it against the signature".into()),
+        n => notes.push(format!(
+            "description flagged {n} times: check it against the signature"
+        )),
+    }
     if !notes.is_empty() {
         out.push_str("\n   ⚠ ");
         out.push_str(&notes.join("; "));
@@ -1549,6 +1637,18 @@ fn hidden(q: &Query) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_slow_count_lookup_is_an_error_not_a_hang() {
+        let slow = bounded(Duration::from_millis(20), async {
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        let e = slow.await.unwrap_err();
+        assert!(e.to_string().contains("timed out"), "{e}");
+        let fast = bounded(Duration::from_millis(20), async { Ok(1) });
+        assert_eq!(fast.await.unwrap(), 1);
+    }
 
     #[tokio::test]
     async fn a_query_keeps_to_the_request_scope() {

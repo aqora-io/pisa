@@ -54,6 +54,8 @@ export type {
   ErrorKind,
   ErrorResponse,
   Export,
+  FlagDescriptionRequest,
+  FlagDescriptionResponse,
   Flags,
   Format,
   GetDeclarationResponse,

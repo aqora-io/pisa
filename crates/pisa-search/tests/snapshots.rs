@@ -58,7 +58,10 @@ fn embed(text: &str) -> Vec<f32> {
 
 #[derive(Default)]
 struct Mocks {
+    /// Descriptions asked for.
     llm_calls: AtomicUsize,
+    /// Descriptions judged.
+    judge_calls: AtomicUsize,
     embed_calls: AtomicUsize,
     /// How long each embedding request takes.
     embed_delay_ms: AtomicU64,
@@ -71,19 +74,26 @@ struct Mocks {
 }
 
 async fn messages(State(mocks): State<Arc<Mocks>>, Json(body): Json<Value>) -> Json<Value> {
-    mocks.llm_calls.fetch_add(1, Ordering::SeqCst);
     let prompt = body["messages"][0]["content"].as_str().unwrap_or_default();
     let name = prompt
         .lines()
         .find_map(|l| l.strip_prefix("name: "))
         .unwrap_or_default();
-    let out = json!({
+    let judging =
+        (body["output_config"]["format"]["schema"]["properties"].get("missing")).is_some();
+    let out = if judging {
+        mocks.judge_calls.fetch_add(1, Ordering::SeqCst);
+        json!({"missing": []})
+    } else {
+        mocks.llm_calls.fetch_add(1, Ordering::SeqCst);
+        json!({
         "informal_name": format!("Twice {name}"),
         "statement_nl": "Multiplying a natural number by two gives the number added to itself.",
         "statement_latex": "2n = n + n",
         "aliases": [],
         "synthetic_queries": [],
-    });
+        })
+    };
     Json(json!({
         "model": body["model"],
         "stop_reason": "end_turn",
@@ -913,6 +923,8 @@ async fn descriptions_and_vectors_are_made_once_and_kept() {
     })
     .await;
     assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), 1);
+    // `(n : ℕ)` is only a variable: there is nothing to judge.
+    assert_eq!(s.mocks.judge_calls.load(Ordering::SeqCst), 0);
 
     // Another replica takes over and asks for nothing.
     s.tasks[first].abort();
@@ -929,6 +941,28 @@ async fn descriptions_and_vectors_are_made_once_and_kept() {
     let hits = search(&e, q).await;
     assert_eq!(hits[0].title.as_deref(), Some("Twice double_eq"));
     s.done((e, again)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_snapshot_description_is_judged_for_the_hypotheses_it_leaves_out() {
+    let Some(mut s) = setup().await else { return };
+    let half = snapshot_decl(
+        "half_lt",
+        "half_lt (n : ℕ) (h : 0 < n) : n / 2 < n",
+        "Halving a positive number makes it smaller.",
+    );
+    create(&s.catalog, "a1", vec![half], &[]).await;
+    let e = s.engine().await;
+    s.index(&e, true);
+    until_true(async || {
+        described(&s.catalog, "a1", "half_lt")
+            .await
+            .is_some_and(|r| r.informal.is_some())
+    })
+    .await;
+    assert_eq!(s.mocks.llm_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(s.mocks.judge_calls.load(Ordering::SeqCst), 1);
+    s.done(e).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -1778,6 +1778,37 @@
         ],
         "type": "object"
       },
+      "FlagDescriptionRequest": {
+        "properties": {
+          "reason": {
+            "description": "What is wrong with the description, e.g. \"leaves out `1 < b`\": 1 to\n2,000 characters.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "type": "object"
+      },
+      "FlagDescriptionResponse": {
+        "properties": {
+          "description_flags": {
+            "description": "The flags on the description now, from every scope, this one included.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "The version the index was built from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "description_flags"
+        ],
+        "type": "object"
+      },
       "Flags": {
         "properties": {
           "additive_sibling": {
@@ -1787,6 +1818,12 @@
           "deprecated_to": {
             "description": "Deprecated; use this name instead.",
             "type": "string"
+          },
+          "description_flags": {
+            "description": "How many times readers flagged its description as wrong, with\n`POST /declarations/{name}/flags`, in any scope: this description, so\none written again starts at none.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
           },
           "imports": {
             "description": "The import header that loads it, one import a line, when the index's\ndefault header (`import Mathlib` and `import Physlib`) doesn't.",
@@ -1974,6 +2011,10 @@
       },
       "Hit": {
         "properties": {
+          "description_source": {
+            "description": "Where `title` and `summary` come from: the description's source, e.g.\n\"lsv2-v4.28.0-rc1\" (LeanSearch v2's) or the model that wrote it, or\n\"docstring\" when the summary is the docstring's. A description is a\nsearch aid: the signature says what holds.",
+            "type": "string"
+          },
           "flags": {
             "$ref": "#/components/schemas/Flags"
           },
@@ -4332,6 +4373,156 @@
           }
         },
         "summary": "A declaration's details",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/declarations/{name}/flags": {
+      "post": {
+        "description": "Says its description is wrong, e.g. that it leaves out a hypothesis. Hits count the flags on their description in `flags.description_flags`, and a description written again starts with none. The declaration is found as `GET /declarations/{name}` finds it; one without a description is a 404. A flag ignores `Pisa-Scope`: it carries no scope, so it is shared across scopes and counted in every client's hits. The scope bounds only the snapshot module `module` may name. Each request adds a flag; nothing records who made it.",
+        "operationId": "flagDescription",
+        "parameters": [
+          {
+            "description": "The full name",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A snapshot module to look in first.",
+            "in": "query",
+            "name": "module",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "A version, or an alias of one: the index's, or its snapshots'. Any\nother is a 404.",
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlagDescriptionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FlagDescriptionResponse"
+                }
+              }
+            },
+            "description": "The flags on the description"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Flag a declaration's description",
         "tags": [
           "search"
         ]

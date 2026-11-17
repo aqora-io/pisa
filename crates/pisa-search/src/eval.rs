@@ -437,6 +437,7 @@ mod tests {
             value: None,
             title: None,
             summary: None,
+            description_source: None,
             flags: Flags {
                 additive_sibling: sibling.map(String::from),
                 ..Default::default()

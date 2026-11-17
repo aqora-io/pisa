@@ -67,12 +67,42 @@ and a few keywords. Write each as the search itself, without a label.
 
 Reading Lean: `↑x` is a coercion, such as a positive real used as a real number. `{x // p x}` is \
 the subtype of elements satisfying `p`. Arguments in square brackets are structure assumptions \
-(a field, a normed space) and rarely worth mentioning. `⋯` is an elided proof. Division by zero \
-is zero and `Real.sqrt` and `Real.log` are defined on all reals; mention such conventions only \
-when the statement depends on them. Lemmas named like `foo_apply`, `foo_def` or `foo_eq` usually \
-unfold a definition: say what it computes.
+(a field, a normed space): say the structure of each type, and those that restrict the \
+statement, such as finiteness, an order or nontriviality, but not decidability. `⋯` is an elided \
+proof. Division by zero is zero and `Real.sqrt` and `Real.log` are defined on all reals; mention \
+such conventions only when the statement depends on them. Lemmas named like `foo_apply`, \
+`foo_def` or `foo_eq` usually unfold a definition: say what it computes.
 
 The glossary below says how to read Lean names many declarations use; follow its terminology.";
+
+/// The judge's instructions: which hypotheses a description leaves out.
+const JUDGE: &str = "\
+You check the descriptions behind a search engine for Lean 4 declarations. Readers take a \
+description to say when a result applies, so one that leaves out a hypothesis claims more than \
+the declaration proves: \"$\\log_b x \\le \\log_b y$ for a positive base $b \\ne 1$ and \
+$0 < x \\le y$\" is false for $b = 1/2$, where the declaration assumes `1 < b`.
+
+You get a declaration's Lean signature, its type with full names and no notation, and its \
+description. List every hypothesis of the statement that the description leaves out:
+- premises: arguments whose type is a proposition, such as `(hb : 1 < b)`, `(hs : s.Finite)` or \
+`{h : Continuous f}`, and premises before `→` in the type;
+- typeclass assumptions, in square brackets, that restrict when the statement holds: finiteness, \
+as `[Fintype V]` or `[Finite ι]`; an order, as `[LinearOrder α]` or `[Archimedean α]`; \
+nontriviality, as `[Nontrivial R]` or `[NeZero n]`; and a structure the description doesn't name, \
+as `[NormedField β]` for a description that never says what $\\beta$ is.
+
+Don't list a typeclass assumption that only gives a type the structure the description names, as \
+`[Field K]` for \"a field $K$\" or `[NormedAddCommGroup E] [InnerProductSpace ℝ E]` for \"a real \
+inner product space $E$\"; a decidability assumption, such as `[DecidableEq α]` or \
+`[DecidableRel G.Adj]`; or an argument that is only an object, such as `{x : ℝ}` or \
+`(f : α → β)`.
+
+A hypothesis counts as stated when the description says it, or something that implies it, in any \
+words or notation: \"$b > 1$\" states `1 < b`, \"positive $x$\" states `0 < x` and \"a finite \
+simple graph\" states `[Fintype V]`, but \"positive $b \\ne 1$\" doesn't state `1 < b`.
+
+Answer with each hypothesis left out as the declaration writes it, e.g. `1 < b` or `Fintype V`, \
+or with an empty list if the description states them all.";
 
 #[derive(Deserialize)]
 struct Glossary {
@@ -234,11 +264,20 @@ pub struct Checks {
     /// Cited Lean names that exist nowhere.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unknown: Vec<String>,
+    /// Hypotheses of the statement that the description leaves out, as the
+    /// judge found them; absent when it wasn't judged, as the declaration has
+    /// nothing like a hypothesis (see [`has_hypotheses`]), or the judge
+    /// failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_hypotheses: Option<Vec<String>>,
 }
 
 impl Checks {
     pub fn passed(&self) -> bool {
-        self.latex.is_empty() && self.not_dependency.is_empty() && self.unknown.is_empty()
+        self.latex.is_empty()
+            && self.not_dependency.is_empty()
+            && self.unknown.is_empty()
+            && self.missing_hypotheses.as_ref().is_none_or(Vec::is_empty)
     }
 }
 
@@ -538,34 +577,65 @@ impl<'a> Context<'a> {
         checks
     }
 
-    /// What the model's answer `r` for `d` comes to.
-    pub fn outcome(&self, cfg: &Config, d: &Decl, r: Completion) -> Outcome {
+    /// What the model's answer `r` for `d` comes to, with what the judge
+    /// made of the first description `d` got, if it judged: `r` is the one
+    /// asked for again when `judged` says it replaces the first.
+    pub fn outcome(
+        &self,
+        cfg: &Config,
+        d: &Decl,
+        r: Completion,
+        judged: Option<&Judged>,
+    ) -> Outcome {
         let mut o = Outcome {
             name: d.name.clone(),
             cost: r.cost,
             usage: r.usage.clone(),
             ..Default::default()
         };
-        if let Some(reason) = &r.stopped {
-            o.error = Some(format!("stopped: {reason}"));
-            return o;
+        if let Some(j) = judged {
+            if j.replaced {
+                // `r` is the one asked for again, which `j` counts.
+                o.usage = j.usage.clone();
+                o.cost = j.cost;
+            } else {
+                o.usage.add(&j.usage);
+                o.cost = add_cost(o.cost, j.cost);
+            }
+            o.judge_calls = j.judge_calls;
+            o.redescribed = j.redescribed;
         }
-        let out: Output = match serde_json::from_str(&r.text) {
+        let out = match parse_output(&r) {
             Ok(out) => out,
             Err(e) => {
-                o.error = Some(format!("invalid JSON: {e}"));
+                o.error = Some(e);
                 return o;
             }
         };
-        if out.statement_nl.trim().is_empty() {
-            // Not stored, so the next run tries again.
-            o.error = Some("empty description".into());
-            return o;
-        }
         o.checks = self.check(d, &out);
+        o.checks.missing_hypotheses = judged.and_then(|j| match &j.missing {
+            Ok(_) if j.replaced => Some(Vec::new()),
+            Ok(missing) => Some(missing.clone()),
+            Err(_) => None,
+        });
+        // What the first description left out, when this one replaces it.
+        let redescribed_for = judged
+            .filter(|j| j.replaced)
+            .and_then(|j| j.missing.as_ref().ok());
         let generated_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |t| t.as_millis() as u64);
+        let mut meta = json!({
+            "model": r.model,
+            "effort": cfg.effort,
+            "usage": o.usage,
+            "cost_usd": o.cost,
+            "checks": o.checks,
+            "generated_ms": generated_ms,
+        });
+        if let Some(missing) = redescribed_for {
+            meta["redescribed_for"] = json!(missing);
+        }
         o.entry = Some(Entry {
             content_hash: d.content_hash.clone(),
             name: d.name.clone(),
@@ -578,17 +648,305 @@ impl<'a> Context<'a> {
                 source: r.model.clone(),
             },
             synthetic_queries: out.synthetic_queries,
-            meta: Some(json!({
-                "model": r.model,
-                "effort": cfg.effort,
-                "usage": r.usage,
-                "cost_usd": o.cost,
-                "checks": o.checks,
-                "generated_ms": generated_ms,
-            })),
+            meta: Some(meta),
         });
         o
     }
+}
+
+/// The description in the model's answer `r`, or why it has none.
+fn parse_output(r: &Completion) -> Result<Output, String> {
+    if let Some(reason) = &r.stopped {
+        return Err(format!("stopped: {reason}"));
+    }
+    let out: Output = serde_json::from_str(&r.text).map_err(|e| format!("invalid JSON: {e}"))?;
+    if out.statement_nl.trim().is_empty() {
+        // Not stored, so the next run tries again.
+        return Err("empty description".into());
+    }
+    Ok(out)
+}
+
+/// A description as the judge reads it: its title, then its statement.
+fn judged_text(title: &str, statement: &str) -> String {
+    format!("{title}\n{statement}")
+}
+
+/// The sum of two costs, unknown only if both are.
+fn add_cost(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    }
+}
+
+/// Hypotheses as a list of code spans.
+fn listed(hypotheses: &[String]) -> String {
+    let spans: Vec<String> = hypotheses.iter().map(|h| format!("`{h}`")).collect();
+    spans.join(", ")
+}
+
+/// Whether `d` has anything like a hypothesis a description may leave out,
+/// by a cheap test of its text, so that the judge reads it: an instance
+/// argument, an argument that looks like a proposition (see
+/// [`looks_like_premise`]), or, for a theorem, a premise before `→` in its
+/// type. Variables alone, as `(x : ℝ)` or `{α : Type*}`, aren't.
+pub fn has_hypotheses(d: &Decl) -> bool {
+    use crate::engine::{after_name, binders, is_instance};
+    let (binders, _) = binders(after_name(&d.name, &d.signature));
+    binders
+        .iter()
+        .any(|b| is_instance(b) || looks_like_premise(b))
+        || (d.kind == "theorem" && has_premise(&d.type_pp_full))
+}
+
+/// Relations and connectives: a type with one is likely a proposition.
+const PROPOSITION_SYMBOLS: &[char] = &[
+    '<', '>', '≤', '≥', '=', '≠', '∈', '∉', '⊆', '⊂', '⊇', '⊃', '∣', '≡', '∧', '∨', '¬', '↔',
+];
+
+/// Whether binder group `binder`, e.g. `(hb : 1 < b)`, looks like a premise:
+/// a name of it starts with `h`, or its type, past any default value, has a
+/// relation or a connective.
+fn looks_like_premise(binder: &str) -> bool {
+    let mut chars = binder.chars();
+    let (Some(_), Some(_)) = (chars.next(), chars.next_back()) else {
+        return false;
+    };
+    let Some((names, ty)) = chars.as_str().split_once(':') else {
+        return false;
+    };
+    let ty = ty.split(":=").next().unwrap_or_default();
+    names.split_whitespace().any(|n| n.starts_with('h')) || ty.contains(PROPOSITION_SYMBOLS)
+}
+
+/// Whether `type_full`, past its leading `∀` binders, has a `→` outside
+/// brackets: a premise.
+fn has_premise(type_full: &str) -> bool {
+    let mut t = type_full.trim_start();
+    while let Some(rest) = t.strip_prefix('∀') {
+        let Some(comma) = outside_brackets(rest, ',') else {
+            return false;
+        };
+        t = rest[comma + 1..].trim_start();
+    }
+    outside_brackets(t, '→').is_some()
+}
+
+/// Where `c` first is in `s` outside brackets.
+fn outside_brackets(s: &str, c: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' | '⦃' => depth += 1,
+            ')' | ']' | '}' | '⦄' => depth = depth.saturating_sub(1),
+            _ if ch == c && depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn judge_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"missing": {"type": "array", "items": {"type": "string"}}},
+        "required": ["missing"],
+        "additionalProperties": false,
+    })
+}
+
+/// The hypotheses in the judge's answer, each once, or why it is unusable.
+fn parse_missing(text: &str) -> Result<Vec<String>, String> {
+    #[derive(Deserialize)]
+    struct Answer {
+        missing: Vec<String>,
+    }
+    let answer: Answer = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for m in &answer.missing {
+        let m = m.trim().trim_matches('`').trim();
+        if !m.is_empty() && !out.iter().any(|o| o == m) {
+            out.push(m.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// `prompt` again, saying what the previous description left out.
+fn feedback(prompt: &str, missing: &[String]) -> String {
+    format!(
+        "{prompt}<feedback>\nThe previous description left out: {}. Describe the declaration \
+         again, with every hypothesis that matters.\n</feedback>\n",
+        listed(missing)
+    )
+}
+
+/// What the judge made of one description.
+#[derive(Debug, Clone)]
+pub struct Verdict {
+    /// The hypotheses it leaves out, or why the judge's answer is unusable.
+    pub missing: Result<Vec<String>, String>,
+    pub usage: Usage,
+    pub cost: Option<f64>,
+}
+
+/// Asks the judge, the model of `cfg`, which hypotheses of `d`'s statement,
+/// its signature and its type with full names, `description` leaves out.
+pub async fn missing_hypotheses(
+    client: &Llm,
+    cfg: &Config,
+    prompts: &Prompts,
+    d: &Decl,
+    description: &str,
+) -> Result<Verdict, llm::Error> {
+    let prompt = format!(
+        "<lean>\n{}\n</lean>\n<type>\n{}\n</type>\n<description>\n{description}\n</description>\n",
+        d.signature, d.type_pp_full
+    );
+    let r = client
+        .complete(&cfg.request(&prompts.judge, &prompt, &prompts.judge_schema))
+        .await?;
+    let missing = match &r.stopped {
+        Some(reason) => Err(format!("stopped: {reason}")),
+        None => parse_missing(&r.text),
+    };
+    Ok(Verdict {
+        missing,
+        usage: r.usage,
+        cost: r.cost,
+    })
+}
+
+/// What the judge made of a description and, when it left hypotheses out,
+/// of the one asked for again.
+#[derive(Debug, Clone)]
+pub struct Judged {
+    /// The hypotheses the description leaves out, or why it wasn't judged.
+    pub missing: Result<Vec<String>, String>,
+    /// Whether the one asked for again replaces it: the judge passed it.
+    pub replaced: bool,
+    /// Why the one asked for again doesn't.
+    pub failure: Option<String>,
+    /// Judge calls made: one, or two when it judged the one asked for again.
+    pub judge_calls: u32,
+    /// Whether a description was asked for again.
+    pub redescribed: bool,
+    /// What its calls took: the judge's, and the description asked for again.
+    pub usage: Usage,
+    pub cost: Option<f64>,
+}
+
+impl Judged {
+    fn add(&mut self, usage: &Usage, cost: Option<f64>) {
+        self.usage.add(usage);
+        self.cost = add_cost(self.cost, cost);
+    }
+
+    /// What it came to, in a line.
+    pub fn verdict(&self) -> String {
+        match &self.missing {
+            Err(e) => format!("not judged: {e}"),
+            Ok(m) if m.is_empty() => "states its hypotheses".into(),
+            Ok(m) if self.replaced => format!("leaves out {}; replaced", listed(m)),
+            Ok(m) => format!(
+                "leaves out {}; kept: {}",
+                listed(m),
+                self.failure.as_deref().unwrap_or_default()
+            ),
+        }
+    }
+}
+
+/// Judges `description`, `d`'s, and when it leaves hypotheses out, asks the
+/// model again, once, with `d`'s `prompt` and those hypotheses named;
+/// returns that description too if the judge passes it. Fails only on an
+/// authentication error, which no later request would get past.
+pub async fn judge(
+    client: &Llm,
+    cfg: &Config,
+    prompts: &Prompts,
+    d: &Decl,
+    prompt: &str,
+    description: &str,
+) -> Result<(Judged, Option<Completion>), llm::Error> {
+    let mut j = Judged {
+        missing: Ok(Vec::new()),
+        replaced: false,
+        failure: None,
+        judge_calls: 1,
+        redescribed: false,
+        usage: Usage::default(),
+        cost: None,
+    };
+    match missing_hypotheses(client, cfg, prompts, d, description).await {
+        Ok(v) => {
+            j.add(&v.usage, v.cost);
+            j.missing = v.missing;
+        }
+        Err(e @ llm::Error::Auth { .. }) => return Err(e),
+        Err(e) => j.missing = Err(e.to_string()),
+    }
+    let missing = match &j.missing {
+        Ok(missing) if !missing.is_empty() => missing.clone(),
+        _ => return Ok((j, None)),
+    };
+    j.redescribed = true;
+    let again = feedback(prompt, &missing);
+    let r = match client
+        .complete(&cfg.request(prompts.system(d), &again, &prompts.schema))
+        .await
+    {
+        Ok(r) => r,
+        Err(e @ llm::Error::Auth { .. }) => return Err(e),
+        Err(e) => {
+            j.failure = Some(e.to_string());
+            return Ok((j, None));
+        }
+    };
+    j.add(&r.usage, r.cost);
+    match judge_again(client, cfg, prompts, d, &r, &mut j).await? {
+        None => {
+            j.replaced = true;
+            Ok((j, Some(r)))
+        }
+        Some(failure) => {
+            j.failure = Some(failure);
+            Ok((j, None))
+        }
+    }
+}
+
+/// Judges `r`, the description of `d` asked for again, into `j`: why it
+/// can't replace the first, or `None` if it can.
+async fn judge_again(
+    client: &Llm,
+    cfg: &Config,
+    prompts: &Prompts,
+    d: &Decl,
+    r: &Completion,
+    j: &mut Judged,
+) -> Result<Option<String>, llm::Error> {
+    let out = match parse_output(r) {
+        Ok(out) => out,
+        Err(e) => return Ok(Some(e)),
+    };
+    j.judge_calls += 1;
+    let description = judged_text(&out.informal_name, &out.statement_nl);
+    let v = match missing_hypotheses(client, cfg, prompts, d, &description).await {
+        Ok(v) => v,
+        Err(e @ llm::Error::Auth { .. }) => return Err(e),
+        Err(e) => return Ok(Some(format!("judging the second description failed: {e}"))),
+    };
+    j.add(&v.usage, v.cost);
+    Ok(match v.missing {
+        Ok(missing) if missing.is_empty() => None,
+        Ok(missing) => Some(format!(
+            "the second description also leaves out {}",
+            listed(&missing)
+        )),
+        Err(e) => Some(format!("judging the second description failed: {e}")),
+    })
 }
 
 /// The result of describing one declaration.
@@ -600,6 +958,11 @@ pub struct Outcome {
     pub usage: Usage,
     pub cost: Option<f64>,
     pub checks: Checks,
+    /// Judge calls made for it.
+    pub judge_calls: u32,
+    /// Whether its first description left out hypotheses, so that it was
+    /// asked for again.
+    pub redescribed: bool,
 }
 
 /// The description of a Physlib informal result: its docstring.
@@ -620,11 +983,14 @@ pub fn docstring_entry(d: &Decl) -> Option<Entry> {
     })
 }
 
-/// The system prompts, by library, and the schema of what the model returns.
+/// The system prompts, by library, and the schema of what the model returns;
+/// and the judge's.
 pub struct Prompts {
     physlib: Vec<String>,
     mathlib: Vec<String>,
     schema: Value,
+    judge: Vec<String>,
+    judge_schema: Value,
 }
 
 impl Prompts {
@@ -633,6 +999,8 @@ impl Prompts {
             physlib: system(&[GLOSSARY_MATHLIB, GLOSSARY_PHYSLIB])?,
             mathlib: system(&[GLOSSARY_MATHLIB])?,
             schema: output_schema(),
+            judge: vec![JUDGE.to_string()],
+            judge_schema: judge_schema(),
         })
     }
 
@@ -652,21 +1020,52 @@ const PHYSICS: &[&str] = &["Physlib", "PhyslibAlpha", "QuantumInfo", "PisaSnap"]
 
 /// Sends each `(i, declaration, prompt)` to the model, at most
 /// `cfg.concurrency` at once and at most as many as `limit` lets through,
-/// and yields `i` with the answer as each lands.
+/// and yields `i` with the answer as each lands. An answer for a declaration
+/// with hypotheses (see [`has_hypotheses`]) is judged, and if it leaves some
+/// out, asked for again once (see [`judge`]): the answer is the one kept.
 pub fn complete<'a>(
     client: &'a Llm,
     cfg: &'a Config,
     prompts: &'a Prompts,
     jobs: Vec<(usize, &'a Decl, String)>,
     limit: &'a tokio::sync::Semaphore,
-) -> impl futures::Stream<Item = (usize, Result<Completion, llm::Error>)> + 'a {
+) -> impl futures::Stream<Item = (usize, Result<(Completion, Option<Judged>), llm::Error>)> + 'a {
     futures::stream::iter(jobs)
         .map(move |(i, d, prompt)| async move {
             let _permit = limit.acquire().await;
-            let req = cfg.request(prompts.system(d), &prompt, &prompts.schema);
-            (i, client.complete(&req).await)
+            (i, describe(client, cfg, prompts, d, &prompt).await)
         })
         .buffer_unordered(cfg.concurrency.max(1))
+}
+
+/// `d`'s description from the model, judged when `d` has hypotheses: the
+/// first, or the one asked for again that replaces it.
+async fn describe(
+    client: &Llm,
+    cfg: &Config,
+    prompts: &Prompts,
+    d: &Decl,
+    prompt: &str,
+) -> Result<(Completion, Option<Judged>), llm::Error> {
+    let first = client
+        .complete(&cfg.request(prompts.system(d), prompt, &prompts.schema))
+        .await?;
+    let out = match parse_output(&first) {
+        Ok(out) if has_hypotheses(d) => out,
+        _ => return Ok((first, None)),
+    };
+    let description = judged_text(&out.informal_name, &out.statement_nl);
+    let (mut j, replacement) = judge(client, cfg, prompts, d, prompt, &description).await?;
+    if let Err(e) = &j.missing {
+        tracing::warn!(name = %d.name, "judging failed: {e}");
+    }
+    Ok(match replacement {
+        Some(r) => {
+            j.add(&first.usage, first.cost);
+            (r, Some(j))
+        }
+        None => (first, Some(j)),
+    })
 }
 
 /// Describes `targets` level by level, saving descriptions to `store` as
@@ -719,7 +1118,7 @@ pub async fn run(
         while let Some((i, result)) = responses.next().await {
             let d = llm[i];
             let outcome = match result {
-                Ok(r) => ctx.outcome(cfg, d, r),
+                Ok((r, judged)) => ctx.outcome(cfg, d, r, judged.as_ref()),
                 Err(e @ llm::Error::Auth { .. }) => return Err(e.into()),
                 Err(e) => Outcome {
                     name: d.name.clone(),
@@ -753,6 +1152,77 @@ pub async fn run(
     }
     save(&mut pending).await?;
     Ok(outcomes)
+}
+
+/// Judges the stored descriptions of `targets`, from `described`, and
+/// describes again, once, each that leaves hypotheses out (see [`judge`]),
+/// saving the descriptions that replace them to `store` as batches named
+/// `<batch>-<seq>`. Returns what the judge made of each, by name. Stops at
+/// the first authentication error.
+pub async fn validate(
+    client: &Llm,
+    cfg: &Config,
+    store: &Store,
+    corpus: &Corpus,
+    targets: &[&Decl],
+    described: HashMap<String, Informal>,
+    batch: &str,
+) -> anyhow::Result<Vec<(String, Judged)>> {
+    let prompts = Prompts::new()?;
+    let ctx = Context::new(corpus, described);
+    let jobs: Vec<(&Decl, String, String)> = targets
+        .iter()
+        .filter_map(|&d| {
+            let i = ctx.described.get(&d.name)?;
+            let description = judged_text(&i.informal_name, &i.statement_nl);
+            Some((d, ctx.prompt(d), description))
+        })
+        .collect();
+    let prompts = &prompts;
+    let mut judged = std::pin::pin!(
+        futures::stream::iter(jobs)
+            .map(|(d, prompt, description)| async move {
+                (
+                    d,
+                    judge(client, cfg, prompts, d, &prompt, &description).await,
+                )
+            })
+            .buffer_unordered(cfg.concurrency.max(1))
+    );
+    let mut out = Vec::new();
+    let mut pending: Vec<Entry> = Vec::new();
+    let mut seq = 0;
+    let mut save = async |pending: &mut Vec<Entry>| -> anyhow::Result<()> {
+        if !pending.is_empty() {
+            store
+                .write_batch(&format!("{batch}-{seq:04}"), pending)
+                .await?;
+            seq += 1;
+            pending.clear();
+        }
+        Ok(())
+    };
+    while let Some((d, result)) = judged.next().await {
+        let (j, replacement) = match result {
+            Ok(judged) => judged,
+            Err(e) => {
+                save(&mut pending).await?;
+                return Err(e.into());
+            }
+        };
+        if let Some(r) = replacement
+            && let Some(e) = ctx.outcome(cfg, d, r, Some(&j)).entry
+        {
+            pending.push(e);
+            if pending.len() >= SAVE_EVERY {
+                save(&mut pending).await?;
+            }
+        }
+        out.push((d.name.clone(), j));
+    }
+    save(&mut pending).await?;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 /// About `n` declarations from `libraries` that need descriptions, taken as
@@ -1043,6 +1513,12 @@ pub fn report(input: &ReportInput, outcomes: &[Outcome], corpus: &Corpus) -> Str
         "| No cited Lean name is unknown | {} |",
         pct(count(&|c| c.unknown.is_empty()))
     );
+    let _ = writeln!(
+        r,
+        "| Leaves out no hypothesis, of those with any (judged) | {}/{} |",
+        count(&|c| c.missing_hypotheses.as_ref().is_some_and(Vec::is_empty)),
+        count(&|c| c.missing_hypotheses.is_some())
+    );
     let _ = writeln!(r, "| All checks | {} |", pct(count(&Checks::passed)));
     let with_latex = ok
         .iter()
@@ -1066,6 +1542,9 @@ pub fn report(input: &ReportInput, outcomes: &[Outcome], corpus: &Corpus) -> Str
                     .map(|n| format!("cites `{n}`, which it doesn't use")),
             );
             parts.extend(c.unknown.iter().map(|n| format!("cites unknown `{n}`")));
+            if let Some(missing) = c.missing_hypotheses.as_ref().filter(|m| !m.is_empty()) {
+                parts.push(format!("leaves out {}", listed(missing)));
+            }
             format!("- `{}`: {}", o.name, parts.join("; "))
         })
         .collect();
@@ -1295,6 +1774,111 @@ mod tests {
             "{p}"
         );
         assert!(!p.contains("`Eq`") && !p.contains("toNormedField"), "{p}");
+    }
+
+    /// The five hits the audit found leaving out premises, finiteness or
+    /// structure (erdos-formalism's
+    /// `logs/finding-controls/search-descriptions/audit.md`), and the one
+    /// that started it: name, signature and type as the bundle has them.
+    const AUDITED: [(&str, &str, &str); 6] = [
+        (
+            "SimpleGraph.card_commonNeighbors_le_degree_left",
+            "SimpleGraph.card_commonNeighbors_le_degree_left.{u_1} {V : Type u_1} (G : SimpleGraph V) [Fintype V]\n  [DecidableRel G.Adj] (v w : V) : Fintype.card ↑(G.commonNeighbors v w) ≤ G.degree v",
+            "∀ {V : Type u_1} (G : SimpleGraph V) [inst : Fintype V] [inst_1 : DecidableRel G.Adj] (v w : V),\n  LE.le (Fintype.card ↑(G.commonNeighbors v w)) (G.degree v)",
+        ),
+        (
+            "SimpleGraph.Adj.degree_pos_right",
+            "SimpleGraph.Adj.degree_pos_right.{u_1} {V : Type u_1} {G : SimpleGraph V} {v : V} [Fintype ↑(G.neighborSet v)] {w : V}\n  (h : G.Adj w v) : 0 < G.degree v",
+            "∀ {V : Type u_1} {G : SimpleGraph V} {v : V} [inst : Fintype ↑(G.neighborSet v)] {w : V},\n  G.Adj w v → LT.lt 0 (G.degree v)",
+        ),
+        (
+            "Real.logb_lt_logb",
+            "Real.logb_lt_logb {b x y : ℝ} (hb : 1 < b) (hx : 0 < x) (hxy : x < y) : Real.logb b x < Real.logb b y",
+            "∀ {b x y : Real}, LT.lt 1 b → LT.lt 0 x → LT.lt x y → LT.lt (Real.logb b x) (Real.logb b y)",
+        ),
+        (
+            "Asymptotics.isEquivalent_iff_exists_eq_mul",
+            "Asymptotics.isEquivalent_iff_exists_eq_mul.{u_1, u_2} {α : Type u_1} {β : Type u_2} [NormedField β] {u v : α → β}\n  {l : Filter α} : Asymptotics.IsEquivalent l u v ↔ ∃ φ, ∃ (_ : Filter.Tendsto φ l (nhds 1)), u =ᶠ[l] φ * v",
+            "∀ {α : Type u_1} {β : Type u_2} [inst : NormedField β] {u v : α → β} {l : Filter α},\n  Iff (Asymptotics.IsEquivalent l u v) (Exists fun φ => Exists fun x => l.EventuallyEq u (HMul.hMul φ v))",
+        ),
+        (
+            "toIcoDiv_zsmul_add",
+            "toIcoDiv_zsmul_add.{u_1} {α : Type u_1} [AddCommGroup α] [LinearOrder α] [IsOrderedAddMonoid α] [hα : Archimedean α]\n  {p : α} (hp : 0 < p) (a b : α) (m : ℤ) : toIcoDiv hp a (m • p + b) = m + toIcoDiv hp a b",
+            "∀ {α : Type u_1} [inst : AddCommGroup α] [inst_1 : LinearOrder α] [inst_2 : IsOrderedAddMonoid α] [hα : Archimedean α]\n  {p : α} (hp : LT.lt 0 p) (a b : α) (m : Int),\n  Eq (toIcoDiv hp a (HAdd.hAdd (HSMul.hSMul m p) b)) (HAdd.hAdd m (toIcoDiv hp a b))",
+        ),
+        (
+            "Real.logb_le_logb_of_le",
+            "Real.logb_le_logb_of_le {b x y : ℝ} (hb : 1 < b) (h : 0 < x) (hxy : x ≤ y) : Real.logb b x ≤ Real.logb b y",
+            "∀ {b x y : Real}, LT.lt 1 b → LT.lt 0 x → LE.le x y → LE.le (Real.logb b x) (Real.logb b y)",
+        ),
+    ];
+
+    fn typed(name: &str, kind: &str, signature: &str, type_full: &str) -> Decl {
+        Decl {
+            type_pp_full: type_full.into(),
+            ..decl(name, kind, signature, &[])
+        }
+    }
+
+    #[test]
+    fn declarations_with_anything_like_a_hypothesis_are_judged() {
+        for (name, signature, type_full) in AUDITED {
+            assert!(
+                has_hypotheses(&typed(name, "theorem", signature, type_full)),
+                "{name}"
+            );
+        }
+        // Variables and no premise.
+        let plain = typed(
+            "Nat.choose_le_two_pow",
+            "theorem",
+            "Nat.choose_le_two_pow (n k : ℕ) : n.choose k ≤ 2 ^ n",
+            "∀ (n k : Nat), LE.le (n.choose k) (HPow.hPow 2 n)",
+        );
+        assert!(!has_hypotheses(&plain));
+        // A premise only after the colon.
+        assert!(has_hypotheses(&typed(
+            "Nat.succ_le_succ",
+            "theorem",
+            "Nat.succ_le_succ {n m : ℕ} : n ≤ m → n.succ ≤ m.succ",
+            "∀ {n m : Nat}, LE.le n m → LE.le n.succ m.succ",
+        )));
+        // A definition's arrows are its arguments, a function a variable, and
+        // a default value no equation.
+        assert!(!has_hypotheses(&typed(
+            "Real.logb",
+            "def",
+            "Real.logb (b x : ℝ) : ℝ",
+            "Real → Real → Real",
+        )));
+        assert!(!has_hypotheses(&typed(
+            "Function.comp_id",
+            "theorem",
+            "Function.comp_id {α β} (f : α → β) (d : ℕ := 3) : f ∘ id = f",
+            "∀ {α : Sort u_1} {β : Sort u_2} (f : α → β) (d : Nat), Eq (Function.comp f id) f",
+        )));
+    }
+
+    #[test]
+    fn the_judge_answers_with_the_hypotheses_left_out() {
+        assert_eq!(
+            parse_missing(r#"{"missing": ["1 < b", " `0 < x` ", "", "1 < b"]}"#),
+            Ok(vec!["1 < b".to_string(), "0 < x".to_string()])
+        );
+        assert_eq!(parse_missing(r#"{"missing": []}"#), Ok(Vec::new()));
+        for bad in [r#"{"choice": 1}"#, "not json", r#"{"missing": "1 < b"}"#] {
+            assert!(parse_missing(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_second_description_is_asked_for_with_what_the_first_left_out() {
+        let p = feedback("<lean>\nX\n</lean>\n", &["1 < b".into(), "0 < x".into()]);
+        assert!(p.starts_with("<lean>\nX\n</lean>\n"), "{p}");
+        assert!(
+            p.contains("The previous description left out: `1 < b`, `0 < x`."),
+            "{p}"
+        );
     }
 
     #[test]

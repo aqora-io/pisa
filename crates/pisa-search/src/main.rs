@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use pisa_db::description_flags::DescriptionFlags;
 use pisa_protocol::search::Informal;
 use pisa_search::corpus::{self, Corpus};
 use pisa_search::dense::{self, Embedder};
 use pisa_search::engine::{self, Weights};
 use pisa_search::index::{self, Bundle};
-use pisa_search::informal_store::Store;
+use pisa_search::informal_store::{Store, description_hash};
 use pisa_search::informalize;
 use pisa_search::llm::Llm;
 use pisa_search::qdrant::Qdrant;
@@ -264,6 +265,47 @@ enum Command {
         #[arg(long)]
         informal: String,
     },
+    /// Ask a model which hypotheses stored descriptions leave out, of
+    /// declarations with anything like a hypothesis; describe each that
+    /// leaves some out again, once, told what, and write those the model then
+    /// passes as a new batch. Prints a line per description judged. Needs
+    /// ANTHROPIC_API_KEY or OPENAI_API_KEY.
+    ValidateDescriptions {
+        #[arg(long)]
+        corpus: PathBuf,
+        /// Description and vector store (a directory or s3:// URL).
+        #[arg(long)]
+        informal: String,
+        /// Only descriptions from this source, e.g. `lsv2-v4.28.0-rc1`.
+        #[arg(long)]
+        source: Option<String>,
+        /// Only descriptions that readers flagged, in the database.
+        #[arg(long)]
+        flagged: bool,
+        /// The database that keeps the flags, for `--flagged`.
+        #[arg(long, env = "PISA_DATABASE_URL")]
+        database_url: Option<String>,
+        /// Only these declarations: names, or files of one name per line,
+        /// separated by commas.
+        #[arg(long, value_delimiter = ',')]
+        names: Vec<String>,
+        /// The model that judges and describes, as the server's describer.
+        #[arg(
+            long,
+            env = "PISA_SEARCH_DESCRIBE_MODEL",
+            default_value = "claude-haiku-5-5"
+        )]
+        model: String,
+        #[arg(long, default_value = "low")]
+        effort: String,
+        #[arg(long, default_value_t = 4096)]
+        max_tokens: u32,
+        #[arg(long, default_value_t = 8)]
+        concurrency: usize,
+        /// Print what would be judged instead of calling the API.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Compare two cached sets of vectors for the same document views.
     CompareVectors {
         #[arg(long)]
@@ -279,6 +321,19 @@ enum Command {
         #[arg(long)]
         b: String,
     },
+}
+
+/// Names given as names, or as files of one name per line.
+fn names_or_files(args: &[String]) -> anyhow::Result<std::collections::HashSet<String>> {
+    let mut names = std::collections::HashSet::new();
+    for a in args.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        if Path::new(a).is_file() {
+            names.extend(read_names(Path::new(a))?);
+        } else {
+            names.insert(a.to_string());
+        }
+    }
+    Ok(names)
 }
 
 fn read_names(path: &Path) -> anyhow::Result<std::collections::HashSet<String>> {
@@ -548,8 +603,11 @@ async fn main() -> anyhow::Result<()> {
             let elapsed_secs = started.elapsed().as_secs_f64();
             let cost: f64 = outcomes.iter().filter_map(|o| o.cost).sum();
             let failed = outcomes.iter().filter(|o| o.error.is_some()).count();
+            let judge_calls: u32 = outcomes.iter().map(|o| o.judge_calls).sum();
+            let redescribed = outcomes.iter().filter(|o| o.redescribed).count();
             eprintln!(
-                "described {} of {} in {elapsed_secs:.0}s for ${cost:.3}",
+                "described {} of {} in {elapsed_secs:.0}s for ${cost:.3}, with {judge_calls} \
+                 judge calls; {redescribed} described again for leaving out hypotheses",
                 outcomes.len() - failed,
                 outcomes.len()
             );
@@ -759,6 +817,132 @@ async fn main() -> anyhow::Result<()> {
                     .await?;
             }
             println!("repaired {} descriptions", repaired.len());
+        }
+        Command::ValidateDescriptions {
+            corpus,
+            informal,
+            source,
+            flagged,
+            database_url,
+            names,
+            model,
+            effort,
+            max_tokens,
+            concurrency,
+            dry_run,
+        } => {
+            let c = Corpus::read(&corpus)?;
+            let store = Store::open(&informal)?;
+            let stored = store.load_all().await?;
+            let names = (!names.is_empty())
+                .then(|| names_or_files(&names))
+                .transpose()?;
+            // The flags on each declaration's current description.
+            let flags = match (flagged, database_url) {
+                (false, _) => None,
+                (true, Some(url)) => {
+                    let db = pisa_db::db::Db::connect(Some(&url)).await?;
+                    let mut flags: HashMap<(String, String), usize> = HashMap::new();
+                    for f in DescriptionFlags::new(db).all().await? {
+                        *flags.entry((f.name, f.description_hash)).or_default() += 1;
+                    }
+                    Some(flags)
+                }
+                (true, None) => anyhow::bail!("--flagged needs --database-url"),
+            };
+            let flagged_times = |d: &corpus::Decl, i: &Informal| {
+                let hash = description_hash(
+                    &i.informal_name,
+                    &i.statement_nl,
+                    i.statement_latex.as_deref(),
+                );
+                let key = (d.name.clone(), hash);
+                flags.as_ref().and_then(|f| f.get(&key)).copied()
+            };
+            let (mut targets, mut skipped) = (Vec::new(), 0);
+            for d in &c.decls {
+                let Some(e) = stored.get(&d.content_hash) else {
+                    continue;
+                };
+                let wanted = source.as_ref().is_none_or(|s| *s == e.informal.source)
+                    && names.as_ref().is_none_or(|n| n.contains(&d.name))
+                    && (!flagged || flagged_times(d, &e.informal).is_some())
+                    && informalize::needs_description(d);
+                if !wanted {
+                    continue;
+                }
+                if informalize::has_hypotheses(d) {
+                    targets.push(d);
+                } else {
+                    skipped += 1;
+                }
+            }
+            if let Some(names) = &names {
+                let described: std::collections::HashSet<&str> = (c.decls.iter())
+                    .filter(|d| stored.contains_key(&d.content_hash))
+                    .map(|d| d.name.as_str())
+                    .collect();
+                let mut missing: Vec<&String> = (names.iter())
+                    .filter(|n| !described.contains(n.as_str()))
+                    .collect();
+                missing.sort();
+                for n in missing {
+                    eprintln!("{n}: not in the corpus, or no description stored");
+                }
+            }
+            eprintln!(
+                "{} descriptions to judge ({skipped} more have nothing like a hypothesis)",
+                targets.len()
+            );
+            let cfg = informalize::Config {
+                model,
+                effort,
+                max_tokens,
+                concurrency,
+            };
+            let source_of = |d: &corpus::Decl| stored[&d.content_hash].informal.source.clone();
+            if dry_run {
+                for d in &targets {
+                    println!("{} ({})", d.name, source_of(d));
+                }
+                return Ok(());
+            }
+            let client = Llm::for_model(&cfg.model)?;
+            let described = descriptions(&c, &store).await?;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+            let batch = format!("{}-validate-{}", now.as_millis(), cfg.model);
+            let judged =
+                informalize::validate(&client, &cfg, &store, &c, &targets, described, &batch)
+                    .await?;
+            let by_name: HashMap<&str, &corpus::Decl> =
+                targets.iter().map(|d| (d.name.as_str(), *d)).collect();
+            for (name, j) in &judged {
+                let d = by_name[name.as_str()];
+                let flagged = match flagged_times(d, &stored[&d.content_hash].informal) {
+                    Some(1) => ", flagged once".to_string(),
+                    Some(n) => format!(", flagged {n} times"),
+                    None => String::new(),
+                };
+                println!("{name} ({}{flagged}): {}", source_of(d), j.verdict());
+            }
+            let count = |f: &dyn Fn(&informalize::Judged) -> bool| {
+                judged.iter().filter(|(_, j)| f(j)).count()
+            };
+            let leaving_out = count(&|j| j.missing.as_ref().is_ok_and(|m| !m.is_empty()));
+            let replaced = count(&|j| j.replaced);
+            let judge_calls: u32 = judged.iter().map(|(_, j)| j.judge_calls).sum();
+            let cost: f64 = judged.iter().filter_map(|(_, j)| j.cost).sum();
+            let written = match replaced {
+                0 => String::new(),
+                _ => format!(" in batches {batch}-*"),
+            };
+            eprintln!(
+                "judged {} descriptions with {judge_calls} judge calls for ${cost:.3}: {leaving_out} \
+                 leave out hypotheses, {replaced} replaced{written}, {} kept, {} not judged",
+                judged.len(),
+                leaving_out - replaced,
+                count(&|j| j.missing.is_err())
+            );
         }
         Command::CompareVectors {
             corpus,

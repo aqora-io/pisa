@@ -64,6 +64,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/declarations/{name}/flags": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Flag a declaration's description
+         * @description Says its description is wrong, e.g. that it leaves out a hypothesis. Hits count the flags on their description in `flags.description_flags`, and a description written again starts with none. The declaration is found as `GET /declarations/{name}` finds it; one without a description is a 404. A flag ignores `Pisa-Scope`: it carries no scope, so it is shared across scopes and counted in every client's hits. The scope bounds only the snapshot module `module` may name. Each request adds a flag; nothing records who made it.
+         */
+        post: operations["flagDescription"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/documents": {
         parameters: {
             query?: never;
@@ -1761,11 +1781,34 @@ export interface components {
              */
             signature?: string;
         };
+        FlagDescriptionRequest: {
+            /**
+             * @description What is wrong with the description, e.g. "leaves out `1 < b`": 1 to
+             *     2,000 characters.
+             */
+            reason: string;
+        };
+        FlagDescriptionResponse: {
+            /**
+             * Format: int32
+             * @description The flags on the description now, from every scope, this one included.
+             */
+            description_flags: number;
+            /** @description The version the index was built from. */
+            version: string;
+        };
         Flags: {
             /** @description The `to_additive` counterpart, folded into this hit. */
             additive_sibling?: string;
             /** @description Deprecated; use this name instead. */
             deprecated_to?: string;
+            /**
+             * Format: int32
+             * @description How many times readers flagged its description as wrong, with
+             *     `POST /declarations/{name}/flags`, in any scope: this description, so
+             *     one written again starts at none.
+             */
+            description_flags?: number;
             /**
              * @description The import header that loads it, one import a line, when the index's
              *     default header (`import Mathlib` and `import Physlib`) doesn't.
@@ -1863,6 +1906,13 @@ export interface components {
         /** @enum {string} */
         HealthStatus: "ok" | "draining";
         Hit: {
+            /**
+             * @description Where `title` and `summary` come from: the description's source, e.g.
+             *     "lsv2-v4.28.0-rc1" (LeanSearch v2's) or the model that wrote it, or
+             *     "docstring" when the summary is the docstring's. A description is a
+             *     search aid: the signature says what holds.
+             */
+            description_source?: string;
             flags: components["schemas"]["Flags"];
             kind: string;
             /** @description `PisaSnap` for a snapshot's declaration. */
@@ -3039,6 +3089,8 @@ export type Error = components['schemas']['Error'];
 export type ErrorKind = components['schemas']['ErrorKind'];
 export type ErrorResponse = components['schemas']['ErrorResponse'];
 export type Export = components['schemas']['Export'];
+export type FlagDescriptionRequest = components['schemas']['FlagDescriptionRequest'];
+export type FlagDescriptionResponse = components['schemas']['FlagDescriptionResponse'];
 export type Flags = components['schemas']['Flags'];
 export type Format = components['schemas']['Format'];
 export type GetDeclarationResponse = components['schemas']['GetDeclarationResponse'];
@@ -3351,6 +3403,108 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GetDeclarationResponse"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    flagDescription: {
+        parameters: {
+            query?: {
+                /** @description A snapshot module to look in first. */
+                module?: string;
+                /**
+                 * @description A version, or an alias of one: the index's, or its snapshots'. Any
+                 *     other is a 404.
+                 */
+                version?: string;
+            };
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
+            path: {
+                /** @description The full name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FlagDescriptionRequest"];
+            };
+        };
+        responses: {
+            /** @description The flags on the description */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FlagDescriptionResponse"];
                 };
             };
             /** @description `bad_request`: the request breaks the API's rules. */

@@ -452,7 +452,8 @@ it to one tenant, so that tenants can share a server.
 - **Search** keeps snapshot hits to the scope (see
   [Snapshot search](#snapshot-search)), and `GET /declarations/{name}` with
   `module=` is `not_found` for a module no snapshot of the scope is on. The
-  library's declarations are everyone's.
+  library's declarations are everyone's, and so are description flags: a flag
+  made in a scope carries none, and counts in every scope's hits.
 - **Not yet:** fairness between scopes, caps and metrics per scope, and
   listing or deleting a scope's documents, sessions and jobs.
 
@@ -2167,6 +2168,18 @@ OpenAI models are a flag away):
 - It caches by content hash, so after a library update only changed
   declarations cost anything.
 - It checks LaTeX against KaTeX and checks that cited Lean names exist.
+- It asks the same model, as a judge, which hypotheses a description leaves
+  out, showing it the signature and the type with full names: premises such
+  as `(hb : 1 < b)` or `n ≤ m →`, and typeclass assumptions that restrict
+  the statement, such as finiteness, an order or nontriviality, but not one
+  that only gives a type the structure the description names. One that
+  leaves out `1 < b` claims more than the theorem proves. A declaration is
+  judged if it has anything like a hypothesis: an instance argument, an
+  argument whose name starts with `h` or whose type has a relation or a
+  connective, or, for a theorem, an arrow in its type; variables alone don't
+  count. A description that leaves some out is asked for again, once, with
+  them named, and replaces the first only if the judge passes it. Judging
+  adds a call or two per such declaration; the run's summary counts them.
 - Its prompt has a glossary of how to read names many declarations use
   (`search/glossary/`): Mathlib's for every declaration, and Physlib's,
   QuantumInfo's terms included, for Physlib, PhyslibAlpha, QuantumInfo and
@@ -2255,6 +2268,23 @@ statistics) when they open the index.
 `--informal` takes a directory or an `s3://bucket/prefix` URL (credentials come
 from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 
+**Validating descriptions.** LeanSearch v2's descriptions, and those written
+before the judge, can leave hypotheses out. `pisa-search validate-descriptions`
+judges stored descriptions as `informalize` judges new ones, describes again
+those that leave hypotheses out, and writes the replacements the judge passes
+as a new batch, which wins over the old descriptions; rebuild and load the
+bundle after it. It prints a line per description judged, and the judge calls
+and cost. `--source`, `--names` (names, or files of one name per line) and
+`--flagged` (descriptions readers flagged, from the database at
+`--database-url`) narrow what it judges, and `--dry-run` lists it:
+
+```sh
+pisa-search validate-descriptions --corpus search/corpus --informal search/store \
+  --source lsv2-v4.28.0-rc1 --names Real.logb_le_logb_of_le,Real.logb_lt_logb
+pisa-search validate-descriptions --corpus search/corpus --informal search/store \
+  --flagged --database-url "$PISA_DATABASE_URL"
+```
+
 **API** (types in `crates/pisa-protocol/src/search.rs`):
 
 | Endpoint | Request → response |
@@ -2262,6 +2292,7 @@ from `AWS_*`). It holds descriptions and vectors, keyed by content hash.
 | `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?, format?}], version?}` → `{version, results: [{hits, text?, warnings?, dense_pending?}]}`, at most 64 queries |
 | `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}` |
 | `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, value, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
+| `POST /declarations/{name}/flags` | `?module=&version=`, `{reason}` → `{version, description_flags}`: flags the declaration's description as wrong, e.g. for leaving out a hypothesis; a 404 for a declaration without one |
 
 Each hit carries:
 - name, kind, library, module and signature;
@@ -2270,8 +2301,13 @@ Each hit carries:
   characters (` …`). Recursive definitions have none, since Lean keeps only
   their compiled form, and a snapshot's is as its build printed it;
 - a description's `title` and `summary`, when one exists: whole sentences, two
-  at most within 240 characters;
-- flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`;
+  at most within 240 characters. `description_source` says where they come
+  from: `lsv2-v4.28.0-rc1` for LeanSearch v2's, the model that wrote it, or
+  `docstring` when the summary is the docstring's. A description is a search
+  aid; the signature says what holds;
+- flags: `uses_sorry`, `informal`, `deprecated_to`, `additive_sibling`, and
+  `description_flags`, how many times readers flagged the description as it
+  is now (one written again starts with none), which `text` mentions too;
 - a score, comparable only within one query, and a source link;
 - `text`, about 150 tokens ready for a model's context: the signature (past
   400 characters, binders go from the middle so that the conclusion stays),
@@ -2281,6 +2317,14 @@ Each hit carries:
 
 With `format: "text"`, a result has no `hits`, only `text`: each hit's `text`,
 separated by blank lines.
+
+A flag's `reason` is 1 to 2,000 characters. Flags are kept in the database the
+servers share, each on the description it flagged, by a hash of its text, and
+`validate-descriptions --flagged` (above) judges the flagged ones. A flag
+ignores `Pisa-Scope`: it is shared across scopes and counted for every client.
+Each request adds one, and nothing records who made it. Pisa has no
+authentication, so anyone who can reach the search service can flag; review a
+`--flagged` run's targets with `--dry-run` before paying for it.
 
 Unknown names and empty results are answers, not errors. A `libraries` or
 `kinds` filter matches case-insensitively; an unknown one is a 400 that lists
@@ -2303,6 +2347,7 @@ client = Client("http://localhost:8000")
 for hit in client.search(description="trace of a density matrix is one", libraries=["Physlib"])["hits"]:
     print(hit["text"])
 client.resolve(["Real.sqrt_mul_sefl"])[0]["suggestions"][0]["name"]  # "Real.sqrt_mul_self"
+client.flag_description("Real.logb_le_logb_of_le", "leaves out `1 < b`")  # the flags on it now
 ```
 
 The Rust and TypeScript clients have the same methods. The search tests,
@@ -2349,7 +2394,7 @@ the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
 - **Descriptions.** With `PISA_SEARCH_DESCRIBE_MODEL` set to a Claude model
   (with `ANTHROPIC_API_KEY`) or an OpenAI one (with `OPENAI_API_KEY`), the
   leader describes every snapshot declaration as `informalize` describes the
-  libraries.
+  libraries, judge included.
   So all snapshot code goes to that provider, at about $0.0003 a declaration
   with Claude Haiku 5.5. Without one, declarations are embedded from their
   docstrings. A failed description is tried 3 times in all; an

@@ -1198,6 +1198,13 @@ class Client:
         one in snapshot module `module`, as a snapshot hit's `module` names
         it, if it has one, else the bundle's. Raises NotFoundError for an
         unknown name."""
+    def flag_description(self, name: str, reason: str, *, module: str | None = None) -> int:
+        """Flag the description of declaration `name`, found as
+        `get_declaration` finds it, as wrong, e.g. for leaving out a
+        hypothesis, saying why in `reason` (1 to 2,000 characters). Returns
+        how many flags that description has now. The flag carries no scope:
+        it counts for every client. Raises NotFoundError for a declaration
+        without a description."""
 
 # Made from Client by tests/test_stubs.py: PISA_UPDATE_STUBS=1 pytest tests/test_stubs.py
 class AsyncClient:
@@ -1718,6 +1725,13 @@ class AsyncClient:
         one in snapshot module `module`, as a snapshot hit's `module` names
         it, if it has one, else the bundle's. Raises NotFoundError for an
         unknown name."""
+    def flag_description(self, name: str, reason: str, *, module: str | None = None) -> Future[int]:
+        """Flag the description of declaration `name`, found as
+        `get_declaration` finds it, as wrong, e.g. for leaving out a
+        hypothesis, saying why in `reason` (1 to 2,000 characters). Returns
+        how many flags that description has now. The flag carries no scope:
+        it counts for every client. Raises NotFoundError for a declaration
+        without a description."""
 # End of AsyncClient.
 
 class Query(TypedDict, total=False):
@@ -1749,6 +1763,9 @@ class Flags(TypedDict):
     deprecated_to: NotRequired[str]
     additive_sibling: NotRequired[str]
     imports: NotRequired[str]
+    # Readers' flags on its description as it is now, from
+    # `POST /declarations/{name}/flags`.
+    description_flags: NotRequired[int]
 
 class Hit(TypedDict):
     name: str
@@ -1759,6 +1776,9 @@ class Hit(TypedDict):
     value: NotRequired[str]
     title: NotRequired[str]
     summary: NotRequired[str]
+    # Where `title` and `summary` come from: the description's source, e.g.
+    # "lsv2-v4.28.0-rc1" or a model name, or "docstring".
+    description_source: NotRequired[str]
     flags: Flags
     score: float
     source_url: NotRequired[str]

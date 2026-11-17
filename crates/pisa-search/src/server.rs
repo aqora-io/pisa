@@ -10,10 +10,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use pisa_db::description_flags::DescriptionFlags;
 use pisa_protocol::api::{ApiErrors, Error, ErrorKind, ErrorResponse};
 use pisa_protocol::search::{
-    GetDeclarationResponse, ResolveRequest, ResolveResponse, SearchHealth, SearchRequest,
-    SearchResponse,
+    FlagDescriptionRequest, FlagDescriptionResponse, GetDeclarationResponse, ResolveRequest,
+    ResolveResponse, SearchHealth, SearchRequest, SearchResponse,
 };
 use pisa_protocol::version::Versions;
 use serde::Deserialize;
@@ -24,6 +25,7 @@ use utoipa::IntoParams;
 use crate::dense::Embedder;
 use crate::engine::Lanes;
 use crate::engine::{Engine, SearchError};
+use crate::informal_store::description_hash;
 use crate::llm::Llm;
 use crate::qdrant::Qdrant;
 use crate::symbols::{self, Symbols};
@@ -31,6 +33,9 @@ use crate::{indexer, informalize};
 
 /// Most queries or names one request may carry.
 const MAX_BATCH: usize = 64;
+
+/// The longest reason a flag may give, in characters.
+const MAX_REASON: usize = 2000;
 
 /// The longest wait between tries to open the engine.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
@@ -94,10 +99,10 @@ pub struct Search {
 }
 
 impl Search {
-    /// Starts search as `args` say, with the snapshots in `db`, resolving
-    /// requests' versions through `versions`; `None` if `args` name no
-    /// Qdrant. Bad settings are errors now; Qdrant being down, or the bundle
-    /// not loaded yet, only delays search.
+    /// Starts search as `args` say, with the snapshots and description flags
+    /// in `db`, resolving requests' versions through `versions`; `None` if
+    /// `args` name no Qdrant. Bad settings are errors now; Qdrant being down,
+    /// or the bundle not loaded yet, only delays search.
     pub async fn start(
         args: SearchArgs,
         db: pisa_db::db::Db,
@@ -132,6 +137,7 @@ impl Search {
             )),
             None => None,
         };
+        let flags = DescriptionFlags::new(db.clone());
         let snapshots = (!args.no_snapshots).then(|| Snapshots {
             version: some(args.snapshot_version).unwrap_or_else(|| env_id.clone()),
             db,
@@ -145,7 +151,7 @@ impl Search {
             q,
             waiting: Mutex::new("opening the engine".into()),
         });
-        tokio::spawn(search.clone().open(symbols, embedder, snapshots));
+        tokio::spawn(search.clone().open(symbols, embedder, snapshots, flags));
         Ok(Some(search))
     }
 
@@ -168,6 +174,7 @@ impl Search {
         symbols: Symbols,
         embedder: Option<Embedder>,
         snapshots: Option<Snapshots>,
+        flags: DescriptionFlags,
     ) {
         let mut backoff = Duration::from_secs(1);
         let mut engine = loop {
@@ -193,6 +200,7 @@ impl Search {
             backoff = (backoff * 2).min(MAX_BACKOFF);
         };
         engine.snapshots = snapshots.as_ref().map(|s| s.version.clone());
+        engine.description_flags = Some(flags);
         let engine = Arc::new(engine);
         if let Some(s) = snapshots {
             tracing::info!(version = %s.version, "searching snapshots");
@@ -250,7 +258,7 @@ impl Search {
 #[derive(utoipa::OpenApi)]
 #[openapi(
     components(schemas(ErrorResponse)),
-    paths(search_handler, resolve, get_declaration)
+    paths(search_handler, resolve, get_declaration, flag_description)
 )]
 pub struct ApiDoc;
 
@@ -260,6 +268,7 @@ pub fn routes(search: Arc<Search>) -> Router {
         .route("/search", post(search_handler))
         .route("/resolve", post(resolve))
         .route("/declarations/{name}", get(get_declaration))
+        .route("/declarations/{name}/flags", post(flag_description))
         .with_state(search)
 }
 
@@ -455,21 +464,90 @@ async fn get_declaration(
             version: engine.env_id().to_string(),
             declaration,
         })),
-        None => {
-            let r = engine
-                .resolve(std::slice::from_ref(&name))
-                .await
-                .map_err(unavailable)?;
-            let hint = r
-                .first()
-                .and_then(|r| r.suggestions.first())
-                .map(|s| format!("; did you mean {}?", s.name));
-            Err(ApiError::new(
-                ErrorKind::NotFound,
-                format!("unknown declaration {name}{}", hint.unwrap_or_default()),
-            ))
-        }
+        None => Err(unknown_declaration(engine, &name).await),
     }
+}
+
+/// A 404 for `name`, with the closest existing name.
+async fn unknown_declaration(engine: &Engine, name: &str) -> ApiError {
+    let r = match engine.resolve(&[name.to_string()]).await {
+        Ok(r) => r,
+        Err(e) => return unavailable(e),
+    };
+    let hint = r
+        .first()
+        .and_then(|r| r.suggestions.first())
+        .map(|s| format!("; did you mean {}?", s.name));
+    ApiError::new(
+        ErrorKind::NotFound,
+        format!("unknown declaration {name}{}", hint.unwrap_or_default()),
+    )
+}
+
+#[utoipa::path(
+    post, path = "/declarations/{name}/flags", operation_id = "flagDescription", tag = "search",
+    summary = "Flag a declaration's description",
+    description = "Says its description is wrong, e.g. that it leaves out a hypothesis. Hits \
+        count the flags on their description in `flags.description_flags`, and a description \
+        written again starts with none. The declaration is found as `GET /declarations/{name}` \
+        finds it; one without a description is a 404. A flag ignores `Pisa-Scope`: it carries \
+        no scope, so it is shared across scopes and counted in every client's hits. The scope \
+        bounds only the snapshot module `module` may name. Each request adds a flag; nothing \
+        records who made it.",
+    params(("name" = String, Path, description = "The full name"), GetDeclarationQuery),
+    request_body = FlagDescriptionRequest,
+    responses((status = 200, description = "The flags on the description", body = FlagDescriptionResponse), ApiErrors),
+)]
+async fn flag_description(
+    State(search): State<Arc<Search>>,
+    Path(name): Path<String>,
+    Query(q): Query<GetDeclarationQuery>,
+    Body(req): Body<FlagDescriptionRequest>,
+) -> Result<Json<FlagDescriptionResponse>, ApiError> {
+    let engine = search.engine()?;
+    search.check_version(engine, q.version.as_deref())?;
+    let reason = req.reason.trim();
+    if reason.is_empty() || reason.chars().count() > MAX_REASON {
+        return Err(ApiError::new(
+            ErrorKind::BadRequest,
+            format!("a reason is 1 to {MAX_REASON} characters"),
+        ));
+    }
+    let Some(flags) = &engine.description_flags else {
+        return Err(ApiError::new(
+            ErrorKind::Unavailable,
+            "this server keeps no description flags",
+        ));
+    };
+    let detail = engine
+        .detail(&name, q.module.as_deref())
+        .await
+        .map_err(unavailable)?;
+    let Some(detail) = detail else {
+        return Err(unknown_declaration(engine, &name).await);
+    };
+    let Some(d) = detail.description else {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("{name} has no description; its summary, if any, is its docstring"),
+        ));
+    };
+    let key = (
+        name,
+        description_hash(&d.title, &d.text, d.latex.as_deref()),
+    );
+    flags
+        .add(&key.0, &key.1, reason)
+        .await
+        .map_err(|e| ApiError(e.into()))?;
+    let counts = flags
+        .counts(std::slice::from_ref(&key))
+        .await
+        .map_err(|e| ApiError(e.into()))?;
+    Ok(Json(FlagDescriptionResponse {
+        version: engine.env_id().to_string(),
+        description_flags: counts.get(&key).copied().unwrap_or(0),
+    }))
 }
 
 #[cfg(test)]

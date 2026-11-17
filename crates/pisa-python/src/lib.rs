@@ -1145,6 +1145,22 @@ impl Base {
             inner.get_declaration(&name, module.as_deref()).await
         })
     }
+
+    #[pyo3(signature = (name, reason, *, module = None))]
+    fn flag_description<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        reason: String,
+        module: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        self.call(py, async move {
+            inner
+                .flag_description(&name, &reason, module.as_deref())
+                .await
+        })
+    }
 }
 
 #[pymodule]

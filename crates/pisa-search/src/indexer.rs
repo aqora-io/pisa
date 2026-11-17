@@ -988,8 +988,8 @@ impl Indexer {
             while let Some((i, result)) = answers.next().await {
                 let d = targets[i];
                 let error = match result {
-                    Ok(r) => {
-                        let outcome = ctx.outcome(cfg, d, r);
+                    Ok((r, judged)) => {
+                        let outcome = ctx.outcome(cfg, d, r, judged.as_ref());
                         match outcome.entry {
                             Some(entry) => {
                                 ctx.described.insert(d.name.clone(), entry.informal.clone());

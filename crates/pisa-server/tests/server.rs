@@ -94,6 +94,11 @@ async fn without_qdrant_there_is_no_search() {
         post(&url("/search"), json!({"queries": []})).await,
         post(&url("/resolve"), json!({"names": []})).await,
         get(&url("/declarations/Nat.add_comm")).await,
+        post(
+            &url("/declarations/Nat.add_comm/flags"),
+            json!({"reason": "wrong"}),
+        )
+        .await,
     ];
     for (status, body) in searches {
         assert_eq!(status, 404, "{body}");

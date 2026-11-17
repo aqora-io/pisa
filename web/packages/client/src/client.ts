@@ -16,6 +16,8 @@ import type {
   DocumentGoals,
   DocumentProbes,
   ErrorKind,
+  FlagDescriptionRequest,
+  FlagDescriptionResponse,
   GetDeclarationResponse,
   GetJobResponse,
   GoalsMode,
@@ -834,6 +836,19 @@ export class PisaClient {
     if (options.module !== undefined) query.set("module", options.module);
     const r = await this.call<GetDeclarationResponse>("GET", ["declarations", name], undefined, options, query);
     return r.declaration;
+  }
+
+  /** Flags the description of declaration `name`, found as `getDeclaration`
+   *  finds it, as wrong, e.g. for leaving out a hypothesis, saying why in
+   *  `reason` (1 to 2,000 characters); returns how many flags that
+   *  description has now. The flag carries no scope: it counts for every
+   *  client. A declaration without a description is a `not_found`. */
+  async flagDescription(name: string, reason: string, options: GetDeclarationOptions = {}): Promise<number> {
+    const query = this.versionQuery(options);
+    if (options.module !== undefined) query.set("module", options.module);
+    const body: FlagDescriptionRequest = { reason };
+    const r = await this.call<FlagDescriptionResponse>("POST", ["declarations", name, "flags"], body, options, query);
+    return r.description_flags;
   }
 
   private checkSessionRequest(code: string, options: CheckSessionOptions): CheckSessionRequest {

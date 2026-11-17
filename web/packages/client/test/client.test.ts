@@ -63,6 +63,18 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("flags a description with its reason, and returns the flags on it", async () => {
+    const { client, sent } = recording(() => json({ version: "v1", description_flags: 2 }));
+    expect(await client.flagDescription("Real.logb/x", "leaves out `1 < b`", { module: "PisaSnap.sa1" })).toBe(2);
+    expect(sent).toMatchObject([
+      {
+        url: "/api/declarations/Real.logb%2Fx/flags?version=v1&module=PisaSnap.sa1",
+        method: "POST",
+        body: { reason: "leaves out `1 < b`" },
+      },
+    ]);
+  });
+
   it("sends positions only when there are some", async () => {
     const { client, sent } = recording(() => json({ results: [] }));
     await client.check("x", { detail: ["terms"], at: [{ line: 2, column: 4 }] });

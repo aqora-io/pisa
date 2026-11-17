@@ -26,6 +26,16 @@ pub struct Usage {
     pub cache_read_input_tokens: u64,
 }
 
+impl Usage {
+    /// Adds `other`'s tokens to these.
+    pub fn add(&mut self, other: &Usage) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+        self.cache_read_input_tokens += other.cache_read_input_tokens;
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// The key is missing, invalid or lacks permission; no request will work.

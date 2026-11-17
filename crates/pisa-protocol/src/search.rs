@@ -5,6 +5,7 @@
 //! | `POST /search` | [`SearchRequest`] → [`SearchResponse`] |
 //! | `POST /resolve` | [`ResolveRequest`] → [`ResolveResponse`] |
 //! | `GET /declarations/{name}` | → [`GetDeclarationResponse`] |
+//! | `POST /declarations/{name}/flags` | [`FlagDescriptionRequest`] → [`FlagDescriptionResponse`] |
 //!
 //! Errors use [`crate::api::ErrorResponse`]. Unknown names and empty results
 //! are ordinary answers, never errors. Every response names the `version` (the
@@ -181,6 +182,12 @@ pub struct Hit {
     /// One or two sentences describing it, when a description exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// Where `title` and `summary` come from: the description's source, e.g.
+    /// "lsv2-v4.28.0-rc1" (LeanSearch v2's) or the model that wrote it, or
+    /// "docstring" when the summary is the docstring's. A description is a
+    /// search aid: the signature says what holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_source: Option<String>,
     #[schema(required = true)]
     #[serde(default)]
     pub flags: Flags,
@@ -223,6 +230,15 @@ pub struct Flags {
     /// default header (`import Mathlib` and `import Physlib`) doesn't.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imports: Option<String>,
+    /// How many times readers flagged its description as wrong, with
+    /// `POST /declarations/{name}/flags`, in any scope: this description, so
+    /// one written again starts at none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub description_flags: u32,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -318,6 +334,21 @@ pub struct DeclarationDetail {
     pub dependencies: Vec<String>,
     /// Declarations that use it, most prominent first (at most 50).
     pub used_by: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FlagDescriptionRequest {
+    /// What is wrong with the description, e.g. "leaves out `1 < b`": 1 to
+    /// 2,000 characters.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct FlagDescriptionResponse {
+    /// The version the index was built from.
+    pub version: String,
+    /// The flags on the description now, from every scope, this one included.
+    pub description_flags: u32,
 }
 
 /// A natural-language description of a declaration.

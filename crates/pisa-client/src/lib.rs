@@ -48,7 +48,8 @@ use pisa_protocol::api::{
     StartSessionRequest, UpdateSnapshotRequest,
 };
 use pisa_protocol::search::{
-    GetDeclarationResponse, ResolveRequest, ResolveResponse, SearchRequest, SearchResponse,
+    FlagDescriptionRequest, FlagDescriptionResponse, GetDeclarationResponse, ResolveRequest,
+    ResolveResponse, SearchRequest, SearchResponse,
 };
 use reqwest::Url;
 use serde::Serialize;
@@ -1842,18 +1843,44 @@ impl Client {
         name: &str,
         module: Option<&str>,
     ) -> Result<DeclarationDetail, Error> {
+        let url = self.declaration_url(&[name], module)?;
+        let resp: GetDeclarationResponse = self.endpoint.get(url).await?;
+        Ok(resp.declaration)
+    }
+
+    /// Flags the description of declaration `name`, found as
+    /// [`Client::get_declaration`] finds it, as wrong, e.g. for leaving out
+    /// a hypothesis, and says why; returns how many flags that description
+    /// has now. The flag carries no scope: it counts for every client. A
+    /// declaration without a description is [`ErrorKind::NotFound`].
+    pub async fn flag_description(
+        &self,
+        name: &str,
+        reason: &str,
+        module: Option<&str>,
+    ) -> Result<u32, Error> {
+        let url = self.declaration_url(&[name, "flags"], module)?;
+        let req = FlagDescriptionRequest {
+            reason: reason.into(),
+        };
+        let resp: FlagDescriptionResponse =
+            self.endpoint.post_to(url, &req, Repeat::Unsafe).await?;
+        Ok(resp.description_flags)
+    }
+
+    /// `/declarations/` and `segments`, with `module` and the version.
+    fn declaration_url(&self, segments: &[&str], module: Option<&str>) -> Result<Url, Error> {
         let mut url = self.endpoint.url("declarations")?;
         url.path_segments_mut()
-            .map_err(|_| Error::Url(name.to_string()))?
-            .push(name);
+            .map_err(|_| Error::Url(segments.join("/")))?
+            .extend(segments);
         if let Some(m) = module {
             url.query_pairs_mut().append_pair("module", m);
         }
         if let Some(v) = &self.version {
             url.query_pairs_mut().append_pair("version", v);
         }
-        let resp: GetDeclarationResponse = self.endpoint.get(url).await?;
-        Ok(resp.declaration)
+        Ok(url)
     }
 
     async fn post<B: Serialize, T: DeserializeOwned>(

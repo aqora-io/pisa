@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use pisa_db::db::Db;
+use pisa_db::description_flags::DescriptionFlags;
 use pisa_protocol::search::{Format, Informal, Query};
 use pisa_protocol::version::Versions;
 use pisa_search::corpus::{self, Corpus, Decl, Manifest};
@@ -600,12 +602,23 @@ async fn detail_lists_dependencies_and_users() {
 }
 
 /// Serves `t`'s engine, searching the snapshots of version `snapshots` if
-/// any; returns its address.
+/// any, with description flags in a database of its own; returns its address.
 async fn serve(t: &Loaded, snapshots: Option<&str>) -> std::net::SocketAddr {
+    let flags = DescriptionFlags::new(Db::memory().await);
+    serve_flagged(t, snapshots, flags).await
+}
+
+/// [`serve`], keeping description flags in `flags`.
+async fn serve_flagged(
+    t: &Loaded,
+    snapshots: Option<&str>,
+    flags: DescriptionFlags,
+) -> std::net::SocketAddr {
     let q = t.q.clone();
     let symbols = Symbols::parse(symbols::DEFAULT).unwrap();
     let mut engine = Engine::open(q, &t.env_id, symbols, None).await.unwrap();
     engine.snapshots = snapshots.map(str::to_string);
+    engine.description_flags = Some(flags);
     let search = pisa_search::server::Search::ready(Arc::new(engine), Versions::default());
     let app = pisa_search::server::router(search);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -711,6 +724,116 @@ async fn http_api() {
     t.done().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn hits_name_where_their_description_comes_from() {
+    let Some(t) = engine().await else { return };
+    let source = async |name: &str| {
+        let q = Query {
+            name: Some(name.into()),
+            limit: 1,
+            ..Default::default()
+        };
+        let hit = t.engine.search(&q).await.unwrap().hits.remove(0);
+        assert_eq!(hit.name, name);
+        hit.description_source
+    };
+    assert_eq!(source("Matrix.trace_one").await.as_deref(), Some("test"));
+    // The summary is the docstring's when there is no description.
+    assert_eq!(source("Matrix.trace").await.as_deref(), Some("docstring"));
+    assert_eq!(source("Matrix").await, None);
+    t.done().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flag_on_a_description_counts_on_its_hits() {
+    let Some(t) = engine().await else { return };
+    let flags = DescriptionFlags::new(Db::memory().await);
+    let addr = serve_flagged(&t, None, flags.clone()).await;
+    let c = reqwest::Client::new();
+    let flag = async |name: &str, reason: &str| {
+        let r = c
+            .post(format!("http://{addr}/declarations/{name}/flags"))
+            .json(&serde_json::json!({"reason": reason}))
+            .send()
+            .await
+            .unwrap();
+        (
+            r.status().as_u16(),
+            r.json::<serde_json::Value>().await.unwrap(),
+        )
+    };
+    let hit = async || {
+        let r: serde_json::Value = c
+            .post(format!("http://{addr}/search"))
+            .json(&serde_json::json!({"queries": [{"name": "Matrix.trace_one", "limit": 1}]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        r["results"][0]["hits"][0].clone()
+    };
+    assert!(hit().await["flags"].get("description_flags").is_none());
+
+    let (status, body) = flag("Matrix.trace_one", "says nothing about n being finite").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        serde_json::json!({"version": t.env_id, "description_flags": 1})
+    );
+    let (_, body) = flag("Matrix.trace_one", "too vague").await;
+    assert_eq!(body["description_flags"], 2);
+    // Flags on a description it had before don't count.
+    flags
+        .add("Matrix.trace_one", "an earlier description", "wrong")
+        .await
+        .unwrap();
+    let h = hit().await;
+    assert_eq!(h["flags"]["description_flags"], 2, "{h}");
+    assert!(
+        h["text"]
+            .as_str()
+            .unwrap()
+            .contains("description flagged 2 times: check it against the signature"),
+        "{h}"
+    );
+    let d: serde_json::Value = c
+        .get(format!("http://{addr}/declarations/Matrix.trace_one"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(d["declaration"]["flags"]["description_flags"], 2, "{d}");
+
+    // A declaration without a description, or none at all, has nothing to flag.
+    let (status, body) = flag("Matrix.trace", "wrong").await;
+    assert_eq!(status, 404);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Matrix.trace has no description"),
+        "{body}"
+    );
+    let (status, body) = flag("Real.sqrt_mul_sefl", "wrong").await;
+    assert_eq!(status, 404);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("did you mean Real.sqrt_mul_self"),
+        "{body}"
+    );
+    for reason in ["", " \n", &"x".repeat(2001)] {
+        let (status, body) = flag("Matrix.trace_one", reason).await;
+        assert_eq!(status, 400, "{body}");
+    }
+    t.done().await;
+}
+
 /// A server whose snapshots are another version's answers for that
 /// version too, from its index.
 #[tokio::test(flavor = "multi_thread")]
@@ -783,6 +906,16 @@ async fn rust_client() {
     assert_eq!(d.dependencies, ["Matrix"]);
     let err = c
         .get_declaration("Real.sqrt_mul_sefl", None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::NotFound));
+
+    let flags = c.flag_description("Matrix.trace_one", "too vague", None);
+    assert_eq!(flags.await.unwrap(), 1);
+    let flags = c.flag_description("Matrix.trace_one", "still vague", Some("PisaSnap.s0"));
+    assert_eq!(flags.await.unwrap(), 2);
+    let err = c
+        .flag_description("Matrix.trace", "wrong", None)
         .await
         .unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::NotFound));

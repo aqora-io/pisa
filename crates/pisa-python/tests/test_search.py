@@ -110,6 +110,10 @@ def test_search(url):
     assert hits[0]["name"] == "Matrix.trace_one"
     assert isinstance(hits[0]["score"], float)
     assert "status" not in hits[0] and "verified" not in hits[0]
+    # Without a description, the summary is the docstring's.
+    assert hits[0]["description_source"] == "docstring"
+    assert hits[0]["summary"] == "The trace of the identity matrix is the dimension."
+    assert "description_flags" not in hits[0]["flags"]
 
     by_consts = client.search(consts=["Matrix.trace"], kinds=["theorem"])["hits"]
     assert by_consts[0]["name"] == "Matrix.trace_one", by_consts
@@ -122,6 +126,7 @@ def test_search(url):
 
     by_name = client.search(name="Real.sqrt_mul_sefl", limit=1)["hits"]
     assert [h["name"] for h in by_name] == ["Real.sqrt_mul_self"]
+    assert "description_source" not in by_name[0] and "summary" not in by_name[0]
     assert client.search("Real.sqrt_mul_sefl", libraries=["Mathlib"], kinds=["theorem"])["hits"]
 
     results = client.search_batch(
@@ -146,6 +151,17 @@ def test_resolve_and_get_declaration(url):
     assert client.get_declaration("Matrix.trace", module="PisaSnap.s0")["library"] == "Mathlib"
     with pytest.raises(NotFoundError, match="did you mean Real.sqrt_mul_self"):
         client.get_declaration("Real.sqrt_mul_sefl")
+
+
+def test_flag_description(url):
+    client = Client(url)
+    # The test's index has no descriptions, only docstrings, which aren't flagged.
+    with pytest.raises(NotFoundError, match="Matrix.trace_one has no description"):
+        client.flag_description("Matrix.trace_one", "too vague")
+    with pytest.raises(NotFoundError, match="did you mean Real.sqrt_mul_self"):
+        client.flag_description("Real.sqrt_mul_sefl", "wrong", module="PisaSnap.s0")
+    with pytest.raises(PisaError, match="a reason is 1 to 2000 characters"):
+        client.flag_description("Matrix.trace_one", " ")
 
 
 def test_version(url):

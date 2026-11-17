@@ -15,6 +15,7 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use pisa_protocol::search::Informal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
@@ -27,6 +28,17 @@ pub struct Entry {
     /// Model, tokens and cost of generating it, when generated here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
+}
+
+/// A description's hash, from its title, text and LaTeX: readers' flags are
+/// on the description they read, so one written again starts with none.
+pub fn description_hash(title: &str, text: &str, latex: Option<&str>) -> String {
+    let mut h = Sha256::new();
+    for part in [title, text, latex.unwrap_or_default()] {
+        h.update(part.as_bytes());
+        h.update([0]);
+    }
+    hex::encode(&h.finalize()[..16])
 }
 
 pub struct Store {
@@ -144,6 +156,23 @@ mod tests {
             },
             synthetic_queries: Vec::new(),
             meta: None,
+        }
+    }
+
+    #[test]
+    fn a_description_hash_follows_its_text() {
+        let hash = |title, text, latex| description_hash(title, text, latex);
+        let h = hash("Name", "Words.", Some("x = x"));
+        assert_eq!(h, hash("Name", "Words.", Some("x = x")));
+        assert_eq!(h.len(), 32);
+        for other in [
+            hash("Name", "Other words.", Some("x = x")),
+            hash("Other", "Words.", Some("x = x")),
+            hash("Name", "Words.", None),
+            // Fields don't run into each other.
+            hash("NameW", "ords.", Some("x = x")),
+        ] {
+            assert_ne!(h, other);
         }
     }
 
