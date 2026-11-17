@@ -1791,6 +1791,7 @@ class QueryResult(TypedDict):
     hits: list[Hit]
     text: NotRequired[str]
     warnings: NotRequired[list[str]]
+    hints: NotRequired[list[str]]
     dense_pending: NotRequired[bool]
 
 class Suggestion(TypedDict):

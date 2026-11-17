@@ -2609,6 +2609,13 @@
             "description": "The dense lane was left out because the query is still being\nembedded; asking again shortly will likely include it.",
             "type": "boolean"
           },
+          "hints": {
+            "description": "Advice the query's words earned, e.g. which lemmas to combine for a\nlogarithm's base, in the order the words fired it, without repeats.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "hits": {
             "description": "Empty with `format: \"text\"`.",
             "items": {

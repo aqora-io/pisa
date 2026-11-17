@@ -396,6 +396,13 @@ impl Engine {
             if q.limit == 0 {
                 continue;
             }
+            let words: Vec<String> = parsed[i]
+                .prose
+                .iter()
+                .chain(&parsed[i].lean)
+                .cloned()
+                .collect();
+            results[i].hints = self.symbols.hints(&words);
             let unavailable = "dense lane unavailable, results from the other lanes only";
             let vector = match &vectors[i] {
                 Some(Embedded::Vector(v)) => Some(v.as_slice()),

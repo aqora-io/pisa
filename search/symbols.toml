@@ -90,6 +90,15 @@ tokens = ["log", "logarithm", "ln"]
 constants = ["Real.log", "Complex.log"]
 
 [[symbol]]
+tokens = ["logb", "log base"]
+constants = ["Real.logb"]
+
+[[symbol]]
+tokens = ["logb base"]
+constants = ["Real.logb", "Real.log", "Real.log_div_log"]
+hint = "Few lemmas vary the base of a logarithm. Rewrite `logb b x = log x / log b` with `Real.log_div_log`, then compare the denominators, e.g. with `div_le_div_of_nonneg_left`."
+
+[[symbol]]
 tokens = ["sin", "sine"]
 constants = ["Real.sin", "Complex.sin"]
 

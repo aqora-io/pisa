@@ -2233,6 +2233,11 @@ export interface components {
              *     embedded; asking again shortly will likely include it.
              */
             dense_pending?: boolean;
+            /**
+             * @description Advice the query's words earned, e.g. which lemmas to combine for a
+             *     logarithm's base, in the order the words fired it, without repeats.
+             */
+            hints?: string[];
             /** @description Empty with `format: "text"`. */
             hits: components["schemas"]["Hit"][];
             /** @description With `format: "text"`: the hits rendered, separated by blank lines. */

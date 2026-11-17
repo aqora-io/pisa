@@ -385,6 +385,23 @@ impl Report {
 
 #[cfg(test)]
 mod tests {
+    /// The shipped set of findings reads, and each item sits on the split
+    /// its id says.
+    #[test]
+    fn the_mathlib_findings_set_reads() {
+        let text = include_str!("../../../search/eval/sets/mathlib-findings.json");
+        let set: Set = serde_json::from_str(text).unwrap();
+        assert_eq!(set.name, "mathlib-findings");
+        assert_eq!(set.items.len(), 2);
+        for item in &set.items {
+            assert_eq!(item.split, split_of(&item.id), "{}", item.id);
+            assert_eq!(item.query.libraries, ["Mathlib"], "{}", item.id);
+            assert!(!item.answers.is_empty(), "{}", item.id);
+        }
+        assert_eq!(set.items[0].answers, ["Real.log_div_log", "Real.logb"]);
+        assert_eq!(set.items[1].answers, ["Real.logb_le_logb_of_le"]);
+    }
+
     use super::*;
     use pisa_protocol::search::Flags;
 

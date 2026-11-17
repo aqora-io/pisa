@@ -1,0 +1,6 @@
+{"name": "mathlib-findings",
+"about": "Searches that failed in a formalization campaign. The answers are the declarations the accepted proof used (`Real.logb` unfolded, `Real.log_div_log`) or the lemma the searcher wanted.",
+"items": [
+{"answers":["Real.log_div_log","Real.logb"],"id":"logb-antitone-in-its-base","query":{"libraries":["Mathlib"],"text":"logb antitone in its base"},"split":"dev","style":"Mathlib/text","source":"erdos-formalism findings/002-search-varying-logarithm-base.md"},
+{"answers":["Real.logb_le_logb_of_le"],"id":"logb-description-base-antitone","query":{"description":"real logarithm logb is antitone in its base for argument at least one","libraries":["Mathlib"]},"split":"dev","style":"Mathlib/description","source":"erdos-formalism logs/finding-controls/search-descriptions/audit.md"}
+]}

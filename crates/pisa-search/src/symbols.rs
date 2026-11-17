@@ -7,6 +7,7 @@
 //!                                   # "partial trace" needs both words
 //! constants = ["Matrix.trace"]
 //! context = ["matrix", "density"]   # optional: full weight only with one of these
+//! hint = "..."                      # optional: sent back to the caller when the entry fires
 //! ```
 
 use serde::Deserialize;
@@ -23,6 +24,8 @@ struct Entry {
     constants: Vec<String>,
     #[serde(default)]
     context: Vec<String>,
+    #[serde(default)]
+    hint: Option<String>,
 }
 
 /// The dictionary shipped in `search/symbols.toml`.
@@ -74,6 +77,22 @@ impl Symbols {
                     Some(existing) => existing.1 = existing.1.max(weight),
                     None => out.push((c.clone(), weight)),
                 }
+            }
+        }
+        out
+    }
+
+    /// The hints of the entries a query's tokens fire, without repeats, in
+    /// the dictionary's order.
+    pub fn hints(&self, tokens: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for e in &self.entries {
+            let has = |t: &String| t.split(' ').all(|w| tokens.iter().any(|q| q == w));
+            let Some(hint) = e.hint.as_ref().filter(|_| e.tokens.iter().any(has)) else {
+                continue;
+            };
+            if !out.contains(hint) {
+                out.push(hint.clone());
             }
         }
         out
@@ -184,6 +203,58 @@ mod tests {
                 means(text)
             );
         }
+    }
+
+    /// An entry's hint is reported when the entry fires, once however many
+    /// entries share it, and an entry without one reports nothing.
+    #[test]
+    fn a_fired_entry_reports_its_hint() {
+        let s = Symbols::parse(
+            r#"
+            [[symbol]]
+            tokens = ["a b", "ab"]
+            constants = ["X"]
+            hint = "use X"
+            [[symbol]]
+            tokens = ["ab"]
+            constants = ["Y"]
+            hint = "use X"
+            [[symbol]]
+            tokens = ["c"]
+            constants = ["Z"]
+            "#,
+        )
+        .unwrap();
+        let hints = |text: &str| s.hints(&tokens(text));
+        assert_eq!(hints("a b"), ["use X"]);
+        assert_eq!(hints("ab c"), ["use X"]);
+        assert!(hints("a").is_empty());
+        assert!(hints("c").is_empty());
+    }
+
+    /// A logarithm's base is told apart from its argument: the phrase fires
+    /// the hint, and plain `log` doesn't.
+    #[test]
+    fn shipped_logb_base_carries_its_hint() {
+        let s = Symbols::parse(DEFAULT).unwrap();
+        let q = tokens("logb antitone in its base");
+        let hints = s.hints(&q);
+        assert_eq!(hints.len(), 1, "{hints:?}");
+        assert!(hints[0].contains("Real.log_div_log"), "{hints:?}");
+        let consts: Vec<String> = s.constants(&q).into_iter().map(|(c, _)| c).collect();
+        assert!(consts.contains(&"Real.logb".to_string()), "{consts:?}");
+        assert!(
+            consts.contains(&"Real.log_div_log".to_string()),
+            "{consts:?}"
+        );
+        assert!(s.hints(&tokens("logb is monotone")).is_empty());
+        assert!(s.hints(&tokens("the log of the base")).is_empty());
+        let consts: Vec<String> = s
+            .constants(&tokens("log base"))
+            .into_iter()
+            .map(|(c, _)| c)
+            .collect();
+        assert!(consts.contains(&"Real.logb".to_string()), "{consts:?}");
     }
 
     #[test]

@@ -218,6 +218,46 @@ fn corpus() -> Corpus {
             )
         },
         D {
+            doc: Some("The natural logarithm of a real number."),
+            ..d(
+                "Real.log",
+                "def",
+                "Mathlib",
+                "Real.log (x : ℝ) : ℝ",
+                &["Real"],
+            )
+        },
+        D {
+            doc: Some("The logarithm of x to the base b."),
+            ..d(
+                "Real.logb",
+                "def",
+                "Mathlib",
+                "Real.logb (b x : ℝ) : ℝ",
+                &["Real"],
+            )
+        },
+        D {
+            value_refs: &["Real.logb", "Real.log"],
+            ..d(
+                "Real.log_div_log",
+                "theorem",
+                "Mathlib",
+                "Real.log_div_log {b x : ℝ} : Real.log x / Real.log b = Real.logb b x",
+                &["Real.log", "Real.logb", "Real"],
+            )
+        },
+        D {
+            value_refs: &["Real.logb"],
+            ..d(
+                "Real.logb_le_logb_of_le",
+                "theorem",
+                "Mathlib",
+                "Real.logb_le_logb_of_le {b x y : ℝ} (hb : 1 < b) (hx : 0 < x) (hxy : x ≤ y) : Real.logb b x ≤ Real.logb b y",
+                &["Real.logb", "Real"],
+            )
+        },
+        D {
             doc: Some("The Lorentz group is connected."),
             ..d(
                 "LorentzGroup.isConnected",
@@ -1075,6 +1115,45 @@ async fn consts_name_the_constants_a_search_is_about() {
         .unwrap();
     let hits: Vec<&str> = r[0].hits.iter().map(|h| h.name.as_str()).collect();
     assert!(hits.contains(&"Matrix.trace_one"), "{hits:?}");
+    t.done().await;
+}
+
+/// A symbol's hint comes back with the result, and its constants lift the
+/// lemmas that unfold the base of a logarithm into the first hits.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_base_of_a_logarithm_is_told_apart_from_its_argument() {
+    let Some(t) = engine().await else { return };
+    let q = Query {
+        text: Some("logb antitone in its base".into()),
+        libraries: vec!["Mathlib".into()],
+        ..Default::default()
+    };
+    let r = t.engine.search(&q).await.unwrap();
+    let names: Vec<&str> = r.hits.iter().map(|h| h.name.as_str()).collect();
+    let top5 = &names[..names.len().min(5)];
+    assert!(top5.contains(&"Real.log_div_log"), "{names:?}");
+    assert!(top5.contains(&"Real.logb"), "{names:?}");
+    // The other lanes' scores shift with the run; the structural lane's
+    // don't, and it is what the symbols feed.
+    let structural = (t.engine)
+        .search_batch(std::slice::from_ref(&q), only("structural"))
+        .await
+        .unwrap();
+    let names: Vec<&str> = structural[0].hits.iter().map(|h| h.name.as_str()).collect();
+    let rank = |n: &str| {
+        (names.iter().position(|x| *x == n)).unwrap_or_else(|| panic!("{n} isn't in {names:?}"))
+    };
+    assert!(
+        rank("Real.log_div_log") < rank("Real.logb_le_logb_of_le"),
+        "{names:?}"
+    );
+    assert_eq!(r.hints.len(), 1, "{:?}", r.hints);
+    assert!(r.hints[0].contains("Real.log_div_log"), "{:?}", r.hints);
+    let q = Query {
+        text: Some("trace of the identity matrix".into()),
+        ..Default::default()
+    };
+    assert!(t.engine.search(&q).await.unwrap().hints.is_empty());
     t.done().await;
 }
 

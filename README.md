@@ -2129,7 +2129,7 @@ with weighted reciprocal rank fusion:
   type's constants. A Lean word counts only when it names a declaration, so a
   goal's hypothesis names and variables don't; `consts` names constants
   exactly. LaTeX symbols, notation and quantum-information words (`|ψ⟩`,
-  `ᴴ`, partial trace, fidelity) map to constants through `search/symbols.toml`;
+  `ᴴ`, partial trace, fidelity) map to constants through `search/symbols.toml`, which can also carry a hint that comes back in the result's `hints` when its words are in the query, e.g. how to compare logarithms of different bases;
 - **conclusion:** a goal's target, after its `⊢`, or a `pattern`, against what
   each theorem concludes: the constants of its conclusion's
   discrimination-tree key, which an index of format 5 or later holds. A
@@ -2289,7 +2289,7 @@ pisa-search validate-descriptions --corpus search/corpus --informal search/store
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?, format?}], version?}` → `{version, results: [{hits, text?, warnings?, dense_pending?}]}`, at most 64 queries |
+| `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?, format?}], version?}` → `{version, results: [{hits, text?, warnings?, hints?, dense_pending?}]}`, at most 64 queries |
 | `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}` |
 | `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, value, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 | `POST /declarations/{name}/flags` | `?module=&version=`, `{reason}` → `{version, description_flags}`: flags the declaration's description as wrong, e.g. for leaving out a hypothesis; a 404 for a declaration without one |

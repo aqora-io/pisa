@@ -155,6 +155,10 @@ pub struct QueryResult {
     /// What made this result worse than usual, e.g. a lane that failed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Advice the query's words earned, e.g. which lemmas to combine for a
+    /// logarithm's base, in the order the words fired it, without repeats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
     /// The dense lane was left out because the query is still being
     /// embedded; asking again shortly will likely include it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
