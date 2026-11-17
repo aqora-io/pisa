@@ -39,10 +39,12 @@ ENV ELAN_HOME=/opt/elan PATH=/opt/elan/bin:$PATH
 ARG LEAN_TOOLCHAIN=leanprover/lean4:v4.36.0-rc2
 RUN curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
     | sh -s -- -y --no-modify-path --default-toolchain ${LEAN_TOOLCHAIN}
-# The REPL must be built with exactly the project's toolchain.
+# The REPL must be built with exactly the project's toolchain. The patch adds
+# `infotreeAt`, which prints the info tree only at given positions.
 ARG REPL_REV=v4.36.0-rc2
+COPY docker/repl/infotree-at.patch /tmp/infotree-at.patch
 RUN git clone --depth 1 --branch ${REPL_REV} https://github.com/leanprover-community/repl /opt/repl \
-    && cd /opt/repl && lake build \
+    && cd /opt/repl && git apply /tmp/infotree-at.patch && lake build \
     && ln -s /opt/repl/.lake/build/bin/repl /usr/local/bin/repl
 ARG PROJECT=lean-project
 COPY docker/${PROJECT} /opt/project

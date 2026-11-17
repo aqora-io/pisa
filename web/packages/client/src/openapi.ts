@@ -1216,6 +1216,13 @@ export interface components {
              *     build's.
              */
             timing: components["schemas"]["Timing"];
+            /**
+             * @description What went wrong with goal reporting: that it failed or ran past
+             *     `timeout`, so the result is a plain check's, without `tactics` or
+             *     `at`, or that it took over three times as long as the check, and a
+             *     second or more longer.
+             */
+            warnings?: string[];
         };
         /**
          * @description `POST /sessions/{id}/check`: re-checks completed code from scratch
@@ -2909,8 +2916,8 @@ export interface components {
             total: number;
             /**
              * Format: double
-             * @description Tracing what Lean did: goals at positions (`lean_goals`). A check
-             *     reports none yet.
+             * @description Tracing what Lean did: a check's `tactics` and `at`, from a second
+             *     run of its body, and a document's goals at positions (`lean_goals`).
              */
             tracing: number;
             /**

@@ -103,7 +103,9 @@ that Compose and the chart set:
 
 The pinned versions live in `docker/lean-project`: `lean-toolchain`,
 `lakefile.toml` and `lake-manifest.json`. Keep `REPL_REV` in `docker/Dockerfile`
-on the same Lean version.
+on the same Lean version. The image applies `docker/repl/infotree-at.patch` to
+the REPL, which adds `infotreeAt` (see [goals](#positions)): it must apply to
+the new `REPL_REV` too.
 
 ## Kubernetes
 
@@ -478,7 +480,7 @@ would have:
 - `/check/batch`, and the snapshot reads and edits, answer at once whatever
   `Prefer` says: send a batch's items to `/check` instead.
 
-A check result is `{ok, time, timing, error?, messages, sorries, reasons, changes?, declarations, runs?}`:
+A check result is `{ok, time, timing, error?, messages, sorries, reasons, changes?, declarations, runs?, warnings?}`:
 - `ok` is the verdict.
 - `timing` says where the time went, in seconds: `{queue, load, execution, tracing, verification, total}`.
   Every operation that runs Lean has one, in the same shape, and a phase that
@@ -491,7 +493,8 @@ A check result is `{ok, time, timing, error?, messages, sorries, reasons, change
   as `execution`. A tactic's `load` is the reopen and the replay of earlier
   steps, and `execution` its step. A probe's `load` is the reopen and
   `execution` its candidates; goals' `load` is the reopen and `tracing` the
-  asking. `tracing` stays 0 for checks.
+  asking. A check's `tracing` is the run that reads its `tactics` and `at`
+  (see [goals](#positions)), 0 when it asks for neither.
 - `messages` are Lean's, each `{severity, pos, end_pos?, text}`.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
 - `changes` lists, for a [replacement](#replacing) or a session's final
@@ -508,6 +511,10 @@ A check result is `{ok, time, timing, error?, messages, sorries, reasons, change
   takes `?detail=declarations`.
 - `runs` says what each import by run name resolved to (see
   [Naming a run](#run-names)).
+- `warnings` says what went wrong with goal reporting (see
+  [goals](#positions)): that it failed or ran past `timeout`, so the result
+  is a plain check's, or that it took over three times as long as the check,
+  and a second or more longer.
 
 With `detail: ["tactics"]`, a check result also has `tactics`, the goals at
 every step of the proof. Each entry is one run of a tactic, in the order Lean
@@ -541,12 +548,25 @@ position in request order, as `{pos, tactic?, term?}`:
 - On a batch, `at` applies to every item. `terms` without `at`, or more than
   64 positions, is a `bad_request`.
 
-Goals cost what `detail: ["tactics"]` does: 16–79% more than a plain check on
-the bench library. Terms make Lean print every term of the code, 1.9 to 6.2
-times the check: seconds for a statement, but minutes for a 1,000-line chunk,
-and within `timeout` (see `bench/infotree/2026-11-06/report.md`). Nothing is
-kept between checks, so ask about every position in one: each check
-elaborates the code again.
+Goals and tactics come from a second run of the code, after the plain check
+that gives `messages`, the verdict and `time`. It has a `timeout` of its own,
+and its time is `timing.tracing`:
+- Without `tactics`, Lean prints only what contains one of the positions,
+  terms included. On a 542-line failing file, goals at one position took
+  6.5 s, against 6 s for the check and 150 s for the whole tree. A position
+  under `all_goals` gets the goals of each of its runs: on a 110-line file
+  with 81 branches, 12 s against the check's 6 s.
+- `tactics` need the whole tree, and with `terms` every term of the code too:
+  several times the check, and minutes for a 1,000-line chunk (see
+  `bench/infotree/2026-11-06/report.md`).
+- When the second run fails or runs past `timeout`, the result is the plain
+  check's, without `tactics` or `at`. `warnings` says so, e.g. `goal
+  reporting ran past 90s; diagnostics are from a plain check`. It also says
+  when goal reporting took over three times as long as the check, and a
+  second or more longer.
+
+Nothing is kept between checks, so ask about every position in one: each
+check elaborates the code again.
 
 <a id="documents"></a>
 **Documents.** A check elaborates its code again each time. To ask about one

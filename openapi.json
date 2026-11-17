@@ -1041,6 +1041,13 @@
           "timing": {
             "$ref": "#/components/schemas/Timing",
             "description": "Where this request's time went. For a create's `check`, the stored\nbuild's."
+          },
+          "warnings": {
+            "description": "What went wrong with goal reporting: that it failed or ran past\n`timeout`, so the result is a plain check's, without `tactics` or\n`at`, or that it took over three times as long as the check, and a\nsecond or more longer.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -3801,7 +3808,7 @@
             "type": "number"
           },
           "tracing": {
-            "description": "Tracing what Lean did: goals at positions (`lean_goals`). A check\nreports none yet.",
+            "description": "Tracing what Lean did: a check's `tactics` and `at`, from a second\nrun of its body, and a document's goals at positions (`lean_goals`).",
             "format": "double",
             "type": "number"
           },

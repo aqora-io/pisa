@@ -1,0 +1,50 @@
+diff --git a/REPL/JSON.lean b/REPL/JSON.lean
+index aaeec55..8eb3734 100644
+--- a/REPL/JSON.lean
++++ b/REPL/JSON.lean
+@@ -19,6 +19,11 @@ structure CommandOptions where
+   Anything else is ignored.
+   -/
+   infotree : Option String
++  /--
++  Keep only the nodes of `infotree` with original syntax whose range contains
++  one of these positions, so that only those are pretty-printed.
++  -/
++  infotreeAt : Option (List Position) := none
+ 
+ /-- Run Lean commands.
+ If `env = none`, starts a new session (in which you can use `import`).
+diff --git a/REPL/Lean/InfoTree.lean b/REPL/Lean/InfoTree.lean
+index 7ba0206..9426118 100644
+--- a/REPL/Lean/InfoTree.lean
++++ b/REPL/Lean/InfoTree.lean
+@@ -159,6 +159,14 @@ partial def retainTacticInfo (tree : InfoTree) : List InfoTree :=
+ partial def retainOriginal (tree : InfoTree) : List InfoTree :=
+   tree.filter Info.isOriginal
+ 
++/-- Retain only nodes with "original" syntax whose range contains one of `ps`. -/
++partial def retainAt (fileMap : FileMap) (ps : List Position) (tree : InfoTree) : List InfoTree :=
++  tree.filter fun i => i.isOriginal && match i.stx? with
++    | none => false
++    | some stx =>
++      let (start, finish) := fileMap.stxRange stx
++      ps.any fun p => !p.lt start && !finish.lt p
++
+ /-- Discard all TacticInfo nodes that are tactic combinators or structuring tactics. -/
+ -- There is considerable grey area here: what to do with `classical`?
+ partial def retainSubstantive (tree : InfoTree) : List InfoTree :=
+diff --git a/REPL/Main.lean b/REPL/Main.lean
+index 1e68e45..8c99c08 100644
+--- a/REPL/Main.lean
++++ b/REPL/Main.lean
+@@ -330,6 +330,10 @@ def runCommand (s : Command) : M IO (CommandResponse ⊕ Error) := do
+   | some "original" => trees.flatMap InfoTree.retainTacticInfo |>.flatMap InfoTree.retainOriginal
+   | some "substantive" => trees.flatMap InfoTree.retainTacticInfo |>.flatMap InfoTree.retainSubstantive
+   | _ => []
++  -- On the FileMap the elaborator gave the ranges, which reads CRLF as LF.
++  let jsonTrees := match s.infotreeAt with
++  | some ps => jsonTrees.flatMap (InfoTree.retainAt (Parser.mkInputContext s.cmd "").fileMap ps)
++  | none => jsonTrees
+   let infotree ← if jsonTrees.isEmpty then
+     pure none
+   else

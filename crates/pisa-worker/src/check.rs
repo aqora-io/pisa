@@ -1,5 +1,7 @@
 //! Whole-proof checks: import the header once per process, run only the body,
-//! then apply the verification policy.
+//! then apply the verification policy. Goals and tactics are traced in a
+//! second run of the body, so that a trace that fails keeps the first's
+//! diagnostics.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +14,7 @@ use pisa_protocol::repl::{
 use pisa_protocol::verify::Verification;
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
+use serde_json::Value;
 
 use crate::policy::{AXIOM_REPORT, Finding, auto_implicit_hint};
 use crate::pool::{HeaderFailure, Lease, Pool};
@@ -28,6 +31,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         response: None,
         verification: None,
         runs: job.runs.clone(),
+        warnings: Vec::new(),
     };
 
     // Before waiting for a slot: refused code needs none.
@@ -89,15 +93,10 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         }
     };
 
-    let cmd = ReplCommand::Cmd {
-        cmd: split.body.clone(),
-        env: Some(env),
-        all_tactics: None,
-        root_goals: None,
-        infotree: infotree(&job).map(str::to_string),
-    };
+    let timeout = Duration::from_secs(job.timeout_secs);
+    let cmd = ReplCommand::cmd(split.body.clone(), Some(env));
     let start = Instant::now();
-    let result = run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await;
+    let result = run(&mut slot, &cmd, timeout).await;
     outcome.time = round6(start.elapsed().as_secs_f64());
     outcome.timing.execution = outcome.time;
 
@@ -110,7 +109,27 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
             if let Some(hint) = auto_implicit_hint(&split.body, &r.messages) {
                 r.messages.push(hint);
             }
-            read_tree(&mut r, &job, &split.body, split.header_lines);
+            if let Some((mode, at)) = infotree(&job, split.header_lines) {
+                let cmd = ReplCommand::Cmd {
+                    cmd: split.body.clone(),
+                    env: Some(env),
+                    all_tactics: None,
+                    root_goals: None,
+                    infotree: Some(mode.to_string()),
+                    infotree_at: at,
+                };
+                let tracing = Instant::now();
+                let traced = trace(&mut slot, &cmd, timeout).await;
+                outcome.timing.tracing = round6(tracing.elapsed().as_secs_f64());
+                match traced {
+                    Ok(tree) => {
+                        read_tree(&mut r, &tree, &job, &split.body, split.header_lines);
+                        let slow = slow_trace(outcome.timing.execution, outcome.timing.tracing);
+                        outcome.warnings.extend(slow);
+                    }
+                    Err(e) => outcome.warnings.push(trace_failed(&e, job.timeout_secs)),
+                }
+            }
             r.shift_lines(split.header_lines);
             // Positions in the header were asked about on line 0 of the body.
             for (at, asked) in r.at.iter_mut().zip(&job.at) {
@@ -135,14 +154,12 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     outcome
 }
 
-/// Reads what `job` asked for from the info tree of the response to `body`,
-/// then drops the tree: `tactics`, and an entry for each position in `at`,
-/// which is in the lines of the code, `header_lines` more than the body's.
-fn read_tree(r: &mut CommandResponse, job: &CheckJob, body: &str, header_lines: u64) {
-    // The REPL leaves out a tree with nothing in it.
-    let tree = r.infotree.take().unwrap_or_else(|| serde_json::json!([]));
+/// Reads what `job` asked for from `tree`, the info tree of `body`:
+/// `tactics`, and an entry for each position in `at`, which is in the lines
+/// of the code, `header_lines` more than the body's.
+fn read_tree(r: &mut CommandResponse, tree: &Value, job: &CheckJob, body: &str, header_lines: u64) {
     if job.detail.contains(&Detail::Tactics) {
-        match tactics(&tree, body) {
+        match tactics(tree, body) {
             Ok(t) => r.tactics = t,
             Err(e) => tracing::warn!("unreadable info tree: {e}"),
         }
@@ -150,31 +167,71 @@ fn read_tree(r: &mut CommandResponse, job: &CheckJob, body: &str, header_lines: 
     if job.at.is_empty() {
         return;
     }
-    let positions: Vec<Pos> = job
-        .at
-        .iter()
-        .map(|p| Pos {
-            line: p.line.saturating_sub(header_lines),
-            column: p.column,
-        })
-        .collect();
+    let positions = body_positions(job, header_lines);
     let terms = job.detail.contains(&Detail::Terms);
-    match at_positions(&tree, body, &positions, terms) {
+    match at_positions(tree, body, &positions, terms) {
         Ok(at) => r.at = at,
         Err(e) => tracing::warn!("unreadable info tree: {e}"),
     }
 }
 
-/// What of the info tree the REPL prints: every node for terms, which costs
-/// several times the check; the original tactics for tactics and goals.
-fn infotree(job: &CheckJob) -> Option<&'static str> {
+/// The positions of `job.at` in the body, below `header_lines` lines of
+/// the code; those in the header are on line 0.
+fn body_positions(job: &CheckJob, header_lines: u64) -> Vec<Pos> {
+    job.at
+        .iter()
+        .map(|p| Pos {
+            line: p.line.saturating_sub(header_lines),
+            column: p.column,
+        })
+        .collect()
+}
+
+/// What the traced run has the REPL print of the info tree, if `job` asks
+/// for any of it: every node for terms, which costs several times the
+/// check; the original tactics otherwise. Tactics need the whole tree;
+/// positions alone only what contains one of them, in the body below
+/// `header_lines`.
+fn infotree(job: &CheckJob, header_lines: u64) -> Option<(&'static str, Option<Vec<Pos>>)> {
     if job.at.is_empty() && !job.detail.contains(&Detail::Tactics) {
-        None
-    } else if job.detail.contains(&Detail::Terms) {
-        Some("full")
-    } else {
-        Some("original")
+        return None;
     }
+    let mode = match job.detail.contains(&Detail::Terms) {
+        true => "full",
+        false => "original",
+    };
+    let at = (!job.detail.contains(&Detail::Tactics)).then(|| body_positions(job, header_lines));
+    Some((mode, at))
+}
+
+/// Runs the body again for its info tree, which the REPL leaves out when it
+/// has nothing in it.
+async fn trace(slot: &mut Lease, cmd: &ReplCommand, timeout: Duration) -> Result<Value, Error> {
+    match run(slot, cmd, timeout).await? {
+        ReplResponse::Command(r) => Ok(r.infotree.unwrap_or_else(|| serde_json::json!([]))),
+        ReplResponse::Error(e) => Err(Error::new(ErrorKind::Lean, e.message)),
+        other => Err(unexpected(other)),
+    }
+}
+
+/// The warning for a trace that failed with `e`: the result has only what
+/// the plain run found.
+fn trace_failed(e: &Error, timeout_secs: u64) -> String {
+    let what = match e.kind {
+        ErrorKind::Timeout => format!("ran past {timeout_secs}s"),
+        _ => format!("failed ({})", e.message),
+    };
+    format!("goal reporting {what}; diagnostics are from a plain check")
+}
+
+/// The warning for a trace that took more than three times the check, and
+/// a second or more longer: three times a few milliseconds costs nothing.
+fn slow_trace(execution: f64, tracing: f64) -> Option<String> {
+    let slow = tracing > 3.0 * execution && tracing - execution >= 1.0;
+    (execution > 0.0 && slow).then(|| {
+        let times = tracing / execution;
+        format!("goal reporting took {times:.1} times as long as the check")
+    })
 }
 
 /// The error for code the policy refuses, which `found` says why, with
@@ -285,22 +342,56 @@ mod tests {
     use pisa_protocol::api;
 
     #[test]
-    fn only_terms_ask_for_the_full_tree() {
+    fn only_terms_ask_for_the_full_tree_and_only_tactics_for_all_of_it() {
         let job = |detail: &[Detail], at: usize| CheckJob {
             code: String::new(),
             timeout_secs: 1,
             detail: detail.to_vec(),
-            at: vec![api::Pos { line: 1, column: 0 }; at],
+            at: vec![api::Pos { line: 3, column: 2 }; at],
             runs: Vec::new(),
             source: None,
         };
-        assert_eq!(infotree(&job(&[], 0)), None);
-        assert_eq!(infotree(&job(&[Detail::Tactics], 0)), Some("original"));
-        assert_eq!(infotree(&job(&[], 2)), Some("original"));
-        assert_eq!(infotree(&job(&[Detail::Terms], 2)), Some("full"));
+        // Positions are in the body's lines, below a header of 2.
+        let traced = |detail: &[Detail], at| infotree(&job(detail, at), 2);
+        let at = |n| Some(vec![Pos { line: 1, column: 2 }; n]);
+        assert_eq!(traced(&[], 0), None);
+        assert_eq!(traced(&[Detail::Tactics], 0), Some(("original", None)));
+        assert_eq!(traced(&[Detail::Tactics], 2), Some(("original", None)));
+        assert_eq!(traced(&[], 2), Some(("original", at(2))));
+        assert_eq!(traced(&[Detail::Terms], 2), Some(("full", at(2))));
         let both = [Detail::Tactics, Detail::Terms];
-        assert_eq!(infotree(&job(&both, 2)), Some("full"));
+        assert_eq!(traced(&both, 2), Some(("full", None)));
         // The server refuses terms without positions; a worker prints none.
-        assert_eq!(infotree(&job(&[Detail::Terms], 0)), None);
+        assert_eq!(traced(&[Detail::Terms], 0), None);
+    }
+
+    #[test]
+    fn a_trace_warns_when_it_fails_or_takes_much_longer_than_the_check() {
+        let timeout = Error::timeout(90);
+        assert_eq!(
+            trace_failed(&timeout, 90),
+            "goal reporting ran past 90s; diagnostics are from a plain check"
+        );
+        let crash = Error::new(ErrorKind::Crash, "Lean process failed: killed");
+        assert_eq!(
+            trace_failed(&crash, 90),
+            "goal reporting failed (Lean process failed: killed); diagnostics are \
+             from a plain check"
+        );
+        assert_eq!(slow_trace(5.3, 15.0), None);
+        assert_eq!(
+            slow_trace(5.3, 129.7).as_deref(),
+            Some("goal reporting took 24.5 times as long as the check")
+        );
+        // Nor does a trace less than a second longer, however many times
+        // the check it took.
+        assert_eq!(slow_trace(0.0004, 0.0016), None);
+        assert_eq!(slow_trace(0.2, 1.1), None);
+        assert_eq!(
+            slow_trace(0.2, 1.3).as_deref(),
+            Some("goal reporting took 6.5 times as long as the check")
+        );
+        // A check that took no measurable time has nothing to compare with.
+        assert_eq!(slow_trace(0.0, 1.0), None);
     }
 }

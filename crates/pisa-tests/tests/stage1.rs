@@ -155,6 +155,78 @@ async fn check_answers_positions_in_the_submitted_code() {
     }
 }
 
+/// Goals at positions are traced in a run of their own, after the plain
+/// check, and only at the positions: a tree too slow to print whole doesn't
+/// hold them up.
+#[tokio::test(flavor = "multi_thread")]
+async fn goals_at_positions_are_traced_only_there() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let pos = |line, column| json!({"line": line, "column": column});
+    let code = "import Foo\n\ntheorem t : True := by\n  exact foo\n  trivial\nSLOW_TREE 5000";
+    let trivial = json!({"tactic": "trivial", "goals_before": ["⊢ goal 4"], "goals_after": [],
+                         "pos": pos(5, 2), "end_pos": pos(5, 9)});
+    let r = check(&c, json!({"code": code, "at": [pos(5, 3)], "timeout": 1})).await;
+    assert_eq!(
+        r["at"],
+        json!([{"pos": pos(5, 3), "tactic": trivial}]),
+        "{r}"
+    );
+    assert!(r.get("warnings").is_none(), "{r}");
+
+    // The trace runs the code again: its time is `tracing`, apart from the
+    // check's.
+    let code = "import Foo\n\ntheorem t : True := by\n  trivial\nSLEEP 300";
+    let r = check(&c, json!({"code": code, "at": [pos(4, 2)]})).await;
+    let timing = &r["timing"];
+    assert!(timing["execution"].as_f64().unwrap() >= 0.3, "{r}");
+    assert!(timing["tracing"].as_f64().unwrap() >= 0.3, "{r}");
+    assert!(r.get("warnings").is_none(), "{r}");
+    let r = check(&c, json!({"code": code})).await;
+    assert_eq!(r["timing"]["tracing"], 0.0, "{r}");
+}
+
+/// A trace that runs out of time keeps the plain check's messages and
+/// verdict, and says so. One that takes much longer than the check says so.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_trace_keeps_the_plain_diagnostics() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let code = "import Foo\n\ntheorem t : True := by\n  trivial\nerror_here\nSLOW_TREE 5000";
+    let r = check(
+        &c,
+        json!({"code": code, "detail": ["tactics"], "timeout": 1}),
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(
+        r["messages"],
+        json!([{"severity": "error", "pos": {"line": 5, "column": 0},
+                "text": "unexpected error_here"}]),
+        "{r}"
+    );
+    assert_eq!(r["declarations"][0]["name"], "t", "{r}");
+    assert!(r.get("tactics").is_none(), "{r}");
+    assert_eq!(
+        r["warnings"],
+        json!(["goal reporting ran past 1s; diagnostics are from a plain check"]),
+        "{r}"
+    );
+    assert!(r["timing"]["tracing"].as_f64().unwrap() >= 1.0, "{r}");
+    assert!(r["time"].as_f64().unwrap() < 1.0, "{r}");
+    // The slot's process was replaced.
+    let r = check(&c, json!({"code": "import Foo\n#check Nat"})).await;
+    assert!(r.get("error").is_none(), "{r}");
+
+    let code = "import Foo\n\ntheorem t : True := by\n  trivial\nSLOW_TREE 2000";
+    let r = check(&c, json!({"code": code, "detail": ["tactics"]})).await;
+    assert_eq!(r["tactics"][0]["tactic"], "trivial", "{r}");
+    let warning = r["warnings"][0].as_str().unwrap_or_default();
+    assert!(
+        warning.starts_with("goal reporting took ")
+            && warning.ends_with(" times as long as the check"),
+        "{r}"
+    );
+}
+
 /// A worker's one slot keeps the header it imported, and says so.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_header_stays_warm_across_checks() {

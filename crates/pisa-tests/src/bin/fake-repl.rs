@@ -5,6 +5,8 @@
 //! - `error_here` gives an error message on that line
 //! - `sorry` gives a warning and a sorry with a fresh proof state
 //! - `SLEEP <ms>` sleeps before answering; `CRASH` exits
+//! - `SLOW_TREE <ms>` sleeps before answering with `infotree` but no
+//!   `infotreeAt`, as printing a whole tree can take long
 //! - `needs NAME` errors unless `NAME` is declared (see `pisa_tests`), with
 //!   Lean's note on `autoImplicit` after `needs NAME binder`
 //! - with `infotree: "original"`, every indented line is a tactic that
@@ -12,6 +14,8 @@
 //! - with `infotree: "full"`, the same in a command node, and under each
 //!   tactic a synthetic one on its first character; for `exact X`, the
 //!   term `X` expecting `goal <line>`, over its head `@X` on the same range
+//! - with `infotreeAt` too, only the tactics whose range contains one of its
+//!   positions, as the patched REPL keeps
 //!
 //! Without `env`, a command is an import header; `import Missing` fails, and
 //! `import Clash` silently yields an empty environment, like the real REPL
@@ -85,7 +89,14 @@ fn respond(s: &mut State, input: &Value) -> Value {
         None => import(s, cmd),
         Some(env) => match s.envs.get(env as usize).cloned() {
             None => json!({"message": "Unknown environment."}),
-            Some(prev) => run(s, &prev, cmd, input["infotree"].as_str()),
+            Some(prev) => {
+                let at = input.get("infotreeAt").map(|at| {
+                    let n = |v: &Value| v.as_u64().unwrap() as usize;
+                    let pos = |p: &Value| (n(&p["line"]), n(&p["column"]));
+                    at.as_array().unwrap().iter().map(pos).collect()
+                });
+                run(s, &prev, cmd, input["infotree"].as_str(), at)
+            }
         },
     }
 }
@@ -118,7 +129,13 @@ fn import(s: &mut State, header: &str) -> Value {
     json!({"env": s.envs.len() - 1})
 }
 
-fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
+fn run(
+    s: &mut State,
+    prev: &Env,
+    cmd: &str,
+    infotree: Option<&str>,
+    at: Option<Vec<(usize, usize)>>,
+) -> Value {
     let full = infotree == Some("full");
     // The axiom report is a call into the `Pisa` library, on what the code
     // since the imports declares.
@@ -187,7 +204,16 @@ fn run(s: &mut State, prev: &Env, cmd: &str, infotree: Option<&str>) -> Value {
                 }
             }
             let range = ((n, column), (n, line.len()));
-            tactics.push(info_node("Lean.Parser.Tactic.fake", range, n, children));
+            let contains = |&(l, c): &(usize, usize)| l == n && column <= c && c <= line.len();
+            if at.as_ref().is_none_or(|at| at.iter().any(contains)) {
+                tactics.push(info_node("Lean.Parser.Tactic.fake", range, n, children));
+            }
+        }
+        if let Some(ms) = line.split("SLOW_TREE ").nth(1)
+            && infotree.is_some()
+            && at.is_none()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms.trim().parse().unwrap()));
         }
         if let Some(ms) = line.split("SLEEP ").nth(1) {
             let ms: u64 = ms.trim().parse().unwrap_or(1000);

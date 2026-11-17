@@ -501,8 +501,8 @@ pub struct Timing {
     #[schema(required = true)]
     #[serde(default)]
     pub execution: f64,
-    /// Tracing what Lean did: goals at positions (`lean_goals`). A check
-    /// reports none yet.
+    /// Tracing what Lean did: a check's `tactics` and `at`, from a second
+    /// run of its body, and a document's goals at positions (`lean_goals`).
     #[serde(default)]
     pub tracing: f64,
     /// Verifying what ran: a check's axiom report, a create's kernel
@@ -560,6 +560,12 @@ pub struct CheckResult {
     /// With `at`, what Lean recorded at each position, in request order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<AtPosition>,
+    /// What went wrong with goal reporting: that it failed or ran past
+    /// `timeout`, so the result is a plain check's, without `tactics` or
+    /// `at`, or that it took over three times as long as the check, and a
+    /// second or more longer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     /// What each module the code imports by run name (`import
     /// PisaRun.<name>`) resolved to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

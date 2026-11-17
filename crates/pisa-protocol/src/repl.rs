@@ -46,6 +46,11 @@ pub enum ReplCommand {
         root_goals: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         infotree: Option<String>,
+        /// Keeps only the nodes of `infotree` whose range contains one of
+        /// these positions. Needs `docker/repl/infotree-at.patch`; an
+        /// unpatched REPL ignores it and prints the whole tree.
+        #[serde(rename = "infotreeAt", skip_serializing_if = "Option::is_none")]
+        infotree_at: Option<Vec<Pos>>,
     },
 }
 
@@ -57,6 +62,7 @@ impl ReplCommand {
             all_tactics: None,
             root_goals: None,
             infotree: None,
+            infotree_at: None,
         }
     }
 }
@@ -451,6 +457,18 @@ mod tests {
                 },
                 json!({"unpickleProofStateFrom": "a.olean", "env": 0}),
             ),
+            (
+                ReplCommand::Cmd {
+                    cmd: "x".into(),
+                    env: Some(1),
+                    all_tactics: None,
+                    root_goals: None,
+                    infotree: Some("original".into()),
+                    infotree_at: Some(vec![Pos { line: 2, column: 4 }]),
+                },
+                json!({"cmd": "x", "env": 1, "infotree": "original",
+                       "infotreeAt": [{"line": 2, "column": 4}]}),
+            ),
         ];
         for (cmd, expected) in cases {
             assert_eq!(serde_json::to_value(&cmd).unwrap(), expected);
@@ -658,6 +676,77 @@ theorem s (n : Nat) : n + 0 = n := rfl";
             ("trivial", ["case left\n⊢ True".to_string()].as_slice())
         );
         assert_eq!((&at[0].term, &at[1].term), (&None, &None));
+    }
+
+    /// `testdata/infotree-at.lean` fails, in proofs that branch. Its
+    /// `"original"` info tree is `testdata/infotree-at-original.json`, and
+    /// `testdata/infotree-at.json` what the REPL patched with
+    /// `docker/repl/infotree-at.patch` keeps of it at [`AT_POSITIONS`].
+    /// `testdata/infotree-full-at.json` is what it keeps of [`FULL_CODE`]'s
+    /// `"full"` tree at the positions of
+    /// `a_position_gets_the_innermost_tactic_and_typed_term`.
+    const AT_CODE: &str = include_str!("testdata/infotree-at.lean");
+    const AT_POSITIONS: [(u64, u64); 12] = [
+        (4, 10),
+        (5, 6),
+        (6, 20),
+        (6, 4),
+        (10, 27),
+        (10, 12),
+        (16, 4),
+        (19, 3),
+        (20, 8),
+        (7, 0),
+        (1, 3),
+        (20, 40),
+    ];
+
+    #[test]
+    fn a_tree_kept_at_positions_answers_them_as_the_whole_tree_does() {
+        let tree = |json: &str| -> Value { serde_json::from_str(json).unwrap() };
+        let positions = AT_POSITIONS.map(|(line, column)| pos(line, column));
+        let whole = tree(include_str!("testdata/infotree-at-original.json"));
+        let kept = tree(include_str!("testdata/infotree-at.json"));
+        let expected = at_positions(&whole, AT_CODE, &positions, false).unwrap();
+        assert_eq!(
+            at_positions(&kept, AT_CODE, &positions, false).unwrap(),
+            expected
+        );
+        // Most positions are in a tactic; the tree keeps only what contains one.
+        assert_eq!(expected.iter().filter(|a| a.tactic.is_some()).count(), 9);
+        let count = |t: &Value| tactics(t, AT_CODE).unwrap().len();
+        assert!(count(&kept) < count(&whole), "{} tactics", count(&kept));
+
+        let positions = [
+            pos(3, 9),
+            pos(2, 25),
+            pos(2, 2),
+            pos(5, 36),
+            pos(1, 18),
+            pos(4, 0),
+        ];
+        let kept = tree(include_str!("testdata/infotree-full-at.json"));
+        assert_eq!(
+            at_positions(&kept, FULL_CODE, &positions, true).unwrap(),
+            at_positions(&full_tree(), FULL_CODE, &positions, true).unwrap()
+        );
+    }
+
+    /// `testdata/infotree-at-crlf.json` is what the patched REPL keeps at
+    /// [`AT_POSITIONS`] of [`AT_CODE`] with CRLF line endings. Lean reads
+    /// such code as if its lines ended in LF, so its whole tree is
+    /// `testdata/infotree-at-original.json` too.
+    #[test]
+    fn a_tree_kept_at_positions_of_crlf_code_answers_them_too() {
+        let code = AT_CODE.replace('\n', "\r\n");
+        let positions = AT_POSITIONS.map(|(line, column)| pos(line, column));
+        let tree = |json: &str| -> Value { serde_json::from_str(json).unwrap() };
+        let whole = tree(include_str!("testdata/infotree-at-original.json"));
+        let kept = tree(include_str!("testdata/infotree-at-crlf.json"));
+        assert_eq!(
+            at_positions(&kept, &code, &positions, false).unwrap(),
+            at_positions(&whole, &code, &positions, false).unwrap()
+        );
     }
 
     #[test]

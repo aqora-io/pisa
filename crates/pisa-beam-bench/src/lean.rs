@@ -79,6 +79,7 @@ pub async fn repl_body(
         all_tactics: None,
         root_goals: None,
         infotree: infotree.map(str::to_string),
+        infotree_at: None,
     };
     command(repl, cmd, T_BODY).await
 }

@@ -98,6 +98,7 @@ impl Snapshots {
             response: None,
             verification: None,
             runs: Vec::new(),
+            warnings: Vec::new(),
         };
         let fail = |mut outcome: CheckOutcome, error: Error| {
             outcome.error = Some(error);

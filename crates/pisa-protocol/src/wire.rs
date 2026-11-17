@@ -369,6 +369,9 @@ pub struct CheckOutcome {
     /// What the code's imports by run name resolved to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<api::RunImport>,
+    /// Said of the check besides its diagnostics, as the result's `warnings`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// The JSON `job` is queued as, with the scope it runs in beside its `kind`
@@ -420,6 +423,7 @@ impl From<CheckOutcome> for api::CheckResult {
             declarations,
             tactics,
             at,
+            warnings: o.warnings,
             runs: o.runs,
         }
     }
@@ -456,11 +460,16 @@ mod tests {
             response: None,
             verification: None,
             runs: Vec::new(),
+            warnings: vec!["slow".into()],
         };
         let wire: CheckOutcome =
             serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
         assert_eq!(wire.timing, timing);
-        assert_eq!(api::CheckResult::from(wire).timing, timing);
+        let result = api::CheckResult::from(wire);
+        assert_eq!(
+            (result.timing, result.warnings),
+            (timing, vec!["slow".into()])
+        );
         // A job answered by a worker of an earlier release has none.
         let old: CheckOutcome = serde_json::from_value(serde_json::json!({"time": 1.0})).unwrap();
         assert_eq!(old.timing, api::Timing::default());
@@ -475,6 +484,7 @@ mod tests {
             response: None,
             verification: None,
             runs: Vec::new(),
+            warnings: Vec::new(),
         });
         result.timing_mut().unwrap().queue = 1.5;
         let JobResult::Check(outcome) = &result else {

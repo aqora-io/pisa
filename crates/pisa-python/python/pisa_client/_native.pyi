@@ -132,7 +132,8 @@ class Timing(TypedDict):
     """A check's body, a create's compile, a session's open, a tactic's step,
     a probe's candidates."""
     tracing: float
-    """Asking Lean for goals at positions."""
+    """A check's second run, for its tactics and goals, or asking a
+    document for goals at positions."""
     verification: float
     """A check's axiom report, or a create's kernel re-check."""
     total: float
@@ -150,6 +151,10 @@ class CheckResult(TypedDict):
     declarations: list[Declaration]
     tactics: NotRequired[list[TacticInfo]]
     at: NotRequired[list[AtPosition]]
+    warnings: NotRequired[list[str]]
+    """What went wrong with goal reporting: that it failed or ran past
+    `timeout`, so the result is a plain check's, or that it took over three
+    times as long as the check, and a second or more longer."""
     runs: NotRequired[list[RunImport]]
 
 class State(TypedDict):
