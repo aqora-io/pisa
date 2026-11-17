@@ -180,6 +180,61 @@ async fn a_wait_returns_as_soon_as_the_job_is_done() {
     assert_eq!(r["body"]["ok"], true, "{r}");
 }
 
+/// The longest a `wait` of one second may take while the database stalls: the
+/// wait, the margin, and slack.
+const STALLED_BOUND: Duration = Duration::from_secs(1 + 5 + 1);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_answers_within_its_bound_while_the_database_stalls() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let job = accepted(
+        &c,
+        "/check",
+        json!({"code": "SLEEP 5000\n#check Nat"}),
+        "check",
+    )
+    .await;
+    let url = c.url(&format!("/jobs/{job}"));
+    // Wait for it to run, so that the look reads `running`.
+    for _ in 0..100 {
+        let (_, r) = look(&c, &url, "0").await;
+        if r["status"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The database stalls after the wait's first reads, before its last.
+    let started = Instant::now();
+    let waiting = look_raw(&c, &url, "1");
+    let stalling = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        c.db.stall().await
+    };
+    let ((status, r), _stalled) = tokio::join!(waiting, stalling);
+    assert!(started.elapsed() < STALLED_BOUND, "{:?}", started.elapsed());
+    assert_eq!((status, &r["status"]), (202, &json!("running")), "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wait_with_no_status_read_answers_503() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let job = accepted(
+        &c,
+        "/check",
+        json!({"code": "SLEEP 5000\n#check Nat"}),
+        "check",
+    )
+    .await;
+    let url = c.url(&format!("/jobs/{job}"));
+    let _stalled = c.db.stall().await;
+    let started = Instant::now();
+    let r = c.client.get(format!("{url}?wait=1")).send().await.unwrap();
+    assert!(started.elapsed() < STALLED_BOUND, "{:?}", started.elapsed());
+    assert_eq!(r.status(), 503);
+    assert!(r.headers().contains_key("retry-after"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn failures_are_kept_and_requests_checked_first() {
     let mut cfg = router_config();

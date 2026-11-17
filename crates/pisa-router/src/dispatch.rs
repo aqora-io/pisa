@@ -11,6 +11,8 @@ use pisa_db::db::{DbError, Notice};
 use pisa_db::queue::{LIVE, NewJob, Poll, Queue, Stage};
 use pisa_protocol::api::{JobKind, JobStatus};
 use pisa_protocol::wire::{self, Job, JobResult};
+
+use crate::jobs::POLL_MARGIN;
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -346,8 +348,36 @@ impl Dispatcher {
     }
 
     /// Where the async job `token` stands, after waiting up to `wait` for it
-    /// to finish; `None` if there's no such job, or it has expired.
+    /// to finish; `None` if there's no such job, or it has expired. Whatever
+    /// the database does, it answers within `wait` and [`POLL_MARGIN`]: at
+    /// that deadline, the last status it read, without reading again, or
+    /// unavailable if it read none.
     pub async fn look(&self, token: &str, wait: Duration) -> Result<Option<Looked>, DispatchError> {
+        let mut last = None;
+        let bound = wait + POLL_MARGIN;
+        match tokio::time::timeout(bound, self.look_for(token, wait, &mut last)).await {
+            Ok(looked) => looked,
+            Err(_) => match last {
+                Some((kind, status)) => Ok(Some(Looked {
+                    kind,
+                    state: Looking::Pending(status),
+                })),
+                None => Err(DispatchError::Unavailable(format!(
+                    "the job queue did not answer within {} s",
+                    bound.as_secs()
+                ))),
+            },
+        }
+    }
+
+    /// [`Dispatcher::look`] without its bound, which keeps in `last` the kind
+    /// and status of each pending job it reads.
+    async fn look_for(
+        &self,
+        token: &str,
+        wait: Duration,
+        last: &mut Option<(JobKind, JobStatus)>,
+    ) -> Result<Option<Looked>, DispatchError> {
         let deadline = tokio::time::Instant::now() + wait;
         let poll_every = self.queue.db().poll_interval();
         let mut woken = None;
@@ -373,6 +403,9 @@ impl Dispatcher {
                     Looking::Pending(JobStatus::Queued)
                 }
             };
+            if let Looking::Pending(pending) = &state {
+                *last = Some((kind, *pending));
+            }
             let now = tokio::time::Instant::now();
             if matches!(state, Looking::Done(_)) || now >= deadline {
                 return Ok(Some(Looked { kind, state }));

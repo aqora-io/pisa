@@ -43,6 +43,10 @@ const POOL_SIZE: usize = 8;
 /// before it fails as unavailable.
 const POOL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the check of a pooled PostgreSQL connection, before it is handed
+/// out, may take; past it the connection is dropped and another is used.
+const POOL_RECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long a SQLite statement waits for another process's lock before it
 /// fails as a conflict, which [`retry`] runs again.
 const SQLITE_BUSY_MILLIS: u32 = 250;
@@ -269,6 +273,42 @@ impl Db {
         }
     }
 
+    /// Holds the database's connection (SQLite), or every connection of the
+    /// pool (PostgreSQL), until the guard is dropped, so that every query
+    /// this process makes waits. For tests of what happens when the
+    /// database does not answer.
+    #[doc(hidden)]
+    pub async fn stall(&self) -> StallGuard {
+        let (held, release) = tokio::sync::oneshot::channel::<()>();
+        let (ready, holding) = tokio::sync::oneshot::channel::<()>();
+        match self {
+            Db::Sqlite(sqlite) => {
+                let sqlite = sqlite.clone();
+                tokio::spawn(async move {
+                    let _conn = sqlite.conn.lock().await;
+                    let _ = ready.send(());
+                    let _ = release.await;
+                });
+            }
+            Db::Pg(pg) => {
+                let pg = pg.clone();
+                tokio::spawn(async move {
+                    let mut conns = Vec::new();
+                    for _ in 0..POOL_SIZE {
+                        match pg.pool.get().await {
+                            Ok(conn) => conns.push(conn),
+                            Err(_) => break,
+                        }
+                    }
+                    let _ = ready.send(());
+                    let _ = release.await;
+                });
+            }
+        }
+        let _ = holding.await;
+        StallGuard(held)
+    }
+
     /// Every row kept for pool version `version` but the change log, each as
     /// its table and key, sorted. For tests.
     pub async fn rows(&self, version: &str) -> Result<Vec<Vec<String>>, DbError> {
@@ -277,6 +317,10 @@ impl Db {
         Ok(rows)
     }
 }
+
+/// What [`Db::stall`] returns: the database answers again once it is dropped.
+#[doc(hidden)]
+pub struct StallGuard(#[allow(dead_code)] tokio::sync::oneshot::Sender<()>);
 
 async fn open_sqlite(path: &str) -> Result<Db, DbError> {
     let path = path.to_string();
@@ -321,6 +365,7 @@ async fn connect_pg(url: &str) -> Result<Db, DbError> {
         .max_size(POOL_SIZE)
         .wait_timeout(Some(POOL_TIMEOUT))
         .create_timeout(Some(POOL_TIMEOUT))
+        .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
         .runtime(deadpool::Runtime::Tokio1)
         .build()
         .map_err(|e| DbError::Other(e.to_string()))?;
@@ -434,6 +479,23 @@ async fn establish_pg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Queries wait while the database is stalled, and run again once the
+    /// guard is dropped.
+    #[tokio::test]
+    async fn a_stalled_database_answers_again_once_released() {
+        let db = Db::memory().await;
+        let stalled = db.stall().await;
+        let rows = db.rows("v");
+        tokio::pin!(rows);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut rows)
+                .await
+                .is_err()
+        );
+        drop(stalled);
+        assert!(rows.await.unwrap().is_empty());
+    }
 
     #[derive(diesel::QueryableByName, Debug, PartialEq)]
     struct LinkRow {

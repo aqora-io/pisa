@@ -499,8 +499,10 @@ would have:
   the job is done, answers 200 `{id, kind, status: "done", http_status,
   body}`: the status and the answer the request would have had, errors
   included, e.g. an `http_status` of 429 when no worker took it in time.
-  Until then it answers 202 with `status` `queued` or `running`. A 404 or a
-  503 is the look's own, never the job's. Any server answers for any job.
+  Until then it answers 202 with `status` `queued` or `running`. It answers
+  within `wait` and five seconds even if the database does not: the last
+  status it read, else a 503. A 404 or a 503 is the look's own, never the
+  job's. Any server answers for any job.
   The clients look every 25 s, well short of a proxy's 60.
 - An answer is kept for an hour after its job is done; then the job is a 404.
 - `DELETE /jobs/{id}` withdraws a job no worker has started (`cancelled`); a

@@ -5367,7 +5367,7 @@
         ]
       },
       "get": {
-        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done.",
+        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done.",
         "operationId": "getJob",
         "parameters": [
           {

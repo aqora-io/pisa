@@ -27,6 +27,10 @@ use crate::{sessions, snapshots};
 /// The longest `/jobs/{id}` waits for a job to finish.
 const MAX_WAIT: Duration = Duration::from_secs(60);
 
+/// How long past its `wait` a look may take reading the database, before it
+/// answers the last status it read.
+pub const POLL_MARGIN: Duration = Duration::from_secs(5);
+
 const PREFERENCE_APPLIED: HeaderName = HeaderName::from_static("preference-applied");
 
 /// Whether the request's `Prefer` headers ask for `respond-async`.
@@ -177,8 +181,9 @@ fn is_token(id: &str) -> bool {
     description = "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with \
         the status its request would have answered with (`http_status`) and that answer \
         (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it \
-        answers 202. A 404 or a 503 is the look's own. A job's answer is kept for an hour \
-        after it is done.",
+        answers 202. It answers within `wait` and five seconds even if the database does \
+        not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's \
+        answer is kept for an hour after it is done.",
     params(("id" = String, Path, description = "The job's id, from the 202"), JobWait),
     responses(
         (status = 200, description = "Done: the request's status and answer", body = GetJobResponse),
