@@ -23,6 +23,7 @@ const client = new PisaClient({ url: "http://pisa.test", version: "v" });
 const result = (kind?: string) => ({
   ok: false,
   time: 1,
+  timing: { queue: 0, load: 0, execution: 1, tracing: 0, verification: 0, total: 1 },
   messages: [],
   sorries: [],
   reasons: [],

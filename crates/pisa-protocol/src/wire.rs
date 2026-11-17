@@ -333,9 +333,32 @@ pub enum JobResult {
     },
 }
 
+impl JobResult {
+    /// The timing the answer carries, for the worker to fill `queue` and
+    /// `total` in. `None` for an answer with none: those of jobs that don't
+    /// run Lean, and failures.
+    pub fn timing_mut(&mut self) -> Option<&mut api::Timing> {
+        match self {
+            JobResult::Check(outcome) => Some(&mut outcome.timing),
+            JobResult::SessionChecked(checked) => Some(&mut checked.outcome.timing),
+            JobResult::SessionStarted(Ok(session)) => Some(&mut session.timing),
+            JobResult::TacticApplied(Ok(applied)) => Some(&mut applied.timing),
+            JobResult::SnapshotCreated(created) => Some(&mut created.timing),
+            JobResult::Document(Ok(document)) => Some(&mut document.timing),
+            JobResult::DocumentGoals(Ok(goals)) => Some(&mut goals.timing),
+            JobResult::DocumentProbes(Ok(probes)) => Some(&mut probes.timing),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckOutcome {
     pub time: f64,
+    /// Where the check's time went, but for `queue` and `total`, which the
+    /// worker adds when it answers.
+    #[serde(default)]
+    pub timing: api::Timing,
     #[serde(default)]
     pub error: Option<api::Error>,
     /// The REPL's response, positions already shifted to the submitted code.
@@ -388,6 +411,7 @@ impl From<CheckOutcome> for api::CheckResult {
         api::CheckResult {
             ok: verified && o.error.is_none(),
             time: o.time,
+            timing: o.timing,
             error: o.error,
             messages,
             sorries,
@@ -414,6 +438,52 @@ pub struct SessionChecked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_check_outcome_carries_its_timing_to_the_result() {
+        let timing = api::Timing {
+            queue: 0.5,
+            load: 1.25,
+            execution: 2.0,
+            tracing: 0.0,
+            verification: 0.125,
+            total: 4.0,
+        };
+        let outcome = CheckOutcome {
+            time: 2.0,
+            timing,
+            error: None,
+            response: None,
+            verification: None,
+            runs: Vec::new(),
+        };
+        let wire: CheckOutcome =
+            serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
+        assert_eq!(wire.timing, timing);
+        assert_eq!(api::CheckResult::from(wire).timing, timing);
+        // A job answered by a worker of an earlier release has none.
+        let old: CheckOutcome = serde_json::from_value(serde_json::json!({"time": 1.0})).unwrap();
+        assert_eq!(old.timing, api::Timing::default());
+    }
+
+    #[test]
+    fn a_job_result_has_its_timing_set_where_it_has_one() {
+        let mut result = JobResult::Check(CheckOutcome {
+            time: 0.0,
+            timing: api::Timing::default(),
+            error: None,
+            response: None,
+            verification: None,
+            runs: Vec::new(),
+        });
+        result.timing_mut().unwrap().queue = 1.5;
+        let JobResult::Check(outcome) = &result else {
+            unreachable!()
+        };
+        assert_eq!(outcome.timing.queue, 1.5);
+        let mut deleted = JobResult::DocumentClosed(Ok(()));
+        assert!(deleted.timing_mut().is_none());
+    }
 
     #[test]
     fn a_job_carries_its_scope_beside_its_kind() {

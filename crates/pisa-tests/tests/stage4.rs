@@ -215,7 +215,24 @@ async fn sorry_is_kept_as_sorry_and_same_code_shares_a_module() {
         "not built again"
     );
     assert_eq!(module(&first), module(&again));
+    // The check is the stored build's, so that of the second create too;
+    // `timing` is this request's.
     assert_eq!(first["check"], again["check"]);
+    assert!(first["check"]["time"].as_f64().unwrap() >= 0.5, "{first}");
+    assert!(first["check"]["timing"]["execution"].as_f64().unwrap() >= 0.5);
+    assert_eq!(
+        (&first["cached"], &again["cached"]),
+        (&json!(false), &json!(true))
+    );
+    assert!(
+        first["timing"]["execution"].as_f64().unwrap() >= 0.5,
+        "{first}"
+    );
+    assert!(first["timing"]["total"].as_f64().unwrap() >= 0.5);
+    assert_eq!(again["timing"]["execution"], 0.0, "{again}");
+    assert_eq!(again["timing"]["verification"], 0.0, "{again}");
+    let total = again["timing"]["total"].as_f64().unwrap();
+    assert!(total > 0.0 && total < 0.4, "{again}");
     assert_ne!(entry(&first), entry(&again));
 }
 

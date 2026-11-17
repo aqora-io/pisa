@@ -68,13 +68,13 @@ async fn delete(c: &Cluster, url: &str) -> (u16, Value) {
     (r.status().as_u16(), r.json().await.unwrap())
 }
 
-/// `v` without what differs between two runs of one request: times, and
-/// the ids of what each run made.
+/// `v` without what differs between two runs of one request: times, whether
+/// it was cached, and the ids of what each run made.
 fn comparable(v: &Value) -> Value {
     match v {
         Value::Object(o) => o
             .iter()
-            .filter(|(k, _)| !["time", "id", "created"].contains(&k.as_str()))
+            .filter(|(k, _)| !["time", "timing", "cached", "id", "created"].contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), comparable(v)))
             .collect(),
         Value::Array(a) => a.iter().map(comparable).collect(),
@@ -386,5 +386,36 @@ async fn a_retried_create_keeps_its_snapshot_once() {
         (status, &r["error"]["kind"]),
         (400, &json!("bad_request")),
         "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_waited_for_the_worker_says_how_long() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let running = accepted(
+        &c,
+        "/check",
+        json!({"code": "SLEEP 800\n#check Nat"}),
+        "check",
+    )
+    .await;
+    let running_url = c.url(&format!("/jobs/{running}"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while look(&c, &running_url, "0").await.1["status"] != "running" {
+        assert!(Instant::now() < deadline, "never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The only slot is busy, so this one waits for it.
+    let queued = accepted(&c, "/check", json!({"code": "#check Nat"}), "check").await;
+    let (status, waited) = look(&c, &c.url(&format!("/jobs/{queued}")), "30").await;
+    assert_eq!(status, 200, "{waited}");
+    let timing = &waited["timing"];
+    assert!(timing["queue"].as_f64().unwrap() > 0.2, "{waited}");
+    assert!(timing["total"].as_f64().unwrap() > 0.0, "{waited}");
+    let (_, first) = look(&c, &running_url, "30").await;
+    assert!(first["timing"]["queue"].as_f64().unwrap() < 0.5, "{first}");
+    assert!(
+        first["timing"]["execution"].as_f64().unwrap() >= 0.8,
+        "{first}"
     );
 }

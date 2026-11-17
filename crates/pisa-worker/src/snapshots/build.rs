@@ -2,6 +2,8 @@
 //! its files and record.
 
 use super::*;
+use crate::check::round6;
+use pisa_protocol::api::Timing;
 
 /// The files the build wrote for module `s<id>` in `dir`, by extension, the
 /// `.olean` last.
@@ -91,6 +93,7 @@ impl Snapshots {
         let replacing = rel.replacing.as_ref();
         let mut outcome = CheckOutcome {
             time: 0.0,
+            timing: Timing::default(),
             error: None,
             response: None,
             verification: None,
@@ -146,6 +149,7 @@ impl Snapshots {
         let start = Instant::now();
         let compiled = slot.compile(&root, &file, &olean, limit).await;
         outcome.time = (start.elapsed().as_secs_f64() * 1e6).round() / 1e6;
+        outcome.timing.execution = outcome.time;
         let mut compiled = match compiled {
             Ok(c) => c,
             Err(e) => {
@@ -231,8 +235,11 @@ impl Snapshots {
         // could expand into what the scan forbids.
         let reported_stands = !module_system && !macros && job.verify != Some(true);
         let per_module = Duration::from_secs(job.timeout_secs);
+        let verifying = Instant::now();
         let (rechecked, unverified) = if recheck {
-            match recheck_module(slot, id, per_module).await {
+            let rechecked = recheck_module(slot, id, per_module).await;
+            outcome.timing.verification = round6(verifying.elapsed().as_secs_f64());
+            match rechecked {
                 Ok(decls) => (Some(decls), None),
                 // Only a re-check out of time or memory keeps it: a crash may
                 // be the code's doing.

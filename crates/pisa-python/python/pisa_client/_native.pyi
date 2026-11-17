@@ -119,9 +119,29 @@ class NamedRun(TypedDict):
     module: NotRequired[str]
     snapshot_id: NotRequired[str]
 
+class Timing(TypedDict):
+    """Where an operation's time went, in seconds; 0 for a phase that doesn't
+    apply. `total` is the worker's wall clock from claiming the job to
+    answering it."""
+    queue: float
+    """Waiting for a worker to claim the job."""
+    load: float
+    """A check's header import when no process had it warm, or a document's
+    reopen and a tactic's replayed steps."""
+    execution: float
+    """A check's body, a create's compile, a session's open, a tactic's step,
+    a probe's candidates."""
+    tracing: float
+    """Asking Lean for goals at positions."""
+    verification: float
+    """A check's axiom report, or a create's kernel re-check."""
+    total: float
+
 class CheckResult(TypedDict):
     ok: bool
     time: float
+    """Seconds Lean spent on the code. For a create, the stored build's."""
+    timing: Timing
     error: NotRequired[Error]
     messages: list[Message]
     sorries: list[Sorry]
@@ -145,6 +165,7 @@ class Session(TypedDict):
     runs: NotRequired[list[RunImport]]
     """What the code's imports by run name resolved to, which the session's
     final check keeps."""
+    timing: Timing
 
 class ApplyTacticResponse(TypedDict):
     state: State
@@ -156,6 +177,7 @@ class ApplyTacticResponse(TypedDict):
     replayed: int
     """The tactics replayed to reach the state, where no handle on it was
     kept."""
+    timing: Timing
 
 class Allow(TypedDict):
     """The definitions whose value a replacement may change."""
@@ -237,7 +259,11 @@ class CreateSnapshotResponse(TypedDict):
     snapshot: NotRequired[Snapshot]
     # Set exactly when `snapshot` is absent.
     refused: NotRequired[Refusal]
+    # The stored build's check, `time` and `timing` included, when `cached`.
     check: CheckResult
+    # Nothing was built for this request: `timing` is what it cost.
+    cached: bool
+    timing: Timing
     replacement: NotRequired[Replacement]
     heads: NotRequired[list[str]]
     # A re-check out of time or memory that kept plain code unverified.
@@ -479,6 +505,7 @@ class Document(TypedDict):
     messages: list[Message]
     sorries: list[Sorry]
     runs: NotRequired[list[RunImport]]
+    timing: Timing
 
 class GoalsAt(TypedDict):
     pos: Pos
@@ -494,6 +521,7 @@ class DocumentGoals(TypedDict):
     at: list[GoalsAt]
     reopened: bool
     """The document was opened again first, within its open's time limit."""
+    timing: Timing
 
 class ProbeResult(TypedDict):
     ok: bool
@@ -507,6 +535,7 @@ class DocumentProbes(TypedDict):
     pos: Pos
     results: list[ProbeResult]
     reopened: bool
+    timing: Timing
 
 class RebuildItem(TypedDict):
     """An item without `snapshot_id` is a support item: it has no labels and

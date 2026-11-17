@@ -836,3 +836,36 @@ async fn without_beam_documents_are_unavailable_and_checks_still_run() {
         .await;
     assert_eq!(status, 200, "{r}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn probes_and_goals_say_where_their_time_went() {
+    let mut c = Cluster::start_with(common::router_config(), &[("a", "v", 1)], |cfg| {
+        beam_worker_config(cfg.worker_id.as_deref().unwrap(), "v", 1)
+    })
+    .await;
+    let id = new_id();
+    let code = CODE.replace("\n\n", "\n-- SLOW_SYNC 700\n");
+    open(&c, &id, &code).await;
+    let JobResult::DocumentProbes(Ok(p)) =
+        run(&c, &id, probes(&id, &["SLEEP 300", "rfl"], 10, 300)).await
+    else {
+        panic!("not probed")
+    };
+    assert!(p.timing.execution >= 0.3, "{:?}", p.timing);
+    assert!(p.timing.load < 0.2, "{:?}", p.timing);
+    assert!(p.timing.total >= p.timing.execution, "{:?}", p.timing);
+
+    let g = goals(&c, &id, None, &[(4, None)]).await.unwrap();
+    assert!(!g.reopened);
+    assert!(g.timing.load < 0.2, "{:?}", g.timing);
+    assert!(g.timing.tracing > 0.0, "{:?}", g.timing);
+
+    c.kill_worker(0).await;
+    c.add_worker(beam_worker_config("a", "v", 1));
+    c.wait_for_workers(1).await;
+    // The reopen syncs the code again, which takes its time.
+    let g = goals(&c, &id, None, &[(4, None)]).await.unwrap();
+    assert!(g.reopened);
+    assert!(g.timing.load >= 0.7, "{:?}", g.timing);
+    assert!(g.timing.total >= g.timing.load, "{:?}", g.timing);
+}

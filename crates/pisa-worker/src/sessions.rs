@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use pisa_protocol::api::{DocumentId, Error, ErrorKind, RunImport};
+use pisa_protocol::api::{DocumentId, Error, ErrorKind, RunImport, Timing};
 use pisa_protocol::header::split_header;
 use pisa_protocol::verify::{Declaration, grouped, parent_in, statement_changes};
 use pisa_protocol::wire::{CheckJob, CheckOutcome, SessionCheckJob, SessionChecked};
@@ -47,6 +47,7 @@ impl Sessions {
         let failed = |error: Error| SessionChecked {
             outcome: CheckOutcome {
                 time: 0.0,
+                timing: Timing::default(),
                 error: Some(error),
                 response: None,
                 verification: None,

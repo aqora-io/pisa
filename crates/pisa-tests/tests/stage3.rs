@@ -340,3 +340,23 @@ async fn a_session_whose_statements_cant_be_described_cant_be_checked() {
         "{message}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_and_its_tactics_say_where_their_time_went() {
+    let c = Cluster::start_beam(&[("w0", "v", 2)]).await;
+    let s = start(
+        &c,
+        "import Foo\n-- SLOW_SYNC 400\ntheorem t : 1 = 1 := by sorry",
+    )
+    .await;
+    let started = &s["timing"];
+    assert!(started["execution"].as_f64().unwrap() >= 0.4, "{s}");
+    assert!(started["total"].as_f64().unwrap() >= started["execution"].as_f64().unwrap());
+    let root = &s["states"][0];
+    let step = tactic(&c, &root["id"], "simp -- SLEEP 300").await;
+    assert!(
+        step["timing"]["execution"].as_f64().unwrap() >= 0.3,
+        "{step}"
+    );
+    assert!(step["timing"]["total"].as_f64().unwrap() >= 0.3, "{step}");
+}

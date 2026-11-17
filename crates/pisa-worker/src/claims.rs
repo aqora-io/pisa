@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::Notice;
 use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue};
@@ -22,6 +22,7 @@ use pisa_protocol::wire::{self, JobResult};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify, watch};
 
+use crate::check::round6;
 use crate::documents::Documents;
 use crate::pool::Pool;
 use crate::sessions::Sessions;
@@ -245,7 +246,9 @@ impl Shared {
     /// its result.
     async fn run_one(self: Arc<Self>, claimed: Claimed, document: Option<String>) {
         let documents = self.documents.as_deref();
-        let result = match wire::unscoped(claimed.job) {
+        let started = Instant::now();
+        let queue = round6((now_micros() - claimed.enqueued_micros).max(0) as f64 / 1e6);
+        let mut result = match wire::unscoped(claimed.job) {
             // In the scope of the request that queued it.
             Ok((job, scope)) => {
                 let running = run_job(&self.pool, &self.sessions, documents, job);
@@ -261,6 +264,10 @@ impl Shared {
                 }
             }
         };
+        if let Some(timing) = result.timing_mut() {
+            timing.queue = queue;
+            timing.total = round6(started.elapsed().as_secs_f64());
+        }
         // A header the job warmed, or a document it opened, is published
         // first, so that the client's next request can find this worker.
         self.publish_warm().await;

@@ -779,6 +779,8 @@ export interface components {
             replayed: number;
             /** @description The new state. Earlier states stay valid, so a session is a tree. */
             state: components["schemas"]["State"];
+            /** @description Where this request's time went: `load` is reopening the document and replaying earlier steps, `execution` the tactic's step. */
+            timing: components["schemas"]["Timing"];
         };
         /**
          * @description What Lean recorded at a position asked about in `at`. Each part is
@@ -1206,9 +1208,14 @@ export interface components {
             tactics?: components["schemas"]["TacticInfo"][];
             /**
              * Format: double
-             * @description Seconds Lean spent on the code.
+             * @description Seconds Lean spent on the code. For a create, the stored build's.
              */
             time: number;
+            /**
+             * @description Where this request's time went. For a create's `check`, the stored
+             *     build's.
+             */
+            timing: components["schemas"]["Timing"];
         };
         /**
          * @description `POST /sessions/{id}/check`: re-checks completed code from scratch
@@ -1355,8 +1362,17 @@ export interface components {
              */
             amendment?: components["schemas"]["Amendment"];
             /**
-             * @description The check, as for `/check`. It has no `sorries`, and `time` includes
-             *     importing the module's imports.
+             * @description True when nothing was built for this request: the code was kept
+             *     already, or a `key` replayed an earlier create, and the answer is the
+             *     stored one. Then `timing` shows what this request cost, and `check`
+             *     what the build did.
+             */
+            cached: boolean;
+            /**
+             * @description The check of the stored build, as for `/check`. It has no `sorries`,
+             *     and `time` includes importing the module's imports. When `cached`, it
+             *     is the earlier build's, `time` and `timing` included, not this
+             *     request's.
              */
             check: components["schemas"]["CheckResult"];
             /**
@@ -1401,6 +1417,12 @@ export interface components {
              *     (`check.error` says which).
              */
             snapshot?: components["schemas"]["Snapshot"];
+            /**
+             * @description Where this request's time went: `execution` is the compile, imports
+             *     included, and `verification` the kernel re-check of the module chain,
+             *     both 0 when `cached` unless a re-check ran.
+             */
+            timing: components["schemas"]["Timing"];
             /**
              * @description Set when the kernel re-check didn't finish, as it ran out of time or
              *     memory, for code outside the module system with no macros, its own or
@@ -1604,6 +1626,8 @@ export interface components {
             runs?: components["schemas"]["RunImport"][];
             /** @description The code's `sorry`s in source order, each with its goals. */
             sorries: components["schemas"]["Sorry"][];
+            /** @description Where this request's time went. */
+            timing: components["schemas"]["Timing"];
         };
         DocumentGoals: {
             /** @description One per position asked about, in order. */
@@ -1616,6 +1640,8 @@ export interface components {
             reopened: boolean;
             /** Format: int64 */
             revision: number;
+            /** @description Where this request's time went: `load` is reopening the document, `tracing` asking Lean for the goals. */
+            timing: components["schemas"]["Timing"];
         };
         /** @description `POST /documents/{id}/goals`. */
         DocumentGoalsRequest: {
@@ -1644,6 +1670,8 @@ export interface components {
             results: components["schemas"]["ProbeResult"][];
             /** Format: int64 */
             revision: number;
+            /** @description Where this request's time went: `load` is reopening the document, `execution` running the candidates. */
+            timing: components["schemas"]["Timing"];
         };
         /**
          * @description `POST /documents/{id}/probes`: runs each candidate at one position, each
@@ -2640,6 +2668,8 @@ export interface components {
             runs?: components["schemas"]["RunImport"][];
             /** @description One per `sorry`, in source order. */
             states: components["schemas"]["State"][];
+            /** @description Where this request's time went: `execution` is opening the code. */
+            timing: components["schemas"]["Timing"];
         };
         /**
          * @description `POST /snapshots/settle`: rebuilds the heads of the run that the spec
@@ -2847,6 +2877,50 @@ export interface components {
             term: string;
         };
         /**
+         * @description Where an operation's time went, in seconds. A phase that doesn't apply to
+         *     the operation is 0. `total` is the worker's wall clock from claiming the
+         *     job to answering it, which the phases don't add up to: the rest is the
+         *     worker's own bookkeeping, and for creates, whatever else the request did.
+         */
+        Timing: {
+            /**
+             * Format: double
+             * @description Running the code: a check's body, a create's compile (its imports
+             *     included), a session's open, a tactic's step, a probe's candidates.
+             *     For a document's open, the elaboration, the header's import included.
+             */
+            execution: number;
+            /**
+             * Format: double
+             * @description Getting ready to run: a check's header import when no process had it
+             *     warm, a document's reopen and the replay of a tactic's earlier steps.
+             *     For a document's open, the startup of Lean Beam.
+             */
+            load: number;
+            /**
+             * Format: double
+             * @description Waiting for a worker: from queueing the job to a worker claiming it.
+             */
+            queue: number;
+            /**
+             * Format: double
+             * @description The worker's wall clock from claiming the job to answering it.
+             */
+            total: number;
+            /**
+             * Format: double
+             * @description Tracing what Lean did: goals at positions (`lean_goals`). A check
+             *     reports none yet.
+             */
+            tracing: number;
+            /**
+             * Format: double
+             * @description Verifying what ran: a check's axiom report, a create's kernel
+             *     re-check of its module chain.
+             */
+            verification: number;
+        };
+        /**
          * @description `PATCH /snapshots/{id}`: changes the snapshot's labels as a JSON merge
          *     patch, and answers the [`Snapshot`]. The labels that result must follow
          *     the rules of [`check_labels`](crate::labels::check_labels), or nothing
@@ -3020,6 +3094,7 @@ export type SweepRefused = components['schemas']['SweepRefused'];
 export type TacticInfo = components['schemas']['TacticInfo'];
 export type Tarball = components['schemas']['Tarball'];
 export type TermInfo = components['schemas']['TermInfo'];
+export type Timing = components['schemas']['Timing'];
 export type UpdateSnapshotRequest = components['schemas']['UpdateSnapshotRequest'];
 export type VerifyFailure = components['schemas']['VerifyFailure'];
 export type VerifySnapshotResponse = components['schemas']['VerifySnapshotResponse'];

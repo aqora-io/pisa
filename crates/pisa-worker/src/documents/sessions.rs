@@ -7,7 +7,7 @@
 //! nearest state it has one for. A tactic runs in the file's own context, so
 //! it sees what the session's code declares before the `sorry`.
 
-use pisa_protocol::api::{ApplyTacticResponse, Key, Session, State};
+use pisa_protocol::api::{ApplyTacticResponse, Key, Session, State, Timing};
 use pisa_protocol::wire::{SessionStartJob, SessionTacticJob};
 use sha2::{Digest, Sha256};
 
@@ -91,7 +91,9 @@ impl Documents {
         let budget = Budget::new(j.timeout_secs);
         let id = &j.document;
         let mut doc = self.lock(id).await;
+        let opening = Instant::now();
         self.load(&mut doc, id, &j.code, 1, budget).await?;
+        let execution = round6(opening.elapsed().as_secs_f64());
         let now = now_secs();
         let meta = SessionMeta {
             code: j.code.clone(),
@@ -135,6 +137,10 @@ impl Documents {
                 states,
                 messages: open.messages.clone(),
                 runs: j.runs,
+                timing: Timing {
+                    execution,
+                    ..Timing::default()
+                },
             }),
             Err(e) => {
                 self.unload(&mut doc, id).await;
@@ -166,31 +172,39 @@ impl Documents {
             .filter(|r| &r.session == session)
             .ok_or_else(unknown)?;
         let mut doc = self.lock(session).await;
+        let mut load = Duration::ZERO;
+        let loading = Instant::now();
         let reopened = match self.ready(&mut doc, session, None).await {
             Ok(reopened) => reopened,
             // The session's document is gone; a reopen's own error stands.
             Err(e) if e == not_found(&self.version, session) => return Err(unknown()),
             Err(e) => return Err(e),
         };
+        load += loading.elapsed();
         // Replays take the time limit the session's start took, as its
         // reopen does.
         let replay = Budget::new(doc.as_ref().map_or(j.timeout_secs, |o| o.timeout));
         let mut retried = false;
-        let (r, at, replayed) = loop {
-            let (from, at, replayed) =
-                match self.start_of(&mut doc, session, state, row.clone()).await {
-                    Ok(from) => from,
-                    Err(Stop::Beam(e)) => {
-                        let e = self.fail(&mut doc, session, e, replay, "").await;
-                        return Err(after_reopen(e, reopened));
-                    }
-                    Err(Stop::Error(e)) => return Err(after_reopen(e, reopened)),
-                };
+        let (r, at, replayed, execution) = loop {
+            let replaying = Instant::now();
+            let started = self.start_of(&mut doc, session, state, row.clone()).await;
+            load += replaying.elapsed();
+            let (from, at, replayed) = match started {
+                Ok(from) => from,
+                Err(Stop::Beam(e)) => {
+                    let e = self.fail(&mut doc, session, e, replay, "").await;
+                    return Err(after_reopen(e, reopened));
+                }
+                Err(Stop::Error(e)) => return Err(after_reopen(e, reopened)),
+            };
             let budget = Budget::new(j.timeout_secs);
-            match self.step(&doc, session, &from, &j.tactic, budget).await {
+            let stepping = Instant::now();
+            let stepped = self.step(&doc, session, &from, &j.tactic, budget).await;
+            let execution = stepping.elapsed();
+            match stepped {
                 Ok(r) => {
                     self.answered(doc.as_ref().unwrap().slot);
-                    break (r, at, replayed);
+                    break (r, at, replayed, execution);
                 }
                 // Lean's answer is a result, so this is Beam's own failure,
                 // perhaps of the handle: replay the state once without it. A
@@ -249,6 +263,11 @@ impl Documents {
             messages,
             reopened: reopened.is_some(),
             replayed,
+            timing: Timing {
+                load: round6(load.as_secs_f64()),
+                execution: round6(execution.as_secs_f64()),
+                ..Timing::default()
+            },
         })
     }
 

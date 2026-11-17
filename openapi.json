@@ -337,6 +337,10 @@
           "state": {
             "$ref": "#/components/schemas/State",
             "description": "The new state. Earlier states stay valid, so a session is a tree."
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went: `load` is reopening the document and replaying earlier steps, `execution` the tactic's step."
           }
         },
         "required": [
@@ -344,7 +348,8 @@
           "complete",
           "messages",
           "reopened",
-          "replayed"
+          "replayed",
+          "timing"
         ],
         "type": "object"
       },
@@ -1029,14 +1034,19 @@
             "type": "array"
           },
           "time": {
-            "description": "Seconds Lean spent on the code.",
+            "description": "Seconds Lean spent on the code. For a create, the stored build's.",
             "format": "double",
             "type": "number"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went. For a create's `check`, the stored\nbuild's."
           }
         },
         "required": [
           "ok",
           "time",
+          "timing",
           "messages",
           "sorries",
           "reasons",
@@ -1148,9 +1158,13 @@
             "$ref": "#/components/schemas/Amendment",
             "description": "What the snapshot's create recorded of the spec it\n[`amends`](CreateSnapshotRequest::amends), if it amends one."
           },
+          "cached": {
+            "description": "True when nothing was built for this request: the code was kept\nalready, or a `key` replayed an earlier create, and the answer is the\nstored one. Then `timing` shows what this request cost, and `check`\nwhat the build did.",
+            "type": "boolean"
+          },
           "check": {
             "$ref": "#/components/schemas/CheckResult",
-            "description": "The check, as for `/check`. It has no `sorries`, and `time` includes\nimporting the module's imports."
+            "description": "The check of the stored build, as for `/check`. It has no `sorries`,\nand `time` includes importing the module's imports. When `cached`, it\nis the earlier build's, `time` and `timing` included, not this\nrequest's."
           },
           "heads": {
             "description": "On a `conflict` (`check.error`), the snapshots to replace instead:\nthose that nothing replaces, reached from the replaced snapshot by\nfollowing what replaces it, oldest first.",
@@ -1189,13 +1203,19 @@
             "$ref": "#/components/schemas/Snapshot",
             "description": "The snapshot this create added, or on a\n[`key`](CreateSnapshotRequest::key) replay the one the key is on.\nAbsent when nothing new was kept, and then `refused` says what to do\nnext and `check` why: Lean reported errors, the check could not\ncomplete, the code changed what the snapshot it\n[`replaces`](CreateSnapshotRequest::replaces) states (`check.reasons`\nsays how), the snapshot it replaces is replaced already (a\n`conflict`, see `heads`), or the request broke a rule\n(`check.error` says which)."
           },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went: `execution` is the compile, imports\nincluded, and `verification` the kernel re-check of the module chain,\nboth 0 when `cached` unless a re-check ran."
+          },
           "unverified": {
             "$ref": "#/components/schemas/VerifyFailure",
             "description": "Set when the kernel re-check didn't finish, as it ran out of time or\nmemory, for code outside the module system with no macros, its own or\nan import's: the snapshot is kept, not\n[`verified`](Snapshot::verified), with the statuses of the build's own\nreport. `POST /snapshots/{id}/verify` finishes the re-check. Other\ncode isn't kept when its re-check doesn't finish."
           }
         },
         "required": [
-          "check"
+          "check",
+          "cached",
+          "timing"
         ],
         "type": "object"
       },
@@ -1488,13 +1508,18 @@
               "$ref": "#/components/schemas/Sorry"
             },
             "type": "array"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went."
           }
         },
         "required": [
           "id",
           "revision",
           "messages",
-          "sorries"
+          "sorries",
+          "timing"
         ],
         "type": "object"
       },
@@ -1515,12 +1540,17 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went: `load` is reopening the document, `tracing` asking Lean for the goals."
           }
         },
         "required": [
           "revision",
           "at",
-          "reopened"
+          "reopened",
+          "timing"
         ],
         "type": "object"
       },
@@ -1576,13 +1606,18 @@
             "format": "int64",
             "minimum": 0,
             "type": "integer"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went: `load` is reopening the document, `execution` running the candidates."
           }
         },
         "required": [
           "revision",
           "pos",
           "results",
-          "reopened"
+          "reopened",
+          "timing"
         ],
         "type": "object"
       },
@@ -3335,12 +3370,17 @@
               "$ref": "#/components/schemas/State"
             },
             "type": "array"
+          },
+          "timing": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Where this request's time went: `execution` is opening the code."
           }
         },
         "required": [
           "id",
           "states",
-          "messages"
+          "messages",
+          "timing"
         ],
         "type": "object"
       },
@@ -3734,6 +3774,49 @@
           "expr",
           "pos",
           "end_pos"
+        ],
+        "type": "object"
+      },
+      "Timing": {
+        "description": "Where an operation's time went, in seconds. A phase that doesn't apply to\nthe operation is 0. `total` is the worker's wall clock from claiming the\njob to answering it, which the phases don't add up to: the rest is the\nworker's own bookkeeping, and for creates, whatever else the request did.",
+        "properties": {
+          "execution": {
+            "description": "Running the code: a check's body, a create's compile (its imports\nincluded), a session's open, a tactic's step, a probe's candidates.\nFor a document's open, the elaboration, the header's import included.",
+            "format": "double",
+            "type": "number"
+          },
+          "load": {
+            "description": "Getting ready to run: a check's header import when no process had it\nwarm, a document's reopen and the replay of a tactic's earlier steps.\nFor a document's open, the startup of Lean Beam.",
+            "format": "double",
+            "type": "number"
+          },
+          "queue": {
+            "description": "Waiting for a worker: from queueing the job to a worker claiming it.",
+            "format": "double",
+            "type": "number"
+          },
+          "total": {
+            "description": "The worker's wall clock from claiming the job to answering it.",
+            "format": "double",
+            "type": "number"
+          },
+          "tracing": {
+            "description": "Tracing what Lean did: goals at positions (`lean_goals`). A check\nreports none yet.",
+            "format": "double",
+            "type": "number"
+          },
+          "verification": {
+            "description": "Verifying what ran: a check's axiom report, a create's kernel\nre-check of its module chain.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "queue",
+          "load",
+          "execution",
+          "verification",
+          "total"
         ],
         "type": "object"
       },

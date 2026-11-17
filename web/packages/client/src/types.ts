@@ -130,6 +130,7 @@ export type {
   TacticInfo,
   Tarball,
   TermInfo,
+  Timing,
   UpdateSnapshotRequest,
   VerifyFailure,
   VerifySnapshotResponse,

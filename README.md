@@ -413,8 +413,8 @@ pnpm -C web generate
 | `PUT /runs/{name}` | `{snapshot_id}` → as `GET /runs/{name}`: names the run the snapshot is in |
 | `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries, runs?}`, each run with `moved_to?`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
-| `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}]}` |
-| `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened}` |
+| `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}], reopened, timing}` |
+| `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened, timing}` |
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
@@ -478,8 +478,20 @@ would have:
 - `/check/batch`, and the snapshot reads and edits, answer at once whatever
   `Prefer` says: send a batch's items to `/check` instead.
 
-A check result is `{ok, time, error?, messages, sorries, reasons, changes?, declarations, runs?}`:
+A check result is `{ok, time, timing, error?, messages, sorries, reasons, changes?, declarations, runs?}`:
 - `ok` is the verdict.
+- `timing` says where the time went, in seconds: `{queue, load, execution, tracing, verification, total}`.
+  Every operation that runs Lean has one, in the same shape, and a phase that
+  doesn't apply is 0. `queue` is the wait for a worker, from queueing the
+  job to a worker claiming it, and `total` the worker's wall clock from
+  claiming it to answering. A check's `load` is the header import, 0 when a
+  process had it warm, `execution` its body (`time`) and `verification` the
+  axiom report. A create's `execution` is the compile, imports included, and
+  its `verification` the kernel re-check. A session's start reports its open
+  as `execution`. A tactic's `load` is the reopen and the replay of earlier
+  steps, and `execution` its step. A probe's `load` is the reopen and
+  `execution` its candidates; goals' `load` is the reopen and `tracing` the
+  asking. `tracing` stays 0 for checks.
 - `messages` are Lean's, each `{severity, pos, end_pos?, text}`.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
 - `changes` lists, for a [replacement](#replacing) or a session's final
@@ -695,7 +707,9 @@ POST /check {"code": "import Mathlib\nimport PisaSnap.s1f…\n\nexample : double
 - **The id** (`id`, `<version>~<32 hex>`) is the snapshot's own: a reference
   to the module with its own `labels` and `created` time. Creating the same
   code again adds another snapshot of the same module without building it
-  again. `GET`, `PATCH`, `DELETE` and `verify` take the id, which carries the
+  again. Such a create answers `cached: true`: its `check` is the stored
+  build's, with the build's `time` and `timing`, and the response's own
+  `timing` is what this request cost. `GET`, `PATCH`, `DELETE` and `verify` take the id, which carries the
   version, so they take no `version`; a module name there is a `bad_request`.
 
 A create that keeps nothing has no `snapshot`; `refused` says what to do

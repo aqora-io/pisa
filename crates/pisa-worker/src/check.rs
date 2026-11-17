@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pisa_protocol::api::{Detail, Error, ErrorKind};
+use pisa_protocol::api::{Detail, Error, ErrorKind, Timing};
 use pisa_protocol::header::{header_to_code, split_header};
 use pisa_protocol::repl::{
     self, CommandResponse, Pos, ReplCommand, ReplResponse, Severity, at_positions, tactics,
@@ -23,6 +23,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     let split = split_header(&job.code);
     let mut outcome = CheckOutcome {
         time: 0.0,
+        timing: Timing::default(),
         error: None,
         response: None,
         verification: None,
@@ -57,7 +58,13 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     }
     let mut slot = pool.acquire(&split.header_key).await;
 
-    let env = match slot.warm_up(&split.header, &split.header_key).await {
+    let loading = Instant::now();
+    let warmed = slot.warm_up(&split.header, &split.header_key).await;
+    // Importing is the load, unless the process had the header already.
+    if !matches!(warmed, Ok((_, true))) {
+        outcome.timing.load = round6(loading.elapsed().as_secs_f64());
+    }
+    let env = match warmed {
         Ok((env, _)) => env,
         Err(HeaderFailure::Lean(mut r)) => {
             // Its error messages say what went wrong, at positions in the
@@ -92,10 +99,13 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     let start = Instant::now();
     let result = run(&mut slot, &cmd, Duration::from_secs(job.timeout_secs)).await;
     outcome.time = round6(start.elapsed().as_secs_f64());
+    outcome.timing.execution = outcome.time;
 
     match result {
         Ok(ReplResponse::Command(mut r)) => {
+            let verifying = Instant::now();
             let report = axiom_report(&mut slot, &r).await;
+            outcome.timing.verification = round6(verifying.elapsed().as_secs_f64());
             outcome.verification = Some(slot.policy().judge(&r, report.as_ref()));
             if let Some(hint) = auto_implicit_hint(&split.body, &r.messages) {
                 r.messages.push(hint);
@@ -116,6 +126,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         Err(e) => {
             if e.kind == ErrorKind::Timeout {
                 outcome.time = job.timeout_secs as f64;
+                outcome.timing.execution = outcome.time;
             }
             outcome.error = Some(e);
         }
@@ -264,7 +275,7 @@ pub async fn axiom_report(slot: &mut Lease, body: &CommandResponse) -> Option<Co
     }
 }
 
-fn round6(x: f64) -> f64 {
+pub(crate) fn round6(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
 }
 

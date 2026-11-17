@@ -461,7 +461,8 @@ describe("accepting a run", () => {
 });
 
 describe("documents", () => {
-  const doc = (revision: number, id = "v~d") => ({ id, revision, messages: [], sorries: [] });
+  const timing = { queue: 0, load: 0, execution: 0, tracing: 0, verification: 0, total: 0 };
+  const doc = (revision: number, id = "v~d") => ({ id, revision, messages: [], sorries: [], timing });
   const refused = (kind: string, status: number) =>
     new Response(JSON.stringify({ error: { kind, message: kind } }), { status });
 

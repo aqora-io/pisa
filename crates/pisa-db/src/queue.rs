@@ -133,6 +133,8 @@ pub struct Peer {
 pub struct Claimed {
     pub id: i64,
     pub job: Value,
+    /// When the job was queued, in microseconds since the Unix epoch.
+    pub enqueued_micros: i64,
 }
 
 /// The queue's state.

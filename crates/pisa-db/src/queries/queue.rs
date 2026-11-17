@@ -654,12 +654,16 @@ pub(crate) async fn claim(
             jobs::lease_micros.eq(now + micros(lease)),
             jobs::attempts.eq(jobs::attempts + 1),
         ))
-        .returning((jobs::id, jobs::job))
-        .get_results::<(i64, Value)>(&mut *conn(db).await?)
+        .returning((jobs::id, jobs::job, jobs::enqueued_micros))
+        .get_results::<(i64, Value, i64)>(&mut *conn(db).await?)
         .await?;
         Ok(rows
             .into_iter()
-            .map(|(id, job)| Claimed { id, job })
+            .map(|(id, job, enqueued_micros)| Claimed {
+                id,
+                job,
+                enqueued_micros,
+            })
             .collect())
     })
     .await

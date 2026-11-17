@@ -479,14 +479,56 @@ pub struct CheckBatchResponse {
     pub results: Vec<CheckResult>,
 }
 
+/// Where an operation's time went, in seconds. A phase that doesn't apply to
+/// the operation is 0. `total` is the worker's wall clock from claiming the
+/// job to answering it, which the phases don't add up to: the rest is the
+/// worker's own bookkeeping, and for creates, whatever else the request did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Timing {
+    /// Waiting for a worker: from queueing the job to a worker claiming it.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub queue: f64,
+    /// Getting ready to run: a check's header import when no process had it
+    /// warm, a document's reopen and the replay of a tactic's earlier steps.
+    /// For a document's open, the startup of Lean Beam.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub load: f64,
+    /// Running the code: a check's body, a create's compile (its imports
+    /// included), a session's open, a tactic's step, a probe's candidates.
+    /// For a document's open, the elaboration, the header's import included.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub execution: f64,
+    /// Tracing what Lean did: goals at positions (`lean_goals`). A check
+    /// reports none yet.
+    #[serde(default)]
+    pub tracing: f64,
+    /// Verifying what ran: a check's axiom report, a create's kernel
+    /// re-check of its module chain.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub verification: f64,
+    /// The worker's wall clock from claiming the job to answering it.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub total: f64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct CheckResult {
     /// True when the code elaborated without errors and passed every policy
     /// check: only standard axioms, no metaprogramming, allowed options, and
     /// for session checks, the session's original statements.
     pub ok: bool,
-    /// Seconds Lean spent on the code.
+    /// Seconds Lean spent on the code. For a create, the stored build's.
     pub time: f64,
+    /// Where this request's time went. For a create's `check`, the stored
+    /// build's.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
     /// Why the check could not complete (timeout, crash, policy, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,
@@ -652,6 +694,10 @@ pub struct Session {
     /// session keeps these: its final check imports the same modules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunImport>,
+    /// Where this request's time went: `execution` is opening the code.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
 }
 
 /// A proof state: the goals still to prove. A state stays valid after
@@ -704,6 +750,10 @@ pub struct ApplyTacticResponse {
     #[schema(required = true)]
     #[serde(default)]
     pub replayed: u32,
+    /// Where this request's time went: `load` is reopening the document and replaying earlier steps, `execution` the tactic's step.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
 }
 
 /// `POST /sessions/{id}/check`: re-checks completed code from scratch
@@ -775,6 +825,10 @@ pub struct Document {
     /// PisaRun.<name>`) resolved to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunImport>,
+    /// Where this request's time went.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
 }
 
 /// A position in a document's code, as for [`Pos`]. Without `column`, it is
@@ -824,6 +878,10 @@ pub struct DocumentGoals {
     #[schema(required = true)]
     #[serde(default)]
     pub reopened: bool,
+    /// Where this request's time went: `load` is reopening the document, `tracing` asking Lean for the goals.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -896,6 +954,10 @@ pub struct DocumentProbes {
     #[schema(required = true)]
     #[serde(default)]
     pub reopened: bool,
+    /// Where this request's time went: `load` is reopening the document, `execution` running the candidates.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -1230,9 +1292,24 @@ pub struct CreateSnapshotResponse {
     /// Set exactly when `snapshot` is absent: what to do next.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<Refusal>,
-    /// The check, as for `/check`. It has no `sorries`, and `time` includes
-    /// importing the module's imports.
+    /// The check of the stored build, as for `/check`. It has no `sorries`,
+    /// and `time` includes importing the module's imports. When `cached`, it
+    /// is the earlier build's, `time` and `timing` included, not this
+    /// request's.
     pub check: CheckResult,
+    /// True when nothing was built for this request: the code was kept
+    /// already, or a `key` replayed an earlier create, and the answer is the
+    /// stored one. Then `timing` shows what this request cost, and `check`
+    /// what the build did.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub cached: bool,
+    /// Where this request's time went: `execution` is the compile, imports
+    /// included, and `verification` the kernel re-check of the module chain,
+    /// both 0 when `cached` unless a re-check ran.
+    #[schema(required = true)]
+    #[serde(default)]
+    pub timing: Timing,
     /// What the replacement changed, if the request named a snapshot it
     /// replaces and the code was kept. Absent on a key replay, which doesn't
     /// compare again.
@@ -2585,6 +2662,8 @@ mod tests {
             serde_json::to_value(&r).unwrap(),
             json!({
                 "ok": false, "time": 1.0,
+                "timing": {"queue": 0.0, "load": 0.0, "execution": 0.0, "tracing": 0.0,
+                           "verification": 0.0, "total": 0.0},
                 "error": {"kind": "timeout", "message": "Lean ran for more than 1s"},
                 "messages": [{"severity": "info", "pos": {"line": 1, "column": 0},
                               "end_pos": {"line": 1, "column": 6}, "text": "Nat : Type"}],

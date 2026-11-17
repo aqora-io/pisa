@@ -6,6 +6,8 @@ use pisa_db::catalog::name_taken;
 use pisa_protocol::api::{self, Amends, Declaration, Replaces};
 use pisa_protocol::verify::normalised;
 
+use crate::check::round6;
+
 use super::*;
 
 /// What [`Snapshots::build`] kept: the module's record, the new entry, and
@@ -101,27 +103,31 @@ pub(super) fn failure_error(f: &VerifyFailure) -> Error {
 impl Snapshots {
     /// The response to a create that added `entry` to the module `meta`
     /// records, or replayed it. What a replacement changed is for the caller
-    /// to add: a key replay doesn't compare again.
+    /// to add: a key replay doesn't compare again. `cached` is whether the
+    /// module was kept already, so that this create built nothing.
     pub(super) fn created(
         &self,
         meta: ModuleMeta,
         (entry, entry_meta): (String, EntryMeta),
+        cached: bool,
     ) -> CreateSnapshotResponse {
         CreateSnapshotResponse {
             snapshot: Some(self.snapshot(entry, entry_meta, &meta)),
             check: meta.result,
+            cached,
             ..Default::default()
         }
     }
 
     /// The response to a create of kept code, the module `meta` records,
     /// that added no entry: the module's check, failed, for the caller to
-    /// say why.
-    pub(super) fn refused(&self, meta: ModuleMeta) -> CreateSnapshotResponse {
+    /// say why. `cached` is as for [`created`](Self::created).
+    pub(super) fn refused(&self, meta: ModuleMeta, cached: bool) -> CreateSnapshotResponse {
         let mut check = meta.result;
         check.ok = false;
         CreateSnapshotResponse {
             check,
+            cached,
             ..Default::default()
         }
     }
@@ -410,7 +416,7 @@ impl Snapshots {
             return Err(key_in_use());
         }
         let meta = self.catalog.module(&entry_meta.module).await?;
-        Ok(Some(self.created(meta, (entry, entry_meta))))
+        Ok(Some(self.created(meta, (entry, entry_meta), true)))
     }
 
     /// Refuses `name` for the run a create starts while another run that has
@@ -461,7 +467,16 @@ impl Snapshots {
         match self.catalog.module(&id).await {
             Ok(meta) => {
                 drop(building);
-                return self.add_to_kept(pool, &id, meta, job, rel, response).await;
+                let added = self
+                    .add_to_kept(pool, &id, meta, job, rel, &mut response)
+                    .await;
+                return added.map(|mut done| {
+                    // An answer built from `response` has the re-check's time
+                    // already, and one built from the module's has none.
+                    done.timing.verification =
+                        done.timing.verification.max(response.timing.verification);
+                    done
+                });
             }
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => {
@@ -488,13 +503,15 @@ impl Snapshots {
         slot.finish_job();
         Some(match built {
             Ok(Some((meta, entry, replacement, unverified))) => {
-                let mut done = self.created(meta, entry);
+                let mut done = self.created(meta, entry, false);
+                done.timing = done.check.timing;
                 replaced(&mut done, rel.replacing.as_ref(), replacement);
                 done.unverified = unverified;
                 done
             }
             Ok(None) => response,
             Err(outcome) => {
+                response.timing = outcome.timing;
                 response.check = (*outcome).into();
                 response
             }
@@ -509,7 +526,7 @@ impl Snapshots {
     /// of plain code with no macros adds the entry, not `verified`, and says
     /// so in `unverified`, unless the request asked to verify. `None` if the
     /// module is gone by the time it is needed, or was built again during the
-    /// re-check.
+    /// re-check. The seconds the re-check took are left in `response.timing`.
     pub(super) async fn add_to_kept(
         &self,
         pool: &Arc<Pool>,
@@ -517,7 +534,7 @@ impl Snapshots {
         meta: ModuleMeta,
         job: &SnapshotCreateJob,
         rel: &Relations,
-        mut response: CreateSnapshotResponse,
+        response: &mut CreateSnapshotResponse,
     ) -> Option<CreateSnapshotResponse> {
         let replacing = rel.replacing.as_ref();
         let module_system = split_header(&job.code).header.lines().next() == Some("module");
@@ -530,7 +547,10 @@ impl Snapshots {
                 let (_, failure) = self.verify_chain(pool, &ids, per_module, false).await?;
                 Ok::<_, Error>((self.catalog.module(id).await?, failure))
             };
-            match verified.await {
+            let started = Instant::now();
+            let verified = verified.await;
+            response.timing.verification = round6(started.elapsed().as_secs_f64());
+            match verified {
                 // Nothing failed, so the chain stopped at a module built again.
                 Ok((meta, None)) if !meta.verified => return None,
                 Ok((meta, None)) => meta,
@@ -542,7 +562,7 @@ impl Snapshots {
                     meta
                 }
                 Ok((meta, Some(failure))) => {
-                    let mut refused = self.refused(meta);
+                    let mut refused = self.refused(meta, true);
                     refused.check.error = Some(failure_error(&failure));
                     return Some(refused);
                 }
@@ -553,7 +573,7 @@ impl Snapshots {
                         return None;
                     }
                     response.check.error = Some(e);
-                    return Some(response);
+                    return Some(std::mem::take(response));
                 }
             }
         } else {
@@ -566,7 +586,7 @@ impl Snapshots {
                     Ok(swapped) => swapped,
                     Err(e) => {
                         response.check.error = Some(e);
-                        return Some(response);
+                        return Some(std::mem::take(response));
                     }
                 };
                 match compare(r, &meta.result.declarations, &swapped) {
@@ -576,7 +596,7 @@ impl Snapshots {
                         new.extend(swapped.gained.iter().map(|(m, _)| m.clone()));
                         let now = self.reader.exports_of(&new).await;
                         self.reader.sign(&mut changes, r, &swapped, &now).await;
-                        let mut refused = self.refused(meta);
+                        let mut refused = self.refused(meta, true);
                         refused
                             .check
                             .reasons
@@ -597,7 +617,7 @@ impl Snapshots {
             Ok(None) => {}
             Ok(Some(e)) | Err(e) => {
                 response.check.error = Some(e);
-                return Some(response);
+                return Some(std::mem::take(response));
             }
         }
         let refutes = match &rel.refuting {
@@ -607,7 +627,7 @@ impl Snapshots {
                 match refuter(&r.target, &r.spec_module, &needs, meta.verified, decls) {
                     Ok(theorem) => Some(r.record(theorem)),
                     Err(reasons) => {
-                        let mut refused = self.refused(meta);
+                        let mut refused = self.refused(meta, true);
                         refused.check.reasons.extend(reasons);
                         return Some(refused);
                     }
@@ -627,7 +647,7 @@ impl Snapshots {
                     Ok(a) => Some(a),
                     Err(e) => {
                         response.check.error = Some(e);
-                        return Some(response);
+                        return Some(std::mem::take(response));
                     }
                 }
             }
@@ -651,15 +671,15 @@ impl Snapshots {
             Ok(None) => return None,
             Err(e) => {
                 response.check.error = Some(e);
-                return Some(response);
+                return Some(std::mem::take(response));
             }
         };
         // Another create took the key for other code since `create` looked.
         if added.1.module != id {
             response.check.error = Some(key_in_use());
-            return Some(response);
+            return Some(std::mem::take(response));
         }
-        let mut done = self.created(meta, added);
+        let mut done = self.created(meta, added, true);
         replaced(&mut done, replacing, replacement);
         done.unverified = unverified;
         Some(done)

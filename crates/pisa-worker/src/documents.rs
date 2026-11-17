@@ -27,7 +27,9 @@ use pisa_beam::pos::BodyMap;
 use pisa_beam::{
     Beam, BeamError, Doc, Goal, Handle, LspPos, Mode, Packages, Range, RunResult, Workspace,
 };
-use pisa_protocol::api::{self, Error, ErrorKind, GoalsMode, LinePos, Pos, ProbeAt, ProbeResult};
+use pisa_protocol::api::{
+    self, Error, ErrorKind, GoalsMode, LinePos, Pos, ProbeAt, ProbeResult, Timing,
+};
 use pisa_protocol::header::{Split, split_header};
 use pisa_protocol::wire::{
     DocumentEditJob, DocumentGoalsJob, DocumentJob, DocumentOpenJob, DocumentProbeJob, Job,
@@ -35,7 +37,7 @@ use pisa_protocol::wire::{
 };
 use tokio::sync::OwnedMutexGuard;
 
-use crate::check::policy_error;
+use crate::check::{policy_error, round6};
 use crate::config::WorkerConfig;
 use crate::db::Db;
 use crate::launcher::Launcher;
@@ -566,6 +568,7 @@ impl Documents {
             messages: open.messages.clone(),
             sorries: open.sorries.iter().map(|(s, _)| s.clone()).collect(),
             runs: Vec::new(),
+            timing: Timing::default(),
         }
     }
 
@@ -656,7 +659,9 @@ impl Documents {
     async fn goals(&self, j: DocumentGoalsJob) -> Result<api::DocumentGoals, Error> {
         let id = &j.document;
         let mut doc = self.lock(id).await;
+        let loading = Instant::now();
         let reopened = self.ready(&mut doc, id, j.revision).await?;
+        let load = round6(loading.elapsed().as_secs_f64());
         let budget = Budget::new(j.timeout_secs);
         let open = doc.as_ref().unwrap();
         let mut at = Vec::new();
@@ -669,6 +674,7 @@ impl Documents {
             GoalsMode::After => Mode::After,
         };
         let file = file(id);
+        let traced = Instant::now();
         let asked = async {
             let mut out = Vec::new();
             for (pos, lsp) in at {
@@ -706,11 +712,17 @@ impl Documents {
         }
         .await;
         let revision = open.revision;
+        let tracing = round6(traced.elapsed().as_secs_f64());
         match asked {
             Ok(at) => Ok(api::DocumentGoals {
                 revision,
                 at,
                 reopened: reopened.is_some(),
+                timing: Timing {
+                    load,
+                    tracing,
+                    ..Timing::default()
+                },
             }),
             Err(e) => Err(after_reopen(
                 self.fail(&mut doc, id, e, budget, "").await,
@@ -722,7 +734,10 @@ impl Documents {
     async fn probe(&self, j: DocumentProbeJob) -> Result<api::DocumentProbes, Error> {
         let id = &j.document;
         let mut doc = self.lock(id).await;
+        let loading = Instant::now();
         let mut reopened = self.ready(&mut doc, id, j.revision).await?.is_some();
+        let mut load = loading.elapsed();
+        let mut execution = Duration::ZERO;
         let budget = Budget::new(j.budget_secs);
         let open = doc.as_ref().unwrap();
         let lsp = match j.at {
@@ -770,7 +785,10 @@ impl Documents {
                 None => false,
             };
             if !current {
-                match self.ready(&mut doc, id, Some(revision)).await {
+                let loading = Instant::now();
+                let ready = self.ready(&mut doc, id, Some(revision)).await;
+                load += loading.elapsed();
+                match ready {
                     Ok(_) => reopened = true,
                     Err(e) => {
                         let rest = j.candidates.len() - i;
@@ -786,10 +804,12 @@ impl Documents {
             };
             let open = doc.as_ref().unwrap();
             let in_slot = self.slots[open.slot].workspace.doc(&file);
+            let running = Instant::now();
             let run = open
                 .beam
                 .run_at(in_slot, open.version, lsp, candidate, limit.left())
                 .await;
+            execution += running.elapsed();
             results.push(match run {
                 Ok(r) => {
                     self.answered(open.slot);
@@ -821,6 +841,11 @@ impl Documents {
             pos,
             results,
             reopened,
+            timing: Timing {
+                load: round6(load.as_secs_f64()),
+                execution: round6(execution.as_secs_f64()),
+                ..Timing::default()
+            },
         })
     }
 
