@@ -365,12 +365,16 @@ pub enum Error {
     /// server answered at once, not by queueing a job, is `internal` with the
     /// answer's status. Kinds `lean`, `policy`, `timeout`, `out_of_memory`,
     /// `crash`, `recursion_limit` and `heartbeat_limit` mean the input itself
-    /// failed, which during proof search is an ordinary dead end.
+    /// failed, which during proof search is an ordinary dead end. Kind
+    /// `worker_lost` means the job was lost; the client sends it again only
+    /// where that is safe, as for a check, and `resend_safe` says whether
+    /// sending it again is, as the server said: `None` for any other kind.
     #[error("{kind:?} ({status}): {message}")]
     Server {
         status: u16,
         kind: ErrorKind,
         message: String,
+        resend_safe: Option<bool>,
     },
 }
 
@@ -478,6 +482,7 @@ impl Answer {
             status: answer.status.as_u16(),
             kind: ErrorKind::Internal,
             message: format!("an answer that doesn't read: {e}"),
+            resend_safe: None,
         })
     }
 }
@@ -638,6 +643,7 @@ impl Endpoint {
                 message: "the server answered at once instead of queueing a job, as it does \
                     for a dry run"
                     .into(),
+                resend_safe: None,
             });
         }
         let job: api::Job = a.json()?;
@@ -822,7 +828,10 @@ impl Client {
             let failed: Vec<usize> = (results.iter().enumerate())
                 .filter(|(_, r)| {
                     (r.error.as_ref()).is_some_and(|e| {
-                        matches!(e.kind, ErrorKind::Capacity | ErrorKind::Unavailable)
+                        matches!(
+                            e.kind,
+                            ErrorKind::Capacity | ErrorKind::Unavailable | ErrorKind::WorkerLost
+                        )
                     })
                 })
                 .map(|(i, _)| i)
@@ -1207,6 +1216,7 @@ impl Client {
                 status: done.http_status,
                 kind: ErrorKind::Internal,
                 message: format!("a job's answer that doesn't read: {e}"),
+                resend_safe: None,
             })
     }
 
@@ -1974,17 +1984,18 @@ fn add_labels(url: &mut Url, labels: &BTreeMap<String, String>) {
 /// 504, whose body isn't pisa's, is [`ErrorKind::Unavailable`]: the server
 /// behind it may answer later.
 fn server_failure(status: reqwest::StatusCode, text: &str) -> Error {
-    let (kind, message) = match serde_json::from_str::<ErrorResponse>(text) {
-        Ok(e) => (e.error.kind, e.error.message),
+    let (kind, message, resend_safe) = match serde_json::from_str::<ErrorResponse>(text) {
+        Ok(e) => (e.error.kind, e.error.message, e.error.resend_safe),
         Err(_) if matches!(status.as_u16(), 502..=504) => {
-            (ErrorKind::Unavailable, text.to_string())
+            (ErrorKind::Unavailable, text.to_string(), None)
         }
-        Err(_) => (ErrorKind::Internal, text.to_string()),
+        Err(_) => (ErrorKind::Internal, text.to_string(), None),
     };
     Error::Server {
         status: status.as_u16(),
         kind,
         message,
+        resend_safe,
     }
 }
 

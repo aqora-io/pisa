@@ -645,7 +645,7 @@ async fn a_worker_without_beam_takes_no_job_on_a_document() {
             give_up_at: Some(_)
         }
     ));
-    assert_eq!(c.queue.give_up(job).await.unwrap(), Some(0));
+    assert_eq!(c.queue.give_up(job).await.unwrap(), Some((0, false)));
 }
 
 #[tokio::test(flavor = "multi_thread")]

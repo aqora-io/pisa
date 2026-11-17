@@ -97,8 +97,10 @@ pub enum Poll {
     /// Not done. If no worker claims it by `give_up_at` (microseconds), it
     /// is given up; `None` while a worker runs it.
     Waiting { give_up_at: Option<i64> },
-    /// Its last claim lapsed with no attempts or time left: taken out.
-    Lost { attempts: u32 },
+    /// Its last claim lapsed with no attempts or time left: taken out. It
+    /// was claimed `attempts` times; `exhausted` if that was all it was
+    /// allowed, else no worker that could run it came back in time.
+    Lost { attempts: u32, exhausted: bool },
     /// Not in the queue: given up or swept.
     Gone,
 }
@@ -126,8 +128,10 @@ pub enum Stage {
     /// Its worker's result.
     Done(Value),
     /// Nobody could run it: no worker claimed it in time if `attempts` is
-    /// 0, or its last worker was lost.
-    GaveUp { attempts: u32 },
+    /// 0, or its last worker was lost. It was claimed `attempts` times;
+    /// `exhausted` if that was all it was allowed, else no worker that could
+    /// run it came back in time.
+    GaveUp { attempts: u32, exhausted: bool },
 }
 
 /// An open job, as a worker picks between them.
@@ -226,9 +230,9 @@ impl Queue {
     }
 
     /// Takes job `id` out of the queue unless a worker holds a live claim on
-    /// it or it is done. Returns how many workers had claimed it, or `None`
-    /// if it wasn't taken out.
-    pub async fn give_up(&self, id: i64) -> Result<Option<u32>, DbError> {
+    /// it or it is done. Returns how many workers had claimed it and whether
+    /// that was all it was allowed, or `None` if it wasn't taken out.
+    pub async fn give_up(&self, id: i64) -> Result<Option<(u32, bool)>, DbError> {
         dispatch!(&self.db, give_up(id))
     }
 
@@ -620,7 +624,10 @@ mod tests {
             assert!(q.claim("c", &[id], LEASE).await.unwrap().is_empty());
             assert!(matches!(
                 q.poll(id).await.unwrap(),
-                Poll::Lost { attempts: 2 }
+                Poll::Lost {
+                    attempts: 2,
+                    exhausted: true
+                }
             ));
             assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
         }
@@ -691,7 +698,7 @@ mod tests {
             q.heartbeat("w", since, LEASE).await.unwrap();
             for _ in 0..2 {
                 let stage = q.status(&token).await.unwrap().unwrap().stage;
-                assert!(matches!(stage, Stage::GaveUp { attempts: 0 }));
+                assert!(matches!(stage, Stage::GaveUp { attempts: 0, .. }));
             }
             // Closed: nobody can claim or complete it, and it isn't queued.
             assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
@@ -710,11 +717,17 @@ mod tests {
             assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }));
+            assert!(matches!(
+                stage,
+                Stage::GaveUp {
+                    attempts: 1,
+                    exhausted: true
+                }
+            ));
             // The worker answers too late.
             assert!(!q.complete("a", id, &json!(1)).await.unwrap());
             let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }));
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1, .. }));
         }
     }
 
@@ -753,7 +766,16 @@ mod tests {
             assert_eq!(q.claim("b", &[id], short).await.unwrap().len(), 1);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 2 }), "{stage:?}");
+            assert!(
+                matches!(
+                    stage,
+                    Stage::GaveUp {
+                        attempts: 2,
+                        exhausted: true
+                    }
+                ),
+                "{stage:?}"
+            );
         }
     }
 
@@ -773,7 +795,16 @@ mod tests {
             q.heartbeat("w", since, LEASE).await.unwrap();
             for _ in 0..2 {
                 let stage = q.status(&token).await.unwrap().unwrap().stage;
-                assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+                assert!(
+                    matches!(
+                        stage,
+                        Stage::GaveUp {
+                            attempts: 1,
+                            exhausted: false
+                        }
+                    ),
+                    "{stage:?}"
+                );
             }
             assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
             // The sweep, a minute behind, agrees: it closes the one nobody
@@ -782,7 +813,10 @@ mod tests {
             let later = now + micros(Duration::from_secs(120));
             assert_eq!(q.sweep_as_of(later).await.unwrap(), 1);
             let stage = q.status(&unread).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 1, .. }),
+                "{stage:?}"
+            );
         }
     }
 
@@ -806,9 +840,15 @@ mod tests {
             }
             q.sweep_as_of(ceiling + margin).await.unwrap();
             let stage = q.status(&never_run).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 0 }), "{stage:?}");
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 0, .. }),
+                "{stage:?}"
+            );
             let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 1, .. }),
+                "{stage:?}"
+            );
             let both = [unclaimed, id];
             assert!(q.claim("b", &both, LEASE).await.unwrap().is_empty());
         }
@@ -826,9 +866,13 @@ mod tests {
             // Its request doesn't wait for a worker to come back.
             assert!(ids(&q, "v").await.is_empty());
             assert!(q.claim("b", &[id], LEASE).await.unwrap().is_empty());
+            // Attempts remained, but no worker came back in its wait.
             assert!(matches!(
                 q.poll(id).await.unwrap(),
-                Poll::Lost { attempts: 1 }
+                Poll::Lost {
+                    attempts: 1,
+                    exhausted: false
+                }
             ));
         }
     }
@@ -859,7 +903,10 @@ mod tests {
             q.heartbeat_as_of("w", since, LEASE, at(60)).await.unwrap();
             q.sweep_as_of(at(60 + 120)).await.unwrap();
             let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 1, .. }),
+                "{stage:?}"
+            );
         }
     }
 
@@ -910,7 +957,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             q.heartbeat("beam", since, LEASE).await.unwrap();
             let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 1, .. }),
+                "{stage:?}"
+            );
         }
     }
 
@@ -929,7 +979,10 @@ mod tests {
             let (_, waits) = q.enqueue_async(&new, "check").await.unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;
             let stage = q.status(&nope).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 0 }), "{stage:?}");
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 0, .. }),
+                "{stage:?}"
+            );
             // The job of `v` waits for its worker to come back.
             let stage = q.status(&waits).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
@@ -1035,7 +1088,7 @@ mod tests {
             let stage = q.status(&done).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::Done(_)));
             let stage = q.status(&given_up).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::GaveUp { attempts: 0 }));
+            assert!(matches!(stage, Stage::GaveUp { attempts: 0, .. }));
 
             // The sweep closed `given_up` at +11 minutes; both are gone an
             // hour after.
@@ -1058,7 +1111,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(ids(&q, "v").await.is_empty());
             assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
-            assert_eq!(q.give_up(id).await.unwrap(), Some(0));
+            assert_eq!(q.give_up(id).await.unwrap(), Some((0, false)));
             assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
 
             // A running job isn't given up.

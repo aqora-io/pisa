@@ -61,10 +61,33 @@ pub enum Looking {
 pub enum DispatchError {
     #[error("No available REPLs")]
     NoCapacity,
-    #[error("job failed on {0} workers that disconnected")]
-    WorkerLost(u32),
+    /// The job was claimed `attempts` times: that was all it was allowed if
+    /// `attempts_exhausted`, else no worker that could run it came back in
+    /// time. Sending the request again is safe if `resend_safe`.
+    #[error("{}", lost_message(*.attempts, *.attempts_exhausted))]
+    WorkerLost {
+        attempts: u32,
+        attempts_exhausted: bool,
+        resend_safe: bool,
+    },
+    /// A job this server ran itself, such as a rebuild, was lost as it
+    /// stopped. Its steps carry keys, so sending the request again is safe.
+    #[error("the server running it stopped")]
+    ServerStopped,
     #[error("the job queue is unavailable, retry later: {0}")]
     Unavailable(String),
+}
+
+fn lost_message(attempts: u32, exhausted: bool) -> String {
+    let plural = if attempts == 1 { "" } else { "s" };
+    if exhausted {
+        format!("job failed on {attempts} worker{plural} that disconnected")
+    } else {
+        format!(
+            "no worker that can run the job came back in time (it was claimed {attempts} \
+             time{plural})"
+        )
+    }
 }
 
 impl From<DbError> for DispatchError {
@@ -298,10 +321,16 @@ impl Dispatcher {
     /// more times than `max_retries` allows, or no other one claimed it
     /// within `max_wait` after.
     pub async fn submit(&self, p: Prepared) -> Result<JobResult, DispatchError> {
-        self.submit_new(self.new_job(p)?).await
+        let resend_safe = p.job.resend_safe();
+        self.submit_new(self.new_job(p)?, resend_safe).await
     }
 
-    async fn submit_new(&self, new: NewJob) -> Result<JobResult, DispatchError> {
+    async fn submit_new(&self, new: NewJob, resend_safe: bool) -> Result<JobResult, DispatchError> {
+        let lost = |(attempts, attempts_exhausted)| DispatchError::WorkerLost {
+            attempts,
+            attempts_exhausted,
+            resend_safe,
+        };
         let id = self.queue.enqueue(&new).await?;
         let mut waiting = Waiting {
             dispatcher: self,
@@ -312,7 +341,10 @@ impl Dispatcher {
         let outcome = loop {
             match self.queue.poll(id).await? {
                 Poll::Done(result) => break Ok(decode(result)),
-                Poll::Lost { attempts } => break Err(DispatchError::WorkerLost(attempts)),
+                Poll::Lost {
+                    attempts,
+                    exhausted,
+                } => break Err(lost((attempts, exhausted))),
                 Poll::Gone => {
                     break Err(DispatchError::Unavailable(
                         "the job left the queue unfinished".into(),
@@ -324,8 +356,8 @@ impl Dispatcher {
                     if let Some(at) = give_up_at {
                         if at <= now {
                             match self.queue.give_up(id).await? {
-                                Some(0) => break Err(DispatchError::NoCapacity),
-                                Some(attempts) => break Err(DispatchError::WorkerLost(attempts)),
+                                Some((0, _)) => break Err(DispatchError::NoCapacity),
+                                Some(gone) => break Err(lost(gone)),
                                 // A worker claimed it meanwhile.
                                 None => continue,
                             }
@@ -389,12 +421,23 @@ impl Dispatcher {
             let mut sleep = poll_every;
             let state = match status.stage {
                 Stage::Done(result) => Looking::Done(Box::new(Ok(decode(result)))),
-                Stage::GaveUp { attempts: 0 } => {
+                Stage::GaveUp { attempts: 0, .. } => {
                     Looking::Done(Box::new(Err(DispatchError::NoCapacity)))
                 }
-                Stage::GaveUp { attempts } => {
-                    Looking::Done(Box::new(Err(DispatchError::WorkerLost(attempts))))
+                // Only a server runs these itself.
+                Stage::GaveUp { .. }
+                    if matches!(kind, JobKind::RebuildSnapshots | JobKind::ResubmitSnapshots) =>
+                {
+                    Looking::Done(Box::new(Err(DispatchError::ServerStopped)))
                 }
+                Stage::GaveUp {
+                    attempts,
+                    exhausted,
+                } => Looking::Done(Box::new(Err(DispatchError::WorkerLost {
+                    attempts,
+                    attempts_exhausted: exhausted,
+                    resend_safe: kind != JobKind::AcceptRun,
+                }))),
                 Stage::Running => Looking::Pending(JobStatus::Running),
                 Stage::Queued { give_up_at } => {
                     // Then the next look closes it.
@@ -500,7 +543,7 @@ fn decode(result: serde_json::Value) -> JobResult {
 mod tests {
     use super::*;
     use pisa_db::db::Db;
-    use pisa_protocol::wire::SnapshotRebuildJob;
+    use pisa_protocol::wire::{CheckJob, SnapshotAcceptJob, SnapshotRebuildJob};
 
     #[tokio::test]
     async fn a_held_job_is_no_workers_and_reads_lost_once_its_server_stops() {
@@ -552,9 +595,76 @@ mod tests {
             panic!("not done")
         };
         assert!(
-            matches!(*done, Err(DispatchError::WorkerLost(1))),
+            matches!(*done, Err(DispatchError::ServerStopped)),
             "{done:?}"
         );
+    }
+
+    /// A request waiting on a job whose worker is lost is told whether
+    /// sending it again is safe, as its job says.
+    #[tokio::test]
+    async fn a_lost_sync_job_says_whether_to_send_it_again() {
+        let queue = Queue::new(Db::memory().await, "q");
+        let cfg = DispatchConfig {
+            max_retries: 0,
+            ..Default::default()
+        };
+        let d = Dispatcher::start(queue.clone(), cfg).await;
+        let accept = Job::SnapshotAccept(SnapshotAcceptJob {
+            against: Vec::new(),
+            allow: Vec::new(),
+            paranoid: false,
+            timeout_secs: 1,
+            build_timeout_secs: 0,
+        });
+        let check = Job::Check(CheckJob {
+            code: String::new(),
+            timeout_secs: 1,
+            detail: Vec::new(),
+            at: Vec::new(),
+            runs: Vec::new(),
+            source: None,
+        });
+        for (job, resend_safe) in [(accept, false), (check, true)] {
+            let p = Prepared {
+                job,
+                route: Route {
+                    version: Some("v".into()),
+                    ..Default::default()
+                },
+                priority: Priority::Batch,
+            };
+            // A worker claims it, and is lost.
+            let lost = async {
+                loop {
+                    let ids: Vec<i64> = queue
+                        .candidates("v", 10)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .map(|c| c.id)
+                        .collect();
+                    if !queue
+                        .claim("lost", &ids, Duration::from_millis(50))
+                        .await
+                        .unwrap()
+                        .is_empty()
+                    {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            let (answer, ()) = tokio::join!(d.submit(p), lost);
+            assert_eq!(
+                answer.unwrap_err(),
+                DispatchError::WorkerLost {
+                    attempts: 1,
+                    attempts_exhausted: true,
+                    resend_safe,
+                }
+            );
+        }
     }
 
     #[tokio::test]

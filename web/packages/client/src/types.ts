@@ -183,6 +183,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorKind, number>> = {
   lean: 422,
   capacity: 429,
   unavailable: 503,
+  worker_lost: 503,
   bad_request: 400,
   not_found: 404,
   conflict: 409,

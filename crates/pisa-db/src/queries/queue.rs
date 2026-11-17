@@ -279,6 +279,7 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
         Ok(if taken == 1 {
             Poll::Lost {
                 attempts: attempts as u32,
+                exhausted: attempts >= open.3,
             }
         } else {
             Poll::Waiting { give_up_at: None }
@@ -355,6 +356,7 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
             let stage = match result {
                 Some(Value::Null) => Stage::GaveUp {
                     attempts: attempts as u32,
+                    exhausted: attempts >= max_attempts,
                 },
                 Some(result) => Stage::Done(result),
                 None if lost == Some(true) => {
@@ -373,6 +375,7 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                     wake(db, &mut c, Notice::Done(id)).await;
                     Stage::GaveUp {
                         attempts: attempts as u32,
+                        exhausted: attempts >= max_attempts,
                     }
                 }
                 None => match give_up_at(now, &open) {
@@ -421,7 +424,7 @@ pub(crate) async fn cancel(db: &Handle, q: &str, token: &str) -> Result<Option<i
     .await
 }
 
-pub(crate) async fn give_up(db: &Handle, id: i64) -> Result<Option<u32>, DbError> {
+pub(crate) async fn give_up(db: &Handle, id: i64) -> Result<Option<(u32, bool)>, DbError> {
     let now = now();
     retry(|| async {
         let attempts = diesel::delete(
@@ -430,11 +433,11 @@ pub(crate) async fn give_up(db: &Handle, id: i64) -> Result<Option<u32>, DbError
                 .filter(jobs::result.is_null())
                 .filter(jobs::worker.is_null().or(jobs::lease_micros.lt(now))),
         )
-        .returning(jobs::attempts)
-        .get_result::<i32>(&mut *conn(db).await?)
+        .returning((jobs::attempts, jobs::max_attempts))
+        .get_result::<(i32, i32)>(&mut *conn(db).await?)
         .await
         .optional()?;
-        Ok(attempts.map(|a| a as u32))
+        Ok(attempts.map(|(a, max)| (a as u32, a >= max)))
     })
     .await
 }

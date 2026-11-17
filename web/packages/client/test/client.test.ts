@@ -665,6 +665,30 @@ describe("retries", () => {
     expect(sent.map((s) => (s.body as { items: unknown }).items)).toEqual([[{ code: "a" }, { code: "b" }], [{ code: "b" }]]);
   }, 10_000);
 
+  it("keeps a lost job's kind, and sends a batch's lost items again", async () => {
+    const lost = { kind: "worker_lost", message: "job failed on 1 worker that disconnected", resend_safe: true };
+    const { client } = recording(() => json({ error: lost }, 503));
+    const e = await client.check("x").catch((e: unknown) => e);
+    expect(e).toMatchObject({ kind: "worker_lost", status: 503, resendSafe: true });
+    expect(isCapacityError(e)).toBe(true);
+    const unsafe = { ...lost, resend_safe: false };
+    const { client: unsafeClient } = recording(() => json({ error: unsafe }, 503));
+    const u = await unsafeClient.check("x").catch((e: unknown) => e);
+    expect(u).toMatchObject({ kind: "worker_lost", resendSafe: false });
+    // Any other error doesn't say.
+    const { client: busy } = recording(() => json({ error: { kind: "lean", message: "no" } }, 422));
+    const b = await busy.check("x").catch((e: unknown) => e);
+    expect(b).toMatchObject({ kind: "lean", resendSafe: undefined });
+    const failed = { ...checked, ok: false, error: lost };
+    const { client: batching, sent } = scripted(
+      () => json({ results: [checked, failed] }),
+      () => json({ results: [checked] }),
+    );
+    const results = await batching.checkBatch(["a", "b"]);
+    expect(results.map((r) => r.ok)).toEqual([true, true]);
+    expect(sent).toHaveLength(2);
+  }, 10_000);
+
   it("stops waiting when the request is aborted", async () => {
     const controller = new AbortController();
     const { client } = recording(

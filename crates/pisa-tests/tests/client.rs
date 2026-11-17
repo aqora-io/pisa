@@ -425,6 +425,7 @@ async fn client_lists_dependents_and_plans_rebuilds() {
             status: 200,
             kind: ErrorKind::Internal,
             message,
+            resend_safe: None,
         } => assert!(message.contains("at once"), "{message}"),
         other => panic!("{other:?}"),
     }
@@ -1254,6 +1255,65 @@ async fn a_client_sends_again_what_is_safe_to_and_waits_as_told() {
     assert_eq!(keys.len(), 2);
     assert_eq!(keys[0], keys[1]);
     assert!(keys[0].as_str().unwrap().starts_with("client:"), "{keys:?}");
+}
+
+/// A lost job's error says whether sending it again is safe, answered at
+/// once or as a job's answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_jobs_error_says_whether_to_send_it_again() {
+    let lost = r#"{"error": {"kind": "worker_lost", "message": "lost", "resend_safe": false}}"#;
+    let (url, _) = scripted(vec![reply("503 Service Unavailable", "", lost)]).await;
+    let against = ["v~0123456789abcdef0123456789abcdef"];
+    match eager(&url)
+        .accept_run(against, &AcceptOptions::default())
+        .await
+    {
+        Err(Error::Server {
+            status,
+            kind,
+            resend_safe,
+            ..
+        }) => assert_eq!(
+            (status, kind, resend_safe),
+            (503, ErrorKind::WorkerLost, Some(false))
+        ),
+        other => panic!("{other:?}"),
+    }
+
+    let queued =
+        r#"{"id": "0123456789abcdef0123456789abcdef", "kind": "accept_run", "status": "queued"}"#;
+    let done = serde_json::json!({
+        "id": "0123456789abcdef0123456789abcdef",
+        "kind": "accept_run",
+        "status": "done",
+        "http_status": 503,
+        "body": {"error": {"kind": "worker_lost", "message": "lost", "resend_safe": true}},
+    })
+    .to_string();
+    let (url, _) = scripted(vec![
+        reply("202 Accepted", "", queued),
+        reply("200 OK", "", &done),
+    ])
+    .await;
+    let client = eager(&url);
+    let job = client
+        .submit_accept_run(against, &AcceptOptions::default())
+        .await
+        .unwrap();
+    match client.wait_job(&job).await {
+        Err(Error::Server {
+            kind, resend_safe, ..
+        }) => assert_eq!((kind, resend_safe), (ErrorKind::WorkerLost, Some(true))),
+        other => panic!("{other:?}"),
+    }
+    // Any other error doesn't say.
+    let busy = r#"{"error": {"kind": "capacity", "message": "no worker took it"}}"#;
+    let (url, _) = scripted(vec![reply("429 Too Many Requests", "", busy)]).await;
+    let off = Client::new(&url).unwrap().with_retry(RetryPolicy::none());
+    match off.check("#check Nat").await {
+        Err(Error::Server { resend_safe, .. }) => assert_eq!(resend_safe, None),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

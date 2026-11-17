@@ -11,11 +11,20 @@ export class PisaError extends Error {
   readonly kind: PisaErrorKind;
   /** The HTTP status, when there was an answer. */
   readonly status: number | undefined;
+  /** For a lost job (`worker_lost`), whether sending the request again is
+   *  safe, as the server said; `undefined` for any other error. */
+  readonly resendSafe: boolean | undefined;
 
-  constructor(kind: PisaErrorKind, message: string, status?: number, options?: ErrorOptions) {
+  constructor(
+    kind: PisaErrorKind,
+    message: string,
+    status?: number,
+    options?: ErrorOptions & { resendSafe?: boolean | undefined },
+  ) {
     super(message, options);
     this.kind = kind;
     this.status = status;
+    this.resendSafe = options?.resendSafe;
   }
 }
 
@@ -39,10 +48,11 @@ export function isLimitError(e: unknown): e is PisaError {
   return isPisaError(e, "timeout", "out_of_memory", "crash", "recursion_limit", "heartbeat_limit");
 }
 
-/** No worker took the job in time, or the server is unavailable: try again
- *  later. */
+/** No worker took the job in time, the server is unavailable, or the job was
+ *  lost (`worker_lost`; its error's `resendSafe` says whether to send it
+ *  again): try again later. */
 export function isCapacityError(e: unknown): e is PisaError {
-  return isPisaError(e, "capacity", "unavailable");
+  return isPisaError(e, "capacity", "unavailable", "worker_lost");
 }
 
 /** An unknown or expired job, state or session, or an unknown snapshot or

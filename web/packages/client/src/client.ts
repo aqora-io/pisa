@@ -300,6 +300,7 @@ const ERROR_KINDS: ReadonlySet<string> = new Set<ErrorKind>([
   "lean",
   "capacity",
   "unavailable",
+  "worker_lost",
   "bad_request",
   "not_found",
   "conflict",
@@ -365,7 +366,9 @@ export class PisaClient {
     const started = Date.now();
     for (let made = 1; ; made += 1) {
       const failed = results.flatMap((r, i) =>
-        r.error?.kind === "capacity" || r.error?.kind === "unavailable" ? [i] : [],
+        r.error?.kind === "capacity" || r.error?.kind === "unavailable" || r.error?.kind === "worker_lost"
+          ? [i]
+          : [],
       );
       const wait = this.retry && delay(this.retry, made, Date.now() - started, RETRY_AFTER * 1000);
       if (failed.length === 0 || wait === undefined) return results;
@@ -1093,7 +1096,8 @@ function answerOf<T>(status: number, statusText: string, body: unknown): T {
   }
   const error = isObject(body) ? body["error"] : undefined;
   if (isObject(error) && typeof error["kind"] === "string" && ERROR_KINDS.has(error["kind"])) {
-    throw new PisaError(error["kind"] as ErrorKind, String(error["message"] ?? ""), status);
+    const resendSafe = typeof error["resend_safe"] === "boolean" ? error["resend_safe"] : undefined;
+    throw new PisaError(error["kind"] as ErrorKind, String(error["message"] ?? ""), status, { resendSafe });
   }
   // A gateway's error: the server behind it may answer later.
   const kind = status >= 502 && status <= 504 ? "unavailable" : "bad_response";

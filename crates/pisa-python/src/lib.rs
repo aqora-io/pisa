@@ -26,24 +26,25 @@ const SIGNALS_EVERY: Duration = Duration::from_millis(100);
 
 /// Raises the exception class `pisa_client.errors` picks for the error.
 fn to_py_err(py: Python<'_>, e: Error) -> PyErr {
-    let (status, kind, message) = match e {
+    let (status, kind, message, resend_safe) = match e {
         Error::Url(msg) | Error::Invalid(msg) => return PyValueError::new_err(msg),
         Error::Server {
             status,
             kind,
             message,
+            resend_safe,
         } => {
             let kind = serde_json::to_value(kind)
                 .ok()
                 .and_then(|v| v.as_str().map(String::from));
-            (Some(status), kind, message)
+            (Some(status), kind, message, resend_safe)
         }
-        Error::Http(err) => (None, None, err.to_string()),
+        Error::Http(err) => (None, None, err.to_string(), None),
     };
     let raised = py
         .import("pisa_client.errors")
         .and_then(|m| m.getattr("_from_server"))
-        .and_then(|f| f.call1((message, kind, status)));
+        .and_then(|f| f.call1((message, kind, status, resend_safe)));
     match raised {
         Ok(exc) => PyErr::from_value(exc),
         Err(err) => err,

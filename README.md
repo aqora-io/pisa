@@ -513,7 +513,8 @@ would have:
   the job is done, answers 200 `{id, kind, status: "done", http_status,
   body}`: the status and the answer the request would have had, errors
   included, e.g. an `http_status` of 429 when no live worker took it in
-  time. While no worker is live, e.g. across a restart, the job waits for
+  time, or 503 `worker_lost` when the job was lost (see
+  [When a worker is lost](#worker-lost)). While no worker is live, e.g. across a restart, the job waits for
   one to come back, up to a day.
   Until then it answers 202 with `status` `queued` or `running`. It answers
   within `wait` and five seconds even if the database does not: the last
@@ -751,6 +752,7 @@ limit in seconds (default 60).
 | `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
 | `recursion_limit`, `heartbeat_limit` | 422 | Lean reached `maxRecDepth` or `maxHeartbeats`; `limit` has the option, its value and the phase. The input fails as it is, so don't retry it |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
+| `worker_lost` | 503 | The job was lost; `resend_safe` says whether to send it again, see [When a worker is lost](#worker-lost) |
 | `bad_request`, `not_found` | 400, 404 | Malformed request; unknown or expired job, state or session; unknown snapshot or declaration |
 | `conflict` | 409 | A create replaces a snapshot that another already replaces, in-band in `check.error` (see [Replacing](#replacing)); or a document is at another revision than the request names |
 | `internal` | 500 | A bug |
@@ -758,6 +760,31 @@ limit in seconds (default 60).
 A 429 or a 503 carries `Retry-After`, in seconds. The clients send a request
 again by themselves (see [Clients](#clients)), and read a gateway's 502, 503
 or 504, whose body isn't pisa's, as `unavailable`.
+
+<a id="worker-lost"></a>
+**When a worker is lost.** A job whose workers kept disconnecting, that no
+worker able to run it came back for in time, or that a server ran itself and
+lost as it stopped, answers 503 `worker_lost` with `Retry-After`, and
+`resend_safe`. Its message says how many times it was claimed, and whether its
+attempts ran out or no worker came back. An async job answers it as its
+`http_status` and `body`, as it would any error. The clients' errors carry
+it: `Error::Server`'s `resend_safe` in Rust, `PisaError.resend_safe` in
+Python and `PisaError.resendSafe` in TypeScript.
+
+| Request | `resend_safe` |
+| --- | --- |
+| Checks, sessions and their tactics and checks, verify, export, document open, goals, probes | `true` |
+| Creates (replace, amend, refute) | `true`: a resend with the same `key` replays; the clients always send one |
+| Rebuild, settle, resubmit | `true`: their creates carry the plan's keys |
+| Delete, document close | `true`: a second run answers `not_found`, which means done |
+| Accept | `false`: a finished first run may be stored already; check `GET /snapshots/accept?spec=` first |
+| Document edit | `false`: check the document's revision first |
+
+The clients send a lost request again by themselves when it is safe to send
+twice, as they do after any 503 (see [Retries](#clients)): checks, tactics,
+goals, probes, verifies and creates, and a batch's lost items. An async job's
+lost answer is returned, not sent again, and so is any other lost request:
+those are yours to resend, by this table.
 
 ## Snapshots
 
@@ -1740,8 +1767,8 @@ POST /snapshots/rebuild {"from": "…~9c0e…", "to": "…~4b7a…", "labels": {
   [Async requests](#async-requests)): the 202's job, of kind
   `rebuild_snapshots`, is run by the server that answered, and
   `GET /jobs/{id}` on any server answers with the response once it is done.
-  If that server stops first, the job reads as lost (503): send the rebuild
-  again. `DELETE /jobs/{id}` leaves a running rebuild running. A dry run
+  If that server stops first, the job reads as lost (503 `worker_lost`,
+  `resend_safe`): send the rebuild again. `DELETE /jobs/{id}` leaves a running rebuild running. A dry run
   answers at once.
 - **Running it yourself.** Or take the plan and send each item as
   `POST /snapshots {code, labels, key, replaces?}`, a level at a time, the
@@ -2102,7 +2129,8 @@ carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
 - `LimitError`: the input hit a timeout, the memory limit, Lean's recursion
   or heartbeat limit (`recursion_limit`, `heartbeat_limit`), or crashed Lean.
-- `CapacityError`: no worker was free, the server is unavailable, or a
+- `CapacityError`: no worker was free, the server is unavailable, the job
+  was lost (`worker_lost`; see [When a worker is lost](#worker-lost)), or a
   gateway answered 502, 503 or 504, once the client's retries ran out;
   retry later.
 - `NotFoundError`: unknown or expired job, state or session, or unknown

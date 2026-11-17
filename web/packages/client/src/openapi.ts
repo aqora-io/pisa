@@ -1769,6 +1769,13 @@ export interface components {
             limit?: components["schemas"]["LeanLimit"];
             message: string;
             /**
+             * @description For `worker_lost`: whether sending the request again is safe, which
+             *     it isn't for `POST /snapshots/accept` (a finished first run may be
+             *     stored already: check `GET /snapshots/accept?spec=` first) and for a
+             *     document edit (check the document's revision first).
+             */
+            resend_safe?: boolean;
+            /**
              * @description Where an open's time went before it failed, for a document that
              *     didn't open, `timeout` included: the phase that ran out has the time
              *     up to the failure.
@@ -1776,7 +1783,7 @@ export interface components {
             timing?: components["schemas"]["Timing"];
         };
         /** @enum {string} */
-        ErrorKind: "timeout" | "out_of_memory" | "crash" | "recursion_limit" | "heartbeat_limit" | "policy" | "lean" | "capacity" | "unavailable" | "bad_request" | "not_found" | "conflict" | "internal";
+        ErrorKind: "timeout" | "out_of_memory" | "crash" | "recursion_limit" | "heartbeat_limit" | "policy" | "lean" | "capacity" | "unavailable" | "worker_lost" | "bad_request" | "not_found" | "conflict" | "internal";
         /** @description The body of every non-2xx response. */
         ErrorResponse: {
             error: components["schemas"]["Error"];
@@ -3307,7 +3314,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3398,7 +3408,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3496,7 +3509,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3598,7 +3614,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3689,7 +3708,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3777,7 +3799,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3880,7 +3905,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -3983,7 +4011,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4086,7 +4117,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4220,7 +4254,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4310,7 +4347,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4401,7 +4441,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4497,7 +4540,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4591,7 +4637,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4682,7 +4731,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4791,7 +4843,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -4903,7 +4958,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5001,7 +5059,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5110,7 +5171,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5200,7 +5264,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5309,7 +5376,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5399,7 +5469,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5499,7 +5572,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5599,7 +5675,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5708,7 +5787,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5817,7 +5899,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -5926,7 +6011,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -6019,7 +6107,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -6112,7 +6203,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -6206,7 +6300,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -6299,7 +6396,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -6412,7 +6512,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */
@@ -6524,7 +6627,10 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description `unavailable`: e.g. search isn't ready; retry later. */
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying */

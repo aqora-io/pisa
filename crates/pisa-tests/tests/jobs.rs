@@ -354,10 +354,43 @@ async fn a_job_whose_worker_is_lost_says_so() {
         let (status, r) = look(&c, &url, wait).await;
         assert_eq!(
             (status, &r["error"]["kind"]),
-            (503, &json!("unavailable")),
+            (503, &json!("worker_lost")),
+            "{r}"
+        );
+        assert_eq!(r["error"]["resend_safe"], true, "{r}");
+        assert_eq!(
+            r["error"]["message"], "job failed on 1 worker that disconnected",
             "{r}"
         );
     }
+}
+
+/// An accept may have been stored by the run that was lost: its error says
+/// to check before sending it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_accept_is_not_safe_to_resend() {
+    let mut cfg = router_config();
+    cfg.max_retries = 0;
+    let c = Cluster::start_with(cfg, &[], |w| w).await;
+    let against = format!("{}~0123456789abcdef0123456789abcdef", c.version("v"));
+    let job = accepted(
+        &c,
+        "/snapshots/accept",
+        json!({"against": [against], "paranoid": false}),
+        "accept_run",
+    )
+    .await;
+    // A worker claims it and is lost.
+    let candidates = c.queue.candidates(&c.version("v"), 10).await.unwrap();
+    let ids: Vec<i64> = candidates.iter().map(|j| j.id).collect();
+    let short = Duration::from_millis(300);
+    assert_eq!(c.queue.claim("lost", &ids, short).await.unwrap().len(), 1);
+    let (status, r) = look(&c, &c.url(&format!("/jobs/{job}")), "30").await;
+    assert_eq!(
+        (status, &r["error"]["kind"], &r["error"]["resend_safe"]),
+        (503, &json!("worker_lost"), &json!(false)),
+        "{r}"
+    );
 }
 
 /// Its worker is lost and no other is live for longer than its max wait, as

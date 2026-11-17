@@ -147,11 +147,18 @@ impl IntoResponse for ApiError {
 
 impl From<DispatchError> for api::Error {
     fn from(e: DispatchError) -> Self {
-        let kind = match e {
-            DispatchError::NoCapacity => ErrorKind::Capacity,
-            DispatchError::WorkerLost(_) | DispatchError::Unavailable(_) => ErrorKind::Unavailable,
+        let (kind, resend_safe) = match &e {
+            DispatchError::NoCapacity => (ErrorKind::Capacity, None),
+            DispatchError::Unavailable(_) => (ErrorKind::Unavailable, None),
+            DispatchError::WorkerLost { resend_safe, .. } => {
+                (ErrorKind::WorkerLost, Some(*resend_safe))
+            }
+            DispatchError::ServerStopped => (ErrorKind::WorkerLost, Some(true)),
         };
-        api::Error::new(kind, e.to_string())
+        api::Error {
+            resend_safe,
+            ..api::Error::new(kind, e.to_string())
+        }
     }
 }
 
@@ -622,6 +629,46 @@ pub fn failed_result(result: JobResult) -> CheckResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lost_job_says_whether_to_send_it_again() {
+        let error = |e: DispatchError| {
+            let e = api::Error::from(e);
+            (e.kind, e.resend_safe, e.message)
+        };
+        assert_eq!(
+            error(DispatchError::WorkerLost {
+                attempts: 1,
+                attempts_exhausted: false,
+                resend_safe: false,
+            }),
+            (
+                ErrorKind::WorkerLost,
+                Some(false),
+                "no worker that can run the job came back in time (it was claimed 1 time)".into()
+            )
+        );
+        assert_eq!(
+            error(DispatchError::WorkerLost {
+                attempts: 2,
+                attempts_exhausted: true,
+                resend_safe: true,
+            }),
+            (
+                ErrorKind::WorkerLost,
+                Some(true),
+                "job failed on 2 workers that disconnected".into()
+            )
+        );
+        // A rebuild's or a resubmit's steps carry keys.
+        let (kind, resend_safe, _) = error(DispatchError::ServerStopped);
+        assert_eq!((kind, resend_safe), (ErrorKind::WorkerLost, Some(true)));
+        // Nothing ran, or the answer is the queue's: it doesn't say.
+        let (kind, resend_safe, _) = error(DispatchError::NoCapacity);
+        assert_eq!((kind, resend_safe), (ErrorKind::Capacity, None));
+        let (kind, resend_safe, _) = error(DispatchError::Unavailable("down".into()));
+        assert_eq!((kind, resend_safe), (ErrorKind::Unavailable, None));
+    }
 
     #[test]
     fn snapshot_headers_are_not_prewarmed() {

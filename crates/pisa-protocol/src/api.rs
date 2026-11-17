@@ -78,9 +78,14 @@ pub enum ErrorKind {
     Lean,
     /// No worker was free within the server's wait limit; retry later.
     Capacity,
-    /// Workers kept disconnecting while running the job, or the metadata
-    /// store failed or stayed contended; retry later.
+    /// The metadata store failed or stayed contended, or search isn't
+    /// ready; retry later.
     Unavailable,
+    /// The job was lost: its workers disconnected until its attempts ran
+    /// out, no worker that can run it came back in time, or the server
+    /// running it stopped. The error's `resend_safe` says whether sending
+    /// the request again is safe. Retry later.
+    WorkerLost,
     BadRequest,
     NotFound,
     /// The snapshot a create replaces is already replaced; see
@@ -101,7 +106,7 @@ impl ErrorKind {
             | ErrorKind::Policy
             | ErrorKind::Lean => 422,
             ErrorKind::Capacity => 429,
-            ErrorKind::Unavailable => 503,
+            ErrorKind::Unavailable | ErrorKind::WorkerLost => 503,
             ErrorKind::BadRequest => 400,
             ErrorKind::NotFound => 404,
             ErrorKind::Conflict => 409,
@@ -113,7 +118,11 @@ impl ErrorKind {
     /// again, which the server says in `Retry-After`: for the kinds whose
     /// request may succeed later as it is.
     pub fn retry_after(self) -> Option<u64> {
-        matches!(self, ErrorKind::Capacity | ErrorKind::Unavailable).then_some(RETRY_AFTER_SECS)
+        matches!(
+            self,
+            ErrorKind::Capacity | ErrorKind::Unavailable | ErrorKind::WorkerLost
+        )
+        .then_some(RETRY_AFTER_SECS)
     }
 }
 
@@ -134,6 +143,12 @@ pub struct Error {
     /// up to the failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<Box<Timing>>,
+    /// For `worker_lost`: whether sending the request again is safe, which
+    /// it isn't for `POST /snapshots/accept` (a finished first run may be
+    /// stored already: check `GET /snapshots/accept?spec=` first) and for a
+    /// document edit (check the document's revision first).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resend_safe: Option<bool>,
 }
 
 /// A limit Lean reached while running the input.
@@ -156,6 +171,7 @@ impl Error {
             message: message.into(),
             limit: None,
             timing: None,
+            resend_safe: None,
         }
     }
 
@@ -203,7 +219,8 @@ pub enum ApiErrors {
     /// `internal`.
     #[response(status = 500)]
     Internal(ErrorResponse),
-    /// `unavailable`: e.g. search isn't ready; retry later.
+    /// `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+    /// lost, and `resend_safe` says whether to send it again; retry later.
     #[response(
         status = 503,
         headers(("Retry-After" = u64, description = "Seconds to wait before retrying"))
@@ -1448,9 +1465,12 @@ impl CreateSnapshotResponse {
             Some(ErrorKind::Conflict | ErrorKind::BadRequest | ErrorKind::NotFound) => {
                 Refusal::Request
             }
-            Some(ErrorKind::Capacity | ErrorKind::Unavailable | ErrorKind::Internal) => {
-                Refusal::Retry
-            }
+            Some(
+                ErrorKind::Capacity
+                | ErrorKind::Unavailable
+                | ErrorKind::WorkerLost
+                | ErrorKind::Internal,
+            ) => Refusal::Retry,
         })
     }
 }
@@ -2670,6 +2690,7 @@ mod tests {
             (Conflict, Refusal::Request),
             (Capacity, Refusal::Retry),
             (Unavailable, Refusal::Retry),
+            (WorkerLost, Refusal::Retry),
             (Internal, Refusal::Retry),
         ] {
             assert_eq!(refused(Some(kind), &[]), Some(refusal), "{kind:?}");
@@ -2745,6 +2766,16 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ErrorKind::OutOfMemory).unwrap(),
             json!("out_of_memory")
+        );
+        assert_eq!(ErrorKind::WorkerLost.status(), 503);
+        assert_eq!(ErrorKind::WorkerLost.retry_after(), Some(RETRY_AFTER_SECS));
+        let lost = Error {
+            resend_safe: Some(false),
+            ..Error::new(ErrorKind::WorkerLost, "gone")
+        };
+        assert_eq!(
+            serde_json::to_value(&lost).unwrap(),
+            json!({"kind": "worker_lost", "message": "gone", "resend_safe": false})
         );
     }
 

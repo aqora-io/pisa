@@ -282,6 +282,29 @@ def test_a_gateways_errors_are_retried_and_read_as_capacity():
         server.shutdown()
 
 
+def test_a_lost_job_reads_as_capacity_and_keeps_its_kind():
+    json = {"content-type": "application/json"}
+    for safe in ["true", "false"]:
+        lost = f'{{"error": {{"kind": "worker_lost", "message": "gone", "resend_safe": {safe}}}}}'
+        url, seen, server = stub([(503, json, lost)])
+        try:
+            with pytest.raises(CapacityError) as e:
+                Client(url, retry=False).check("#check Nat")
+            assert (e.value.kind, e.value.status) == ("worker_lost", 503)
+            assert e.value.resend_safe is (safe == "true")
+        finally:
+            server.shutdown()
+    # Any other error doesn't say.
+    busy = '{"error": {"kind": "capacity", "message": "no worker took it"}}'
+    url, seen, server = stub([(429, json, busy)])
+    try:
+        with pytest.raises(CapacityError) as e:
+            Client(url, retry=False).check("#check Nat")
+        assert e.value.resend_safe is None
+    finally:
+        server.shutdown()
+
+
 def test_an_async_client_answers_with_futures(url):
     async def main():
         client = AsyncClient(url, timeout=30)

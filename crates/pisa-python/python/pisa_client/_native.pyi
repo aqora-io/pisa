@@ -4,7 +4,7 @@ from typing import Literal, NotRequired, TypedDict
 ErrorKind = Literal[
     "timeout", "out_of_memory", "crash", "recursion_limit", "heartbeat_limit",
     "policy", "lean",
-    "capacity", "unavailable", "bad_request", "not_found", "conflict", "internal",
+    "capacity", "unavailable", "worker_lost", "bad_request", "not_found", "conflict", "internal",
 ]
 
 class LeanLimit(TypedDict):
@@ -18,6 +18,8 @@ class Error(TypedDict):
     limit: NotRequired[LeanLimit]
     # Where an open's time went before it failed, `timeout` included.
     timing: NotRequired[Timing]
+    # For `worker_lost`: whether sending the request again is safe.
+    resend_safe: NotRequired[bool]
 
 class Pos(TypedDict):
     line: int

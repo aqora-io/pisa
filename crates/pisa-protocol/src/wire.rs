@@ -48,6 +48,15 @@ pub enum Job {
     Unsupported,
 }
 
+impl Job {
+    /// Whether sending the request again after this job was lost is safe:
+    /// not for an accept, whose finished first run may be stored already, or
+    /// a document edit, which may have changed the document.
+    pub fn resend_safe(&self) -> bool {
+        !matches!(self, Job::SnapshotAccept(_) | Job::DocumentEdit(_))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckJob {
     pub code: String,
@@ -458,6 +467,74 @@ pub struct SessionChecked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_accept_or_a_document_edit_is_unsafe_to_resend() {
+        use serde_json::json;
+        let code = |kind: &str| json!({"kind": kind, "code": "", "timeout_secs": 1});
+        let jobs = [
+            code("check"),
+            code("session_start"),
+            json!({"kind": "session_tactic", "state": "s", "tactic": "rfl", "timeout_secs": 1}),
+            json!({"kind": "session_check", "session": "s", "code": "", "timeout_secs": 1}),
+            code("snapshot_create"),
+            code("snapshot_replace"),
+            code("snapshot_amend"),
+            code("snapshot_refute"),
+            json!({"kind": "snapshot_delete", "entry": "e"}),
+            json!({"kind": "snapshot_verify", "entry": "e"}),
+            json!({"kind": "snapshot_rebuild", "from": "f", "to": "t", "labels": {}}),
+            json!({"kind": "snapshot_settle", "against": []}),
+            json!({"kind": "snapshot_resubmit", "from": "f", "to": "t"}),
+            json!({"kind": "snapshot_export", "against": []}),
+            json!({"kind": "snapshot_accept", "against": [], "paranoid": false, "timeout_secs": 1}),
+            json!({"kind": "document_open", "document": "d", "code": "", "timeout_secs": 1}),
+            json!({
+                "kind": "document_edit", "document": "d", "code": "", "revision": 1,
+                "timeout_secs": 1,
+            }),
+            json!({"kind": "document_goals", "document": "d", "at": [], "timeout_secs": 1}),
+            json!({
+                "kind": "document_probe", "document": "d", "at": {"sorry": 0},
+                "candidates": [], "timeout_secs": 1,
+            }),
+            json!({"kind": "document_close", "document": "d"}),
+            json!({"kind": "from_a_newer_server"}),
+        ];
+        let jobs: Vec<Job> = jobs
+            .into_iter()
+            .map(|j| serde_json::from_value(j).unwrap())
+            .collect();
+        // One of each kind: a misspelt one would be a second `Unsupported`.
+        let kinds: std::collections::HashSet<_> = jobs.iter().map(std::mem::discriminant).collect();
+        assert_eq!(kinds.len(), jobs.len());
+        for job in &jobs {
+            // A new kind fails to compile here until it is added above.
+            let resend_safe = match job {
+                Job::SnapshotAccept(_) | Job::DocumentEdit(_) => false,
+                Job::Check(_)
+                | Job::SessionStart(_)
+                | Job::SessionTactic(_)
+                | Job::SessionCheck(_)
+                | Job::SnapshotCreate(_)
+                | Job::SnapshotReplace(_)
+                | Job::SnapshotAmend(_)
+                | Job::SnapshotRefute(_)
+                | Job::SnapshotDelete(_)
+                | Job::SnapshotVerify(_)
+                | Job::SnapshotRebuild(_)
+                | Job::SnapshotSettle(_)
+                | Job::SnapshotResubmit(_)
+                | Job::SnapshotExport(_)
+                | Job::DocumentOpen(_)
+                | Job::DocumentGoals(_)
+                | Job::DocumentProbe(_)
+                | Job::DocumentClose(_)
+                | Job::Unsupported => true,
+            };
+            assert_eq!(job.resend_safe(), resend_safe, "{job:?}");
+        }
+    }
 
     #[test]
     fn a_check_outcome_carries_its_timing_to_the_result() {

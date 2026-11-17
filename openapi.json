@@ -1734,6 +1734,10 @@
           "message": {
             "type": "string"
           },
+          "resend_safe": {
+            "description": "For `worker_lost`: whether sending the request again is safe, which\nit isn't for `POST /snapshots/accept` (a finished first run may be\nstored already: check `GET /snapshots/accept?spec=` first) and for a\ndocument edit (check the document's revision first).",
+            "type": "boolean"
+          },
           "timing": {
             "$ref": "#/components/schemas/Timing",
             "description": "Where an open's time went before it failed, for a document that\ndidn't open, `timeout` included: the phase that ran out has the time\nup to the failure."
@@ -1756,6 +1760,7 @@
           "lean",
           "capacity",
           "unavailable",
+          "worker_lost",
           "bad_request",
           "not_found",
           "conflict",
@@ -4151,7 +4156,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -4274,7 +4279,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -4414,7 +4419,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -4564,7 +4569,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -4687,7 +4692,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -4802,7 +4807,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -4942,7 +4947,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5084,7 +5089,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5226,7 +5231,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5380,7 +5385,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5521,7 +5526,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5644,7 +5649,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5775,7 +5780,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -5905,7 +5910,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6028,7 +6033,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6184,7 +6189,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6349,7 +6354,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6511,7 +6516,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6665,7 +6670,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6787,7 +6792,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -6941,7 +6946,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -7063,7 +7068,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -7241,7 +7246,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -7416,7 +7421,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -7572,7 +7577,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -7728,7 +7733,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -7884,7 +7889,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -8015,7 +8020,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -8143,7 +8148,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -8273,7 +8278,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -8407,7 +8412,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -8582,7 +8587,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
@@ -8747,7 +8752,7 @@
                 }
               }
             },
-            "description": "`unavailable`: e.g. search isn't ready; retry later.",
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying",
