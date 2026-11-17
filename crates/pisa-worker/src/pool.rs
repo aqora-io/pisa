@@ -328,10 +328,15 @@ impl Lease {
         let cause = self.failure_cause();
         self.retire(cause);
         HeaderFailure::Failed(if cause == "oom" {
-            Error::new(ErrorKind::OutOfMemory, "Lean exceeded its memory limit")
+            crate::limits::out_of_memory("Lean", self.memory_cap())
         } else {
             Error::new(ErrorKind::Crash, format!("Lean process failed: {e}"))
         })
+    }
+
+    /// The memory limit of the slot, as [`Launcher::memory_max_mb`] gives it.
+    pub fn memory_cap(&self) -> Option<(&'static str, u64)> {
+        self.pool.launcher.memory_max_mb(self.id)
     }
 
     /// The slot's private directory, shared with its sandboxed process.

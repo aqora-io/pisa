@@ -96,6 +96,22 @@ impl Cgroups {
         Ok(())
     }
 
+    /// The setting that limits the slot's memory and its value in MiB, `None`
+    /// without a limit.
+    pub fn memory_max_mb(&self, slot: usize) -> Option<(&'static str, u64)> {
+        let (setting, limit) = match self.beam {
+            Some((first, beam)) if slot >= first => ("PISA_BEAM_MEMORY_MAX_MB", beam),
+            _ => ("PISA_MEMORY_MAX_MB", self.memory_max),
+        };
+        Some((setting, limit? / (1024 * 1024)))
+    }
+
+    /// The memory limits of slots `0..slots` and the slots from there on
+    /// that are `beam_slots` many, summed in MiB; `None` if any has none.
+    pub fn memory_caps_mb(&self, slots: usize, beam_slots: usize) -> Option<u64> {
+        (0..slots + beam_slots).try_fold(0, |sum, slot| Some(sum + self.memory_max_mb(slot)?.1))
+    }
+
     pub fn oom_kills(&self, slot: usize) -> u64 {
         std::fs::read_to_string(self.slot_dir(slot).join("memory.events"))
             .ok()
@@ -120,5 +136,52 @@ impl Cgroups {
             .trim()
             .parse()
             .ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_slots_cap_is_the_setting_that_gives_it() {
+        let cgroups = Cgroups {
+            root: PathBuf::new(),
+            memory_max: Some(16000 * 1024 * 1024),
+            pids_max: None,
+            beam: Some((2, Some(8000 * 1024 * 1024))),
+        };
+        assert_eq!(
+            cgroups.memory_max_mb(0),
+            Some(("PISA_MEMORY_MAX_MB", 16000))
+        );
+        assert_eq!(
+            cgroups.memory_max_mb(1),
+            Some(("PISA_MEMORY_MAX_MB", 16000))
+        );
+        assert_eq!(
+            cgroups.memory_max_mb(2),
+            Some(("PISA_BEAM_MEMORY_MAX_MB", 8000))
+        );
+        let unlimited = Cgroups {
+            root: PathBuf::new(),
+            memory_max: None,
+            pids_max: None,
+            beam: Some((2, None)),
+        };
+        assert_eq!(cgroups.memory_caps_mb(2, 1), Some(2 * 16000 + 8000));
+        assert_eq!(cgroups.memory_caps_mb(2, 0), Some(32000));
+        assert_eq!(unlimited.memory_caps_mb(2, 1), None);
+        // A pool without slots needs no limit.
+        let beamless = Cgroups {
+            root: PathBuf::new(),
+            memory_max: cgroups.memory_max,
+            pids_max: None,
+            beam: Some((2, None)),
+        };
+        assert_eq!(beamless.memory_caps_mb(2, 0), Some(32000));
+        assert_eq!(beamless.memory_caps_mb(2, 1), None);
+        assert_eq!(unlimited.memory_max_mb(0), None);
+        assert_eq!(unlimited.memory_max_mb(2), None);
     }
 }

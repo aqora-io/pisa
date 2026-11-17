@@ -116,7 +116,7 @@ pub enum Unfinished {
     /// It ran out of time, loading the imports or on the module.
     Timeout(Duration),
     /// The slot's memory limit killed it.
-    OutOfMemory,
+    OutOfMemory(Option<(&'static str, u64)>),
     /// It couldn't start, failed (`PISA_FAILED`), or ended without a
     /// verdict.
     Crash(String),
@@ -128,7 +128,11 @@ impl std::fmt::Display for Unfinished {
             Unfinished::Timeout(limit) => {
                 write!(f, "the re-check took more than {}s", limit.as_secs())
             }
-            Unfinished::OutOfMemory => write!(f, "the re-check exceeded its memory limit"),
+            Unfinished::OutOfMemory(cap) => write!(
+                f,
+                "the re-check exceeded its memory limit{}",
+                crate::limits::cap_suffix(*cap)
+            ),
             Unfinished::Crash(why) => write!(f, "the re-check failed: {why}"),
         }
     }
@@ -176,7 +180,8 @@ impl VerifyRun<'_> {
             let Some(line) = line else {
                 let status = self.child.wait().await;
                 if self.launcher.oom_kills(self.slot) > self.oom_before {
-                    return Some(Err(Unfinished::OutOfMemory));
+                    let cap = self.launcher.memory_max_mb(self.slot);
+                    return Some(Err(Unfinished::OutOfMemory(cap)));
                 }
                 return match status {
                     Ok(s) if s.success() => None,
@@ -337,6 +342,20 @@ impl Launcher {
             snapshot_root,
             cgroups,
         })
+    }
+
+    /// The setting that limits the slot's memory (`PISA_MEMORY_MAX_MB`, or
+    /// `PISA_BEAM_MEMORY_MAX_MB` for a Beam slot) and its value in MiB, `None`
+    /// without a limit.
+    pub fn memory_max_mb(&self, slot: usize) -> Option<(&'static str, u64)> {
+        self.cgroups.as_ref()?.memory_max_mb(slot)
+    }
+
+    /// What the memory limits of `slots` REPL slots and `beam_slots` Beam
+    /// slots add up to in MiB; `None` if Lean runs without limits, or any of
+    /// those slots has none.
+    pub fn memory_caps_mb(&self, slots: usize, beam_slots: usize) -> Option<u64> {
+        self.cgroups.as_ref()?.memory_caps_mb(slots, beam_slots)
     }
 
     /// Whether Lean runs with the memory and process limits of cgroups.

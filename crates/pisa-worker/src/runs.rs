@@ -319,7 +319,8 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
                     _ => failed_kernels(&ran.output, *external),
                 };
                 (
-                    classify(ran, *oom),
+                    classify(ran, *oom)
+                        .map(|e| with_cap(e, pool.launcher().memory_max_mb(slot.id))),
                     ran.code,
                     tail(&ran.output, OUTPUT_LINES),
                     kernels,
@@ -607,6 +608,15 @@ fn failed_kernels(output: &str, external: bool) -> Vec<KernelVerdict> {
         kernels.splice(at..at, skipped());
     }
     kernels
+}
+
+/// `error`, if it is an out-of-memory, naming the limit of the slot that ran
+/// out (`cap`, as [`Launcher::memory_max_mb`] gives it).
+fn with_cap(mut error: PairError, cap: Option<(&'static str, u64)>) -> PairError {
+    if error.kind == PairErrorKind::OutOfMemory {
+        error.message.push_str(&crate::limits::cap_suffix(cap));
+    }
+    error
 }
 
 /// Why comparator didn't accept a pair, from how its run ended (`ran`, and
@@ -1412,6 +1422,18 @@ mod tests {
             kind(&ran(None, "lake ran for more than 1s"), false),
             Some(PairErrorKind::Timeout)
         );
+        let oom = classify(&ran(Some(1), ""), true).unwrap();
+        let named = with_cap(oom, Some(("PISA_MEMORY_MAX_MB", 16000)));
+        assert!(
+            named.message.ends_with(" (PISA_MEMORY_MAX_MB = 16000 MiB)"),
+            "{}",
+            named.message
+        );
+        let other = with_cap(
+            classify(&ran(None, "slow"), false).unwrap(),
+            Some(("PISA_MEMORY_MAX_MB", 1)),
+        );
+        assert_eq!(other.message, "slow");
         // A build the memory limit killed exits like a failed one.
         let killed = "Resolving dependencies\nBuilding PisaSnap.sa\nerror: Child exited with 137\n";
         assert_eq!(

@@ -54,6 +54,28 @@ fn limited(
     }
 }
 
+/// The error for a process the memory limit killed. `what` is the process
+/// as the message names it, `cap` its slot's setting and value in MiB (see
+/// [`crate::launcher::Launcher::memory_max_mb`]), which the error names.
+pub fn out_of_memory(what: &str, cap: Option<(&'static str, u64)>) -> Error {
+    let message = format!("{what} exceeded its memory limit{}", cap_suffix(cap));
+    Error {
+        limit: cap.map(|(option, value)| LeanLimit {
+            option: option.to_string(),
+            value,
+            phase: None,
+        }),
+        ..Error::new(ErrorKind::OutOfMemory, message)
+    }
+}
+
+/// ` (PISA_MEMORY_MAX_MB = 16000 MiB)`, or nothing without a limit.
+pub fn cap_suffix(cap: Option<(&'static str, u64)>) -> String {
+    cap.map_or_else(String::new, |(setting, mb)| {
+        format!(" ({setting} = {mb} MiB)")
+    })
+}
+
 /// The value of the last `set_option <option> N` in `text`.
 fn last_option(text: &str, option: &str) -> Option<u64> {
     let mut found = None;
@@ -72,6 +94,24 @@ fn last_option(text: &str, option: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_out_of_memory_error_names_its_cap() {
+        let repl = out_of_memory("Lean", Some(("PISA_MEMORY_MAX_MB", 16000)));
+        assert_eq!(repl.kind, ErrorKind::OutOfMemory);
+        assert_eq!(
+            repl.message,
+            "Lean exceeded its memory limit (PISA_MEMORY_MAX_MB = 16000 MiB)"
+        );
+        let limit = repl.limit.unwrap();
+        assert_eq!(
+            (limit.option.as_str(), limit.value),
+            ("PISA_MEMORY_MAX_MB", 16000)
+        );
+        let beam = out_of_memory("Lean Beam", Some(("PISA_BEAM_MEMORY_MAX_MB", 8000)));
+        assert_eq!(beam.limit.unwrap().option, "PISA_BEAM_MEMORY_MAX_MB");
+        assert!(out_of_memory("Lean", None).limit.is_none());
+    }
 
     /// `maxRecDepthErrorMessage` in `Init/Prelude.lean`.
     const RECURSION: &str = "maximum recursion depth has been reached\n\

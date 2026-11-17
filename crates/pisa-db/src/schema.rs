@@ -243,6 +243,9 @@ diesel::table! {
         store_reachable -> Nullable<Bool>,
         store_checked_micros -> Nullable<BigInt>,
         live_since_micros -> BigInt,
+        memory_caps_mb -> Nullable<BigInt>,
+        host_memory_mb -> BigInt,
+        boot_id -> Text,
     }
 }
 

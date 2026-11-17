@@ -90,6 +90,7 @@ async fn without_qdrant_there_is_no_search() {
             "revision": "unknown",
             "worker_revisions": [],
             "dependencies": {"database": "ok", "store": "unknown"},
+            "hosts": [],
             "search": null
         })
     );

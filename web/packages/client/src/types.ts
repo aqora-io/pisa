@@ -67,6 +67,7 @@ export type {
   Health,
   HealthStatus,
   Hit,
+  HostMemory,
   Inherited,
   Job,
   JobKind,

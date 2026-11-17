@@ -326,9 +326,9 @@ impl Documents {
                 }
                 tracing::warn!(slot = s.id, oom, "Lean Beam failed: {e}");
                 if oom {
-                    Error::new(
-                        ErrorKind::OutOfMemory,
-                        "Lean Beam exceeded its memory limit",
+                    crate::limits::out_of_memory(
+                        "Lean Beam",
+                        self.pool.launcher().memory_max_mb(s.id),
                     )
                 } else {
                     Error::new(ErrorKind::Crash, format!("Lean Beam failed: {e}"))

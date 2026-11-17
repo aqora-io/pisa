@@ -309,7 +309,7 @@ pub async fn run(
             let cause = slot.failure_cause();
             slot.retire(cause);
             Err(if cause == "oom" {
-                Error::new(ErrorKind::OutOfMemory, "Lean exceeded its memory limit")
+                crate::limits::out_of_memory("Lean", slot.memory_cap())
             } else {
                 Error::new(ErrorKind::Crash, format!("Lean process failed: {e}"))
             })

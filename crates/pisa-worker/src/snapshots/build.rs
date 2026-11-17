@@ -176,10 +176,9 @@ impl Snapshots {
                 ErrorKind::Timeout,
                 format!("building took more than {}s", limit.as_secs()),
             )),
-            Some(_) if compiled.oom_kills > 0 => Err(Error::new(
-                ErrorKind::OutOfMemory,
-                "Lean exceeded its memory limit",
-            )),
+            Some(_) if compiled.oom_kills > 0 => {
+                Err(crate::limits::out_of_memory("Lean", slot.memory_cap()))
+            }
             Some(status) if status.success() || errors => Ok(()),
             Some(status) => Err(Error::new(
                 ErrorKind::Crash,

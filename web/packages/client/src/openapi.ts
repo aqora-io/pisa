@@ -1765,7 +1765,10 @@ export interface components {
         };
         Error: {
             kind: components["schemas"]["ErrorKind"];
-            /** @description The limit Lean reached, for `recursion_limit` and `heartbeat_limit`. */
+            /**
+             * @description The limit Lean reached, for `recursion_limit` and `heartbeat_limit`,
+             *     and the memory limit for `out_of_memory`, where the worker knows it.
+             */
             limit?: components["schemas"]["LeanLimit"];
             message: string;
             /**
@@ -1904,6 +1907,14 @@ export interface components {
             /** @description Whether the database and the module store are reachable. */
             dependencies: components["schemas"]["Dependencies"];
             /**
+             * @description The live workers' memory limits, summed per host (the workers that
+             *     report the same boot of a machine); `null` if the queue can't be
+             *     read. A host is overcommitted when the limits its workers give their
+             *     Lean processes add up to more than it has, so that a request can be
+             *     killed for memory the limit promised.
+             */
+            hosts: components["schemas"]["HostMemory"][] | null;
+            /**
              * Format: int64
              * @description The jobs waiting on the queue for a worker, of every version; `null`
              *     if it can't be read.
@@ -1997,6 +2008,42 @@ export interface components {
              */
             verified?: boolean;
         };
+        /** @description The memory limits of the workers on one host. */
+        HostMemory: {
+            /**
+             * @description The host's boot id (`/proc/sys/kernel/random/boot_id`), which its
+             *     workers share. Workers that can't read theirs are left out.
+             */
+            boot_id: string;
+            /**
+             * Format: int64
+             * @description What the limited workers' limits add up to, in MiB:
+             *     `PISA_SLOTS` x `PISA_MEMORY_MAX_MB` plus `PISA_BEAM_SLOTS` x
+             *     `PISA_BEAM_MEMORY_MAX_MB` of each.
+             */
+            memory_caps_mb: number;
+            /**
+             * Format: int64
+             * @description The memory the host has, in MiB: the most any of its workers
+             *     reports, each the least of the machine's memory and the limit of its
+             *     own container; 0 if none could tell.
+             */
+            memory_mb: number;
+            /**
+             * @description Whether `memory_caps_mb` is more than `memory_mb`. Never for a host
+             *     whose memory is not known.
+             */
+            overcommitted: boolean;
+            /**
+             * @description The workers among them that run Lean without a memory limit, as one
+             *     without `PISA_CGROUP_ROOT`, or with a `PISA_MEMORY_MAX_MB` or
+             *     `PISA_BEAM_MEMORY_MAX_MB` of 0, does. Their memory isn't in
+             *     `memory_caps_mb`.
+             */
+            uncapped_workers: string[];
+            /** @description Its live workers, by name, those without limits included. */
+            workers: string[];
+        };
         /**
          * @description A theorem of another snapshot module that a declaration gets axioms
          *     through.
@@ -2051,14 +2098,20 @@ export interface components {
         };
         /** @description A limit Lean reached while running the input. */
         LeanLimit: {
-            /** @description The Lean option that sets it: `maxRecDepth` or `maxHeartbeats`. */
+            /**
+             * @description The setting that sets it: the Lean option `maxRecDepth` or
+             *     `maxHeartbeats`, or for `out_of_memory` the worker setting
+             *     `PISA_MEMORY_MAX_MB` (`PISA_BEAM_MEMORY_MAX_MB` for a document or a
+             *     tactic session).
+             */
             option: string;
             /** @description Where Lean was when it stopped, as it names it, e.g. `whnf`. */
             phase?: string;
             /**
              * Format: int64
-             * @description The option's value when Lean stopped. For `maxRecDepth` it is the
-             *     last the code set, else Lean's default of 512.
+             * @description The setting's value when Lean stopped. For `maxRecDepth` it is the
+             *     last the code set, else Lean's default of 512; for a memory setting,
+             *     the limit in MiB.
              */
             value: number;
         };
@@ -3145,6 +3198,7 @@ export type GoalsMode = components['schemas']['GoalsMode'];
 export type Health = components['schemas']['Health'];
 export type HealthStatus = components['schemas']['HealthStatus'];
 export type Hit = components['schemas']['Hit'];
+export type HostMemory = components['schemas']['HostMemory'];
 export type Inherited = components['schemas']['Inherited'];
 export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];

@@ -604,6 +604,25 @@ pub(crate) async fn live_revisions(
         .await?)
 }
 
+pub(crate) async fn host_rows(
+    db: &Handle,
+    q: &str,
+    stale: Duration,
+) -> Result<Vec<crate::queue::HostRow>, DbError> {
+    Ok(workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::seen_micros.ge(now() - micros(stale)))
+        .order((workers::boot_id, workers::name))
+        .select((
+            workers::name,
+            workers::boot_id,
+            workers::memory_caps_mb,
+            workers::host_memory_mb,
+        ))
+        .load(&mut *conn(db).await?)
+        .await?)
+}
+
 pub(crate) async fn report_store(
     db: &Handle,
     q: &str,
@@ -759,11 +778,7 @@ async fn bury_answered(c: &mut Conn, q: &str, now: i64) -> Result<usize, DbError
     buried.map_err(db_error)
 }
 
-pub(crate) async fn register(
-    db: &Handle,
-    q: &str,
-    r: &Registration,
-) -> Result<i64, DbError> {
+pub(crate) async fn register(db: &Handle, q: &str, r: &Registration) -> Result<i64, DbError> {
     let now = now();
     retry(|| async {
         let mut c = conn(db).await?;
@@ -774,6 +789,9 @@ pub(crate) async fn register(
                 workers::beam_slots.eq(r.beam_slots as i32),
                 workers::unlimited.eq(r.unlimited),
                 workers::revision.eq(&r.revision),
+                workers::memory_caps_mb.eq(r.memory_caps_mb.map(|m| m as i64)),
+                workers::host_memory_mb.eq(r.host_memory_mb as i64),
+                workers::boot_id.eq(&r.boot_id),
                 workers::store_reachable.eq(None::<bool>),
                 workers::store_checked_micros.eq(None::<i64>),
                 workers::warm.eq(Value::Array(Vec::new())),
@@ -828,9 +846,14 @@ pub(crate) async fn candidates(
             jobs::enqueued_micros,
             jobs::document,
         ))
-        .load::<(i64, i16, Option<String>, Option<String>, i64, Option<String>)>(
-            &mut *conn(db).await?,
-        )
+        .load::<(
+            i64,
+            i16,
+            Option<String>,
+            Option<String>,
+            i64,
+            Option<String>,
+        )>(&mut *conn(db).await?)
         .await?;
     Ok(rows
         .into_iter()

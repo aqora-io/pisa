@@ -24,6 +24,7 @@ use tokio::sync::{Mutex, Notify, watch};
 
 use crate::check::round6;
 use crate::documents::Documents;
+use crate::host;
 use crate::pool::Pool;
 use crate::sessions::Sessions;
 use crate::{prewarm, run_job};
@@ -345,6 +346,20 @@ impl Shared {
         let slots = self.pool.slots();
         let beam_slots = self.documents.as_ref().map_or(0, |d| d.beam_slots());
         let unlimited = !self.pool.launcher().limited();
+        let memory_caps_mb = self.pool.launcher().memory_caps_mb(slots, beam_slots);
+        let host_memory_mb = host::memory_mb();
+        if let (Some(caps), Some(memory)) = (memory_caps_mb, host_memory_mb)
+            && caps > memory
+        {
+            tracing::warn!(
+                memory_caps_mb = caps,
+                host_memory_mb = memory,
+                "this worker's memory limits add up to more than its host has: Lean processes \
+                 may be killed for memory their limits promised (lower PISA_MEMORY_MAX_MB or \
+                 PISA_BEAM_MEMORY_MAX_MB, or the slots)"
+            );
+        }
+        let boot_id = host::boot_id().unwrap_or_default();
         let mut backoff = Duration::from_millis(100);
         let since = loop {
             match self
@@ -356,6 +371,9 @@ impl Shared {
                     beam_slots: beam_slots as u32,
                     unlimited,
                     revision: pisa_protocol::revision::REVISION.to_string(),
+                    memory_caps_mb,
+                    host_memory_mb: host_memory_mb.unwrap_or(0),
+                    boot_id: boot_id.clone(),
                 })
                 .await
             {

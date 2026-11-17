@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use pisa_protocol::api::{DependencyState, ErrorKind, JobKind};
+use pisa_protocol::api::{DependencyState, ErrorKind, HostMemory, JobKind};
 use pisa_protocol::wire::JobResult;
 use serde_json::Value;
 
@@ -62,6 +62,43 @@ pub const LIVE: Duration = Duration::from_secs(30);
 /// even if no worker that can run it was ever live.
 pub const LOST_CEILING: Duration = Duration::from_secs(24 * 3600);
 
+/// A worker's memory as it registered it: its name, boot id, the sum of its
+/// limits (`None` if it has an unlimited pool) and the memory of its host.
+pub(crate) type HostRow = (String, String, Option<i64>, i64);
+
+/// The hosts the workers in `rows` (ordered by boot id) make up.
+fn group_hosts(rows: Vec<HostRow>) -> Vec<HostMemory> {
+    let mut hosts: Vec<HostMemory> = Vec::new();
+    for (name, boot_id, caps, memory) in rows {
+        if boot_id.is_empty() {
+            continue;
+        }
+        if hosts.last().is_none_or(|h| h.boot_id != boot_id) {
+            hosts.push(HostMemory {
+                boot_id,
+                workers: Vec::new(),
+                uncapped_workers: Vec::new(),
+                memory_caps_mb: 0,
+                memory_mb: 0,
+                overcommitted: false,
+            });
+        }
+        let host = hosts.last_mut().unwrap();
+        host.workers.push(name.clone());
+        match caps {
+            Some(caps) => host.memory_caps_mb += caps.max(0) as u64,
+            None => host.uncapped_workers.push(name),
+        }
+        // Workers on one boot share the machine, and each reports it or
+        // the limit of its own container: the most is the machine's.
+        host.memory_mb = host.memory_mb.max(memory.max(0) as u64);
+    }
+    for host in &mut hosts {
+        host.overcommitted = host.memory_mb > 0 && host.memory_caps_mb > host.memory_mb;
+    }
+    hosts
+}
+
 /// A job queue: the jobs and workers under one name, so that deployments
 /// sharing a database keep theirs apart.
 #[derive(Clone)]
@@ -83,6 +120,16 @@ pub struct Registration {
     pub unlimited: bool,
     /// The commit it was built from.
     pub revision: String,
+    /// What its memory limits add up to in MiB: its REPL slots times
+    /// `PISA_MEMORY_MAX_MB` plus its Beam slots times
+    /// `PISA_BEAM_MEMORY_MAX_MB`. `None` if either is 0 for a pool that has
+    /// slots.
+    pub memory_caps_mb: Option<u64>,
+    /// The memory of the machine or container it runs in, in MiB; 0 if it
+    /// couldn't tell.
+    pub host_memory_mb: u64,
+    /// The boot id of its machine; empty if it couldn't tell.
+    pub boot_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +431,14 @@ impl Queue {
         dispatch!(&self.db, live_revisions(&self.name, stale))
     }
 
+    /// The workers seen within `stale`, grouped by the boot of their
+    /// machine, in order of boot id. Workers that report no boot id are in
+    /// no group, as nothing says which others share their host.
+    pub async fn hosts(&self, stale: Duration) -> Result<Vec<HostMemory>, DbError> {
+        let rows = dispatch!(&self.db, host_rows(&self.name, stale))?;
+        Ok(group_hosts(rows))
+    }
+
     /// Records whether `worker`'s last probe of the module store reached it.
     pub async fn report_store(&self, worker: &str, reachable: bool) -> Result<(), DbError> {
         dispatch!(&self.db, report_store(&self.name, worker, reachable))
@@ -572,6 +627,48 @@ mod tests {
                 .unwrap();
             }
             assert_eq!(q.live_revisions(LEASE).await.unwrap(), ["def"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn hosts_sum_the_caps_of_workers_on_one_boot() {
+        for q in queues().await {
+            let on = |worker: &str, boot: &str, caps: Option<u64>, memory: u64| Registration {
+                boot_id: boot.into(),
+                memory_caps_mb: caps,
+                host_memory_mb: memory,
+                ..reg(worker, "v", 1, 1, false)
+            };
+            for (worker, boot) in [("w1", "b1"), ("w2", "b1")] {
+                q.register(&on(worker, boot, Some(40000), 47038))
+                    .await
+                    .unwrap();
+            }
+            q.register(&on("w3", "b2", Some(40000), 47038))
+                .await
+                .unwrap();
+            q.register(&on("w4", "b1", None, 47038)).await.unwrap();
+            // Neither a boot nor its memory known: in no host.
+            q.register(&on("w5", "", Some(1), 0)).await.unwrap();
+            let hosts = q.hosts(LEASE).await.unwrap();
+            assert_eq!(hosts.len(), 2);
+            assert_eq!(hosts[0].boot_id, "b1");
+            assert_eq!(hosts[0].workers, ["w1", "w2", "w4"]);
+            assert_eq!(hosts[0].uncapped_workers, ["w4"]);
+            assert_eq!(hosts[0].memory_caps_mb, 80000);
+            assert_eq!(hosts[0].memory_mb, 47038);
+            assert!(hosts[0].overcommitted);
+            assert_eq!(hosts[1].boot_id, "b2");
+            assert_eq!(hosts[1].workers, ["w3"]);
+            assert!(hosts[1].uncapped_workers.is_empty());
+            assert_eq!(hosts[1].memory_caps_mb, 40000);
+            assert!(!hosts[1].overcommitted);
+            assert!(q.hosts(Duration::ZERO).await.unwrap().is_empty());
+            // A host whose memory nobody could read is not judged.
+            q.register(&on("w6", "b3", Some(40000), 0)).await.unwrap();
+            let hosts = q.hosts(LEASE).await.unwrap();
+            let b3 = hosts.iter().find(|h| h.boot_id == "b3").unwrap();
+            assert_eq!((b3.memory_mb, b3.overcommitted), (0, false));
         }
     }
 

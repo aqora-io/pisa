@@ -135,7 +135,8 @@ pub const RETRY_AFTER_SECS: u64 = 2;
 pub struct Error {
     pub kind: ErrorKind,
     pub message: String,
-    /// The limit Lean reached, for `recursion_limit` and `heartbeat_limit`.
+    /// The limit Lean reached, for `recursion_limit` and `heartbeat_limit`,
+    /// and the memory limit for `out_of_memory`, where the worker knows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<LeanLimit>,
     /// Where an open's time went before it failed, for a document that
@@ -154,10 +155,14 @@ pub struct Error {
 /// A limit Lean reached while running the input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LeanLimit {
-    /// The Lean option that sets it: `maxRecDepth` or `maxHeartbeats`.
+    /// The setting that sets it: the Lean option `maxRecDepth` or
+    /// `maxHeartbeats`, or for `out_of_memory` the worker setting
+    /// `PISA_MEMORY_MAX_MB` (`PISA_BEAM_MEMORY_MAX_MB` for a document or a
+    /// tactic session).
     pub option: String,
-    /// The option's value when Lean stopped. For `maxRecDepth` it is the
-    /// last the code set, else Lean's default of 512.
+    /// The setting's value when Lean stopped. For `maxRecDepth` it is the
+    /// last the code set, else Lean's default of 512; for a memory setting,
+    /// the limit in MiB.
     pub value: u64,
     /// Where Lean was when it stopped, as it names it, e.g. `whnf`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -388,9 +393,49 @@ pub struct Health {
     #[serde(default)]
     #[schema(required = true)]
     pub dependencies: Dependencies,
+    /// The live workers' memory limits, summed per host (the workers that
+    /// report the same boot of a machine); `null` if the queue can't be
+    /// read. A host is overcommitted when the limits its workers give their
+    /// Lean processes add up to more than it has, so that a request can be
+    /// killed for memory the limit promised.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub hosts: Option<Vec<HostMemory>>,
     /// Search's state; `null` if the server doesn't search.
     #[schema(required = true)]
     pub search: Option<crate::search::SearchHealth>,
+}
+
+/// The memory limits of the workers on one host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HostMemory {
+    /// The host's boot id (`/proc/sys/kernel/random/boot_id`), which its
+    /// workers share. Workers that can't read theirs are left out.
+    #[schema(required = true)]
+    pub boot_id: String,
+    /// Its live workers, by name, those without limits included.
+    #[schema(required = true)]
+    pub workers: Vec<String>,
+    /// The workers among them that run Lean without a memory limit, as one
+    /// without `PISA_CGROUP_ROOT`, or with a `PISA_MEMORY_MAX_MB` or
+    /// `PISA_BEAM_MEMORY_MAX_MB` of 0, does. Their memory isn't in
+    /// `memory_caps_mb`.
+    #[schema(required = true)]
+    pub uncapped_workers: Vec<String>,
+    /// What the limited workers' limits add up to, in MiB:
+    /// `PISA_SLOTS` x `PISA_MEMORY_MAX_MB` plus `PISA_BEAM_SLOTS` x
+    /// `PISA_BEAM_MEMORY_MAX_MB` of each.
+    #[schema(required = true)]
+    pub memory_caps_mb: u64,
+    /// The memory the host has, in MiB: the most any of its workers
+    /// reports, each the least of the machine's memory and the limit of its
+    /// own container; 0 if none could tell.
+    #[schema(required = true)]
+    pub memory_mb: u64,
+    /// Whether `memory_caps_mb` is more than `memory_mb`. Never for a host
+    /// whose memory is not known.
+    #[schema(required = true)]
+    pub overcommitted: bool,
 }
 
 /// What the server knows of the services it depends on.

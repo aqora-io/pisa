@@ -309,7 +309,8 @@ impl App {
 
     /// The API's health: up, or 503 once draining, with the number of live
     /// workers on the queue, those without limits, the versions whose
-    /// sweeps are refused and the commits the workers were built from, each
+    /// sweeps are refused, the commits the workers were built from and the
+    /// memory limits of the workers per host, each
     /// `null` if it can't be read, the commit of the server, and whether the
     /// database and the module store are reachable. Each read of the
     /// database gets [`HEALTH_READ`] to answer, so a stalled database delays
@@ -321,12 +322,13 @@ impl App {
             (StatusCode::OK, HealthStatus::Ok)
         };
         let queue = self.dispatcher.queue();
-        let (counts, unlimited_workers, worker_revisions, sweeps_refused, store) = tokio::join!(
+        let (counts, unlimited_workers, worker_revisions, sweeps_refused, store, hosts) = tokio::join!(
             bounded("the queue's state", self.dispatcher.workers()),
             read("the workers without limits", queue.unlimited_workers(LIVE)),
             read("the workers' revisions", queue.live_revisions(LIVE)),
             bounded("the refused sweeps", self.sweeps_refused()),
             read("the store's state", queue.store_state(LIVE)),
+            read("the hosts' memory", queue.hosts(LIVE)),
         );
         let database = if counts.is_some() {
             DependencyState::Ok
@@ -345,6 +347,7 @@ impl App {
                 database,
                 store: store.unwrap_or_default(),
             },
+            hosts,
             search: None,
         };
         (code, health)

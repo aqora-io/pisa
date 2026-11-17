@@ -2,6 +2,7 @@
 //! each request's job to the workers through the database's job queue and
 //! waits for the result, so any number of servers can serve one queue.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,71 @@ use http::App;
 /// How often a server deletes the queue's leftovers: results nobody took,
 /// jobs nobody can claim, workers gone quiet.
 const SWEEP_EVERY: Duration = Duration::from_secs(30);
+
+/// Logs a warning if the set of overcommitted hosts (see
+/// [`HostMemory`](pisa_protocol::api::HostMemory)) is not `known`, the one
+/// it logged last, and remembers it in `known`: so once per change, not on
+/// every read. Returns whether it logged.
+fn warn_overcommitted(
+    known: &mut BTreeSet<String>,
+    hosts: &[pisa_protocol::api::HostMemory],
+) -> bool {
+    let now: BTreeSet<String> = hosts
+        .iter()
+        .filter(|h| h.overcommitted)
+        .map(|h| h.boot_id.clone())
+        .collect();
+    if now == *known {
+        return false;
+    }
+    for host in hosts.iter().filter(|h| h.overcommitted) {
+        tracing::warn!(
+            boot_id = %host.boot_id,
+            workers = ?host.workers,
+            memory_caps_mb = host.memory_caps_mb,
+            memory_mb = host.memory_mb,
+            "the workers on a host are allowed more memory in total than it has: Lean processes \
+             may be killed for memory their limits promised (lower PISA_MEMORY_MAX_MB or \
+             PISA_BEAM_MEMORY_MAX_MB, or the slots)"
+        );
+    }
+    if now.is_empty() {
+        tracing::info!("no host is overcommitted any more");
+    }
+    *known = now;
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pisa_protocol::api::HostMemory;
+
+    fn host(boot_id: &str, overcommitted: bool) -> HostMemory {
+        HostMemory {
+            boot_id: boot_id.into(),
+            workers: vec![],
+            uncapped_workers: vec![],
+            memory_caps_mb: 0,
+            memory_mb: 0,
+            overcommitted,
+        }
+    }
+
+    #[test]
+    fn overcommitted_hosts_are_warned_of_once_per_change() {
+        let mut known = BTreeSet::new();
+        assert!(!warn_overcommitted(&mut known, &[host("b1", false)]));
+        assert!(warn_overcommitted(&mut known, &[host("b1", true)]));
+        assert!(!warn_overcommitted(&mut known, &[host("b1", true)]));
+        assert!(warn_overcommitted(
+            &mut known,
+            &[host("b1", true), host("b2", true)]
+        ));
+        assert!(warn_overcommitted(&mut known, &[host("b1", false)]));
+        assert!(!warn_overcommitted(&mut known, &[]));
+    }
+}
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct RouterConfig {
@@ -195,8 +261,15 @@ pub async fn start_with(
 
     let sweeper = tokio::spawn(async move {
         let mut tick = tokio::time::interval(SWEEP_EVERY);
+        let mut overcommitted = BTreeSet::new();
         loop {
             tick.tick().await;
+            match queue.hosts(pisa_db::queue::LIVE).await {
+                Ok(hosts) => {
+                    warn_overcommitted(&mut overcommitted, &hosts);
+                }
+                Err(e) => tracing::warn!("reading the hosts' memory failed: {e}"),
+            }
             match queue.sweep().await {
                 Ok(n) => tracing::debug!(deleted = n, "swept the job queue"),
                 Err(e) => tracing::warn!("sweeping the job queue failed: {e}"),

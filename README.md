@@ -246,6 +246,20 @@ To the release that restarts after a reboot and names its commit:
 - `/health` adds `dependencies`, `{database, store}`, each `ok`, `unreachable`
   or `unknown`. With the database stalled it answers within about 2 seconds,
   with `database: unreachable` and `null` for what it couldn't read.
+- `/health` adds `hosts`, the live workers' memory limits summed per host: a
+  worker registers `PISA_SLOTS` x `PISA_MEMORY_MAX_MB` plus `PISA_BEAM_SLOTS`
+  x `PISA_BEAM_MEMORY_MAX_MB`, the memory of its machine (or the limit of its
+  container, if less) and the machine's boot id, and workers with one boot id
+  are one host. A host whose limits add up to more than it has is
+  `overcommitted`: Lean processes may be killed for memory their limits
+  promised. The server and the worker each log a warning. `uncapped_workers`
+  of a host aren't in the sum. A worker that can't read its boot id is in no
+  host, and one that can't read its memory has `memory_mb` 0 and isn't judged.
+  Reading the container's limit looks at `/sys/fs/cgroup/memory.max`.
+- An `out_of_memory` error has `limit`, `{option, value}`: the setting
+  (`PISA_MEMORY_MAX_MB`, or `PISA_BEAM_MEMORY_MAX_MB` for documents and
+  tactic sessions) and its value in MiB. An accept's `out_of_memory` pair
+  error names them in its message instead.
 
 To the release that answers jobs in an envelope and retries in the clients:
 - `GET /jobs/{id}` of a done job answers 200 with `{id, kind, status:
@@ -464,7 +478,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -756,7 +770,7 @@ limit in seconds (default 60).
 | `kind` | Status | Meaning |
 | --- | --- | --- |
 | `lean`, `policy` | 422 | Lean or the policy refused the input, e.g. an unknown tactic |
-| `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit |
+| `timeout`, `out_of_memory`, `crash` | 422 | The input hit a resource limit; `out_of_memory`'s `limit` has the memory setting and its value in MiB |
 | `recursion_limit`, `heartbeat_limit` | 422 | Lean reached `maxRecDepth` or `maxHeartbeats`; `limit` has the option, its value and the phase. The input fails as it is, so don't retry it |
 | `capacity`, `unavailable` | 429, 503 | No worker could take the request, or the metadata store failed; retry later |
 | `worker_lost` | 503 | The job was lost; `resend_safe` says whether to send it again, see [When a worker is lost](#worker-lost) |

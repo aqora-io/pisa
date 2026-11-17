@@ -16,6 +16,7 @@ pub mod check;
 pub mod claims;
 pub mod config;
 pub mod documents;
+pub mod host;
 pub mod launcher;
 pub mod limits;
 pub mod policy;

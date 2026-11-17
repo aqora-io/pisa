@@ -47,7 +47,7 @@ pub(super) async fn recheck_module(
 pub(super) fn unfinished_kind(unfinished: &Unfinished) -> ErrorKind {
     match unfinished {
         Unfinished::Timeout(_) => ErrorKind::Timeout,
-        Unfinished::OutOfMemory => ErrorKind::OutOfMemory,
+        Unfinished::OutOfMemory(_) => ErrorKind::OutOfMemory,
         Unfinished::Crash(_) => ErrorKind::Crash,
     }
 }
@@ -55,12 +55,18 @@ pub(super) fn unfinished_kind(unfinished: &Unfinished) -> ErrorKind {
 /// Whether a re-check that didn't finish ran out of time or memory, which
 /// says nothing about the code, rather than failed.
 pub(super) fn outgrown(unfinished: &Unfinished) -> bool {
-    matches!(unfinished, Unfinished::Timeout(_) | Unfinished::OutOfMemory)
+    matches!(
+        unfinished,
+        Unfinished::Timeout(_) | Unfinished::OutOfMemory(_)
+    )
 }
 
 /// The error of a create whose re-check didn't finish.
 pub(super) fn unfinished_error(unfinished: &Unfinished) -> Error {
-    Error::new(unfinished_kind(unfinished), unfinished.to_string())
+    match unfinished {
+        Unfinished::OutOfMemory(cap) => crate::limits::out_of_memory("the re-check", *cap),
+        _ => Error::new(unfinished_kind(unfinished), unfinished.to_string()),
+    }
 }
 
 /// A verdict's declarations, or why there are none: the kernel rejected the

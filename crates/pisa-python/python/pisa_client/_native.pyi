@@ -8,6 +8,7 @@ ErrorKind = Literal[
 ]
 
 class LeanLimit(TypedDict):
+    # The Lean option, or for `out_of_memory` the worker's memory setting.
     option: str
     value: int
     phase: NotRequired[str]
@@ -675,6 +676,21 @@ class SweepRefused(TypedDict):
     reason: str
     since: int
 
+class HostMemory(TypedDict):
+    # The host's boot id, which its workers share.
+    boot_id: str
+    # Its live workers, those without limits included.
+    workers: list[str]
+    # Those running Lean without a memory limit: not in `memory_caps_mb`.
+    uncapped_workers: list[str]
+    # What the limited workers' limits add up to, in MiB.
+    memory_caps_mb: int
+    # The memory the host has, in MiB: the most any of its workers reports;
+    # 0 if none could tell.
+    memory_mb: int
+    # Whether `memory_caps_mb` is more than `memory_mb`.
+    overcommitted: bool
+
 class Health(TypedDict):
     status: Literal["ok", "draining"]
     workers: int | None
@@ -687,6 +703,8 @@ class Health(TypedDict):
     # The commits the live workers were built from, each once, in order.
     worker_revisions: list[str] | None
     dependencies: Dependencies
+    # The live workers' memory limits per host.
+    hosts: list[HostMemory] | None
     search: SearchHealth | None
 
 class JobDone(TypedDict):
