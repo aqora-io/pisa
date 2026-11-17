@@ -40,6 +40,9 @@ pub struct RouterConfig {
     #[arg(long, env = "PISA_HTTP", default_value = "0.0.0.0:8000")]
     pub http: SocketAddr,
     /// Seconds a job may wait for a free worker before the request gets 429.
+    /// An async job counts them only while a worker that can run it is live,
+    /// or, if none has claimed it, while no worker that can run it is on
+    /// record, live or stopped within the hour.
     #[arg(long, env = "PISA_MAX_WAIT_SECS", default_value_t = 60)]
     pub max_wait_secs: u64,
     #[arg(long, env = "PISA_MAX_RETRIES", default_value_t = 2)]

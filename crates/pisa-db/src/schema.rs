@@ -229,7 +229,9 @@ diesel::table! {
         revision -> Text,
         store_reachable -> Nullable<Bool>,
         store_checked_micros -> Nullable<BigInt>,
+        live_since_micros -> BigInt,
     }
 }
 
 diesel::allow_tables_to_appear_in_same_query!(entries, links);
+diesel::allow_tables_to_appear_in_same_query!(jobs, workers);

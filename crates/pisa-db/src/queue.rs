@@ -39,6 +39,10 @@ pub const STALE_RETENTION: Duration = Duration::from_secs(3600);
 /// A worker seen within this long is live. Workers heartbeat well within it.
 pub const LIVE: Duration = Duration::from_secs(30);
 
+/// An async job is given up this long after it was queued at the latest,
+/// even if no worker that can run it was ever live.
+pub const LOST_CEILING: Duration = Duration::from_secs(24 * 3600);
+
 /// A job queue: the jobs and workers under one name, so that deployments
 /// sharing a database keep theirs apart.
 #[derive(Clone)]
@@ -77,6 +81,10 @@ pub struct NewJob {
     pub document: Option<String>,
     pub job: Value,
     /// How long it may wait for a worker, from now or from a lapsed claim.
+    /// An async job counts it only while a worker that can run it is live,
+    /// up to [`LOST_CEILING`], or, if none has claimed it, while no worker
+    /// that can run it has a row, live or stopped within
+    /// [`STALE_RETENTION`]: it is of a version no worker runs.
     pub max_wait: Duration,
     /// How many workers may claim it before it is lost.
     pub max_attempts: u32,
@@ -106,7 +114,12 @@ pub struct Status {
 
 #[derive(Debug, Clone)]
 pub enum Stage {
-    /// Waiting for a worker until `give_up_at` (microseconds).
+    /// Waiting for a worker. If none claims it, it is given up at
+    /// `give_up_at` (microseconds) at the earliest. Past its max wait, while
+    /// no worker that can run it has been live that long, it waits on, and
+    /// `give_up_at` is [`LOST_CEILING`] after it was queued; one no worker
+    /// has claimed waits on only while a worker that can run it has a row,
+    /// live or stopped within [`STALE_RETENTION`].
     Queued { give_up_at: i64 },
     /// A worker holds a live claim on it.
     Running,
@@ -241,8 +254,9 @@ impl Queue {
 
     /// Adds or resets the worker's row, with its REPL slots and Beam slots,
     /// whether it runs Lean without limits and the commit it was built from,
-    /// and lets its claims from before, of a process under the same name,
-    /// lapse at once. Returns when, which [`Queue::heartbeat`] takes.
+    /// live from now, and lets its claims from before, of a process under
+    /// the same name, lapse at once. Returns when, which
+    /// [`Queue::heartbeat`] takes.
     pub async fn register(&self, r: &Registration) -> Result<i64, DbError> {
         dispatch!(&self.db, register(&self.name, r))
     }
@@ -326,14 +340,28 @@ impl Queue {
     }
 
     /// Renews the leases of the claims `worker` made since it registered at
-    /// `since`, and marks it seen.
+    /// `since`, and marks it seen: live anew if it was last seen longer
+    /// than [`LIVE`] ago.
     pub async fn heartbeat(
         &self,
         worker: &str,
         since: i64,
         lease: Duration,
     ) -> Result<(), DbError> {
-        dispatch!(&self.db, heartbeat(&self.name, worker, since, lease))
+        let now = crate::catalog::now_micros() as i64;
+        dispatch!(&self.db, heartbeat(&self.name, worker, since, lease, now))
+    }
+
+    /// [`Queue::heartbeat`] as if it were `now` (microseconds).
+    #[cfg(test)]
+    pub async fn heartbeat_as_of(
+        &self,
+        worker: &str,
+        since: i64,
+        lease: Duration,
+        now: i64,
+    ) -> Result<(), DbError> {
+        dispatch!(&self.db, heartbeat(&self.name, worker, since, lease, now))
     }
 
     pub async fn set_warm(&self, worker: &str, warm: &[String]) -> Result<(), DbError> {
@@ -350,6 +378,11 @@ impl Queue {
         dispatch!(&self.db, set_draining(&self.name, worker))
     }
 
+    /// Records that `worker` stopped: its row is kept, draining and no
+    /// longer live, until the sweep removes it [`STALE_RETENTION`] after it
+    /// was last seen, so that an unclaimed async job of its version waits
+    /// for a worker to come back rather than being given up as one of a
+    /// version no worker runs. Registering again under its name replaces it.
     pub async fn unregister(&self, worker: &str) -> Result<(), DbError> {
         dispatch!(&self.db, unregister(&self.name, worker))
     }
@@ -645,10 +678,17 @@ mod tests {
     #[tokio::test]
     async fn an_async_job_nobody_claims_in_time_is_closed_given_up() {
         for q in queues().await {
+            // Its version's worker, quiet since it registered.
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let mut new = job(Some("v"), 1);
             new.max_wait = Duration::from_millis(10);
             let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;
+            // With no worker live, it waits for one.
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            // The worker is live for its max wait, and doesn't take it.
+            q.heartbeat("w", since, LEASE).await.unwrap();
             for _ in 0..2 {
                 let stage = q.status(&token).await.unwrap().unwrap().stage;
                 assert!(matches!(stage, Stage::GaveUp { attempts: 0 }));
@@ -678,6 +718,277 @@ mod tests {
         }
     }
 
+    fn micros(d: Duration) -> i64 {
+        d.as_micros() as i64
+    }
+
+    #[tokio::test]
+    async fn an_async_job_lost_while_no_worker_is_live_waits_for_one() {
+        for q in queues().await {
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(10);
+            new.max_attempts = 2;
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            // Its worker claims it and dies, as every other does. Its row
+            // stays, last seen before the claim lapsed.
+            q.register(&reg("a", "v", 1, 0, false)).await.unwrap();
+            let short = Duration::from_millis(1);
+            let claimed = q.claim("a", &[id], short).await.unwrap();
+            let ceiling = claimed[0].enqueued_micros + micros(LOST_CEILING);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            for _ in 0..2 {
+                let stage = q.status(&token).await.unwrap().unwrap().stage;
+                assert!(
+                    matches!(stage, Stage::Queued { give_up_at } if give_up_at == ceiling),
+                    "{stage:?}"
+                );
+            }
+            // The sweep leaves it too, however late short of the ceiling.
+            let hour = micros(Duration::from_secs(3600));
+            q.sweep_as_of(ceiling - hour).await.unwrap();
+            assert_eq!(ids(&q, "v").await, [id]);
+            // A worker comes back, and runs it again: its second and last
+            // attempt.
+            q.register(&reg("b", "v", 1, 0, false)).await.unwrap();
+            assert_eq!(q.claim("b", &[id], short).await.unwrap().len(), 1);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 2 }), "{stage:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_async_job_is_lost_after_max_wait_with_a_live_worker() {
+        for q in queues().await {
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            let (swept, unread) = q.enqueue_async(&new, "check").await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("a", &[id, swept], short).await.unwrap().len(), 2);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            // `w` is live past the lapse and the max wait, and doesn't take
+            // them, e.g. as it is busy.
+            q.heartbeat("w", since, LEASE).await.unwrap();
+            for _ in 0..2 {
+                let stage = q.status(&token).await.unwrap().unwrap().stage;
+                assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+            }
+            assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
+            // The sweep, a minute behind, agrees: it closes the one nobody
+            // read.
+            let now = crate::catalog::now_micros() as i64;
+            let later = now + micros(Duration::from_secs(120));
+            assert_eq!(q.sweep_as_of(later).await.unwrap(), 1);
+            let stage = q.status(&unread).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_async_job_is_lost_at_the_ceiling() {
+        for q in queues().await {
+            // Its version's worker, quiet since it registered.
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let (unclaimed, never_run) =
+                q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            let short = Duration::from_millis(1);
+            let claimed = q.claim("a", &[id], short).await.unwrap();
+            let ceiling = claimed[0].enqueued_micros + micros(LOST_CEILING);
+            // No worker is ever live. The sweep runs a minute behind.
+            let margin = micros(Duration::from_secs(120));
+            q.sweep_as_of(ceiling - margin).await.unwrap();
+            for token in [&never_run, &token] {
+                let stage = q.status(token).await.unwrap().unwrap().stage;
+                assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            }
+            q.sweep_as_of(ceiling + margin).await.unwrap();
+            let stage = q.status(&never_run).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 0 }), "{stage:?}");
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+            let both = [unclaimed, id];
+            assert!(q.claim("b", &both, LEASE).await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sync_job_keeps_its_bound_with_no_worker_live() {
+        for q in queues().await {
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let id = q.enqueue(&new).await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            // Its request doesn't wait for a worker to come back.
+            assert!(ids(&q, "v").await.is_empty());
+            assert!(q.claim("b", &[id], LEASE).await.unwrap().is_empty());
+            assert!(matches!(
+                q.poll(id).await.unwrap(),
+                Poll::Lost { attempts: 1 }
+            ));
+        }
+    }
+
+    /// A worker that went quiet, e.g. while the database was down, is live
+    /// again only from its return: the time it was away doesn't count
+    /// toward a lost job's wait.
+    #[tokio::test]
+    async fn a_worker_back_from_a_gap_counts_from_its_return() {
+        for q in queues().await {
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            // It waits a minute for a worker.
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            // `w` is back two minutes later, and heartbeats every 20 s.
+            let back = since + micros(Duration::from_secs(120));
+            let at = |secs: u64| back + micros(Duration::from_secs(secs));
+            for secs in [0, 20, 40] {
+                q.heartbeat_as_of("w", since, LEASE, at(secs))
+                    .await
+                    .unwrap();
+            }
+            q.sweep_as_of(at(40 + 120)).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            // A minute after it came back, it has been live long enough.
+            q.heartbeat_as_of("w", since, LEASE, at(60)).await.unwrap();
+            q.sweep_as_of(at(60 + 120)).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+        }
+    }
+
+    /// Only a worker that could claim a lost job counts: one of another
+    /// version doesn't, however long it is live.
+    #[tokio::test]
+    async fn an_async_job_waits_for_a_worker_of_its_version() {
+        for q in queues().await {
+            let mut new = job(Some("v1"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            q.register(&reg("a", "v1", 1, 0, false)).await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            // `a` dies; a worker of v2 is live past the max wait.
+            let since = q.register(&reg("w", "v2", 1, 0, false)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            q.heartbeat("w", since, LEASE).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            assert_eq!(ids(&q, "v1").await, [id]);
+            // A worker of v1 comes back and takes it.
+            q.register(&reg("b", "v1", 1, 0, false)).await.unwrap();
+            assert_eq!(q.claim("b", &[id], LEASE).await.unwrap().len(), 1);
+        }
+    }
+
+    /// A lost job on a document waits for a worker with Beam slots, which
+    /// only can claim it.
+    #[tokio::test]
+    async fn an_async_document_job_waits_for_a_worker_with_beam_slots() {
+        for q in queues().await {
+            let mut new = document_job("d");
+            new.max_wait = Duration::from_millis(10);
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            let short = Duration::from_millis(1);
+            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            // Only a worker without Beam slots is live past the max wait.
+            let since = q.register(&reg("repl", "v", 1, 0, false)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            q.heartbeat("repl", since, LEASE).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            let found = q.document_candidates("v", 10).await.unwrap();
+            assert_eq!(found.iter().map(|c| c.id).collect::<Vec<_>>(), [id]);
+            // One with Beam slots is, and doesn't take it.
+            let since = q.register(&reg("beam", "v", 1, 1, false)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            q.heartbeat("beam", since, LEASE).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 1 }), "{stage:?}");
+        }
+    }
+
+    /// A job of a version no worker has run within the hour workers' rows
+    /// are kept isn't waiting on a restart: it is given up after its max
+    /// wait, so that its client gets a 429.
+    #[tokio::test]
+    async fn an_async_job_of_a_version_no_worker_runs_gives_up_after_max_wait() {
+        for q in queues().await {
+            // A worker of `v`, quiet since it registered.
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut new = job(Some("nope"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let (_, nope) = q.enqueue_async(&new, "check").await.unwrap();
+            new.version = Some("v".into());
+            let (_, waits) = q.enqueue_async(&new, "check").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let stage = q.status(&nope).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::GaveUp { attempts: 0 }), "{stage:?}");
+            // The job of `v` waits for its worker to come back.
+            let stage = q.status(&waits).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+        }
+    }
+
+    /// Across a clean restart of every worker of its version, as a reboot
+    /// does, an unclaimed job waits for one to come back: the stopped
+    /// worker's row is kept, though it is no worker any more.
+    #[tokio::test]
+    async fn an_unclaimed_async_job_outlasts_a_clean_stop_of_its_workers() {
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            q.set_draining("w").await.unwrap();
+            q.unregister("w").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            // The sweep, however late short of an hour, leaves it too.
+            q.sweep_as_of(later(50)).await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            // The stopped worker is no worker.
+            assert_eq!(q.counts(LIVE).await.unwrap().workers, 0);
+            assert!(q.registry("v", LIVE).await.unwrap().is_empty());
+            assert!(q.live_versions(LIVE).await.unwrap().is_empty());
+            // One comes back, under its name, and takes it.
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let peers = q.registry("v", LIVE).await.unwrap();
+            assert_eq!(peers.len(), 1);
+            assert!(!peers[0].draining);
+            assert_eq!(ids(&q, "v").await, [id]);
+            assert_eq!(q.claim("w", &[id], LEASE).await.unwrap().len(), 1);
+        }
+    }
+
+    /// A cleanly stopped worker's row goes an hour later, as any other's
+    /// does: then a job of its version is of a version no worker runs.
+    #[tokio::test]
+    async fn a_stopped_workers_row_goes_after_an_hour() {
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            q.unregister("w").await.unwrap();
+            assert_eq!(q.sweep_as_of(later(61)).await.unwrap(), 1);
+            let mut new = job(Some("v"), 1);
+            new.max_wait = Duration::from_millis(10);
+            let (_, token) = q.enqueue_async(&new, "check").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 0, .. }),
+                "{stage:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn only_an_async_job_no_worker_holds_is_cancelled() {
         for q in queues().await {
@@ -700,6 +1011,7 @@ mod tests {
     #[tokio::test]
     async fn the_sweep_keeps_async_outcomes_an_hour() {
         for q in queues().await {
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let sync = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             let (id, done) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
             q.claim("w", &[sync, id], LEASE).await.unwrap();
@@ -709,6 +1021,9 @@ mod tests {
             unclaimed.max_wait = Duration::from_millis(1);
             let sync_unclaimed = q.enqueue(&unclaimed).await.unwrap();
             let (_, given_up) = q.enqueue_async(&unclaimed, "check").await.unwrap();
+            // `w` is live past `given_up`'s max wait, and doesn't take it.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            q.heartbeat("w", since, LEASE).await.unwrap();
             let later = |minutes: u64| {
                 (crate::catalog::now_micros()
                     + Duration::from_secs(60 * minutes).as_micros() as u64) as i64
@@ -728,6 +1043,10 @@ mod tests {
             assert!(q.status(&done).await.unwrap().is_none());
             assert!(q.status(&given_up).await.unwrap().is_none());
         }
+    }
+
+    fn later(minutes: u64) -> i64 {
+        (crate::catalog::now_micros() + Duration::from_secs(60 * minutes).as_micros() as u64) as i64
     }
 
     #[tokio::test]
@@ -881,7 +1200,7 @@ mod tests {
                 }
             );
             q.unregister("w2").await.unwrap();
-            assert_eq!(q.registry("v", LEASE).await.unwrap().len(), 1);
+            assert_eq!(q.registry("v", LIVE).await.unwrap().len(), 1);
             assert!(q.registry("v", Duration::ZERO).await.unwrap().is_empty());
         }
     }

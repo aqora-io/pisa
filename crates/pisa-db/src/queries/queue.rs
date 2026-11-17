@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use diesel::dsl::{case_when, exists, not};
+use diesel::sql_types::BigInt;
 use diesel::{
     BoolExpressionMethods, ExpressionMethods, NullableExpressionMethods, OptionalExtension,
     QueryDsl,
@@ -16,8 +18,8 @@ use pisa_protocol::api::DependencyState;
 use crate::catalog::now_micros;
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
-    ASYNC_RETENTION, Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION,
-    Registration, STALE_RETENTION, Stage, Status,
+    ASYNC_RETENTION, Candidate, Claimed, Counts, LIVE, LOST_CEILING, NewJob, Peer, Poll,
+    RESULT_RETENTION, Registration, STALE_RETENTION, Stage, Status,
 };
 use crate::schema::{documents, jobs, workers};
 
@@ -33,18 +35,88 @@ fn micros(d: Duration) -> i64 {
     d.as_micros() as i64
 }
 
-/// Jobs a worker may claim at `$now`: unclaimed ones that haven't waited
-/// their `max_wait`, and lapsed claims with attempts left that haven't
-/// waited it since.
+/// Whether a `workers` row is of a worker that could claim the job, as
+/// `candidates` and the workers' rounds decide: of the job's version, or of
+/// any for a job of none, with REPL slots for a job on no document, and Beam
+/// slots for one on a document.
+macro_rules! can_run {
+    () => {
+        jobs::version
+            .is_null()
+            .or(jobs::version.eq(workers::version.nullable()))
+            .and(
+                jobs::document
+                    .is_null()
+                    .and(workers::slots.gt(0))
+                    .or(jobs::document.is_not_null().and(workers::beam_slots.gt(0))),
+            )
+    };
+}
+
+/// Whether an open job has waited out its time for a worker at `$now`:
+/// `unclaimed`, counting from when it was enqueued, or `lapsed`, from when
+/// its last claim lapsed.
+///
+/// A sync job waits its `max_wait`. An async one waits until a worker that
+/// [`can_run!`] it, and takes jobs, was seen live for its `max_wait` past
+/// then, without a break (see `workers.live_since_micros`), or until
+/// [`LOST_CEILING`] after it was enqueued. So it outlasts a restart of every
+/// worker that could run it, while its client, which isn't waiting on a
+/// request, looks again later.
+///
+/// An unclaimed async job is waited out at its `max_wait` also when no
+/// worker that could run it has a row, live or not: it is of a version no
+/// worker runs, rather than one restarting, since a worker's row is kept
+/// [`STALE_RETENTION`] after its last heartbeat, after a clean stop too.
+/// A lapsed one had a worker that could, so it waits.
+macro_rules! waited {
+    (unclaimed, $now:expr) => {
+        waited!(@ jobs::enqueued_micros, $now, or not(exists(
+            workers::table
+                .filter(workers::queue.eq(jobs::queue))
+                .filter(can_run!()),
+        )))
+    };
+    (lapsed, $now:expr) => {
+        waited!(@ jobs::lease_micros, $now)
+    };
+    (@ $since:expr, $now:expr $(, or $otherwise:expr)?) => {{
+        let due = $since.nullable() + jobs::max_wait_micros.nullable();
+        // The max wait from when a worker came live.
+        let worker_due = workers::live_since_micros + jobs::max_wait_micros;
+        // A worker that could run it and takes jobs, which heartbeat after
+        // both were up, and both are up by `$now`.
+        let live = exists(
+            workers::table
+                .filter(workers::queue.eq(jobs::queue))
+                .filter(can_run!())
+                .filter(workers::draining.eq(false))
+                .filter(worker_due.le(workers::seen_micros))
+                .filter(worker_due.le($now))
+                .filter(due.le(workers::seen_micros.nullable())),
+        );
+        let ceiling = (jobs::enqueued_micros + micros(LOST_CEILING)).le($now);
+        jobs::token
+            .is_null()
+            .and(due.le($now))
+            .or(jobs::token
+                .is_not_null()
+                .and(ceiling.or(due.le($now).and(live $(.or($otherwise))?))))
+    }};
+}
+
+/// Jobs a worker may claim at `$now`: unclaimed ones that haven't
+/// [`waited!`] since they were enqueued, and lapsed claims with attempts
+/// left that haven't waited since they lapsed.
 macro_rules! claimable {
     ($now:expr) => {
         jobs::worker
             .is_null()
-            .and((jobs::enqueued_micros + jobs::max_wait_micros).gt($now))
+            .and(not(waited!(unclaimed, $now)))
             .or(jobs::lease_micros
                 .lt($now)
                 .and(jobs::attempts.lt(jobs::max_attempts))
-                .and((jobs::lease_micros + jobs::max_wait_micros.nullable()).gt($now)))
+                .and(not(waited!(lapsed, $now))))
     };
 }
 
@@ -54,11 +126,11 @@ macro_rules! unclaimable {
     ($now:expr) => {
         jobs::worker
             .is_null()
-            .and((jobs::enqueued_micros + jobs::max_wait_micros).le($now))
+            .and(waited!(unclaimed, $now))
             .or(jobs::lease_micros.lt($now).and(
                 jobs::attempts
                     .ge(jobs::max_attempts)
-                    .or((jobs::lease_micros + jobs::max_wait_micros.nullable()).le($now)),
+                    .or(waited!(lapsed, $now)),
             ))
     };
 }
@@ -135,9 +207,10 @@ async fn insert(
 /// was enqueued, and its max wait.
 type Open = (Option<String>, Option<i64>, i32, i32, i64, i64);
 
-/// When an open job stops being claimable, as [`claimable!`] decides it:
-/// `None` while a worker holds a live claim. A lapsed claim with no
-/// attempts left is due at once.
+/// When an open sync job stops being claimable, as [`claimable!`] decides
+/// it: `None` while a worker holds a live claim. A lapsed claim with no
+/// attempts left is due at once. An async job may be given up then at the
+/// earliest; see [`waited!`].
 fn give_up_at(now: i64, open: &Open) -> Option<i64> {
     let (worker, lease, attempts, max_attempts, enqueued, max_wait) = open;
     match (worker, lease) {
@@ -214,7 +287,8 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
     .await
 }
 
-/// An async job's row: its id and kind, its result, and its claim.
+/// An async job's row: its id and kind, its result, its claim, and whether
+/// it is [`unclaimable!`].
 type Row = (
     i64,
     Option<String>,
@@ -225,6 +299,7 @@ type Row = (
     i32,
     i64,
     i64,
+    Option<bool>,
 );
 
 /// Whether the job of `token` is in the request's scope: its token alone
@@ -252,6 +327,7 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
         // Closing it races the workers, other servers and the sweep: whoever
         // loses reads it again, and finds what the winner made of it.
         for _ in 0..3 {
+            let now = now();
             let row = jobs::table
                 .filter(jobs::queue.eq(q))
                 .filter(jobs::token.eq(token))
@@ -265,41 +341,47 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                     jobs::max_attempts,
                     jobs::enqueued_micros,
                     jobs::max_wait_micros,
+                    unclaimable!(now),
                 ))
                 .first::<Row>(&mut *c)
                 .await
                 .optional()?;
-            let Some((id, kind, result, worker, lease, attempts, max_attempts, enqueued, max_wait)) =
-                row
-            else {
+            let Some(row) = row else {
                 return Ok(None);
             };
+            let (id, kind, result, worker, lease, attempts, max_attempts, enqueued, max_wait, lost) =
+                row;
             let open = (worker, lease, attempts, max_attempts, enqueued, max_wait);
-            let now = now();
             let stage = match result {
                 Some(Value::Null) => Stage::GaveUp {
                     attempts: attempts as u32,
                 },
                 Some(result) => Stage::Done(result),
+                None if lost == Some(true) => {
+                    let closed = diesel::update(
+                        jobs::table
+                            .find(id)
+                            .filter(jobs::result.is_null())
+                            .filter(unclaimable!(now)),
+                    )
+                    .set((jobs::result.eq(&Value::Null), jobs::done_micros.eq(now)))
+                    .returning(jobs::attempts)
+                    .get_result::<i32>(&mut *c)
+                    .await
+                    .optional()?;
+                    let Some(attempts) = closed else { continue };
+                    wake(db, &mut c, Notice::Done(id)).await;
+                    Stage::GaveUp {
+                        attempts: attempts as u32,
+                    }
+                }
                 None => match give_up_at(now, &open) {
                     None => Stage::Running,
-                    Some(at) if at > now => Stage::Queued { give_up_at: at },
-                    Some(_) => {
-                        let closed = diesel::update(
-                            jobs::table
-                                .find(id)
-                                .filter(jobs::result.is_null())
-                                .filter(unclaimable!(now)),
-                        )
-                        .set((jobs::result.eq(&Value::Null), jobs::done_micros.eq(now)))
-                        .returning(jobs::attempts)
-                        .get_result::<i32>(&mut *c)
-                        .await
-                        .optional()?;
-                        let Some(attempts) = closed else { continue };
-                        wake(db, &mut c, Notice::Done(id)).await;
-                        Stage::GaveUp {
-                            attempts: attempts as u32,
+                    // Past its max wait, it waits for a worker to come back.
+                    Some(at) => {
+                        let ceiling = enqueued + micros(LOST_CEILING);
+                        Stage::Queued {
+                            give_up_at: if at > now { at.min(ceiling) } else { ceiling },
                         }
                     }
                 },
@@ -533,8 +615,10 @@ pub(crate) async fn register(
                 workers::store_reachable.eq(None::<bool>),
                 workers::store_checked_micros.eq(None::<i64>),
                 workers::warm.eq(Value::Array(Vec::new())),
+                workers::documents_open.eq(0),
                 workers::draining.eq(false),
                 workers::seen_micros.eq(now),
+                workers::live_since_micros.eq(now),
             )
         };
         diesel::insert_into(workers::table)
@@ -759,8 +843,8 @@ pub(crate) async fn heartbeat(
     worker: &str,
     since: i64,
     lease: Duration,
+    now: i64,
 ) -> Result<(), DbError> {
-    let now = now();
     retry(|| async {
         let mut c = conn(db).await?;
         diesel::update(
@@ -773,8 +857,14 @@ pub(crate) async fn heartbeat(
         .set(jobs::lease_micros.eq(now + micros(lease)))
         .execute(&mut *c)
         .await?;
+        // Back from a break longer than the live window, it is live anew.
+        let gap = workers::seen_micros.lt(now - micros(LIVE));
         diesel::update(workers::table.find((q, worker)))
-            .set(workers::seen_micros.eq(now))
+            .set((
+                workers::live_since_micros
+                    .eq(case_when::<_, _, BigInt>(gap, now).otherwise(workers::live_since_micros)),
+                workers::seen_micros.eq(now),
+            ))
             .execute(&mut *c)
             .await?;
         Ok(())
@@ -827,8 +917,15 @@ pub(crate) async fn set_draining(db: &Handle, q: &str, worker: &str) -> Result<(
 }
 
 pub(crate) async fn unregister(db: &Handle, q: &str, worker: &str) -> Result<(), DbError> {
+    let now = now();
     retry(|| async {
-        diesel::delete(workers::table.find((q, worker)))
+        // Last seen just outside the live window: no live read counts it,
+        // and the sweep removes it an hour on.
+        diesel::update(workers::table.find((q, worker)))
+            .set((
+                workers::draining.eq(true),
+                workers::seen_micros.eq(now - micros(LIVE) - 1),
+            ))
             .execute(&mut *conn(db).await?)
             .await?;
         Ok(())

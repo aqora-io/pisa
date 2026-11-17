@@ -100,7 +100,18 @@ that Compose and the chart set:
     lock, and notifications need a session of their own.
   - A worker's claim on a job lasts `PISA_LEASE_SECS` (default 10) without a
     heartbeat; a job whose worker died runs elsewhere once it lapses, up to
-    `PISA_MAX_RETRIES` more times.
+    `PISA_MAX_RETRIES` more times. A request waiting on its answer gives
+    another worker `PISA_MAX_WAIT_SECS` (default 60) after the lapse, then
+    answers 503. An [async](#async-requests) job instead waits until a
+    worker that can run it, of its version and with Beam slots for a
+    document, has been live that long since the lapse, so it outlasts a
+    restart of every such worker, or of the whole host; it is given up 24
+    hours after it was queued at the latest. An async job no worker has
+    claimed yet waits the same way, from when it was queued, unless no
+    worker that can run it is on record (a worker is from when it registers
+    until an hour after it was last seen, even once it stopped cleanly, so
+    a reboot doesn't clear it): then it gets a 429 after
+    `PISA_MAX_WAIT_SECS`.
   - The tests use in-memory SQLite, and also the PostgreSQL that
     `PISA_TEST_DATABASE_URL` names when it is set. Each test has versions of
     its own there, so tests can share one database.
@@ -501,7 +512,9 @@ would have:
 - `GET /jobs/{id}?wait=30` waits up to `wait` seconds (at most 60) and, once
   the job is done, answers 200 `{id, kind, status: "done", http_status,
   body}`: the status and the answer the request would have had, errors
-  included, e.g. an `http_status` of 429 when no worker took it in time.
+  included, e.g. an `http_status` of 429 when no live worker took it in
+  time. While no worker is live, e.g. across a restart, the job waits for
+  one to come back, up to a day.
   Until then it answers 202 with `status` `queued` or `running`. It answers
   within `wait` and five seconds even if the database does not: the last
   status it read, else a 503. A 404 or a 503 is the look's own, never the

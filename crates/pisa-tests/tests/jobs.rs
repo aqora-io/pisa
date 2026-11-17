@@ -360,6 +360,45 @@ async fn a_job_whose_worker_is_lost_says_so() {
     }
 }
 
+/// Its worker is lost and no other is live for longer than its max wait, as
+/// across a reboot: it runs when a worker comes back, as a new one or under
+/// the lost one's name.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_job_runs_again_when_a_worker_comes_back() {
+    let mut cfg = router_config();
+    cfg.max_wait_secs = 2;
+    let mut c = Cluster::start_with(cfg, &[("w0", "v", 1)], |w| w).await;
+    for (lost, back) in [(0, "w1"), (1, "w1")] {
+        // Longer than the wait below: a lost worker's run would finish it.
+        let job = accepted(
+            &c,
+            "/check",
+            json!({"code": "SLEEP 8000\n#check Nat"}),
+            "check",
+        )
+        .await;
+        let url = c.url(&format!("/jobs/{job}"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while look(&c, &url, "0").await.1["status"] != "running" {
+            assert!(Instant::now() < deadline, "never started");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if lost == 0 {
+            c.kill_worker(lost).await;
+        } else {
+            // Dead as in a reboot: its row stays, until it registers again.
+            c.workers[lost].abort();
+            let _ = (&mut c.workers[lost]).await;
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let (status, r) = look(&c, &url, "0").await;
+        assert_eq!((status, &r["status"]), (202, &json!("queued")), "{r}");
+        c.add_worker(common::worker_config(back, "v", 1));
+        let (status, r) = look(&c, &url, "30").await;
+        assert_eq!((status, &r["ok"]), (200, &json!(true)), "{r}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn other_endpoints_answer_at_once() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
