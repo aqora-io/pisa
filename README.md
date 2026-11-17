@@ -393,10 +393,10 @@ pnpm -C web generate
 | --- | --- |
 | `POST /check` | `{code, version?, timeout?, detail?, at?}` → check result |
 | `POST /check/batch` | `{items: [{code}], version?, timeout?, detail?, at?}`, up to 128 items, 32 queued at a time → `{results: [...]}`, in order |
-| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages, runs?}`; see [Tactic sessions](#sessions) and [Naming a run](#run-names) |
-| `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages}`; earlier states stay valid, and a failing tactic is a 422 |
+| `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages, runs?, timing}`; see [Tactic sessions](#sessions) and [Naming a run](#run-names) |
+| `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages, timing}`; earlier states stay valid, and a failing tactic is a 422 |
 | `POST /sessions/{id}/check` | `{code, timeout?, detail?}` → check result, also requiring the session's original statements and imports; a `lean` error if the axiom report can't describe a declaration of the session's code, whose statement it couldn't guard |
-| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, name?, detail?}` → `{snapshot?, refused?, check, replacement?, heads?, unverified?, amendment?, refutation?, refutations?, runs?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending), [Refuting a target](#refuting) and [Naming a run](#run-names) |
+| `POST /snapshots` | `{code, version?, timeout?, verify?, labels?, key?, replaces?, fork?, holes?, amends?, refutes?, name?, detail?}` → `{snapshot?, refused?, check, cached, timing, replacement?, heads?, unverified?, amendment?, refutation?, refutations?, runs?}`; see [Snapshots](#snapshots), [Replacing](#replacing), [Verifying](#verifying), [Amending a spec](#amending), [Refuting a target](#refuting) and [Naming a run](#run-names) |
 | `GET /snapshots` | `?label=k:v` (repeated), `limit?`, `after?`, `heads?`, `version?` → `{snapshots: [{id, version, module, header, imports, labels, replaces?, holes?, status, verified, created, run?}], next?}`, newest first; see [Labels](#labels) |
 | `GET /snapshots/{id}` | `?detail=declarations` → the snapshot as in a listing, with `code`, `source?`, `check` and `exports?` |
 | `GET /snapshots/{id}/dependents` | `?label=k:v` (repeated) → `{snapshots: [...]}` as in a listing, parents first; see [Rebuilding](#rebuilding) |
@@ -408,12 +408,12 @@ pnpm -C web generate
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; with `profile=palomar`, `pair=<n>`, `challenge_module`, `solution_module`, one pair as a Palomar package; see [Accepting a run](#comparator) |
-| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
+| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, kernels?: [{name, verdict, reason?}], output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
 | `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
 | `GET /runs/{name}` | `?version=` → `{name, root, heads, module?, snapshot_id?}`: the run, and what `import PisaRun.<name>` resolves to when its heads are on one module; see [Naming a run](#run-names) |
 | `PUT /runs/{name}` | `{snapshot_id}` → as `GET /runs/{name}`: names the run the snapshot is in |
-| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries, runs?}`, each run with `moved_to?`; see [Documents](#documents) |
+| `POST /documents` | `{code, version?, timeout?}` → `{id, revision, messages, sorries, runs?, timing}`, each run with `moved_to?`; see [Documents](#documents) |
 | `PATCH /documents/{id}` | `{code, revision, timeout?}` → the document at its next revision |
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}], reopened, timing}` |
 | `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened, timing}` |
@@ -1322,10 +1322,12 @@ accepting a run takes both:
   statement, the definitions those statements use are the same but for the
   holes, an assumption keeps its statement, and the proofs use no other
   axiom. It replays them in Lean's kernel and, with `--paranoid`, in the
-  external kernels Lean bundles.
+  external kernels Lean bundles (for a pair whose spec permits a
+  non-standard axiom, only those that support one, as below).
 - **Running it.** `POST /snapshots/accept {"against": [...]}` audits the run,
   as `audit?against=` does with the same `allow`, and runs
-  `lake comparator --paranoid` on a worker on exactly the pairs the audit
+  `lake comparator --paranoid` (without `--paranoid` and with `external_kernels` for a
+  pair whose spec permits an axiom, as below) on a worker on exactly the pairs the audit
   compared, each in turn, in one export so that each module builds once. The worker keeps the last 4 runs it
   judged as they were built, by their modules and Lake configuration, so
   judging the same run again, with another `allow` too, doesn't build it again. `paranoid: false` uses Lean's
@@ -1375,7 +1377,19 @@ accepting a run takes both:
   without the review, and `truncated` says which. A pair that imports
   Mathlib takes about 25 s, or 45 s paranoid, so send it with
   `Prefer: respond-async`. Or untar the export and run `lake comparator
-  --paranoid --config comparator/1.json` there: it needs `bwrap`.
+  --paranoid --config comparator/1.json` there: it needs `bwrap`. For a pair
+  whose spec permits an axiom of its own, `--paranoid` exits 1 when con-leche
+  exits 2, though pisa accepts it: pisa runs it without `--paranoid`, with the
+  kernels that support the axiom named in the configuration, to which you add
+  (the paths are the toolchain's `bin`, `lean --print-prefix`):
+  ```json
+  "external_kernels": {
+    "Lean paranoid": ["<prefix>/bin/leanchecker-paranoid", "--silent", "--from-export"],
+    "lean4lean": ["<prefix>/bin/lean4lean", "--import"],
+    "nanoda": ["<prefix>/bin/nanoda_bin"]
+  }
+  ```
+  and then run `lake comparator --config comparator/1.json`.
 - **Where the audit and comparator differ.** Each pair's `left_out` and
   `theorems` say what its configuration couldn't name. The full list:
   - *Private names* differ between two modules, so a configuration leaves out
@@ -1411,7 +1425,9 @@ accepting a run takes both:
   source), and lists each pair with its theorems and what it leaves out, and
   each file with the snapshots on its module and their labels. Then
   `lake build` and `lake comparator --paranoid --config comparator/<n>.json`
-  judge it as pisa does.
+  judge it as pisa does, but for a pair whose spec permits an axiom of its
+  own: pisa runs that without `--paranoid`, with `external_kernels` (see
+  above), as con-leche and con-ron don't support one.
 - **A Palomar package.** `profile=palomar` exports one pair of the run as a
   Palomar package instead, in `palomar/`, as the Erdős campaign's
   `pisa_to_palomar.py` made one. `pair=<n>` names the pair, from 1 as
@@ -2036,7 +2052,8 @@ async def main(codes):
 Results are plain dicts; the type stubs describe their shapes. Exceptions
 carry `.kind` and `.status`, and their class says what to do:
 - `LeanError`: Lean or the policy refused the input.
-- `LimitError`: the input hit a timeout, the memory limit, or crashed Lean.
+- `LimitError`: the input hit a timeout, the memory limit, Lean's recursion
+  or heartbeat limit (`recursion_limit`, `heartbeat_limit`), or crashed Lean.
 - `CapacityError`: no worker was free, the server is unavailable, or a
   gateway answered 502, 503 or 504, once the client's retries ran out;
   retry later.
