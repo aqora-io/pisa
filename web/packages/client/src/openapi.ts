@@ -1882,6 +1882,11 @@ export interface components {
              *     if it can't be read.
              */
             queued: number | null;
+            /**
+             * @description The commit this server was built from, `unknown` if its build didn't
+             *     say.
+             */
+            revision: string;
             search: components["schemas"]["SearchHealth"] | null;
             /** @description `draining`, with a 503, once the server is stopping. */
             status: components["schemas"]["HealthStatus"];
@@ -1897,6 +1902,12 @@ export interface components {
              *     queue can't be read.
              */
             unlimited_workers: string[] | null;
+            /**
+             * @description The commits the live workers were built from, each once, in order;
+             *     `null` if the queue can't be read. More than one means a rollout is
+             *     under way, or stuck.
+             */
+            worker_revisions: string[] | null;
             /**
              * Format: int64
              * @description The live workers on the queue; `null` if it can't be read.

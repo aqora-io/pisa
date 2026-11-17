@@ -33,6 +33,7 @@ services:
       - --providers.docker.constraints=Label(`com.docker.compose.project`,`${COMPOSE_PROJECT_NAME}`)
       - --entrypoints.web.address=:8000
     ports: ["${PISA_PORT:-8000}:8000"]
+    restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
@@ -44,13 +45,20 @@ services:
       GARAGE_DEFAULT_ACCESS_KEY: *garage-key
       GARAGE_DEFAULT_SECRET_KEY: *garage-secret
       GARAGE_DEFAULT_BUCKET: pisa
+    restart: unless-stopped
     volumes:
       - ./docker/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
 
-  # Its data is in an anonymous volume, which `docker compose down -v` deletes.
-  # The servers and workers create the tables.
+  # Its data is in the postgres-data volume, which `docker compose down -v`
+  # deletes. The servers and workers create the tables.
   postgres:
     image: postgres:18
+    restart: unless-stopped
+    # postgres:18 keeps its cluster in a subdirectory of /var/lib/postgresql.
+    volumes:
+      - postgres-data:/var/lib/postgresql
     environment:
       POSTGRES_USER: pisa
       POSTGRES_PASSWORD: pisa
@@ -67,12 +75,16 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: server
+      args:
+        REVISION: ${PISA_REVISION:-unknown}
     image: pisa-server
     deploy:
       replicas: 2
     depends_on:
       postgres: { condition: service_healthy }
-    restart: on-failure
+    # A server exits 0 once it has drained, so on-failure would leave it down
+    # after a reboot.
+    restart: unless-stopped
     labels:
       traefik.enable: "true"
       traefik.http.routers.pisa.entrypoints: web
@@ -111,14 +123,18 @@ services:
       target: worker
       args:
         PROJECT: ${PROJECT:-lean-project}
+        REVISION: ${PISA_REVISION:-unknown}
     image: pisa-worker:${PROJECT:-lean-project}
     deploy:
       replicas: 2
     depends_on:
       garage: { condition: service_started }
       postgres: { condition: service_healthy }
-    # A worker exits if it can't connect to the database.
-    restart: on-failure
+    # A worker exits 0 once it has drained, and 1 if it can't connect to the
+    # database; either way it comes back, after a reboot too.
+    restart: unless-stopped
+    # It drains for up to PISA_DRAIN_TIMEOUT_SECS (600) on a stop.
+    stop_grace_period: 630s
     # bubblewrap needs to create namespaces and the worker writes to its own
     # cgroup subtree, so dev workers run privileged in a private cgroup
     # namespace. Production would grant only what these need (see the design
@@ -152,6 +168,7 @@ services:
   qdrant:
     profiles: [search, search-load]
     image: qdrant/qdrant:v1.20.0
+    restart: unless-stopped
     ports: ["127.0.0.1:6333:6333"]
     volumes:
       - qdrant-data:/qdrant/storage
@@ -164,6 +181,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       target: server
+      args:
+        REVISION: ${PISA_REVISION:-unknown}
     entrypoint: ["pisa-search"]
     depends_on: [qdrant]
     volumes:
@@ -182,5 +201,8 @@ services:
       - tei-models:/data
 
 volumes:
+  garage-meta:
+  garage-data:
+  postgres-data:
   qdrant-data:
   tei-models:

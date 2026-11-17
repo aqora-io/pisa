@@ -356,6 +356,17 @@ pub struct Health {
     #[serde(default)]
     #[schema(required = true)]
     pub sweeps_refused: Option<Vec<SweepRefused>>,
+    /// The commit this server was built from, `unknown` if its build didn't
+    /// say.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub revision: String,
+    /// The commits the live workers were built from, each once, in order;
+    /// `null` if the queue can't be read. More than one means a rollout is
+    /// under way, or stuck.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub worker_revisions: Option<Vec<String>>,
     /// Search's state; `null` if the server doesn't search.
     #[schema(required = true)]
     pub search: Option<crate::search::SearchHealth>,

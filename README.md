@@ -70,7 +70,13 @@ Compose is laid out like a deployment: Traefik on port 8000 (`PISA_PORT` to
 change it) spreads requests over two servers, which it finds through Docker
 and health-checks on `/health`, and two workers take jobs from PostgreSQL,
 next to Garage for S3.
-`--scale server=N` or `--scale worker=N` runs more of either. The servers and
+`--scale server=N` or `--scale worker=N` runs more of either. Traefik, Garage,
+PostgreSQL, Qdrant, the servers and the workers restart with the Docker
+daemon, and whenever they exit, even a server or worker that drained
+cleanly, unless stopped; Garage
+and PostgreSQL keep their data in the named volumes `garage-meta`,
+`garage-data` and `postgres-data`, which `docker compose down -v` deletes.
+A worker is given 630 s to drain on a stop. The servers and
 the workers keep their data in two places, chosen by environment variables
 that Compose and the chart set:
 - **The job queue and the metadata**, the documents, the sessions and their
@@ -100,6 +106,20 @@ that Compose and the chart set:
     its own there, so tests can share one database.
 - **Blobs**, the snapshot modules, are in S3.
   `PISA_STORE` is `s3`, which reads the `AWS_*` variables, or `memory`.
+
+To name the commit a stack runs, build it with `PISA_REVISION`, which
+Compose passes to the images as the `REVISION` build arg (default `unknown`).
+The binaries report it, in `/health`'s `revision` and `worker_revisions`, and
+the images carry it as the label `org.opencontainers.image.revision`:
+
+```sh
+# jj: the working copy's commit if it has changes, else its parent
+PISA_REVISION=$(jj log -r 'coalesce(@ ~ empty(), @-)' --no-graph -T 'commit_id') docker compose up --build
+# git
+PISA_REVISION=$(git rev-parse HEAD)$(git diff --quiet || echo -dirty) docker compose up --build
+# a plain image build
+docker build --build-arg REVISION=<commit> -f docker/Dockerfile --target server .
+```
 
 The pinned versions live in `docker/lean-project`: `lean-toolchain`,
 `lakefile.toml` and `lake-manifest.json`. Keep `REPL_REV` in `docker/Dockerfile`
@@ -202,6 +222,16 @@ and the rest of the API works.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that restarts after a reboot and names its commit:
+- Compose keeps Garage's and PostgreSQL's data in the named volumes
+  `garage-meta`, `garage-data` and `postgres-data`. They start empty: a stack
+  that kept its data in anonymous volumes starts from empty stores, so
+  rebuild the catalog (create the snapshots again) or restore a backup into
+  the new volumes.
+- `/health` adds `revision`, the server's commit, and `worker_revisions`, the
+  distinct commits of the live workers, `null` if the queue can't be read.
+  A worker registers its commit, and `unknown` is any that doesn't say.
 
 To the release that answers jobs in an envelope and retries in the clients:
 - `GET /jobs/{id}` of a done job answers 200 with `{id, kind, status:
@@ -420,7 +450,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)

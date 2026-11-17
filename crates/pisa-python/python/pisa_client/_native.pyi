@@ -669,6 +669,10 @@ class Health(TypedDict):
     queued: int | None
     unlimited_workers: list[str] | None
     sweeps_refused: list[SweepRefused] | None
+    # The commit this server was built from, `unknown` if its build didn't say.
+    revision: str
+    # The commits the live workers were built from, each once, in order.
+    worker_revisions: list[str] | None
     search: SearchHealth | None
 
 class JobDone(TypedDict):

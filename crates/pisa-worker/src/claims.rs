@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::Notice;
-use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue};
+use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue, Registration};
 use pisa_protocol::wire::{self, JobResult};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify, watch};
@@ -345,13 +345,14 @@ impl Shared {
         let since = loop {
             match self
                 .queue
-                .register(
-                    &self.me,
-                    &self.version,
-                    slots as u32,
-                    beam_slots as u32,
+                .register(&Registration {
+                    worker: self.me.clone(),
+                    version: self.version.clone(),
+                    slots: slots as u32,
+                    beam_slots: beam_slots as u32,
                     unlimited,
-                )
+                    revision: pisa_protocol::revision::REVISION.to_string(),
+                })
                 .await
             {
                 Ok(since) => break since,

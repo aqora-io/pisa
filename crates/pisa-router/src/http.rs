@@ -300,8 +300,9 @@ impl App {
     }
 
     /// The API's health: up, or 503 once draining, with the number of live
-    /// workers on the queue, those without limits, and the versions whose
-    /// sweeps are refused, each `null` if it can't be read.
+    /// workers on the queue, those without limits, the versions whose
+    /// sweeps are refused and the commits the workers were built from, each
+    /// `null` if it can't be read, and the commit of the server.
     pub async fn health(&self) -> (StatusCode, Health) {
         let counts = self.dispatcher.workers().await;
         let (code, status) = if self.draining.load(Ordering::Acquire) {
@@ -317,12 +318,21 @@ impl App {
                 None
             }
         };
+        let worker_revisions = match queue.live_revisions(LIVE).await {
+            Ok(revisions) => Some(revisions),
+            Err(e) => {
+                tracing::warn!("reading the workers' revisions failed: {e}");
+                None
+            }
+        };
         let health = Health {
             status,
             workers: counts.map(|(workers, _)| workers),
             queued: counts.map(|(_, queued)| queued),
             unlimited_workers,
             sweeps_refused: self.sweeps_refused().await,
+            revision: pisa_protocol::revision::REVISION.to_string(),
+            worker_revisions,
             search: None,
         };
         (code, health)

@@ -93,6 +93,8 @@ async fn health_names_workers_without_limits_and_a_refused_sweep() {
     .await
     .expect("health shows the refused sweep");
     assert_eq!(health.unlimited_workers, Some(vec!["w0".to_string()]));
+    assert_eq!(health.revision, pisa_protocol::revision::REVISION);
+    assert_eq!(health.worker_revisions, Some(vec!["unknown".to_string()]));
     let refused = &health.sweeps_refused.unwrap()[0];
     assert_eq!(refused.version, c.version("v"));
     assert!(refused.reason.contains("another-catalog"), "{refused:?}");

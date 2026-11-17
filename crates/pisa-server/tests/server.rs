@@ -87,6 +87,8 @@ async fn without_qdrant_there_is_no_search() {
             "queued": 0,
             "unlimited_workers": [],
             "sweeps_refused": [],
+            "revision": "unknown",
+            "worker_revisions": [],
             "search": null
         })
     );

@@ -1947,6 +1947,10 @@
               "null"
             ]
           },
+          "revision": {
+            "description": "The commit this server was built from, `unknown` if its build didn't\nsay.",
+            "type": "string"
+          },
           "search": {
             "oneOf": [
               {
@@ -1982,6 +1986,16 @@
               "null"
             ]
           },
+          "worker_revisions": {
+            "description": "The commits the live workers were built from, each once, in order;\n`null` if the queue can't be read. More than one means a rollout is\nunder way, or stuck.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "workers": {
             "description": "The live workers on the queue; `null` if it can't be read.",
             "format": "int64",
@@ -1998,6 +2012,8 @@
           "queued",
           "unlimited_workers",
           "sweeps_refused",
+          "revision",
+          "worker_revisions",
           "search"
         ],
         "type": "object"

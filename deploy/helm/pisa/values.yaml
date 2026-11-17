@@ -6,7 +6,9 @@
 # workers take them from, so any replica serves any request.
 server:
   image:
-    # Built from docker/Dockerfile (target server).
+    # Built from docker/Dockerfile (target server). Build it with
+    # `--build-arg REVISION=<commit>`, so `/health` and the image label name the
+    # commit it runs.
     repository: pisa-server
     tag: latest
     pullPolicy: IfNotPresent
@@ -54,8 +56,9 @@ allowedAxioms: []
 
 worker:
   image:
-    # Built from docker/Dockerfile (target worker). The default project bundles
-    # Lean v4.36.0-rc2 with Mathlib and Physlib.
+    # Built from docker/Dockerfile (target worker), with
+    # `--build-arg REVISION=<commit>` as the server's. The default project
+    # bundles Lean v4.36.0-rc2 with Mathlib and Physlib.
     repository: pisa-worker
     tag: lean-project
     pullPolicy: IfNotPresent

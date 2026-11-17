@@ -15,7 +15,7 @@ use crate::catalog::now_micros;
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
     ASYNC_RETENTION, Candidate, Claimed, Counts, NewJob, Peer, Poll, RESULT_RETENTION,
-    STALE_RETENTION, Stage, Status,
+    Registration, STALE_RETENTION, Stage, Status,
 };
 use crate::schema::{documents, jobs, workers};
 
@@ -404,6 +404,21 @@ pub(crate) async fn unlimited_workers(
     Ok(names)
 }
 
+pub(crate) async fn live_revisions(
+    db: &Handle,
+    q: &str,
+    stale: Duration,
+) -> Result<Vec<String>, DbError> {
+    Ok(workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::seen_micros.ge(now() - micros(stale)))
+        .select(workers::revision)
+        .distinct()
+        .order(workers::revision)
+        .load::<String>(&mut *conn(db).await?)
+        .await?)
+}
+
 pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, DbError> {
     let cutoff = now - micros(SWEEP_GRACE);
     retry(|| async {
@@ -459,28 +474,25 @@ pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, 
 pub(crate) async fn register(
     db: &Handle,
     q: &str,
-    worker: &str,
-    version: &str,
-    slots: u32,
-    beam_slots: u32,
-    unlimited: bool,
+    r: &Registration,
 ) -> Result<i64, DbError> {
     let now = now();
     retry(|| async {
         let mut c = conn(db).await?;
         let row = || {
             (
-                workers::version.eq(version),
-                workers::slots.eq(slots as i32),
-                workers::beam_slots.eq(beam_slots as i32),
-                workers::unlimited.eq(unlimited),
+                workers::version.eq(&r.version),
+                workers::slots.eq(r.slots as i32),
+                workers::beam_slots.eq(r.beam_slots as i32),
+                workers::unlimited.eq(r.unlimited),
+                workers::revision.eq(&r.revision),
                 workers::warm.eq(Value::Array(Vec::new())),
                 workers::draining.eq(false),
                 workers::seen_micros.eq(now),
             )
         };
         diesel::insert_into(workers::table)
-            .values((workers::queue.eq(q), workers::name.eq(worker), row()))
+            .values((workers::queue.eq(q), workers::name.eq(&r.worker), row()))
             .on_conflict((workers::queue, workers::name))
             .do_update()
             .set(row())
@@ -489,7 +501,7 @@ pub(crate) async fn register(
         diesel::update(
             jobs::table
                 .filter(jobs::queue.eq(q))
-                .filter(jobs::worker.eq(worker))
+                .filter(jobs::worker.eq(&r.worker))
                 .filter(jobs::result.is_null()),
         )
         .set(jobs::lease_micros.eq(now - 1))

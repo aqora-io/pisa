@@ -226,6 +226,7 @@ diesel::table! {
         beam_slots -> Integer,
         documents_open -> Integer,
         unlimited -> Bool,
+        revision -> Text,
     }
 }
 

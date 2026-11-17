@@ -46,6 +46,21 @@ pub struct Queue {
     name: String,
 }
 
+/// What a worker tells the queue about itself as it starts.
+#[derive(Debug, Clone, Default)]
+pub struct Registration {
+    pub worker: String,
+    pub version: String,
+    /// Its REPL slots.
+    pub slots: u32,
+    /// Its Lean Beam slots.
+    pub beam_slots: u32,
+    /// Whether it runs Lean without memory or process limits.
+    pub unlimited: bool,
+    /// The commit it was built from.
+    pub revision: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewJob {
     /// The pool version that may run it; `None` for any.
@@ -223,22 +238,12 @@ impl Queue {
         dispatch!(&self.db, sweep_jobs(&self.name, now))
     }
 
-    /// Adds or resets `worker`'s row, with its REPL slots and Beam slots and
-    /// whether it runs Lean without limits, and
-    /// lets its claims from before, of a process under the same name, lapse at
-    /// once. Returns when, which [`Queue::heartbeat`] takes.
-    pub async fn register(
-        &self,
-        worker: &str,
-        version: &str,
-        slots: u32,
-        beam_slots: u32,
-        unlimited: bool,
-    ) -> Result<i64, DbError> {
-        dispatch!(
-            &self.db,
-            register(&self.name, worker, version, slots, beam_slots, unlimited)
-        )
+    /// Adds or resets the worker's row, with its REPL slots and Beam slots,
+    /// whether it runs Lean without limits and the commit it was built from,
+    /// and lets its claims from before, of a process under the same name,
+    /// lapse at once. Returns when, which [`Queue::heartbeat`] takes.
+    pub async fn register(&self, r: &Registration) -> Result<i64, DbError> {
+        dispatch!(&self.db, register(&self.name, r))
     }
 
     /// The live workers, seen within `stale`, that run Lean without memory
@@ -267,6 +272,12 @@ impl Queue {
     /// The workers of `version` seen within `stale`.
     pub async fn registry(&self, version: &str, stale: Duration) -> Result<Vec<Peer>, DbError> {
         dispatch!(&self.db, registry(&self.name, version, stale))
+    }
+
+    /// The commits the workers seen within `stale` were built from, each once,
+    /// in order.
+    pub async fn live_revisions(&self, stale: Duration) -> Result<Vec<String>, DbError> {
+        dispatch!(&self.db, live_revisions(&self.name, stale))
     }
 
     /// The versions of the workers seen within `stale`, in order.
@@ -376,6 +387,57 @@ mod tests {
     async fn ids(q: &Queue, version: &str) -> Vec<i64> {
         let found = q.candidates(version, 100).await.unwrap();
         found.into_iter().map(|c| c.id).collect()
+    }
+
+    fn reg(
+        worker: &str,
+        version: &str,
+        slots: u32,
+        beam_slots: u32,
+        unlimited: bool,
+    ) -> Registration {
+        Registration {
+            worker: worker.into(),
+            version: version.into(),
+            slots,
+            beam_slots,
+            unlimited,
+            ..Registration::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_worker_registers_its_revision() {
+        for q in queues().await {
+            let abc = Registration {
+                revision: "abc".into(),
+                ..reg("w1", "v", 1, 0, false)
+            };
+            q.register(&abc).await.unwrap();
+            let again = Registration {
+                worker: "w2".into(),
+                ..abc.clone()
+            };
+            q.register(&again).await.unwrap();
+            q.register(&Registration {
+                revision: "def".into(),
+                ..reg("w3", "v", 1, 0, false)
+            })
+            .await
+            .unwrap();
+            assert_eq!(q.live_revisions(LEASE).await.unwrap(), ["abc", "def"]);
+            assert!(q.live_revisions(Duration::ZERO).await.unwrap().is_empty());
+            // Processes under the same names, of another build.
+            for worker in ["w1", "w2"] {
+                q.register(&Registration {
+                    revision: "def".into(),
+                    ..reg(worker, "v", 1, 0, false)
+                })
+                .await
+                .unwrap();
+            }
+            assert_eq!(q.live_revisions(LEASE).await.unwrap(), ["def"]);
+        }
     }
 
     #[tokio::test]
@@ -688,8 +750,8 @@ mod tests {
     #[tokio::test]
     async fn the_live_workers_without_limits_are_named() {
         for q in queues().await {
-            q.register("free", "v", 1, 0, true).await.unwrap();
-            q.register("held", "v", 1, 0, false).await.unwrap();
+            q.register(&reg("free", "v", 1, 0, true)).await.unwrap();
+            q.register(&reg("held", "v", 1, 0, false)).await.unwrap();
             assert_eq!(q.unlimited_workers(LEASE).await.unwrap(), ["free"]);
             assert!(
                 q.unlimited_workers(Duration::ZERO)
@@ -698,7 +760,7 @@ mod tests {
                     .is_empty()
             );
             // A process under the same name, with limits.
-            q.register("free", "v", 1, 0, false).await.unwrap();
+            q.register(&reg("free", "v", 1, 0, false)).await.unwrap();
             assert!(q.unlimited_workers(LEASE).await.unwrap().is_empty());
         }
     }
@@ -707,10 +769,10 @@ mod tests {
     async fn only_live_workers_with_beam_slots_serve_documents() {
         for q in queues().await {
             assert_eq!(q.serving_documents(Some("v"), LEASE).await.unwrap(), 0);
-            q.register("repl", "v", 2, 0, false).await.unwrap();
-            q.register("beam", "v", 2, 1, false).await.unwrap();
-            q.register("leaving", "v", 2, 1, false).await.unwrap();
-            q.register("other", "w", 2, 1, false).await.unwrap();
+            q.register(&reg("repl", "v", 2, 0, false)).await.unwrap();
+            q.register(&reg("beam", "v", 2, 1, false)).await.unwrap();
+            q.register(&reg("leaving", "v", 2, 1, false)).await.unwrap();
+            q.register(&reg("other", "w", 2, 1, false)).await.unwrap();
             q.set_draining("leaving").await.unwrap();
             assert_eq!(q.serving_documents(Some("v"), LEASE).await.unwrap(), 1);
             assert_eq!(q.serving_documents(None, LEASE).await.unwrap(), 2);
@@ -722,9 +784,9 @@ mod tests {
     #[tokio::test]
     async fn the_registry_has_live_workers_and_their_claims() {
         for q in queues().await {
-            q.register("w1", "v", 2, 1, false).await.unwrap();
-            q.register("w2", "v", 1, 0, false).await.unwrap();
-            q.register("x", "other", 4, 0, false).await.unwrap();
+            q.register(&reg("w1", "v", 2, 1, false)).await.unwrap();
+            q.register(&reg("w2", "v", 1, 0, false)).await.unwrap();
+            q.register(&reg("x", "other", 4, 0, false)).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 0)).await.unwrap();
             q.enqueue(&job(Some("v"), 1)).await.unwrap();
             // A job on a document takes none of its REPL slots.
@@ -776,7 +838,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeats_renew_only_this_registrations_claims() {
         for q in queues().await {
-            let since = q.register("w", "v", 1, 0, false).await.unwrap();
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             q.claim("w", &[id], Duration::from_millis(1)).await.unwrap();
             q.heartbeat("w", since, LEASE).await.unwrap();
@@ -785,7 +847,7 @@ mod tests {
 
             // A new process under the same name doesn't run the old one's
             // jobs: they lapse, and its heartbeats don't renew them.
-            let since = q.register("w", "v", 1, 0, false).await.unwrap();
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             q.heartbeat("w", since, LEASE).await.unwrap();
             assert_eq!(ids(&q, "v").await, [id]);
         }

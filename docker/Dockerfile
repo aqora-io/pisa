@@ -5,22 +5,26 @@
 #   docker build -f docker/Dockerfile --target corpus --output search/corpus .
 # Set PROJECT=lean-core for a small image without Mathlib, for quick tests
 # (not for `corpus`, which exports Mathlib and Physlib).
+# Add --build-arg REVISION=<commit> to name the commit: the binaries report it
+# (`/health`), and the image carries it as its revision label.
 
 FROM rust:1.99-trixie AS build
+ARG REVISION=unknown
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p pisa-worker \
+    PISA_REVISION=$REVISION cargo build --release -p pisa-worker \
     && cp target/release/pisa-worker /usr/local/bin/
 
 # Its own stage, so worker builds don't wait for search's dependencies.
 FROM rust:1.99-trixie AS build-server
+ARG REVISION=unknown
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p pisa-server -p pisa-search \
+    PISA_REVISION=$REVISION cargo build --release -p pisa-server -p pisa-search \
     && cp target/release/pisa-server target/release/pisa-search /usr/local/bin/
 
 # The server, and `pisa-search` for loading bundles and other offline work.
@@ -29,6 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build-server /usr/local/bin/pisa-server /usr/local/bin/pisa-search /usr/local/bin/
 EXPOSE 8000
+ARG REVISION=unknown
+LABEL org.opencontainers.image.revision=$REVISION
 ENTRYPOINT ["pisa-server"]
 
 FROM debian:trixie-slim AS lean
@@ -85,6 +91,8 @@ ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl
 RUN apt-get update \
     && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/*
+ARG REVISION=unknown
+LABEL org.opencontainers.image.revision=$REVISION
 ENTRYPOINT ["tini", "--", "pisa-worker"]
 
 # Exports every declaration of the project (about 30 minutes) and ingests it.
