@@ -5,10 +5,13 @@ fake-repl in place of Lean. Build the binaries first:
 """
 
 import asyncio
+import io
+import json
 import os
 import signal
 import socket
 import subprocess
+import tarfile
 import threading
 import time
 from pathlib import Path
@@ -559,6 +562,19 @@ def test_review_export_and_accept(url):
         client.audit_snapshots(review=True)
 
     assert client.export_run([spec["id"]])[:2] == b"\x1f\x8b"
+    # As a Palomar package, whose challenge imports only Mathlib, Init and Lean.
+    with pytest.raises(PisaError) as e:
+        client.export_run([spec["id"]], profile="palomar")
+    assert e.value.kind == "bad_request" and "imports Foo" in e.value.message, e.value
+    palomar = client.create_snapshot("import Mathlib\ntheorem py_p : 2 = 2 := sorry")["snapshot"]
+    client.create_snapshot("import Mathlib\ntheorem py_p : 2 = 2 := rfl", replaces={"snapshot_id": palomar["id"]})
+    package = client.export_run([palomar["id"]], profile="palomar", pair=1, challenge_module="Spec",
+                                solution_module="Proof")
+    with tarfile.open(fileobj=io.BytesIO(package)) as tar:
+        names = tar.getnames()
+        comparator = json.load(tar.extractfile("palomar/comparator.json"))
+    assert {"palomar/Spec.lean", "palomar/Proof.lean", "palomar/REVIEW.md"} <= set(names), names
+    assert (comparator["challenge_module"], comparator["theorem_names"]) == ("Spec", ["py_p"]), comparator
 
     accepted = client.accept_run([spec["id"]])
     assert accepted["accepted"] and accepted["clean"] and accepted["heads"] == [head["id"]], accepted

@@ -413,7 +413,7 @@ export interface paths {
         };
         /**
          * A run as a Lake project
-         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/accept` runs comparator on it.
+         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/accept` runs comparator on it. With `profile=palomar`, one pair is a Palomar package in `palomar/` instead: its challenge and solution named `challenge_module` and `solution_module`, and every module the pair needs made a module-system file; a `lakefile.toml` that requires Mathlib alone, at the commit the worker's manifest resolved, and that manifest without the worker's other packages, each package pinned to its commit; the pair's configuration as `comparator.json`; and `formalization.yaml`, `REVIEW.md` and `conversion.json` for what pisa can't decide and what it changed. A pair whose spec permits an axiom of its own, whose challenge imports anything but Mathlib, Init and Lean, that imports a module that is neither the run's, Lean's, Mathlib's nor of a package Mathlib builds on (an allowlist, so the worker's Physlib is refused), or whose spec is its own head is a `bad_request` that names it.
          */
         get: operations["exportRun"];
         put?: never;
@@ -5486,6 +5486,14 @@ export interface operations {
                 against: string[];
                 /** @description A definition the run's heads may change besides the spec's holes, as for the audit; repeatable */
                 allow?: string[];
+                /** @description `palomar` for one pair of the run as a Palomar package */
+                profile?: string;
+                /** @description With `profile`, the pair to package, from 1 as `comparator/<n>.json` numbers them; needed unless the run has one pair */
+                pair?: number;
+                /** @description With `profile`, the challenge's module name; `Challenge` by default */
+                challenge_module?: string;
+                /** @description With `profile`, the solution's module name; `Solution` by default */
+                solution_module?: string;
             };
             header?: {
                 /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */

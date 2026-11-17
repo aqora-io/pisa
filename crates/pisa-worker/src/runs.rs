@@ -27,7 +27,9 @@ use pisa_protocol::api::{
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
-use pisa_protocol::wire::{ExportedFile, ExportedPair, ExportedRun, SnapshotAcceptJob};
+use pisa_protocol::wire::{
+    ExportedFile, ExportedPair, ExportedRun, SnapshotAcceptJob, SnapshotExportJob,
+};
 use pisa_snapshots::review::review;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -36,6 +38,8 @@ use crate::catalog::{ModuleMeta, record_fits};
 use crate::launcher::Ran;
 use crate::pool::Pool;
 use crate::snapshots::Snapshots;
+
+mod palomar;
 
 /// How many of comparator's last lines of output a pair keeps.
 const OUTPUT_LINES: usize = 40;
@@ -49,16 +53,22 @@ const NAME: &str = "pisa_run";
 /// The axioms `#print axioms` counts a proof clean with.
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Quot.sound", "Classical.choice"];
 
-/// The run that spec snapshots `against` start, with `allow` naming what its
-/// heads may change besides the spec's holes, as a Lake project. `project`
-/// is the worker's, whose toolchain and packages it takes.
+/// The run that spec snapshots `job.against` start, with `job.allow` naming
+/// what its heads may change besides the spec's holes, as a Lake project, or
+/// one of its pairs as a Palomar package. `project` is the worker's, whose
+/// toolchain and packages it takes.
 pub async fn export(
     snapshots: &Snapshots,
     project: Option<&Path>,
-    against: &[String],
-    allow: &[String],
+    job: &SnapshotExportJob,
 ) -> Result<ExportedRun, Error> {
-    Ok(audited_export(snapshots, project, against, allow).await?.1)
+    let run = audited_export(snapshots, project, &job.against, &job.allow)
+        .await?
+        .1;
+    match &job.palomar {
+        Some(palomar) => palomar::package(&run, palomar, &job.against, &job.allow),
+        None => Ok(run),
+    }
 }
 
 /// [`export`], with the audit whose pairs it exports.

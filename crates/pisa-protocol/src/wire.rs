@@ -176,6 +176,21 @@ pub struct SnapshotExportJob {
     /// The definitions the leader allows the run's heads to change.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
+    /// With `profile=palomar`: one pair of the run as a Palomar package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub palomar: Option<PalomarExport>,
+}
+
+/// The pair of a run to export as a Palomar package, and what to name its
+/// modules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PalomarExport {
+    /// The pair, from 1 as `comparator/<n>.json` numbers them; `None` for a
+    /// run of one pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair: Option<u32>,
+    pub challenge_module: String,
+    pub solution_module: String,
 }
 
 /// `POST /snapshots/accept`.

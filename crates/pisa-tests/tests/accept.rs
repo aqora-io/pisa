@@ -62,6 +62,7 @@ async fn export(c: &Cluster, against: &[&str], allow: &[&str]) -> ExportedRun {
     let job = Job::SnapshotExport(SnapshotExportJob {
         against: against.iter().map(|s| s.to_string()).collect(),
         allow: allow.iter().map(|s| s.to_string()).collect(),
+        palomar: None,
     });
     match run(c, job).await {
         JobResult::SnapshotExport(Ok(run)) => run,
@@ -472,6 +473,158 @@ async fn the_api_exports_a_run_and_judges_it() {
     assert_eq!(r.status(), 200);
     let stored: Value = r.json().await.unwrap();
     assert_eq!(stored, verdict);
+}
+
+async fn get_export(c: &Cluster, query: &str) -> reqwest::Response {
+    let url = c.url(&format!("/snapshots/export?{query}"));
+    c.client.get(url).send().await.unwrap()
+}
+
+/// A named run's pair as a Palomar package: its challenge and solution as
+/// `Challenge` and `Solution`, module-system files, beside a root
+/// `comparator.json`, a lakefile named by the run, and metadata to review.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_named_run_exports_as_a_palomar_package() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Mathlib\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
+    let s = create(
+        &c,
+        json!({"code": spec, "holes": ["cost"], "name": "erdos.main"}),
+    )
+    .await;
+    let filled = "import Mathlib\n\ndef cost : Nat := 3\ntheorem t : cost = cost := rfl";
+    create(
+        &c,
+        json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+
+    let r = get_export(&c, &format!("against={}&profile=palomar", id(&s))).await;
+    assert_eq!(r.status(), 200);
+    let disposition = r.headers()["content-disposition"].to_str().unwrap();
+    assert!(disposition.contains("palomar.tar.gz"), "{disposition}");
+    let files = unpack(&r.bytes().await.unwrap());
+    let paths: Vec<&str> = files.keys().map(String::as_str).collect();
+    // No project here, so no toolchain.
+    assert_eq!(
+        paths,
+        [
+            "palomar/Challenge.lean",
+            "palomar/REVIEW.md",
+            "palomar/Solution.lean",
+            "palomar/comparator.json",
+            "palomar/conversion.json",
+            "palomar/formalization.yaml",
+            "palomar/lake-manifest.json",
+            "palomar/lakefile.toml",
+        ]
+    );
+    let module = |code: &str| {
+        code.replacen(
+            "import Mathlib\n",
+            "module\npublic import Mathlib\n\n@[expose] public section\n",
+            1,
+        )
+    };
+    assert_eq!(files["palomar/Challenge.lean"], module(spec));
+    assert_eq!(files["palomar/Solution.lean"], module(filled));
+    let config: Value = serde_json::from_str(&files["palomar/comparator.json"]).unwrap();
+    assert_eq!(
+        config,
+        json!({
+            "challenge_module": "Challenge",
+            "solution_module": "Solution",
+            "theorem_names": ["t"],
+            "definition_names": ["cost"],
+            "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
+        })
+    );
+    let lakefile = &files["palomar/lakefile.toml"];
+    assert!(
+        lakefile.starts_with("name = \"erdos_main\"\nversion = \"0.1.0\"\n")
+            && lakefile.contains("defaultTargets = [\"Challenge\", \"Solution\"]\n"),
+        "{lakefile}"
+    );
+    for (path, text) in &files {
+        assert!(!text.contains("Physlib"), "{path}: {text}");
+    }
+    let metadata: Value = serde_json::from_str(&files["palomar/formalization.yaml"]).unwrap();
+    assert_eq!(metadata["project"]["name"], "erdos.main");
+    assert_eq!(metadata["project"]["license"], "REVIEW");
+
+    // Its one pair, by number, named otherwise.
+    let query = format!(
+        "against={}&profile=palomar&pair=1&challenge_module=Erdos.Spec&solution_module=Erdos.Proof",
+        id(&s)
+    );
+    let files = unpack(&get_export(&c, &query).await.bytes().await.unwrap());
+    assert!(
+        files.contains_key("palomar/Erdos/Spec.lean"),
+        "{:?}",
+        files.keys()
+    );
+    let config: Value = serde_json::from_str(&files["palomar/comparator.json"]).unwrap();
+    assert_eq!(
+        (&config["challenge_module"], &config["solution_module"]),
+        (&json!("Erdos.Spec"), &json!("Erdos.Proof"))
+    );
+}
+
+/// What a Palomar package can't hold is a `bad_request` that names it, and
+/// so are the profile's parameters without the profile.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_palomar_export_refuses_what_a_package_cant_hold() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let u = create(
+        &c,
+        json!({"code": "import Mathlib\n\ntheorem u : 3 = 3 := sorry"}),
+    )
+    .await;
+    create(
+        &c,
+        json!({"code": "import Mathlib\nimport Physlib\n\ntheorem u : 3 = 3 := rfl",
+               "replaces": {"snapshot_id": id(&u)}}),
+    )
+    .await;
+    let (s, u) = (id(&s), id(&u));
+    for (query, wanted) in [
+        (format!("against={s}&profile=palomar"), "imports Foo"),
+        (format!("against={u}&profile=palomar"), "imports Physlib"),
+        (format!("against={s}&pair=1"), "profile=palomar"),
+        (format!("against={s}&solution_module=S"), "profile=palomar"),
+        (format!("against={s}&profile=lake"), "palomar, not lake"),
+        (format!("against={s}&profile=palomar&pair=0"), "pair"),
+        (format!("against={s}&profile=palomar&pair=2"), "1 to 1"),
+        (
+            format!("against={s}&profile=palomar&challenge_module=../x"),
+            "challenge_module",
+        ),
+        (
+            format!("against={s}&profile=palomar&challenge_module=Solution"),
+            "Solution",
+        ),
+    ] {
+        let r = get_export(&c, &query).await;
+        let status = r.status().as_u16();
+        let e: Value = r.json().await.unwrap();
+        assert_eq!(
+            (status, &e["error"]["kind"]),
+            (400, &json!("bad_request")),
+            "{query}: {e}"
+        );
+        let message = e["error"]["message"].as_str().unwrap();
+        assert!(message.contains(wanted), "{query}: {message}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -255,6 +255,24 @@ pub struct AuditOptions {
     pub review_limit: Option<u32>,
 }
 
+/// Options for [`Client::export_run_with`].
+#[derive(Debug, Clone, Default)]
+pub struct ExportOptions {
+    /// Definitions the heads may change besides the spec's holes, as for the
+    /// audit.
+    pub allow: Vec<String>,
+    /// `palomar` for one pair of the run as a Palomar package, in
+    /// `palomar/` of the tar.gz.
+    pub profile: Option<String>,
+    /// With `profile`, the pair to package, from 1 as `comparator/<n>.json`
+    /// numbers them; needed unless the run has one pair.
+    pub pair: Option<u32>,
+    /// With `profile`, the challenge's module name; `Challenge` unless set.
+    pub challenge_module: Option<String>,
+    /// With `profile`, the solution's module name; `Solution` unless set.
+    pub solution_module: Option<String>,
+}
+
 /// Options for [`Client::accept_run`].
 #[derive(Debug, Clone)]
 pub struct AcceptOptions {
@@ -1538,6 +1556,45 @@ impl Client {
         self.endpoint.get_bytes(url).await
     }
 
+    /// [`Client::export_run`] with `options`: with `profile` `palomar`, one
+    /// pair of the run as a Palomar package, in `palomar/` of the tar.gz. A
+    /// pair the package can't hold is `bad_request`, naming why.
+    pub async fn export_run_with<I, S>(
+        &self,
+        against: I,
+        options: &ExportOptions,
+    ) -> Result<Vec<u8>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let url = self.export_url(against, options)?;
+        self.endpoint.get_bytes(url).await
+    }
+
+    fn export_url<I, S>(&self, against: I, options: &ExportOptions) -> Result<Url, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut url = self.run_url("snapshots/export", against, &options.allow)?;
+        let mut query = url.query_pairs_mut();
+        if let Some(profile) = &options.profile {
+            query.append_pair("profile", profile);
+        }
+        if let Some(pair) = options.pair {
+            query.append_pair("pair", &pair.to_string());
+        }
+        if let Some(module) = &options.challenge_module {
+            query.append_pair("challenge_module", module);
+        }
+        if let Some(module) = &options.solution_module {
+            query.append_pair("solution_module", module);
+        }
+        drop(query);
+        Ok(url)
+    }
+
     /// Judges the run that spec snapshots `against` start: audits it and
     /// runs `lake comparator` on the pairs the audit compared, with this
     /// client's timeout for each pair, and stores the result; see
@@ -2005,6 +2062,28 @@ mod tests {
         assert_eq!(
             c.accept_request(["b~s"], &asked).unwrap().timeout,
             Some(900)
+        );
+    }
+
+    #[test]
+    fn an_export_sends_the_profile_and_what_it_names() {
+        let c = Client::new("http://h/").unwrap();
+        let plain = c.export_url(["b~s"], &ExportOptions::default()).unwrap();
+        assert_eq!(plain.query(), Some("against=b%7Es"));
+        let palomar = ExportOptions {
+            allow: vec!["g".into()],
+            profile: Some("palomar".into()),
+            pair: Some(2),
+            challenge_module: Some("Erdos.Spec".into()),
+            solution_module: Some("Erdos.Proof".into()),
+        };
+        let url = c.export_url(["b~s"], &palomar).unwrap();
+        assert_eq!(
+            url.query(),
+            Some(
+                "against=b%7Es&allow=g&profile=palomar&pair=2&challenge_module=Erdos.Spec\
+                 &solution_module=Erdos.Proof"
+            )
         );
     }
 

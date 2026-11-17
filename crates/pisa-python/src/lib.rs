@@ -683,19 +683,27 @@ impl Base {
     }
 
     /// The run's export, a tar.gz, as bytes.
-    #[pyo3(signature = (against, *, allow = None))]
+    #[pyo3(signature = (against, *, allow = None, profile = None, pair = None, challenge_module = None, solution_module = None))]
+    #[allow(clippy::too_many_arguments)]
     fn export_run<'py>(
         &self,
         py: Python<'py>,
         against: Vec<String>,
         allow: Option<Vec<String>>,
+        profile: Option<String>,
+        pair: Option<u32>,
+        challenge_module: Option<String>,
+        solution_module: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let allow = allow.unwrap_or_default();
-        let fut = async move {
-            let allow: Vec<&str> = allow.iter().map(String::as_str).collect();
-            inner.export_run(&against, &allow).await
+        let opts = pisa_client::ExportOptions {
+            allow: allow.unwrap_or_default(),
+            profile,
+            pair,
+            challenge_module,
+            solution_module,
         };
+        let fut = async move { inner.export_run_with(&against, &opts).await };
         self.run(py, fut, |py, bytes| {
             Ok(PyBytes::new(py, &bytes).into_any().unbind())
         })

@@ -407,7 +407,7 @@ pnpm -C web generate
 | `PATCH /snapshots/{id}` | `{labels: {key: value or null}}` → the snapshot as in a listing; see [Labels](#labels) |
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
-| `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; see [Accepting a run](#comparator) |
+| `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; with `profile=palomar`, `pair=<n>`, `challenge_module`, `solution_module`, one pair as a Palomar package; see [Accepting a run](#comparator) |
 | `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
 | `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
@@ -1412,6 +1412,46 @@ accepting a run takes both:
   each file with the snapshots on its module and their labels. Then
   `lake build` and `lake comparator --paranoid --config comparator/<n>.json`
   judge it as pisa does.
+- **A Palomar package.** `profile=palomar` exports one pair of the run as a
+  Palomar package instead, in `palomar/`, as the Erdős campaign's
+  `pisa_to_palomar.py` made one. `pair=<n>` names the pair, from 1 as
+  `comparator/<n>.json` numbers them; a run of one pair needs none. `pair`,
+  `challenge_module` and `solution_module` need the profile.
+  - The pair's spec module is `Challenge.lean` and its head's
+    `Solution.lean`, or as `challenge_module` and `solution_module` name
+    them; the modules they import of the run keep their names. Each plain
+    file becomes a module-system file, as Palomar requires: `module` first,
+    its imports `public`, and `@[expose] public section` after them. A
+    module-system file stays as it is. Imports follow the new names.
+  - `lakefile.toml` is named by the run (its name with `_` for `.`, or
+    `pisa_run`), with a `version`, the challenge's and solution's libraries
+    as `defaultTargets`, `autoImplicit` off, and Mathlib alone required, at
+    the commit the worker's manifest resolved. `lake-manifest.json` is the
+    worker's without its other packages (Physlib), each package's `inputRev`
+    its commit. A package that isn't a GitHub repository at a commit is a
+    500 `internal`: it is the worker's project, not the request.
+  - `comparator.json` is the pair's configuration, with the new names.
+  - `formalization.yaml` (v0.4, as JSON) has every key of a Palomar
+    package's: the run's name and the solution's theorems, and in `status`
+    no `sorry` and no axiom beyond the standard three, which
+    `comparator.json` makes true of a solution it accepts. Everything else,
+    the licence, authors and maintainers, description, classification,
+    sources and the rest, reads `REVIEW`. `REVIEW.md` lists what to decide
+    before publishing: the licence, authors, attribution, fidelity to the
+    source, the rest of the metadata, and validation. `conversion.json` names the pair and each module's SHA-256
+    before and after, and the packages removed.
+  - A `bad_request` names what a package can't hold: a spec that permits an
+    axiom beyond the standard three, a challenge that imports anything but
+    `Mathlib`, `Init` and `Lean`, a spec that is its own head, with no
+    solution yet, or a pair that imports a module that is neither the run's,
+    Lean's (`Init`, `Lean`, `Std`, `Lake`), Mathlib's nor of a package
+    Mathlib builds on (`Batteries`, `Aesop`, `Qq`, `ProofWidgets`,
+    `Plausible`, `ImportGraph`, `LeanSearchClient`, `Cli`). That is an
+    allowlist: the worker's Physlib, `QuantumInfo` and `PhyslibAlpha`, and
+    whatever the worker's project adds, are refused.
+
+  New headers and names change what Lean builds: build the package, judge
+  it with comparator, and cross-check it in pisa before publishing it.
 - **The worker.** Comparator runs on a REPL slot, in its cgroup and outside
   pisa's sandbox, as it sandboxes the code it judges itself with `bwrap`,
   with only `PATH`, `HOME`, `ELAN_HOME`, `LANG` and `TMPDIR` of the worker's

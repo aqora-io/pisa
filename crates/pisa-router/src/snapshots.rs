@@ -25,8 +25,8 @@ use pisa_protocol::labels::{
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::wire::{
-    ExportedRun, Job, JobResult, SnapshotAcceptJob, SnapshotCreateJob, SnapshotDeleteJob,
-    SnapshotExportJob, SnapshotRebuildJob, SnapshotVerifyJob,
+    ExportedRun, Job, JobResult, PalomarExport, SnapshotAcceptJob, SnapshotCreateJob,
+    SnapshotDeleteJob, SnapshotExportJob, SnapshotRebuildJob, SnapshotVerifyJob,
 };
 use serde::Deserialize;
 use utoipa::IntoParams;
@@ -641,10 +641,24 @@ fn run_version(against: &[String]) -> Result<String, ApiError> {
         project's toolchain, manifest and requirements, and a configuration in `comparator/` \
         for each spec snapshot and head it reaches. Each names the spec's theorems, its holes \
         and `allow` as definition holes, and the standard axioms and the spec's assumptions as \
-        permitted. `POST /snapshots/accept` runs comparator on it.",
+        permitted. `POST /snapshots/accept` runs comparator on it. With `profile=palomar`, one \
+        pair is a Palomar package in `palomar/` instead: its challenge and solution named \
+        `challenge_module` and `solution_module`, and every module the pair needs made a \
+        module-system file; a `lakefile.toml` that requires Mathlib alone, at the commit the \
+        worker's manifest resolved, and that manifest without the worker's other packages, \
+        each package pinned to its commit; the pair's configuration as `comparator.json`; and \
+        `formalization.yaml`, `REVIEW.md` and `conversion.json` for what pisa can't decide and \
+        what it changed. A pair whose spec permits an axiom of its own, whose challenge imports \
+        anything but Mathlib, Init and Lean, that imports a module that is neither the run's, \
+        Lean's, Mathlib's nor of a package Mathlib builds on (an allowlist, so the worker's \
+        Physlib is refused), or whose spec is its own head is a `bad_request` that names it.",
     params(
         ("against" = Vec<String>, Query, description = "A spec snapshot's id, `<version>~<32 hex>`; repeatable, all of one version"),
         ("allow" = Option<Vec<String>>, Query, description = "A definition the run's heads may change besides the spec's holes, as for the audit; repeatable"),
+        ("profile" = Option<String>, Query, description = "`palomar` for one pair of the run as a Palomar package"),
+        ("pair" = Option<u32>, Query, minimum = 1, description = "With `profile`, the pair to package, from 1 as `comparator/<n>.json` numbers them; needed unless the run has one pair"),
+        ("challenge_module" = Option<String>, Query, description = "With `profile`, the challenge's module name; `Challenge` by default"),
+        ("solution_module" = Option<String>, Query, description = "With `profile`, the solution's module name; `Solution` by default"),
     ),
     responses(
         (status = 200, description = "The project, as a tar.gz", content_type = "application/gzip", body = Tarball),
@@ -658,34 +672,116 @@ pub async fn export(
 ) -> Result<Response, ApiError> {
     let query = query.as_deref().unwrap_or_default();
     let allow = allow_query(query)?;
+    let palomar = palomar_query(query)?;
     let Some((version, against)) = against_query(query, &Filters::new())? else {
         return Err(ApiError::new(
             ErrorKind::BadRequest,
             "against names the run's spec snapshots, and is required",
         ));
     };
-    let job = Job::SnapshotExport(SnapshotExportJob { against, allow });
+    let root = match palomar {
+        Some(_) => PALOMAR_ROOT,
+        None => EXPORT_ROOT,
+    };
+    let job = Job::SnapshotExport(SnapshotExportJob {
+        against,
+        allow,
+        palomar,
+    });
     let run = match submit(&app, job, Some(version), Priority::Interactive).await? {
         JobResult::SnapshotExport(r) => r.map_err(ApiError)?,
         other => return Err(unexpected(other)),
     };
-    let tarball = tarball(&run)
+    let tarball = tarball(&run, root)
         .map_err(|e| ApiError::new(ErrorKind::Internal, format!("packing the export: {e}")))?;
     let headers = [
-        (CONTENT_TYPE, "application/gzip"),
+        (CONTENT_TYPE, "application/gzip".to_string()),
         (
             CONTENT_DISPOSITION,
-            "attachment; filename=\"pisa-run.tar.gz\"",
+            format!("attachment; filename=\"{root}.tar.gz\""),
         ),
     ];
     Ok((headers, tarball).into_response())
 }
 
+/// The Palomar package an export's query asks for with `profile=palomar`,
+/// whose `pair`, `challenge_module` and `solution_module` are for it alone.
+fn palomar_query(query: &str) -> Result<Option<PalomarExport>, ApiError> {
+    let get = |key: &str| {
+        let mut pairs = form_urlencoded::parse(query.as_bytes());
+        pairs
+            .find(|(name, _)| name == key)
+            .map(|(_, v)| v.into_owned())
+    };
+    let bad = |message: String| ApiError::new(ErrorKind::BadRequest, message);
+    let (pair, challenge, solution) =
+        (get("pair"), get("challenge_module"), get("solution_module"));
+    match get("profile").as_deref() {
+        Some("palomar") => {}
+        Some(other) => return Err(bad(format!("profile is palomar, not {other}"))),
+        None if pair.is_some() || challenge.is_some() || solution.is_some() => {
+            return Err(bad(
+                "pair, challenge_module and solution_module are for profile=palomar".into(),
+            ));
+        }
+        None => return Ok(None),
+    }
+    let pair = match pair.map(|p| (p.parse::<u32>(), p)) {
+        None => None,
+        Some((Ok(n), _)) if n >= 1 => Some(n),
+        Some((_, p)) => {
+            return Err(bad(format!(
+                "pair is a pair's number, from 1 as comparator/<n>.json numbers them, not {p}"
+            )));
+        }
+    };
+    let challenge_module = module_name("challenge_module", challenge, "Challenge")?;
+    let solution_module = module_name("solution_module", solution, "Solution")?;
+    if challenge_module == solution_module {
+        return Err(bad(format!(
+            "challenge_module and solution_module are both {challenge_module}: two modules need \
+             two names"
+        )));
+    }
+    Ok(Some(PalomarExport {
+        pair,
+        challenge_module,
+        solution_module,
+    }))
+}
+
+/// The module name a query gives as `key`, or `default`: dotted parts, each
+/// a letter or `_` then letters, digits and `_`, and none of Lean's
+/// keywords.
+fn module_name(key: &str, name: Option<String>, default: &str) -> Result<String, ApiError> {
+    let name = name.unwrap_or_else(|| default.to_string());
+    let part = |part: &str| {
+        let mut chars = part.chars();
+        let first = chars.next();
+        first.is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !snapshot::KEYWORDS.contains(&part)
+    };
+    if name.split('.').all(part) {
+        return Ok(name);
+    }
+    Err(ApiError::new(
+        ErrorKind::BadRequest,
+        format!(
+            "{key} is a module name, dotted parts each a letter or '_' then letters, digits and \
+             '_', none of them a Lean keyword, not {name:?}"
+        ),
+    ))
+}
+
 /// The directory an export unpacks to.
 const EXPORT_ROOT: &str = "pisa-run";
 
-/// `run`'s files as a tar.gz, in [`EXPORT_ROOT`].
-fn tarball(run: &ExportedRun) -> std::io::Result<Vec<u8>> {
+/// The directory a Palomar package unpacks to.
+const PALOMAR_ROOT: &str = "palomar";
+
+/// `run`'s files as a tar.gz, in `root`.
+fn tarball(run: &ExportedRun, root: &str) -> std::io::Result<Vec<u8>> {
     let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
     let now = std::time::SystemTime::now()
@@ -696,7 +792,7 @@ fn tarball(run: &ExportedRun) -> std::io::Result<Vec<u8>> {
         header.set_size(f.text.len() as u64);
         header.set_mode(0o644);
         header.set_mtime(now);
-        let path = format!("{EXPORT_ROOT}/{}", f.path);
+        let path = format!("{root}/{}", f.path);
         tar.append_data(&mut header, path, f.text.as_bytes())?;
     }
     tar.into_inner()?.finish()

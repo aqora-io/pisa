@@ -256,6 +256,19 @@ describe("PisaClient", () => {
     expect(await client.exportRun(["v2~s0"]).catch((e: unknown) => e)).toMatchObject({ kind: "not_found", status: 404 });
   });
 
+  it("asks for a run's pair as a Palomar package", async () => {
+    const { client, sent } = recording(() => new Response(new Uint8Array([0x1f, 0x8b])));
+    await client.exportRun(["v2~s0"], {
+      profile: "palomar",
+      pair: 2,
+      challengeModule: "Erdos.Spec",
+      solutionModule: "Erdos.Proof",
+    });
+    expect(sent[0]?.url).toBe(
+      "/api/snapshots/export?against=v2%7Es0&profile=palomar&pair=2&challenge_module=Erdos.Spec&solution_module=Erdos.Proof",
+    );
+  });
+
   it("accepts a run, at once or as a job, and reads an acceptance back", async () => {
     const accepted = { id: "v2~a", accepted: true, clean: true, pairs: [] };
     const { client, sent } = recording((s) =>

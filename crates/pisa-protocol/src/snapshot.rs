@@ -170,7 +170,7 @@ pub fn run_imports(header: &str) -> Result<Vec<String>, String> {
 /// `code` with each module its import lines name that `rename` maps to
 /// another name swapped for it, in place: the rest of the line, its comment
 /// included, and every other line stay as they were.
-fn rename_modules(code: &str, rename: impl Fn(&str) -> Option<String>) -> String {
+pub fn rename_modules(code: &str, rename: impl Fn(&str) -> Option<String>) -> String {
     let header_lines = split_header(code).header_lines as usize;
     let lines = code.split('\n').enumerate().map(|(i, line)| {
         let (import, comment) = match line.find("--") {

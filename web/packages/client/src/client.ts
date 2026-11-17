@@ -159,6 +159,22 @@ export interface GetDeclarationOptions extends VersionOptions {
   module?: ModuleName;
 }
 
+/** What `exportRun` exports besides the run: the `allow` of its audit, and
+ *  with `profile` one pair as a Palomar package. */
+export interface ExportParams {
+  /** Definitions the run may change, as for the audit. */
+  allow?: string[];
+  /** One pair of the run as a Palomar package. */
+  profile?: "palomar";
+  /** With `profile`: the pair to package, from 1 as `comparator/<n>.json`
+   *  numbers them; needed unless the run has one pair. */
+  pair?: number;
+  /** With `profile`: the challenge's module name, `Challenge` unless given. */
+  challengeModule?: string;
+  /** With `profile`: the solution's module name, `Solution` unless given. */
+  solutionModule?: string;
+}
+
 /** What `auditSnapshots` audits: a project by its `labels`, or a run
  *  `against` its spec snapshots. */
 export interface AuditParams {
@@ -515,15 +531,17 @@ export class PisaClient {
   }
 
   /** The run that spec snapshots `against` start, as a Lake project for
-   *  `lake comparator` in `pisa-run/` of a tar.gz: its bytes. */
-  async exportRun(
-    against: SnapshotId[],
-    params: { allow?: string[] } = {},
-    options: RequestOptions = {},
-  ): Promise<ArrayBuffer> {
+   *  `lake comparator` in `pisa-run/` of a tar.gz: its bytes. With
+   *  `profile: "palomar"`, one pair as a Palomar package in `palomar/`
+   *  instead; a pair the package can't hold is a `bad_request` naming why. */
+  async exportRun(against: SnapshotId[], params: ExportParams = {}, options: RequestOptions = {}): Promise<ArrayBuffer> {
     const query = new URLSearchParams();
     for (const id of against) query.append("against", id);
     for (const name of params.allow ?? []) query.append("allow", name);
+    if (params.profile !== undefined) query.set("profile", params.profile);
+    if (params.pair !== undefined) query.set("pair", String(params.pair));
+    if (params.challengeModule !== undefined) query.set("challenge_module", params.challengeModule);
+    if (params.solutionModule !== undefined) query.set("solution_module", params.solutionModule);
     const r = await this.send("GET", ["snapshots", "export"], undefined, query, options.signal);
     if (!r.ok) ok(r, await readJson(r));
     return r.arrayBuffer();

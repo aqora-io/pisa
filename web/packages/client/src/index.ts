@@ -12,6 +12,7 @@ export {
   type CreateSpecOptions,
   type RefuteOptions,
   type DeleteSnapshotOptions,
+  type ExportParams,
   type GetDeclarationOptions,
   type Job,
   type JobOptions,

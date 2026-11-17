@@ -300,9 +300,7 @@ pub(crate) async fn run_job(
         }
         Job::SnapshotExport(j) => {
             let project = pool.launcher().project();
-            JobResult::SnapshotExport(
-                runs::export(pool.snapshots(), project, &j.against, &j.allow).await,
-            )
+            JobResult::SnapshotExport(runs::export(pool.snapshots(), project, &j).await)
         }
         job @ (Job::DocumentOpen(_)
         | Job::DocumentEdit(_)

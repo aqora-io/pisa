@@ -24,7 +24,7 @@
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
 //! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
-//! | `GET /snapshots/export` | `?against=<id>&allow=<name>` → a Lake project, as a tar.gz |
+//! | `GET /snapshots/export` | `?against=<id>&allow=<name>&profile=palomar` → a Lake project, as a tar.gz |
 //! | `POST /snapshots/accept` | [`AcceptRequest`] → [`AcceptResponse`] |
 //! | `GET /snapshots/accept/{id}` | → [`AcceptResponse`] |
 //! | `POST /documents` | [`OpenDocumentRequest`] → [`Document`] |

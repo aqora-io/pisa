@@ -985,9 +985,23 @@ class Client:
         entries, 1 to 10,000 (1,000 unless given), and `review_left_out`
         counts the rest. `labels` and `against` don't combine, `against`
         can't be empty, and `allow` and `review` need `against` (ValueError)."""
-    def export_run(self, against: list[str], *, allow: list[str] | None = None) -> bytes:
+    def export_run(
+        self,
+        against: list[str],
+        *,
+        allow: list[str] | None = None,
+        profile: str | None = None,
+        pair: int | None = None,
+        challenge_module: str | None = None,
+        solution_module: str | None = None,
+    ) -> bytes:
         """The run that spec snapshots `against` start, as a Lake project for
-        `lake comparator` in `pisa-run/` of a tar.gz."""
+        `lake comparator` in `pisa-run/` of a tar.gz. With `profile="palomar"`,
+        one pair as a Palomar package in `palomar/` instead: `pair`, from 1 as
+        `comparator/<n>.json` numbers them, needed unless the run has one; its
+        challenge and solution named `challenge_module` and `solution_module`
+        (`Challenge` and `Solution` unless given). A pair the package can't
+        hold is a `bad_request` naming why."""
     def accept_run(
         self,
         against: list[str],
@@ -1512,9 +1526,23 @@ class AsyncClient:
         entries, 1 to 10,000 (1,000 unless given), and `review_left_out`
         counts the rest. `labels` and `against` don't combine, `against`
         can't be empty, and `allow` and `review` need `against` (ValueError)."""
-    def export_run(self, against: list[str], *, allow: list[str] | None = None) -> Future[bytes]:
+    def export_run(
+        self,
+        against: list[str],
+        *,
+        allow: list[str] | None = None,
+        profile: str | None = None,
+        pair: int | None = None,
+        challenge_module: str | None = None,
+        solution_module: str | None = None,
+    ) -> Future[bytes]:
         """The run that spec snapshots `against` start, as a Lake project for
-        `lake comparator` in `pisa-run/` of a tar.gz."""
+        `lake comparator` in `pisa-run/` of a tar.gz. With `profile="palomar"`,
+        one pair as a Palomar package in `palomar/` instead: `pair`, from 1 as
+        `comparator/<n>.json` numbers them, needed unless the run has one; its
+        challenge and solution named `challenge_module` and `solution_module`
+        (`Challenge` and `Solution` unless given). A pair the package can't
+        hold is a `bad_request` naming why."""
     def accept_run(
         self,
         against: list[str],

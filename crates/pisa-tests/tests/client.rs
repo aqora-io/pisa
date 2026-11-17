@@ -8,10 +8,10 @@ use std::time::Duration;
 use common::Cluster;
 use pisa_client::{
     AcceptOptions, Allow, AmendOptions, Amends, AuditOptions, CheckOptions, Client,
-    CreateSnapshotOptions, DeleteSnapshotOptions, Detail, Error, ErrorKind, GoalsOptions,
-    HealthStatus, Job, JobKind, JobPoll, JobStatus, LinePos, ListSnapshotsResponse, Pos, ProbeAt,
-    ProofOptions, ProofStatus, RebuildOptions, Refusal, RefuteOptions, Refutes, Replaces,
-    ResubmitOptions, RetryPolicy, SettleOptions, SpecOptions,
+    CreateSnapshotOptions, DeleteSnapshotOptions, Detail, Error, ErrorKind, ExportOptions,
+    GoalsOptions, HealthStatus, Job, JobKind, JobPoll, JobStatus, LinePos, ListSnapshotsResponse,
+    Pos, ProbeAt, ProofOptions, ProofStatus, RebuildOptions, Refusal, RefuteOptions, Refutes,
+    Replaces, ResubmitOptions, RetryPolicy, SettleOptions, SpecOptions,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -884,6 +884,21 @@ async fn client_reviews_exports_and_accepts_a_run() {
 
     let tarball = client.export_run([&spec.id], &[]).await.unwrap();
     assert_eq!(&tarball[..2], [0x1f, 0x8b], "a gzip");
+    // As a Palomar package, whose challenge imports only Mathlib, Init and
+    // Lean: this spec's `Foo` is refused.
+    let palomar = ExportOptions {
+        profile: Some("palomar".into()),
+        pair: Some(1),
+        ..Default::default()
+    };
+    let refused = client.export_run_with([&spec.id], &palomar).await;
+    match refused {
+        Err(Error::Server { kind, message, .. }) => {
+            assert_eq!(kind, ErrorKind::BadRequest);
+            assert!(message.contains("imports Foo"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
 
     let accepted = client
         .accept_run([&spec.id], &AcceptOptions::default())
