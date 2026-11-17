@@ -389,6 +389,12 @@ pub struct DeclarationChange {
     /// no longer builds on, rather than the original code itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    /// For a missing declaration, the snapshot module the new code builds on
+    /// that declares an identical one, with the same kind, type and value.
+    /// An import can't stand in for the spec's own declarations: keep them
+    /// in the module and import only helpers (README, *Reusing a proof*).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
     pub change: Change,
     /// For a changed type or assumption, its signature before, and `now`
     /// after, from the search exports of the modules, where they have them.
@@ -409,6 +415,7 @@ impl DeclarationChange {
         DeclarationChange {
             name: name.into(),
             module: None,
+            imported_from: None,
             change,
             was: None,
             now: None,
@@ -435,6 +442,13 @@ impl std::fmt::Display for DeclarationChange {
             }
             (change, None) => write!(f, "statement: {name} {}", change.says()),
         }?;
+        if let Some(from) = &self.imported_from {
+            write!(
+                f,
+                "; `{from}` declares an identical {name} \u{2014} keep the spec's declarations in this \
+                 module and import only helpers (README, *Reusing a proof*)"
+            )?;
+        }
         if !self.includes.is_empty() {
             write!(f, " ({})", self.includes.join(", "))?;
         }

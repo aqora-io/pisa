@@ -261,6 +261,46 @@ fn a_swapped_snapshot_passes_when_nothing_the_statements_use_changed() {
 }
 
 #[test]
+fn a_missing_declaration_names_the_import_that_declares_it_identically() {
+    let old = vec![decl("t", "1", Some("2"), &[])];
+    let now = [decl("other", "5", None, &[])];
+    let gained = |d: Declaration| Swapped {
+        lost: Vec::new(),
+        gained: vec![("b".into(), vec![d])],
+    };
+    let reason = |s: &Swapped| compare(&replacing(old.clone(), None), &now, s).unwrap_err();
+    let identical = reason(&gained(decl("t", "1", Some("2"), &[])));
+    assert_eq!(
+        identical,
+        [format!(
+            "statement: t is missing; `{}` declares an identical t \u{2014} keep the spec's \
+             declarations in this module and import only helpers (README, *Reusing a proof*)",
+            snapshot::module("b")
+        )]
+    );
+    // A different type, value or kind is not the same declaration.
+    for other in [
+        decl("t", "9", Some("2"), &[]),
+        decl("t", "1", Some("9"), &[]),
+        Declaration {
+            kind: "opaque".into(),
+            ..decl("t", "1", Some("2"), &[])
+        },
+    ] {
+        assert_eq!(reason(&gained(other)), ["statement: t is missing"]);
+    }
+    // The first of several identical copies is named.
+    let both = Swapped {
+        lost: Vec::new(),
+        gained: vec![
+            ("b".into(), vec![decl("t", "1", Some("2"), &[])]),
+            ("c".into(), vec![decl("t", "1", Some("2"), &[])]),
+        ],
+    };
+    assert_eq!(reason(&both), identical);
+}
+
+#[test]
 fn a_replacement_cant_assume_what_it_should_prove() {
     let axiom = |name: &str, ty: &str| Declaration {
         kind: "axiom".into(),

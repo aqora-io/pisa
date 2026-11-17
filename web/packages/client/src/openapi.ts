@@ -1525,6 +1525,13 @@ export interface components {
         DeclarationChange: {
             change: components["schemas"]["Change"];
             /**
+             * @description For a missing declaration, the snapshot module the new code builds on
+             *     that declares an identical one, with the same kind, type and value.
+             *     An import can't stand in for the spec's own declarations: keep them
+             *     in the module and import only helpers (README, *Reusing a proof*).
+             */
+            imported_from?: string;
+            /**
              * @description For a change to what Lean makes from an inductive type, the
              *     declarations that changed.
              */

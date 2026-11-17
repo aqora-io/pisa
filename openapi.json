@@ -1319,6 +1319,10 @@
           "change": {
             "$ref": "#/components/schemas/Change"
           },
+          "imported_from": {
+            "description": "For a missing declaration, the snapshot module the new code builds on\nthat declares an identical one, with the same kind, type and value.\nAn import can't stand in for the spec's own declarations: keep them\nin the module and import only helpers (README, *Reusing a proof*).",
+            "type": "string"
+          },
           "includes": {
             "description": "For a change to what Lean makes from an inductive type, the\ndeclarations that changed.",
             "items": {

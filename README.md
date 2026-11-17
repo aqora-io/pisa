@@ -862,6 +862,10 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     or `ambiguous`;
   - `module` names the snapshot a constant is from, when the code no longer
     builds on it (see *Imports*);
+  - `imported_from` is the snapshot module the code builds on that declares an
+    identical copy, for a `missing` declaration (same name, kind, type and
+    value; the first, when several do). An import doesn't stand in for the
+    spec's own declarations: see [Reusing a proof](#reusing-a-proof);
   - `was` and `now` are its signature before and after, for a changed type or
     assumption, from the modules' search exports. Those are what the builds
     printed; the comparison reads the declarations' hashes;
@@ -949,6 +953,23 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
   create's build reported, so acceptance doesn't rest on it: the
   [spec audit](#spec-audit) compares again from verified records. A key
   replay returns the snapshot as it is, without `replacement`.
+
+<a id="reusing-a-proof"></a>
+**Reusing a proof.** The unit of reuse is a helper-only snapshot: a snapshot
+whose code declares lemmas and definitions that other code may import, and
+none of a spec's targets. A replacement must declare the replaced module's
+own declarations itself, so code that imports a snapshot declaring the spec's
+`t` is refused with `change: missing`, even if that `t` is identical: the
+refusal's `imported_from` names the module. An import can't stand in for them
+because the comparison reads the replaced module's declarations in the new
+module, and the spec is what that module states, not what it builds on.
+To reuse a retrieved complete proof:
+
+1. Take the proof's helpers (everything but the spec's targets) into a
+   snapshot of their own, and create it.
+2. Import that snapshot in the code that replaces the spec's module.
+3. State the targets again in that code, locally, and prove them with the
+   helpers.
 
 <a id="run-names"></a>
 **Naming a run.** A module's name is a hash of its code, so a proof that

@@ -78,6 +78,7 @@ class DeclarationChange(TypedDict):
     the modules' exports, for a changed type or assumption."""
     name: str
     module: NotRequired[str]
+    imported_from: NotRequired[str]
     change: Change
     was: NotRequired[str]
     now: NotRequired[str]

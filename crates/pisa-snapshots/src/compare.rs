@@ -81,6 +81,11 @@ pub fn compare(
     }
     refused.extend(added_assumptions(replacing, now, swapped));
     if !refused.is_empty() {
+        for c in &mut refused {
+            if c.change == Change::Missing && c.module.is_none() {
+                c.imported_from = identical_import(replacing, swapped, &c.name);
+            }
+        }
         return Err(grouped(refused, |c| parent(replacing, swapped, c)));
     }
     // What changed under an allowed type is listed after it, for review.
@@ -118,6 +123,25 @@ pub fn compare(
         filled,
         changed_definitions,
         affected,
+    })
+}
+
+/// The module of the first newly imported snapshot that declares an identical
+/// copy of the replaced module's declaration `name`: the same name, kind, type
+/// and value.
+fn identical_import(replacing: &Replacing, swapped: &Swapped, name: &str) -> Option<String> {
+    let original = replacing.declarations.iter().find(|d| d.name == name)?;
+    let wanted = normalised(name);
+    swapped.gained.iter().find_map(|(id, decls)| {
+        decls
+            .iter()
+            .any(|d| {
+                normalised(&d.name) == wanted
+                    && d.kind == original.kind
+                    && d.type_hash == original.type_hash
+                    && d.value_hash == original.value_hash
+            })
+            .then(|| snapshot::module(id))
     })
 }
 

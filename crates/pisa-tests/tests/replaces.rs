@@ -157,12 +157,28 @@ async fn a_changed_statement_is_not_kept() {
     .await;
     refused(&r, "statement: t is missing");
 
+    // An import that declares the spec's `t` identically doesn't stand in
+    // for it, and the refusal says where it is from.
+    let helper = create(&c, json!({"code": PROOF})).await;
+    let code = on(&helper, "theorem other : 1 = 1 := rfl");
+    let r = create(&c, json!({"code": code, "replaces": replacing(&old)})).await;
+    assert_eq!(r["check"]["changes"][0]["name"], "t", "{r}");
+    assert_eq!(r["check"]["changes"][0]["change"], "missing", "{r}");
+    assert_eq!(
+        r["check"]["changes"][0]["imported_from"],
+        module(&helper),
+        "{r}"
+    );
+    let reason = r["check"]["reasons"][0].as_str().unwrap();
+    assert!(reason.starts_with("statement: t is missing; `"), "{r}");
+    assert!(reason.contains("Reusing a proof"), "{r}");
+
     // Code that is kept already gets no new snapshot either.
     create(&c, json!({"code": weakened})).await;
     let r = create(&c, json!({"code": weakened, "replaces": replacing(&old)})).await;
     refused(&r, "statement: t has a different type");
     let listed = get(&c, "/snapshots").await;
-    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 2, "{listed}");
+    assert_eq!(listed["snapshots"].as_array().unwrap().len(), 3, "{listed}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
