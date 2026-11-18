@@ -9,7 +9,9 @@
 //! cargo test -p pisa-worker --test real_lean -- --ignored
 //! ```
 
-use std::path::{Path, PathBuf};
+mod lean;
+
+use std::path::PathBuf;
 use std::process::Command;
 
 use pisa_protocol::header::split_header;
@@ -22,9 +24,7 @@ use pisa_worker::policy::{
     parse_export,
 };
 
-fn docker() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker")
-}
+use lean::docker;
 
 fn policy() -> Policy {
     Policy {

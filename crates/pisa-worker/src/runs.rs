@@ -650,7 +650,8 @@ fn file(path: &str, text: String) -> ExportedFile {
 
 /// The Lake configuration: the project's toolchain and manifest, and a
 /// lakefile with its requirements.
-fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedFile>, Error> {
+#[doc(hidden)]
+pub fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedFile>, Error> {
     let Some(project) = project else {
         // As in tests, which build nothing.
         let manifest = json!({"version": "1.3.0", "packagesDir": ".lake/packages",
