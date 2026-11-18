@@ -55,6 +55,14 @@ async fn search_that_isnt_ready_leaves_the_api_up() {
     assert_eq!(status, 200, "{health}");
     assert_eq!(health["search"]["ready"], false, "{health}");
     assert_eq!(health["search"]["qdrant"], false, "{health}");
+    // No describe model: no snapshot code goes to one.
+    assert_eq!(health["search"]["describe_model"], Value::Null, "{health}");
+    assert!(
+        health["search"]
+            .as_object()
+            .unwrap()
+            .contains_key("describe_model")
+    );
 
     let (status, body) = post(&url("/search"), json!({"queries": [{"text": "x"}]})).await;
     assert_eq!(status, 503, "{body}");

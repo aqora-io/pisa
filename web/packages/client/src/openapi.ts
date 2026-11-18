@@ -2791,6 +2791,13 @@ export interface components {
         };
         /** @description Search's state in a server's `GET /health`. */
         SearchHealth: {
+            /**
+             * @description The model that snapshot declarations are sent to for descriptions,
+             *     and for the check that a description states the hypotheses (the same
+             *     model), `null` if none are sent anywhere. See the README's "What
+             *     snapshot search sends to a model".
+             */
+            describe_model: string | null;
             /** @description Why the index isn't open yet. */
             error?: string;
             /** @description This replica leads the snapshot index. */

@@ -658,6 +658,7 @@ class SearchHealth(TypedDict):
     version: str
     qdrant: bool
     leader: bool
+    describe_model: str | None
     error: NotRequired[str]
 
 # `ok`, `unreachable`, or `unknown` if nobody has said.

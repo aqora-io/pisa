@@ -98,6 +98,8 @@ pub struct Search {
     /// How a request's version resolves, as the rest of the API does.
     versions: Versions,
     q: Qdrant,
+    /// The model snapshot declarations are sent to, if any.
+    describe_model: Option<String>,
     /// Why the engine isn't open yet.
     waiting: Mutex<String>,
 }
@@ -141,6 +143,9 @@ impl Search {
             )),
             None => None,
         };
+        let describe_model = (!args.no_snapshots)
+            .then(|| llm.as_ref().map(|(_, config)| config.model.clone()))
+            .flatten();
         let flags = DescriptionFlags::new(db.clone());
         let snapshots = (!args.no_snapshots).then(|| Snapshots {
             version: some(args.snapshot_version).unwrap_or_else(|| env_id.clone()),
@@ -153,19 +158,26 @@ impl Search {
             env_id,
             versions,
             q,
+            describe_model,
             waiting: Mutex::new("opening the engine".into()),
         });
         tokio::spawn(search.clone().open(symbols, embedder, snapshots, flags));
         Ok(Some(search))
     }
 
-    /// Search over `engine`, open already.
-    pub fn ready(engine: Arc<Engine>, versions: Versions) -> Arc<Search> {
+    /// Search over `engine`, open already, whose snapshots are described by
+    /// `describe_model`, if any.
+    pub fn ready(
+        engine: Arc<Engine>,
+        versions: Versions,
+        describe_model: Option<String>,
+    ) -> Arc<Search> {
         let search = Search {
             env_id: engine.env_id().to_string(),
             versions,
             q: engine.q.clone(),
             engine: OnceLock::from(engine),
+            describe_model,
             waiting: Mutex::new(String::new()),
         };
         Arc::new(search)
@@ -256,6 +268,7 @@ impl Search {
             version: self.env_id.clone(),
             qdrant,
             leader: engine.is_some_and(|e| e.leader.load(std::sync::atomic::Ordering::Acquire)),
+            describe_model: self.describe_model.clone(),
             error: engine
                 .is_none()
                 .then(|| self.waiting.lock().unwrap().clone()),

@@ -659,7 +659,7 @@ async fn serve_flagged(
     let mut engine = Engine::open(q, &t.env_id, symbols, None).await.unwrap();
     engine.snapshots = snapshots.map(str::to_string);
     engine.description_flags = Some(flags);
-    let search = pisa_search::server::Search::ready(Arc::new(engine), Versions::default());
+    let search = pisa_search::server::Search::ready(Arc::new(engine), Versions::default(), None);
     let app = pisa_search::server::router(search);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -761,6 +761,32 @@ async fn http_api() {
         .unwrap();
     assert_eq!(health["qdrant"], true);
     assert_eq!(health["version"], t.env_id);
+    t.done().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_says_which_model_snapshot_code_is_sent_to() {
+    let Some(t) = engine().await else { return };
+    let health = async |model: Option<&str>| {
+        let symbols = Symbols::parse(symbols::DEFAULT).unwrap();
+        let engine = Engine::open(t.q.clone(), &t.env_id, symbols, None)
+            .await
+            .unwrap();
+        let search = pisa_search::server::Search::ready(
+            Arc::new(engine),
+            Versions::default(),
+            model.map(str::to_string),
+        );
+        serde_json::to_value(search.health().await.1).unwrap()
+    };
+    assert_eq!(
+        health(None).await["describe_model"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        health(Some("claude-haiku-5-5")).await["describe_model"],
+        "claude-haiku-5-5"
+    );
     t.done().await;
 }
 

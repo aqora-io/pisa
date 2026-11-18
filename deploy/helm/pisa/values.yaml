@@ -163,7 +163,8 @@ search:
   # database indexes them.
   snapshots: true
   # Claude or OpenAI model that describes every snapshot declaration, so all
-  # snapshot code goes to that provider; empty for none.
+  # snapshot code goes to that provider; empty for none. What is sent, and
+  # to whom: README, "What snapshot search sends to a model".
   describeModel: ""
   # LLM and embedding requests in flight for snapshots.
   describeConcurrency: 8

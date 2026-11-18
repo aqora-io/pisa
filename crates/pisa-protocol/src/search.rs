@@ -266,6 +266,12 @@ pub struct SearchHealth {
     pub qdrant: bool,
     /// This replica leads the snapshot index.
     pub leader: bool,
+    /// The model that snapshot declarations are sent to for descriptions,
+    /// and for the check that a description states the hypotheses (the same
+    /// model), `null` if none are sent anywhere. See the README's "What
+    /// snapshot search sends to a model".
+    #[schema(required = true)]
+    pub describe_model: Option<String>,
     /// Why the index isn't open yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

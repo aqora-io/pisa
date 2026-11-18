@@ -109,7 +109,8 @@ services:
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
       # Set a describe model (e.g. claude-haiku-5-5, with ANTHROPIC_API_KEY)
       # to describe every snapshot declaration with it; without one they are
-      # searched by name, signature and docstring.
+      # searched by name, signature and docstring. What is sent, and to whom:
+      # README, "What snapshot search sends to a model".
       PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

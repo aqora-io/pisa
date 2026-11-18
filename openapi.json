@@ -3450,6 +3450,13 @@
       "SearchHealth": {
         "description": "Search's state in a server's `GET /health`.",
         "properties": {
+          "describe_model": {
+            "description": "The model that snapshot declarations are sent to for descriptions,\nand for the check that a description states the hypotheses (the same\nmodel), `null` if none are sent anywhere. See the README's \"What\nsnapshot search sends to a model\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "error": {
             "description": "Why the index isn't open yet.",
             "type": "string"
@@ -3475,7 +3482,8 @@
           "ready",
           "version",
           "qdrant",
-          "leader"
+          "leader",
+          "describe_model"
         ],
         "type": "object"
       },

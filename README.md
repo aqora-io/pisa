@@ -478,7 +478,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -906,7 +906,7 @@ declaration that isn't proved; set it on both, or on neither.
 signature?, error?, docstring?, description?}`, with `error` in place of
 `signature` for one that didn't print. `description` is `{title, text,
 latex?, aliases, source}`, which search writes when it has a describe model
-(`PISA_SEARCH_DESCRIBE_MODEL`; see [Snapshot search](#snapshot-search)), a
+(`PISA_SEARCH_DESCRIBE_MODEL`; see [what it sends](#what-snapshot-search-sends)), a
 little after the create.
 
 <a id="labels"></a>
@@ -2576,7 +2576,8 @@ the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
   (with `ANTHROPIC_API_KEY`) or an OpenAI one (with `OPENAI_API_KEY`), the
   leader describes every snapshot declaration as `informalize` describes the
   libraries, judge included.
-  So all snapshot code goes to that provider, at about $0.0003 a declaration
+  So all snapshot code goes to that provider (see [what is
+  sent](#what-snapshot-search-sends)), at about $0.0003 a declaration
   with Claude Haiku 5.5. Without one, declarations are embedded from their
   docstrings. A failed description is tried 3 times in all; an
   authentication error pauses describing for 5 minutes, and a failed
@@ -2596,6 +2597,42 @@ the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
 hits = client.search(description="doubling adds a number to itself", snapshots={"labels": {"run": "7"}})["hits"]
 hits[0]["module"], hits[0]["snapshot_ids"], hits[0]["status"]  # "PisaSnap.s1f…", ["v4.35.0-1a2b3c4d~9c0e…"], "proved"
 ```
+
+<a id="what-snapshot-search-sends"></a>
+**What snapshot search sends to a model.** When `PISA_SEARCH_DESCRIBE_MODEL` is
+set, the search replica that leads the index sends each snapshot declaration
+to that model, so code that a client submitted leaves your deployment. With it
+unset, nothing goes to a model. `GET /health` says which: `search.describe_model`
+is the model, or `null` if no snapshot code is sent to one (also when
+`PISA_SEARCH_NO_SNAPSHOTS` is set).
+- **Who receives it.** A model name starting with `claude-` goes to Anthropic
+  (`ANTHROPIC_API_KEY`, or `ANTHROPIC_BASE_URL` for another endpoint); any
+  other name goes to OpenAI (`OPENAI_API_KEY`, or `OPENAI_BASE_URL`). The
+  provider's own retention terms apply.
+- **Per declaration**, one request describes it, with: its Lean name, kind and
+  module name; its signature as Lean prints it (the name, arguments and type,
+  not the proof or the value of a definition); its docstring, up to 2,000
+  characters; and, for at most 30 declarations it uses outside the Init, Std
+  and Lean libraries, the name and the description, or if that isn't written
+  yet the signature (300 characters) and docstring (200 characters). Those it
+  uses can be Mathlib or Physlib declarations, or other declarations of the
+  same snapshot or of the snapshots it imports.
+- **Judging.** A declaration with a hypothesis, such as an assumption, a
+  premise or a typeclass argument, is sent again, to the same model, with its
+  signature, its type printed with full names, and the description just
+  written, to check that the description states the hypothesis. If it leaves
+  one out, the declaration is described once more.
+- **Not sent.** Proofs and definition values, a module's `code` as a whole,
+  its imports, comments, labels, scopes, the snapshot's id, and who created it.
+- **Instructions.** Each request also carries the fixed instructions and
+  glossary of `informalize.rs`.
+- **Another provider.** The embedder (`PISA_SEARCH_TEI`, Scaleway by default)
+  gets each snapshot declaration's signature, docstring and description,
+  whether or not a describe model is set; it is a separate setting.
+- **Turning it off.** Leave `PISA_SEARCH_DESCRIBE_MODEL` empty (compose
+  `PISA_SEARCH_DESCRIBE_MODEL`, the chart's `search.describeModel`), or set
+  `PISA_SEARCH_NO_SNAPSHOTS`; restart the servers, and check `/health`.
+  Descriptions already written stay in the database and keep being searched.
 
 **Quality.** These reports track it:
 - `search/eval/<env_id>-qdrant.md`: recall, MRR and nDCG on LeanSearch v2's
