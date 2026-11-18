@@ -406,10 +406,10 @@ async fn a_spec_and_head_are_accepted_from_their_exports() {
         .collect();
     let names = [
         "Lean paranoid",
-        "lean4lean",
-        "nanoda",
         "con-leche",
         "con-ron",
+        "lean4lean",
+        "nanoda",
         "Lean default",
     ];
     assert_eq!(kernels, names.map(|n| (n, KernelOutcome::Accepted)));
@@ -422,6 +422,89 @@ async fn a_spec_and_head_are_accepted_from_their_exports() {
             judged[0].output
         );
     }
+}
+
+/// con-leche and con-ron take their worker count as one `--jobs=N` argument,
+/// which pisa passes from the slot's memory: real comparator accepts the
+/// configuration and runs each kernel under the name pisa lists. The harness
+/// has no cgroup, so the judged pair's configuration gets the flags as pisa
+/// writes them for a cap, and comparator runs it again on the same exports.
+#[tokio::test]
+#[ignore = "real Lean and bwrap"]
+async fn kernels_run_with_the_jobs_pisa_passes() {
+    let h = Harness::new().await;
+    let spec = "def cost : Nat := sorry\ntheorem t : cost = cost := sorry\n";
+    let head = "def cost : Nat := 3\ntheorem t : cost = cost := rfl\n";
+    let modules = h.build(&[spec, head]).await;
+    let judged = h
+        .judge_with(&modules, &[pair_with(spec, head, "t", &["cost"])], true)
+        .await;
+    assert_eq!(judged[0].exit_code, Some(0), "{}", judged[0].output);
+    let judging = h.launcher.judging_dir().join("0");
+    let config = judging.join("comparator/1.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    for (name, jobs) in [("con-leche", "--jobs=3"), ("con-ron", "--jobs=2")] {
+        let command = json["external_kernels"][name].as_array_mut().unwrap();
+        assert_eq!(command.len(), 1, "{name}: {command:?}");
+        command.push(jobs.into());
+    }
+    std::fs::write(&config, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let exports: Vec<String> = std::fs::read_dir(judging.join("exports"))
+        .unwrap()
+        .map(|e| format!("exports/{}", e.unwrap().file_name().to_str().unwrap()))
+        .collect();
+    assert_eq!(exports.len(), 2, "{exports:?}");
+    // The challenge is the spec's, whose theorem is proved by `sorry`.
+    let challenge = exports
+        .iter()
+        .find(|e| {
+            std::fs::read_to_string(judging.join(e))
+                .unwrap()
+                .contains("sorryAx")
+        })
+        .unwrap();
+    let solution = exports.iter().find(|e| *e != challenge).unwrap();
+    let args = [
+        "comparator",
+        "--challenge-from-export",
+        challenge,
+        "--solution-from-export",
+        solution,
+        "--config",
+        "comparator/1.json",
+    ];
+    let ran = (h.launcher)
+        .lake(SLOT, &args, &judging, Duration::from_secs(300))
+        .await
+        .unwrap();
+    eprintln!("{}", ran.output);
+    assert_eq!(ran.code, Some(0), "{}", ran.output);
+    for name in [
+        "Lean paranoid",
+        "con-leche",
+        "con-ron",
+        "lean4lean",
+        "nanoda",
+    ] {
+        let accepts = format!("{name} kernel accepts the solution");
+        assert!(ran.output.contains(&accepts), "{name}: {}", ran.output);
+    }
+    // In Lake's order, as `accepted_kernels` lists them.
+    let at = |n: &str| ran.output.find(&format!("Running {n} kernel")).unwrap();
+    let order = [
+        "Lean paranoid",
+        "con-leche",
+        "con-ron",
+        "lean4lean",
+        "nanoda",
+        "Lean default",
+    ];
+    assert!(
+        order.windows(2).all(|w| at(w[0]) < at(w[1])),
+        "{}",
+        ran.output
+    );
 }
 
 /// pisa exports a pair's modules with the targets Lake's own comparator

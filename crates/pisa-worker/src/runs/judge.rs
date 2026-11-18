@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     OUTPUT_LINES, accepted_kernels, classify, comparator_args, external_config, failed_kernels,
-    hex, needs_external, tail, with_cap,
+    hex, leaves_out_declining, tail, with_cap,
 };
 use crate::catalog::Module;
 use crate::launcher::{Launcher, LeanExportError};
@@ -354,24 +354,20 @@ pub async fn judge(
             });
             continue;
         }
-        let external = needs_external(&pair.configuration, options.paranoid);
-        let text = match external {
+        let left_out = leaves_out_declining(&pair.configuration, options.paranoid);
+        let text = match options.paranoid {
             true => {
                 let prefix = (launcher.toolchain_prefix().await)
                     .map_err(|e| internal("finding the toolchain's kernels", e))?;
-                external_config(&pair.configuration, &prefix.join("bin"))
+                let cap = launcher.memory_max_mb(slot).map(|(_, mb)| mb);
+                external_config(&pair.configuration, &prefix.join("bin"), cap)
             }
             false => pair.configuration.clone(),
         };
         let config = format!("comparator/{}.json", n + 1);
         std::fs::write(dir.join(&config), text)
             .map_err(|e| internal("writing the configuration", e))?;
-        let args = comparator_args(
-            &config,
-            (&exported[0], &exported[1]),
-            options.paranoid,
-            external,
-        );
+        let args = comparator_args(&config, (&exported[0], &exported[1]));
         let oom_before = launcher.oom_kills(slot);
         let left = deadline.saturating_duration_since(Instant::now());
         let mut ran = (launcher.lake(slot, &args, dir, left).await)
@@ -383,8 +379,8 @@ pub async fn judge(
         let oom = launcher.oom_kills(slot) > oom_before;
         // From the whole output, before it is cut to its end.
         let kernels = match ran.code {
-            Some(0) => accepted_kernels(options.paranoid, external),
-            _ => failed_kernels(&ran.output, external),
+            Some(0) => accepted_kernels(options.paranoid, left_out),
+            _ => failed_kernels(&ran.output, left_out),
         };
         judgments.push(Judgment {
             error: classify(&ran, oom).map(|e| with_cap(e, launcher.memory_max_mb(slot))),

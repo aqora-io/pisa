@@ -236,6 +236,14 @@ async fn a_named_run_exports_its_files_by_name() {
     );
 }
 
+/// The kernels a pair ran, in the order its fake comparator printed them.
+fn ran_kernels(output: &str) -> Vec<&str> {
+    let kernels = output.lines().filter_map(|l| l.strip_prefix("Running "));
+    kernels
+        .filter_map(|l| l.strip_suffix(" kernel on solution"))
+        .collect()
+}
+
 async fn accept(
     c: &Cluster,
     against: &[&str],
@@ -277,13 +285,7 @@ async fn accept_judges_each_spec_snapshot_against_its_head() {
     let error = pair.error.as_ref().unwrap();
     assert_eq!(error.kind, PairErrorKind::Refused);
     assert_eq!(error.message, "Illegal axiom detected: 'sorryAx'");
-    assert!(
-        pair.output
-            .contains("--config comparator/1.json --paranoid"),
-        "{}",
-        pair.output
-    );
-
+    assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
     let p = create(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
@@ -799,7 +801,7 @@ async fn a_pair_not_accepted_says_why() {
 /// kernels that support one, not `--paranoid`, which fails when con-leche and
 /// con-ron decline it. Comparator's exit says the verdict, and the pair says
 /// which kernels it ran and which it left out. Without a spec axiom it runs
-/// `--paranoid`, and a decline is `unsupported`.
+/// all five, and a decline is `unsupported`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_spec_axiom_runs_the_kernels_that_support_it() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
@@ -832,6 +834,8 @@ async fn a_spec_axiom_runs_the_kernels_that_support_it() {
     assert_eq!(pair.exit_code, Some(0));
     assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
     assert!(!pair.output.contains("con-leche kernel"), "{}", pair.output);
+    let kernels = ["Lean paranoid", "lean4lean", "nanoda", "Lean default"];
+    assert_eq!(ran_kernels(&pair.output), kernels);
     assert!(
         pair.output.contains("Running nanoda kernel"),
         "{}",
@@ -841,14 +845,14 @@ async fn a_spec_axiom_runs_the_kernels_that_support_it() {
         verdicts(&r),
         named(&[
             ("Lean paranoid", Accepted),
-            ("lean4lean", Accepted),
-            ("nanoda", Accepted),
             ("con-leche", Unsupported),
             ("con-ron", Unsupported),
+            ("lean4lean", Accepted),
+            ("nanoda", Accepted),
             ("Lean default", Accepted),
         ])
     );
-    let reason = pair.kernels[3].reason.as_deref().unwrap();
+    let reason = pair.kernels[1].reason.as_deref().unwrap();
     assert!(reason.contains("non-standard axioms"), "{reason}");
 
     // A kernel that rejects fails comparator, and the pair is refused.
@@ -863,13 +867,17 @@ async fn a_spec_axiom_runs_the_kernels_that_support_it() {
     assert_eq!(error.message, "nanoda exited with 1");
     assert!(verdicts(&r).contains(&("nanoda".to_string(), Rejected)));
 
-    // No spec axiom: `--paranoid` runs con-leche and con-ron, which decline.
+    // No spec axiom: con-leche and con-ron run, and decline.
     let r = judge("", "KERNEL_DECLINE").await;
     let pair = &r.pairs[0];
     let error = pair.error.as_ref().unwrap();
     assert!(!r.accepted, "{r:?}");
     assert_eq!(error.kind, PairErrorKind::Unsupported);
-    assert!(pair.output.contains("--paranoid"), "{}", pair.output);
+    assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
+    let kernels = ["Lean paranoid", "con-leche", "con-ron", "lean4lean"];
+    let all = [kernels.as_slice(), &["nanoda", "Lean default"]].concat();
+    assert_eq!(ran_kernels(&pair.output), all);
+    assert!(pair.output.contains("con-ron command: "), "{}", pair.output);
     assert!(verdicts(&r).contains(&("con-ron".to_string(), Rejected)));
 }
 

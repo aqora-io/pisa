@@ -1467,14 +1467,13 @@ builds with `lake build` and that comparator accepts it there.
   Comparator accepts the head when each theorem is proved there with the same
   statement, the definitions those statements use are the same but for the
   holes, an assumption keeps its statement, and the proofs use no other
-  axiom. It replays them in Lean's kernel and, with `--paranoid`, in the
+  axiom. It replays them in Lean's kernel and, when paranoid, in the
   external kernels Lean bundles (for a pair whose spec permits a
   non-standard axiom, only those that support one, as below).
 - **Running it.** `POST /snapshots/accept {"against": [...]}` audits the run,
   as `audit?against=` does with the same `allow`, and runs
-  `lake comparator --paranoid` (without `--paranoid` and with `external_kernels` for a
-  pair whose spec permits an axiom, as below) on a worker on exactly the pairs the audit
-  compared, each in turn:
+  `lake comparator` (paranoid, with `external_kernels`, as below) on a worker on
+  exactly the pairs the audit compared, each in turn:
   - The worker links the module of each spec snapshot and head, and every
     module it builds on, into a directory of the judgment's own: the files
     pisa built and kernel-checked when the snapshots were created, each
@@ -1519,18 +1518,28 @@ builds with `lake build` and that comparator accepts it there.
   one at least. Only comparator's exit code decides whether a pair is accepted,
   never what it printed, which a kernel's output and the names in the
   solution's declarations can imitate.
-  With `paranoid`, comparator also runs the kernels Lean bundles, except when
-  the spec permits a non-standard axiom: con-leche and con-ron don't support
-  one, and `--paranoid` fails when they decline. Then pisa writes the
-  configuration with `external_kernels` Lean paranoid, lean4lean and nanoda,
-  from the toolchain's `bin`, runs it without `--paranoid`, and leaves
-  con-leche and con-ron out. Lean's own kernel always runs last. A pair's
+  With `paranoid`, comparator also runs the kernels Lean bundles. Pisa names
+  all five in the configuration's `external_kernels`, from the toolchain's
+  `bin`, and never passes `--paranoid`, which names the same five but can't
+  pass them arguments. Lake runs them sorted by name, Lean's own kernel last:
+  Lean paranoid, con-leche, con-ron, lean4lean, nanoda, Lean default.
+  con-leche and con-ron check declarations in parallel, a worker for each
+  core, and a worker takes gigabytes: con-ron about 6250 MiB, con-leche about
+  3790 MiB. On a computation-heavy proof a dozen workers outgrow a slot, and
+  the kernel is killed, which Lake prints as `rejected`. So when the slot has a
+  memory limit (`PISA_MEMORY_MAX_MB`), pisa passes `--jobs=N` to them, one
+  argument (`--jobs N` exits 3): the limit less 3072 MiB, over a worker's
+  memory, at least 1. A 16000 MiB slot runs con-ron with `--jobs=2` and
+  con-leche with `--jobs=3`; a slot without a limit passes no `--jobs`. When
+  the spec permits a non-standard axiom, con-leche and con-ron don't support
+  one and decline it, so pisa leaves them out of `external_kernels`. A pair's
   `kernels` list each kernel's verdict: for an accepted pair, what pisa
-  configured, each `accepted`, and con-leche and con-ron `unsupported`, with a
-  `reason`, when they were left out. For a pair comparator failed, they are
-  as comparator printed them, for the reader. A pair whose final error line
-  says con-leche or con-ron exited with 2, kernels a spec without an axiom of
-  its own doesn't leave out, is `unsupported`; any other failure is
+  configured in Lake's order, each `accepted`, and con-leche and con-ron
+  `unsupported`, with a `reason`, when they were left out. For a pair
+  comparator failed, they are as comparator printed them, for the reader. A
+  pair whose final error line says con-leche or con-ron exited with 2,
+  kernels a spec without an axiom of its own doesn't leave out, is
+  `unsupported`; any other failure is
   `refused`. The result is stored with an `id`, and
   `GET /snapshots/accept/{id}` reads it again; `GET /snapshots/accept?spec=<id>`
   lists a spec snapshot's, newest first. It names the code it judged, which
@@ -1544,14 +1553,17 @@ builds with `lake build` and that comparator accepts it there.
   Mathlib takes about 25 s, or 45 s paranoid, so send it with
   `Prefer: respond-async`. Or untar the export, `lake build` it and run
   `lake comparator --paranoid --config comparator/1.json` there: it needs
-  `bwrap`. For a pair
-  whose spec permits an axiom of its own, `--paranoid` exits 1 when con-leche
-  exits 2, though pisa accepts it: pisa runs it without `--paranoid`, with the
-  kernels that support the axiom named in the configuration, to which you add
-  (the paths are the toolchain's `bin`, `lean --print-prefix`):
+  `bwrap`. That runs the same five kernels with their own workers, which
+  can outgrow a small machine: to bound them, and for a pair whose spec
+  permits an axiom of its own, which `--paranoid` exits 1 for when con-leche
+  exits 2, add the kernels pisa names to the configuration
+  (the paths are the toolchain's `bin`, `lean --print-prefix`; leave out
+  con-leche and con-ron for a spec axiom, and `--jobs=N` for no limit):
   ```json
   "external_kernels": {
     "Lean paranoid": ["<prefix>/bin/leanchecker-paranoid", "--silent", "--from-export"],
+    "con-leche": ["<prefix>/bin/con-leche", "--jobs=3"],
+    "con-ron": ["<prefix>/bin/con-ron", "--jobs=2"],
     "lean4lean": ["<prefix>/bin/lean4lean", "--import"],
     "nanoda": ["<prefix>/bin/nanoda_bin"]
   }
@@ -1592,9 +1604,9 @@ builds with `lake build` and that comparator accepts it there.
   source), and lists each pair with its theorems and what it leaves out, and
   each file with the snapshots on its module and their labels. Then
   `lake build` and `lake comparator --paranoid --config comparator/<n>.json`
-  judge it as pisa does, but for a pair whose spec permits an axiom of its
-  own: pisa runs that without `--paranoid`, with `external_kernels` (see
-  above), as con-leche and con-ron don't support one.
+  judge it as pisa does, but that pisa names its kernels in `external_kernels`
+  and bounds con-leche's and con-ron's workers by the slot's memory, and leaves
+  out those two for a spec axiom (see above).
 - **A Palomar package.** `profile=palomar` exports one pair of the run as a
   Palomar package instead, in `palomar/`, as the Erdős campaign's
   `pisa_to_palomar.py` made one. `pair=<n>` names the pair, from 1 as

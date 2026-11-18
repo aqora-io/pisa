@@ -417,15 +417,18 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The bundled kernels that check proofs with non-standard axioms, as Lake
-/// names them and runs them: their executables in the toolchain's `bin`, and
-/// their arguments. A configuration's `external_kernels` lists them.
-const CHECKERS: [(&str, &str, &[&str]); 3] = [
+/// The kernels a paranoid pair runs, as Lake names them and runs them, sorted
+/// as it runs them: their executables in the toolchain's `bin`, and their
+/// arguments. A configuration's `external_kernels` lists them, as
+/// `--paranoid`, which names the same five, can't bound their workers.
+const KERNELS: [(&str, &str, &[&str]); 5] = [
     (
         "Lean paranoid",
         "leanchecker-paranoid",
         &["--silent", "--from-export"],
     ),
+    ("con-leche", "con-leche", &[]),
+    ("con-ron", "con-ron", &[]),
     ("lean4lean", "lean4lean", &["--import"]),
     ("nanoda", "nanoda_bin", &[]),
 ];
@@ -433,6 +436,14 @@ const CHECKERS: [(&str, &str, &[&str]); 3] = [
 /// The bundled kernels that don't support non-standard axioms, which a run
 /// of a spec that permits one leaves out.
 const DECLINING: [&str; 2] = ["con-leche", "con-ron"];
+
+/// What a parallel worker of a kernel takes of memory, in MiB, as measured
+/// on the largest package: con-ron's and con-leche's, which default to a
+/// worker for each core.
+const WORKER_MB: [(&str, u64); 2] = [("con-leche", 3790), ("con-ron", 6250)];
+
+/// What a kernel run takes beside its workers, in MiB.
+const KERNEL_BASE_MB: u64 = 3072;
 
 /// Lake's name for its own kernel, which runs last.
 const DEFAULT_KERNEL: &str = "Lean default";
@@ -446,23 +457,34 @@ fn permits_spec_axiom(config: &str) -> bool {
         .any(|a| !STANDARD_AXIOMS.contains(&a))
 }
 
-/// Whether a pair is run with `external_kernels` and not `--paranoid`: it is
-/// `paranoid`, and its `config` permits a non-standard axiom. Of the bundled
-/// kernels only some support one, so `--paranoid`, which runs them all and
-/// fails when one declines, would refuse a proof no kernel rejected.
-fn needs_external(config: &str, paranoid: bool) -> bool {
+/// Whether a paranoid pair leaves out the kernels that decline a spec's
+/// non-standard axiom: `--paranoid` would run them and fail when they
+/// decline, refusing a proof no kernel rejected.
+fn leaves_out_declining(config: &str, paranoid: bool) -> bool {
     paranoid && permits_spec_axiom(config)
 }
 
-/// `config` with the kernels that support non-standard axioms as its
-/// `external_kernels`, from the toolchain's `bin`.
-fn external_config(config: &str, bin: &Path) -> String {
+/// How many workers of a kernel fit in a slot of `cap_mb`, at `per_worker_mb`
+/// each, after the base: at least one.
+fn kernel_jobs(cap_mb: u64, per_worker_mb: u64) -> u64 {
+    (cap_mb.saturating_sub(KERNEL_BASE_MB) / per_worker_mb).max(1)
+}
+
+/// `config` with the kernels as its `external_kernels`, from the toolchain's
+/// `bin`, without those that decline a spec's axiom if it permits one. With
+/// the slot's memory `cap_mb`, con-leche and con-ron get as many workers as
+/// fit in it: as a single `--jobs=N`, as `--jobs N` exits 3.
+fn external_config(config: &str, bin: &Path, cap_mb: Option<u64>) -> String {
     let mut config: Value = serde_json::from_str(config).unwrap_or_default();
-    let kernels: serde_json::Map<String, Value> = CHECKERS
+    let declining = permits_spec_axiom(&config.to_string());
+    let kernels: serde_json::Map<String, Value> = KERNELS
         .iter()
+        .filter(|(name, ..)| !(declining && DECLINING.contains(name)))
         .map(|(name, exe, args)| {
+            let jobs = WORKER_MB.iter().find(|(n, _)| n == name).zip(cap_mb);
             let command: Vec<String> = std::iter::once(bin.join(exe).display().to_string())
                 .chain(args.iter().map(|a| a.to_string()))
+                .chain(jobs.map(|((_, mb), cap)| format!("--jobs={}", kernel_jobs(cap, *mb))))
                 .collect();
             (name.to_string(), json!(command))
         })
@@ -472,15 +494,10 @@ fn external_config(config: &str, bin: &Path) -> String {
 }
 
 /// The arguments of `lake` for a pair's `config`, judged on `exports` of
-/// its challenge and solution: `--paranoid` runs every bundled kernel, unless
-/// the config names `external` kernels instead.
-fn comparator_args<'a>(
-    config: &'a str,
-    exports: (&'a str, &'a str),
-    paranoid: bool,
-    external: bool,
-) -> Vec<&'a str> {
-    let mut args = vec![
+/// its challenge and solution. Never `--paranoid`: a paranoid pair's config
+/// names its kernels.
+fn comparator_args<'a>(config: &'a str, exports: (&'a str, &'a str)) -> Vec<&'a str> {
+    vec![
         "comparator",
         "--challenge-from-export",
         exports.0,
@@ -488,11 +505,7 @@ fn comparator_args<'a>(
         exports.1,
         "--config",
         config,
-    ];
-    if paranoid && !external {
-        args.push("--paranoid");
-    }
-    args
+    ]
 }
 
 fn kernel(name: &str, verdict: KernelOutcome, reason: Option<&str>) -> KernelVerdict {
@@ -503,38 +516,34 @@ fn kernel(name: &str, verdict: KernelOutcome, reason: Option<&str>) -> KernelVer
     }
 }
 
-/// The kernels con-leche and con-ron, which a run with `external_kernels`
-/// doesn't run.
-fn skipped() -> impl Iterator<Item = KernelVerdict> {
-    DECLINING.iter().map(|name| {
-        let why = "doesn't support non-standard axioms, which the spec permits, and wasn't run";
-        kernel(name, KernelOutcome::Unsupported, Some(why))
-    })
+/// The kernel con-leche or con-ron, which a run of a spec axiom doesn't run.
+fn skipped(name: &str) -> KernelVerdict {
+    let why = "doesn't support non-standard axioms, which the spec permits, and wasn't run";
+    kernel(name, KernelOutcome::Unsupported, Some(why))
 }
 
 /// The kernels of a pair comparator accepted, which it did when it exited 0:
-/// all that it was set to run, from what pisa configured (`paranoid`, and
-/// `external` kernels), not from its output.
-fn accepted_kernels(paranoid: bool, external: bool) -> Vec<KernelVerdict> {
-    let accepts = |name: &str| kernel(name, KernelOutcome::Accepted, None);
+/// all that it was set to run, in Lake's order, from what pisa configured
+/// (`paranoid`, and a spec axiom that leaves out `declining` kernels), not
+/// from its output.
+fn accepted_kernels(paranoid: bool, left_out: bool) -> Vec<KernelVerdict> {
     let mut kernels = Vec::new();
     if paranoid {
-        kernels.extend(CHECKERS.iter().map(|(name, ..)| accepts(name)));
-        match external {
-            true => kernels.extend(skipped()),
-            false => kernels.extend(DECLINING.iter().map(|name| accepts(name))),
-        }
+        kernels.extend(KERNELS.iter().map(|(name, ..)| match left_out {
+            true if DECLINING.contains(name) => skipped(name),
+            _ => kernel(name, KernelOutcome::Accepted, None),
+        }));
     }
-    kernels.push(accepts(DEFAULT_KERNEL));
+    kernels.push(kernel(DEFAULT_KERNEL, KernelOutcome::Accepted, None));
     kernels
 }
 
 /// The kernels of a pair comparator didn't accept, as it printed them: a
 /// kernel's `accepts`, `rejected` or `Error while interacting` line, in
 /// order, which the solution's own build or a declaration's name could
-/// imitate. They are for the reader and never settle a pair. The kernels an
-/// `external` run left out follow its own.
-fn failed_kernels(output: &str, external: bool) -> Vec<KernelVerdict> {
+/// imitate. They are for the reader and never settle a pair. The kernels a
+/// spec axiom left out follow its own.
+fn failed_kernels(output: &str, left_out: bool) -> Vec<KernelVerdict> {
     let mut kernels: Vec<KernelVerdict> = output
         .lines()
         .filter_map(|line| {
@@ -552,10 +561,10 @@ fn failed_kernels(output: &str, external: bool) -> Vec<KernelVerdict> {
             ))
         })
         .collect();
-    if external && !kernels.is_empty() {
+    if left_out && !kernels.is_empty() {
         let last = kernels.iter().position(|k| k.name == DEFAULT_KERNEL);
         let at = last.unwrap_or(kernels.len());
-        kernels.splice(at..at, skipped());
+        kernels.splice(at..at, DECLINING.iter().map(|name| skipped(name)));
     }
     kernels
 }
@@ -1179,50 +1188,70 @@ mod tests {
         "theorem_names": ["t"], "permitted_axioms": ["propext", "Quot.sound",
         "Classical.choice", "lit"]}"#;
 
-    /// Kernels that don't support a spec's axiom aren't run: the pair runs
-    /// with the ones that do as `external_kernels`, without `--paranoid`,
-    /// exactly when it is paranoid and the spec permits one.
+    /// A paranoid pair names all five kernels in `external_kernels` and never
+    /// passes `--paranoid`, which can't bound their workers; a spec axiom
+    /// leaves out the two that decline it.
     #[test]
-    fn a_spec_axiom_swaps_paranoid_for_the_kernels_that_support_it() {
+    fn paranoid_always_names_its_kernels() {
         let bin = Path::new("/tc/bin");
-        for (config, paranoid, external) in [
-            (CONFIG_WITH_AXIOM, true, true),
-            (CONFIG_WITH_AXIOM, false, false),
-            (CONFIG, true, false),
-            (CONFIG, false, false),
-        ] {
-            assert_eq!(
-                needs_external(config, paranoid),
-                external,
-                "{config} {paranoid}"
-            );
-            let args = comparator_args("comparator/1.json", ("c", "s"), paranoid, external);
-            let mut expected = vec!["comparator", "--challenge-from-export", "c"];
-            expected.extend([
-                "--solution-from-export",
-                "s",
-                "--config",
-                "comparator/1.json",
-            ]);
-            if paranoid && !external {
-                expected.push("--paranoid");
-            }
-            assert_eq!(args, expected);
-        }
-        let text = external_config(CONFIG_WITH_AXIOM, bin);
-        let config: Value = serde_json::from_str(&text).unwrap();
+        let args = comparator_args("comparator/1.json", ("c", "s"));
+        let mut expected = vec!["comparator", "--challenge-from-export", "c"];
+        expected.extend(["--solution-from-export", "s"]);
+        expected.extend(["--config", "comparator/1.json"]);
+        assert_eq!(args, expected);
+        let kernels = |config: &str| -> Value {
+            let text = external_config(config, bin, None);
+            serde_json::from_str::<Value>(&text).unwrap()["external_kernels"].clone()
+        };
         assert_eq!(
-            config["external_kernels"],
+            kernels(CONFIG),
+            json!({
+                "Lean paranoid": ["/tc/bin/leanchecker-paranoid", "--silent", "--from-export"],
+                "con-leche": ["/tc/bin/con-leche"],
+                "con-ron": ["/tc/bin/con-ron"],
+                "lean4lean": ["/tc/bin/lean4lean", "--import"],
+                "nanoda": ["/tc/bin/nanoda_bin"],
+            })
+        );
+        assert_eq!(
+            kernels(CONFIG_WITH_AXIOM),
             json!({
                 "Lean paranoid": ["/tc/bin/leanchecker-paranoid", "--silent", "--from-export"],
                 "lean4lean": ["/tc/bin/lean4lean", "--import"],
                 "nanoda": ["/tc/bin/nanoda_bin"],
             })
         );
+        let text = external_config(CONFIG_WITH_AXIOM, bin, None);
+        let config: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(config["enable_nanoda"], Value::Null);
         assert_eq!(config["permitted_axioms"][3], "lit");
-        let plain: Value = serde_json::from_str(CONFIG).unwrap();
-        assert_eq!(plain["external_kernels"], Value::Null);
+        let names: Vec<&str> = KERNELS.iter().map(|k| k.0).collect();
+        assert!(names.is_sorted(), "Lake runs them sorted: {names:?}");
+        assert!(names.iter().all(|n| !n.contains("noda") || *n == "nanoda"));
+    }
+
+    /// con-ron's and con-leche's workers are bounded by the slot's memory:
+    /// what is left after the base, over a worker's, at least one.
+    #[test]
+    fn jobs_follow_the_slots_memory_cap() {
+        assert_eq!(kernel_jobs(16000, 6250), 2);
+        assert_eq!(kernel_jobs(16000, 3790), 3);
+        assert_eq!(kernel_jobs(4000, 6250), 1);
+        assert_eq!(kernel_jobs(4000, 3790), 1);
+        assert_eq!(kernel_jobs(100, 3790), 1);
+        let jobs = |cap| -> Value {
+            let text = external_config(CONFIG, Path::new("/b"), cap);
+            serde_json::from_str::<Value>(&text).unwrap()["external_kernels"].clone()
+        };
+        let capped = jobs(Some(16000));
+        assert_eq!(capped["con-ron"], json!(["/b/con-ron", "--jobs=2"]));
+        assert_eq!(capped["con-leche"], json!(["/b/con-leche", "--jobs=3"]));
+        assert_eq!(capped["nanoda"], json!(["/b/nanoda_bin"]));
+        assert_eq!(
+            jobs(Some(4000))["con-ron"],
+            json!(["/b/con-ron", "--jobs=1"])
+        );
+        assert_eq!(jobs(None)["con-ron"], json!(["/b/con-ron"]));
     }
 
     #[test]
@@ -1234,10 +1263,10 @@ mod tests {
         let all = |a, b| {
             vec![
                 ("Lean paranoid".to_string(), Accepted),
-                ("lean4lean".to_string(), Accepted),
-                ("nanoda".to_string(), Accepted),
                 ("con-leche".to_string(), a),
                 ("con-ron".to_string(), b),
+                ("lean4lean".to_string(), Accepted),
+                ("nanoda".to_string(), Accepted),
                 ("Lean default".to_string(), Accepted),
             ]
         };
@@ -1253,7 +1282,7 @@ mod tests {
             names(accepted_kernels(false, false)),
             [("Lean default".to_string(), Accepted)]
         );
-        let reason = accepted_kernels(true, true)[3].reason.clone().unwrap();
+        let reason = accepted_kernels(true, true)[1].reason.clone().unwrap();
         assert!(reason.contains("non-standard axioms") && reason.contains("wasn't run"));
     }
 

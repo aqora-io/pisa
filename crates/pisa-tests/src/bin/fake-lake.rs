@@ -108,16 +108,19 @@ fn exported(path: &str, config: &Value, key: &str) -> String {
     export["code"].as_str().unwrap_or_default().to_string()
 }
 
-/// Runs the kernels as comparator does, each printing `Running`, its own
-/// output and its verdict, Lean's default kernel last, and then fails with
-/// the first failure: `names` are the kernels `--paranoid` runs, or a
-/// configuration's `external_kernels`. nanoda rejects a solution that says
-/// `KERNEL_REJECT`, and con-leche and con-ron decline one that says
-/// `KERNEL_DECLINE`, as they do a non-standard axiom (exit 2).
-fn kernels(names: &[String], solution: &str) {
+/// Runs the kernels as comparator does, each printing `Running`, its command,
+/// its own output and its verdict, Lean's default kernel last, and then fails
+/// with the first failure: `kernels` are a configuration's `external_kernels`,
+/// in Lake's order. nanoda rejects a solution that says `KERNEL_REJECT`, and
+/// con-leche and con-ron decline one that says `KERNEL_DECLINE`, as they do a
+/// non-standard axiom (exit 2).
+fn kernels(kernels: &[(String, Vec<String>)], solution: &str) {
     let mut failure = None;
-    for kernel in names.iter().map(String::as_str).chain(["Lean default"]) {
+    let default = ("Lean default".to_string(), Vec::new());
+    for (kernel, command) in kernels.iter().chain([&default]) {
+        let kernel = kernel.as_str();
         println!("Running {kernel} kernel on solution");
+        println!("{kernel} command: {}", command.join(" "));
         let (verdict, exit) = match kernel {
             "nanoda" if solution.contains("KERNEL_REJECT") => ("rejected", Some(1)),
             "con-leche" | "con-ron" if solution.contains("KERNEL_DECLINE") => {
@@ -176,24 +179,13 @@ fn main() {
     if solution.contains("sorry") {
         fail("Illegal axiom detected: 'sorryAx'");
     }
-    let names: Vec<String> = if args.iter().any(|a| a == "--paranoid") {
-        [
-            "Lean paranoid",
-            "lean4lean",
-            "nanoda",
-            "con-leche",
-            "con-ron",
-        ]
-        .map(String::from)
-        .to_vec()
-    } else {
-        let external = config["external_kernels"].as_object();
-        external
-            .into_iter()
-            .flatten()
-            .map(|(k, _)| k.clone())
-            .collect()
-    };
-    kernels(&names, &solution);
+    if args.iter().any(|a| a == "--paranoid") {
+        cannot_run("pisa names its kernels, and never passes --paranoid");
+    }
+    let named = config["external_kernels"].as_object().into_iter().flatten();
+    let named: Vec<(String, Vec<String>)> = named
+        .map(|(k, v)| (k.clone(), serde_json::from_value(v.clone()).unwrap()))
+        .collect();
+    kernels(&named, &solution);
     println!("Your solution is okay!");
 }
