@@ -271,9 +271,9 @@ To the release that accepts runs on pisa's own builds:
 - Workers run the toolchain's `leanexport` (`PISA_LEAN_EXPORT` names
   another) and keep exports in their work directory's `exports/`. They
   remove `runs/`, where comparator built runs, as they start.
-- A server of this release queues acceptances that a worker of the release
-  before would build with no time beyond `timeout`: upgrade the workers
-  with the servers.
+- A server of this release still sends the 1800 s that a worker of the
+  release before builds a run in, which a worker of this release ignores:
+  an accept queued while both releases run is judged by either.
 
 To the release that restarts after a reboot and names its commit:
 - Compose keeps Garage's and PostgreSQL's data in the named volumes
@@ -1539,12 +1539,13 @@ builds with `lake build` and that comparator accepts it there.
   or `nothing_to_judge`, a spec that names no theorem comparator can judge,
   for which it doesn't run. `build_failed`, a module that didn't build in
   comparator's sandbox, is only in acceptances stored while comparator built
-  the run. Only `refused` is a verdict on the proofs: a kernel that was killed or couldn't run never makes one. The run
-  is `accepted` when the audit is `clean` (`clean`, with the whole `audit`
-  and the `heads` both judged), comparator accepted every pair, and there is
-  one at least. Only comparator's exit code decides whether a pair is accepted,
-  never what it printed, which a kernel's output and the names in the
-  solution's declarations can imitate.
+  the run. Only `refused` is a verdict on the proofs: a kernel that was
+  killed or couldn't run never makes one. The run is `accepted` when the
+  audit is `clean` (`clean`, with the whole `audit` and the `heads` both
+  judged), comparator accepted every pair, and there is one at least. Only
+  comparator's exit code decides whether a pair is accepted, never what it
+  printed, which a kernel's output and the names in the solution's
+  declarations can imitate.
   With `paranoid`, comparator also runs the kernels Lean bundles. Pisa names
   all five in the configuration's `external_kernels`, from the toolchain's
   `bin`, and never passes `--paranoid`, which names the same five but can't
@@ -1576,15 +1577,12 @@ builds with `lake build` and that comparator accepts it there.
   Lake printed that they rejected the solution, as it does for any non-zero
   exit, and no code is known, else `accepted`. A kernel that didn't accept
   has its own first line in `reason`, cut at 200 characters, such as
-  `con-ron: declined: non-standard axiom ...`; a kernel that was killed has none. A
-  line of the output can be imitated by the solution, so these are for the
-  reader and never settle a pair, which only the exit code does. A pair whose
-  final error line says con-leche or con-ron exited with 2 is `unsupported`;
-  a pair whose kernel couldn't run, or exited with another code, is
-  `cannot_run`; any other failure is
-  `refused`. The result is stored with an `id`, and
-  `GET /snapshots/accept/{id}` reads it again; `GET /snapshots/accept?spec=<id>`
-  lists a spec snapshot's, newest first. It names the code it judged, which
+  `con-ron: declined: non-standard axiom ...`; a kernel that was killed has
+  none. A line of the output can be imitated by the solution, so these are
+  for the reader and never settle a pair, which only the exit code does.
+  The result is stored with an `id`, and `GET /snapshots/accept/{id}` reads
+  it again; `GET /snapshots/accept?spec=<id>` lists a spec snapshot's,
+  newest first. It names the code it judged, which
   stays named when snapshots go: each pair's `spec_module` and
   `head_module`, and the audit with its review list, at the default cap.
   Read back, it says `stale` once the run's heads are no longer the ones it

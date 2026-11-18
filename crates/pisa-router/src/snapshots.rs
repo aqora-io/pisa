@@ -843,7 +843,8 @@ pub async fn accept(
         allow: req.allow,
         paranoid: req.paranoid,
         timeout_secs: req.timeout.unwrap_or(ACCEPT_TIMEOUT),
-        build_timeout_secs: 0,
+        // A worker of the release before builds the run in this; this release's ignore it.
+        build_timeout_secs: 1800,
     });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::AcceptRun, p).await

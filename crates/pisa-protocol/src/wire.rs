@@ -212,8 +212,9 @@ pub struct SnapshotAcceptJob {
     pub paranoid: bool,
     /// For each pair: its exports and comparator.
     pub timeout_secs: u64,
-    /// Ignored, as acceptance builds nothing: kept so that a worker reads a
-    /// job a server of the release before queued.
+    /// Ignored, as acceptance builds nothing: sent so that a worker of the
+    /// release before, which builds the run, has the time it had to, while
+    /// servers and workers of both releases run together.
     #[serde(default)]
     pub build_timeout_secs: u64,
 }
