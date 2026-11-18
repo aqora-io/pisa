@@ -103,6 +103,8 @@ spec:
           readinessProbe:
             httpGet: { path: /health, port: http }
             periodSeconds: 2
+            # /health answers within about 2 s even while Postgres or Qdrant stalls.
+            timeoutSeconds: 3
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
 ---
