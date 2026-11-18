@@ -39,7 +39,10 @@ use crate::launcher::Ran;
 use crate::pool::Pool;
 use crate::snapshots::Snapshots;
 
+mod judge;
 mod palomar;
+
+pub use judge::{JudgeOptions, Judgment, ModulesToJudge, PairToJudge, judge};
 
 /// How many of comparator's last lines of output a pair keeps.
 const OUTPUT_LINES: usize = 40;
@@ -245,106 +248,48 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     let lock = pool.snapshots().lock(&format!("run:{key}"));
     let _judging = lock.lock().await;
     let runs = pool.launcher().runs_dir();
-    let dir = runs.join(&key);
-    write(&dir, &run, project).map_err(|e| {
-        Error::new(
-            ErrorKind::Internal,
-            format!("writing the run's project: {e}"),
-        )
-    })?;
     evict(pool, &runs, &key);
+    let (sources, to_judge) = judged_run(&run);
+    let modules = ModulesToJudge {
+        root: runs.join(&key),
+        sources,
+    };
+    let options = JudgeOptions {
+        paranoid: job.paranoid,
+        timeout: Duration::from_secs(job.timeout_secs),
+        build_timeout: Duration::from_secs(job.build_timeout_secs),
+    };
     let mut slot = pool.acquire("").await;
     // Comparator builds the modules, so free the slot's memory first.
     slot.retire_and_wait("evict").await;
-    let timeout = Duration::from_secs(job.timeout_secs);
-    // The first pair comparator runs builds the run's modules, which later
-    // pairs replay, so it has the build's time too.
-    let mut building = Duration::from_secs(job.build_timeout_secs);
-    let mut pairs = Vec::new();
-    // The toolchain's `bin`, found when a pair needs its kernels.
-    let mut bin: Option<std::path::PathBuf> = None;
-    for pair in &run.pairs {
-        // Nothing for comparator to judge, which it would refuse to start.
-        let ran = match pair.theorems {
-            0 => None,
-            _ => {
-                let config = run.files.iter().find(|f| f.path == pair.config);
-                let config = config.map_or("", |f| f.text.as_str());
-                let external = needs_external(config, job.paranoid);
-                let launcher = pool.launcher();
-                if external {
-                    if bin.is_none() {
-                        bin = Some(launcher.toolchain_bin(&dir).await.map_err(|e| {
-                            Error::new(
-                                ErrorKind::Internal,
-                                format!("finding the toolchain's kernels: {e}"),
-                            )
-                        })?);
-                    }
-                    let text = external_config(config, bin.as_deref().unwrap_or(Path::new("")));
-                    std::fs::write(dir.join(&pair.config), text).map_err(|e| {
-                        Error::new(
-                            ErrorKind::Internal,
-                            format!("writing the configuration: {e}"),
-                        )
-                    })?;
-                }
-                let args = comparator_args(&pair.config, job.paranoid, external);
-                let oom_before = launcher.oom_kills(slot.id);
-                let limit = timeout + std::mem::take(&mut building);
-                let ran = launcher
-                    .lake(slot.id, &args, &dir, limit)
-                    .await
-                    .map_err(|e| {
-                        Error::new(ErrorKind::Internal, format!("running lake comparator: {e}"))
-                    })?;
-                let oom = launcher.oom_kills(slot.id) > oom_before;
-                Some((ran, oom, external))
-            }
-        };
-        let (error, exit_code, output, kernels) = match &ran {
-            None => (
-                Some(PairError {
-                    kind: PairErrorKind::NothingToJudge,
-                    message: "the spec names no theorem comparator can judge".into(),
-                }),
-                None,
-                String::new(),
-                Vec::new(),
-            ),
-            Some((ran, oom, external)) => {
-                // From the whole output, before it is cut to its end.
-                let kernels = match ran.code {
-                    Some(0) => accepted_kernels(job.paranoid, *external),
-                    _ => failed_kernels(&ran.output, *external),
-                };
-                (
-                    classify(ran, *oom)
-                        .map(|e| with_cap(e, pool.launcher().memory_max_mb(slot.id))),
-                    ran.code,
-                    tail(&ran.output, OUTPUT_LINES),
-                    kernels,
-                )
-            }
-        };
-        pairs.push(AcceptPair {
-            spec: pair.spec.clone(),
-            head: pair.head.clone(),
-            spec_module: pair.spec_module.clone(),
-            head_module: pair.head_module.clone(),
-            challenge_module: pair.challenge_module.clone(),
-            solution_module: pair.solution_module.clone(),
-            config: pair.config.clone(),
-            accepted: error.is_none(),
-            error,
-            exit_code,
-            output,
-            kernels,
-            theorems: pair.theorems,
-            left_out: pair.left_out.clone(),
-        });
-    }
+    let judgments = judge(
+        pool.launcher(),
+        slot.id,
+        &modules,
+        project,
+        &to_judge,
+        &options,
+    )
+    .await?;
     drop(slot);
+    let pairs: Vec<AcceptPair> = (run.pairs.into_iter().zip(judgments))
+        .map(|(pair, judged)| AcceptPair {
+            spec: pair.spec,
+            head: pair.head,
+            spec_module: pair.spec_module,
+            head_module: pair.head_module,
+            challenge_module: pair.challenge_module,
+            solution_module: pair.solution_module,
+            config: pair.config,
+            accepted: judged.error.is_none(),
+            error: judged.error,
+            exit_code: judged.exit_code,
+            output: judged.output,
+            kernels: judged.kernels,
+            theorems: pair.theorems,
+            left_out: pair.left_out,
+        })
+        .collect();
     let clean = audit.clean == Some(true);
     let snapshots = pool.snapshots();
     let specs = (job.against.iter())
@@ -419,11 +364,33 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Writes `run` into `dir`, with the project's packages, which are built
-/// already, as its own. A new run is written beside it and moved into place;
-/// a run already there gets only its configurations and README again, so
-/// that Lake finds what it built.
-fn write(dir: &Path, run: &ExportedRun, project: Option<&Path>) -> std::io::Result<()> {
+/// What [`judge`] takes of `run`: its files but the pairs' configurations,
+/// and its pairs, each with its configuration.
+fn judged_run(run: &ExportedRun) -> (Vec<ExportedFile>, Vec<PairToJudge>) {
+    let text = |path: &str| {
+        let file = run.files.iter().find(|f| f.path == path);
+        file.map_or_else(String::new, |f| f.text.clone())
+    };
+    let pairs = (run.pairs.iter())
+        .map(|pair| PairToJudge {
+            spec_module: pair.spec_module.clone(),
+            head_module: pair.head_module.clone(),
+            configuration: text(&pair.config),
+            theorems: pair.theorems,
+        })
+        .collect();
+    let sources = (run.files.iter())
+        .filter(|f| !f.path.starts_with("comparator/"))
+        .cloned()
+        .collect();
+    (sources, pairs)
+}
+
+/// Writes a run's `files` into `dir`, with the project's packages, which are
+/// built already, as its own. A new run is written beside it and moved into
+/// place; a run already there gets only its configurations and README again,
+/// so that Lake finds what it built.
+fn write(dir: &Path, files: &[&ExportedFile], project: Option<&Path>) -> std::io::Result<()> {
     let put = |root: &Path, f: &ExportedFile| -> std::io::Result<()> {
         let path = root.join(&f.path);
         if let Some(parent) = path.parent() {
@@ -433,13 +400,13 @@ fn write(dir: &Path, run: &ExportedRun, project: Option<&Path>) -> std::io::Resu
     };
     if dir.is_dir() {
         let _ = std::fs::remove_dir_all(dir.join("comparator"));
-        for f in run.files.iter().filter(|f| judging_only(&f.path)) {
+        for f in files.iter().filter(|f| judging_only(&f.path)) {
             put(dir, f)?;
         }
     } else {
         let new = dir.with_extension("tmp");
         let _ = std::fs::remove_dir_all(&new);
-        for f in &run.files {
+        for f in files {
             put(&new, f)?;
         }
         let packages = project.map(|p| p.join(".lake").join("packages"));
