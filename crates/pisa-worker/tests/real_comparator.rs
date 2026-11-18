@@ -2,9 +2,12 @@
 //! are built as a worker builds them, and a run's pairs judged with
 //! [`runs::judge`]. What a judged solution's code does while it is judged
 //! must not reach what comparator judges after it: the next pair's
-//! challenge, a later judgment's, or the programs an export runs. Each test
-//! needs elan on `PATH`, `docker/pisa-lean` built and a `bwrap` that works,
-//! so they are ignored by default:
+//! challenge, a later judgment's, or the programs an export runs. The judged
+//! code here runs with `#eval`, which a worker's policy refuses unless it
+//! allows metaprogramming, so these test the comparator layer, not what a
+//! default worker would store. Each test needs elan on `PATH`,
+//! `docker/pisa-lean` built and a `bwrap` that works, so they are ignored by
+//! default:
 //!
 //! ```text
 //! (cd docker/pisa-lean && lake build)
@@ -321,6 +324,14 @@ async fn an_export_runs_no_program_the_judged_code_wrote() {
     let h = Harness::new().await;
     let modules = h.build(&[C, P, S, H]).await;
     let judged = h.judge(&modules, &[pair(C, P, "c"), pair(S, H, "t")]).await;
+    // Both pairs were judged through their exports, so a lean P planted
+    // would have run.
+    assert!(
+        judged[0].error.is_none() && judged[0].exit_code == Some(0),
+        "{}",
+        judged[0].output
+    );
+    assert_mismatch(&judged[1]);
     for (n, j) in judged.iter().enumerate() {
         assert!(
             !j.output.contains("PLANTED"),
