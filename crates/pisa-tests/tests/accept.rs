@@ -202,7 +202,8 @@ async fn a_named_run_exports_its_files_by_name() {
         "{readme}"
     );
     assert!(readme.contains("a renamed build"), "{readme}");
-    // Acceptance runs comparator on these files, and says what it judged.
+    // Acceptance judges pisa's own builds, which name the modules by their
+    // hash, with the export's configuration, and says what it judged.
     let verdict = accept(&c, &[&id(&s)], &[], true, 60).await;
     let pair = &verdict.pairs[0];
     assert!(pair.accepted, "{verdict:?}");
@@ -211,9 +212,10 @@ async fn a_named_run_exports_its_files_by_name() {
             pair.challenge_module.as_str(),
             pair.solution_module.as_str()
         ),
-        ("PisaSpec.main", "PisaRun.main")
+        (module(&s).as_str(), module(&p).as_str())
     );
     assert_eq!(pair.spec_module, module(&s));
+    assert_eq!(pair.config, "comparator/1.json");
 
     // Forked, the run's heads keep their hash names; its spec keeps its.
     let forked = format!("{filled}\n-- forked");
@@ -241,25 +243,12 @@ async fn accept(
     paranoid: bool,
     timeout_secs: u64,
 ) -> AcceptResponse {
-    accept_with(c, against, allow, paranoid, timeout_secs, 0).await
-}
-
-/// [`accept`] with `build_timeout_secs` more for the first pair, which
-/// builds the run's modules.
-async fn accept_with(
-    c: &Cluster,
-    against: &[&str],
-    allow: &[&str],
-    paranoid: bool,
-    timeout_secs: u64,
-    build_timeout_secs: u64,
-) -> AcceptResponse {
     let job = Job::SnapshotAccept(SnapshotAcceptJob {
         against: against.iter().map(|s| s.to_string()).collect(),
         allow: allow.iter().map(|s| s.to_string()).collect(),
         paranoid,
         timeout_secs,
-        build_timeout_secs,
+        build_timeout_secs: 0,
     });
     match run(c, job).await {
         JobResult::SnapshotAccepted(Ok(r)) => *r,
@@ -290,7 +279,7 @@ async fn accept_judges_each_spec_snapshot_against_its_head() {
     assert_eq!(error.message, "Illegal axiom detected: 'sorryAx'");
     assert!(
         pair.output
-            .contains("comparator --config comparator/1.json --paranoid"),
+            .contains("--config comparator/1.json --paranoid"),
         "{}",
         pair.output
     );
@@ -306,15 +295,110 @@ async fn accept_judges_each_spec_snapshot_against_its_head() {
     let pair = &r.pairs[0];
     assert_eq!((&pair.head, pair.exit_code), (&id(&p), Some(0)));
     assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
-    assert!(pair.output.contains("Built PisaSnap.s"), "{}", pair.output);
-    // Judged again, the run isn't built again.
+    // Judged again, the spec's and the head's exports are the ones kept.
+    let exports = || exported(&c, "w0");
+    let kept: Vec<u64> = exports().iter().map(|(_, ino, _)| *ino).collect();
+    assert_eq!(kept.len(), 2, "{:?}", exports());
     let again = accept(&c, &[&id(&s)], &[], false, 60).await;
-    let output = &again.pairs[0].output;
     assert!(again.accepted, "{again:?}");
+    let reused: Vec<u64> = exports().iter().map(|(_, ino, _)| *ino).collect();
+    assert_eq!(reused, kept);
+}
+
+/// The exports worker `name` keeps, sorted by name: each as its file's name,
+/// inode, and the export fake-leanexport wrote.
+fn exported(c: &Cluster, name: &str) -> Vec<(String, u64, Value)> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = c.dir.path().join(name).join("exports");
+    let mut exports: Vec<(String, u64, Value)> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            let text = std::fs::read_to_string(e.path()).unwrap();
+            let name = e.file_name().into_string().unwrap();
+            (
+                name,
+                e.metadata().unwrap().ino(),
+                serde_json::from_str(&text).unwrap(),
+            )
+        })
+        .collect();
+    exports.sort_by(|a, b| a.0.cmp(&b.0));
+    exports
+}
+
+/// Acceptance builds nothing: comparator judges exports of the modules
+/// pisa built when the snapshots were created, and the worker keeps no
+/// project to build them in.
+#[tokio::test(flavor = "multi_thread")]
+async fn acceptance_builds_nothing() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let head = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+    let p = create(
+        &c,
+        json!({"code": head, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let r = accept(&c, &[&id(&s)], &[], false, 60).await;
+    let pair = &r.pairs[0];
+    assert!(r.accepted, "{r:?}");
+    for flag in [
+        "--challenge-from-export exports/",
+        "--solution-from-export exports/",
+    ] {
+        assert!(pair.output.contains(flag), "{flag}: {}", pair.output);
+    }
+    // The exports are of pisa's builds, whose fake olean is the code.
+    let exports = exported(&c, "w0");
+    let code = |m: &str| {
+        let export = exports.iter().find(|(_, _, e)| e["module"] == m);
+        export.map(|(_, _, e)| e["code"].as_str().unwrap().to_string())
+    };
+    assert_eq!(code(&module(&p)).as_deref(), Some(head), "{exports:?}");
+    assert!(code(&module(&s)).is_some(), "{exports:?}");
+    // Nothing is left of the judgment but its exports.
+    let work = c.dir.path().join("w0");
+    assert!(!work.join("runs").exists());
+    let judging: Vec<_> = std::fs::read_dir(work.join("judging")).unwrap().collect();
+    assert!(judging.is_empty(), "{judging:?}");
+}
+
+/// A module pisa couldn't export, as when the exporter doesn't find a
+/// target, is `export_failed`: comparator doesn't run, and there is no
+/// verdict on the proofs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_export_is_export_failed() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
+    )
+    .await;
+    let head = "import Foo\n\n-- EXPORT_PANIC\ntheorem t : 2 = 2 := rfl";
+    let p = create(
+        &c,
+        json!({"code": head, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let r = accept(&c, &[&id(&s)], &[], false, 60).await;
+    assert!(r.clean && !r.accepted, "{r:?}");
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert_eq!(error.kind, PairErrorKind::ExportFailed, "{r:?}");
     assert!(
-        output.contains("Replayed PisaSnap.s") && !output.contains("Built"),
-        "{output}"
+        error.message.contains(&module(&p)) && error.message.contains("PANIC"),
+        "{}",
+        error.message
     );
+    assert_eq!((pair.exit_code, pair.output.as_str()), (None, ""));
+    assert!(pair.kernels.is_empty(), "{r:?}");
+    // It is stored like any verdict.
+    get(&c, &format!("/snapshots/accept/{}", r.id)).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -353,36 +437,27 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
     );
     let output = &r.pairs[0].output;
     assert!(output.contains("more than 1s"), "{output}");
-    // What Lake printed before then is kept.
-    assert!(output.contains("Resolving dependencies"), "{output}");
-}
+    // What comparator printed before then is kept.
+    assert!(output.contains("fake-lake comparator"), "{output}");
 
-/// The first pair, which builds the run's modules, has the build's time on
-/// top of its own; a slow build without it runs out.
-#[tokio::test(flavor = "multi_thread")]
-async fn the_first_pair_has_time_to_build_the_runs_modules() {
-    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    // The time limit covers the exports too.
     let s = create(
         &c,
-        json!({"code": "import Foo
-
-theorem t : 2 = 2 := sorry"}),
+        json!({"code": "import Foo\n\ntheorem v : 4 = 4 := sorry"}),
     )
     .await;
-    let slow = "import Foo
-
--- SLOW_BUILD
-theorem t : 2 = 2 := rfl";
+    let slow = "import Foo\n\n-- SLOW_EXPORT 3000\ntheorem v : 4 = 4 := rfl";
     create(
         &c,
         json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
     )
     .await;
-    let r = accept_with(&c, &[&id(&s)], &[], false, 2, 0).await;
-    let error = r.pairs[0].error.as_ref().map(|e| e.kind);
-    assert_eq!(error, Some(PairErrorKind::Timeout), "{r:?}");
-    let r = accept_with(&c, &[&id(&s)], &[], false, 2, 10).await;
-    assert!(r.accepted, "{r:?}");
+    let r = accept(&c, &[&id(&s)], &[], false, 1).await;
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert_eq!(error.kind, PairErrorKind::Timeout, "{r:?}");
+    assert!(error.message.contains("more than 1s"), "{}", error.message);
+    assert_eq!((pair.exit_code, pair.output.as_str()), (None, ""));
 }
 
 /// The files of the tar.gz `bytes`, by path.
@@ -681,9 +756,8 @@ async fn a_run_is_named_by_spec_snapshots_of_one_version() {
     assert_eq!(old.status(), 405);
 }
 
-/// A pair not accepted says why: what comparator refused, a module that
-/// didn't build, comparator that couldn't run, or a spec with nothing to
-/// judge, for which it doesn't run.
+/// A pair not accepted says why: what comparator refused, comparator that
+/// couldn't run, or a spec with nothing to judge, for which it doesn't run.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pair_not_accepted_says_why() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
@@ -693,10 +767,7 @@ async fn a_pair_not_accepted_says_why() {
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
-    for (marker, expected) in [
-        ("BUILD_FAIL", PairErrorKind::BuildFailed),
-        ("CANNOT_RUN", PairErrorKind::CannotRun),
-    ] {
+    for (marker, expected) in [("CANNOT_RUN", PairErrorKind::CannotRun)] {
         let code = format!("import Foo\n\n-- {marker}\ntheorem t : 2 = 2 := rfl");
         let head = create(
             &c,
@@ -965,6 +1036,64 @@ async fn a_head_deleted_during_comparator_doesnt_lose_the_acceptance() {
     let (r, ()) = tokio::join!(accept(&c, &against, &[], false, 60), delete);
     assert_eq!(r.audit.review[0].head, id(&h), "{r:?}");
     get(&c, &format!("/snapshots/accept/{}", r.id)).await;
+}
+
+/// A head deleted while pisa exports it leaves the acceptance whole too:
+/// the modules are judged from links of their verified files, made before
+/// the exports, which the delete doesn't remove.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_head_deleted_during_its_export_leaves_the_acceptance_whole() {
+    let c = Cluster::start(&[("w0", "v", 2)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem u : 3 = 3 := sorry"}),
+    )
+    .await;
+    let slow = "import Foo\n\n-- SLOW_EXPORT 3000\ntheorem u : 3 = 3 := rfl";
+    let h = create(
+        &c,
+        json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let delete = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let r = c.client.delete(c.url(&format!("/snapshots/{}", id(&h))));
+        assert_eq!(r.send().await.unwrap().status(), 200);
+    };
+    let spec = id(&s);
+    let against = [spec.as_str()];
+    let (r, ()) = tokio::join!(accept(&c, &against, &[], false, 60), delete);
+    let pair = &r.pairs[0];
+    assert!(r.accepted && pair.accepted, "{r:?}");
+    assert_eq!(pair.head_module, module(&h));
+    get(&c, &format!("/snapshots/accept/{}", r.id)).await;
+}
+
+/// What a slot's build directory holds before a build isn't installed with
+/// it: the module's files are only what its compile wrote, as they are what
+/// acceptance judges.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_file_in_a_slots_build_directory_is_not_installed() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let code = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+    let id_ = pisa_protocol::snapshot::id(code);
+    let work = c.dir.path().join("w0");
+    let build = work.join("slot-0/build/PisaSnap");
+    std::fs::create_dir_all(&build).unwrap();
+    let stale = format!("s{id_}.olean.private");
+    std::fs::write(build.join(&stale), "planted").unwrap();
+    let r = create(&c, json!({"code": code})).await;
+    assert_eq!(module(&r), pisa_protocol::snapshot::module(&id_));
+    let cached = work.join("snapshots").join(c.version("v")).join("PisaSnap");
+    assert!(cached.join(format!("s{id_}.olean")).exists());
+    assert!(!cached.join(&stale).exists());
+    let blobs = c.stored_blobs().await;
+    let ours: Vec<&String> = blobs.iter().filter(|b| b.contains(&id_)).collect();
+    assert!(!ours.is_empty(), "{blobs:?}");
+    assert!(
+        ours.iter().all(|b| !b.contains("olean.private")),
+        "{ours:?}"
+    );
 }
 
 /// A stored acceptance names the modules it judged and keeps the review

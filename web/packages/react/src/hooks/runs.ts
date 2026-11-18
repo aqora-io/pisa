@@ -41,28 +41,26 @@ export function useRebuildSnapshots(
 
 /** A run to accept: its spec snapshots, the definitions it may change
  *  besides the spec's holes, whether comparator runs Lean's other kernels
- *  too, the seconds for each pair, and those more for the first pair, which
- *  builds the run. */
+ *  too, and the seconds for each pair. */
 export interface AcceptInput {
   against: SnapshotId[];
   allow?: string[];
   paranoid?: boolean;
   timeout?: number;
-  buildTimeout?: number;
 }
 
 /** Accepts runs, as long jobs: the audit, and `lake comparator` on each
- *  pair, which builds the spec and the head and takes minutes. The answer
- *  is kept under its `id`. */
+ *  pair, on exports of pisa's builds of the spec and the head, which takes
+ *  minutes. The answer is kept under its `id`. */
 export function useAcceptRun(
   options: LongJobOptions<AcceptResponse, AcceptInput> = {},
 ): LongJob<AcceptResponse, AcceptInput> {
   return useLongJob(
-    (c, { against, allow, paranoid, timeout, buildTimeout }, { signal }) =>
+    (c, { against, allow, paranoid, timeout }, { signal }) =>
       c.submitAcceptRun(
         against,
         { ...(allow !== undefined && { allow }), ...(paranoid !== undefined && { paranoid }) },
-        { ...(timeout !== undefined && { timeout }), ...(buildTimeout !== undefined && { buildTimeout }), signal },
+        { ...(timeout !== undefined && { timeout }), signal },
       ),
     options,
   );

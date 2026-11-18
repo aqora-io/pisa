@@ -10,6 +10,20 @@ pub(super) fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Makes `to` a hard link of `from`, or, where the filesystem can't link
+/// them, a copy, written beside `to` and moved into place.
+pub(crate) fn link_or_copy(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            let name = to.file_name().unwrap_or_default().to_string_lossy();
+            let tmp = to.with_file_name(format!("{name}.tmp.{}", uuid::Uuid::new_v4().simple()));
+            std::fs::copy(from, &tmp)?;
+            std::fs::rename(&tmp, to)
+        }
+        linked => linked,
+    }
+}
+
 /// Removes every file of module `s<id>` from `dir`.
 pub(super) fn remove_module(dir: &Path, id: &str) {
     let prefix = format!("s{id}.");
@@ -150,6 +164,60 @@ impl Snapshots {
             .lock()
             .unwrap()
             .insert(module.id.clone(), module.clone());
+        Ok(())
+    }
+
+    /// Puts the files of the modules `ids` and of everything they build on
+    /// into `<into>/PisaSnap/`, from the local cache, which fetches what it
+    /// lacks: as hard links, which a delete of a snapshot meanwhile doesn't
+    /// remove, or copies where the filesystem can't link. Each is hashed
+    /// again there against its module's record, so that what is read from
+    /// `into` is what was built and checked. Returns each id's modules as
+    /// its record lists them: what it builds on, each after what it imports,
+    /// and its own last.
+    pub async fn link_verified(
+        &self,
+        ids: &[String],
+        into: &Path,
+    ) -> Result<HashMap<String, Vec<Module>>, Error> {
+        let dir = into.join(snapshot::ROOT);
+        tokio::fs::create_dir_all(&dir).await.map_err(internal)?;
+        let mut closures = HashMap::new();
+        let mut linked = HashSet::new();
+        for id in ids {
+            if closures.contains_key(id) {
+                continue;
+            }
+            let meta = self.catalog.module(id).await?;
+            for module in &meta.modules {
+                if linked.insert(module.id.clone()) {
+                    self.link_one(module, &dir).await?;
+                }
+            }
+            closures.insert(id.clone(), meta.modules);
+        }
+        Ok(closures)
+    }
+
+    /// [`link_verified`](Self::link_verified) of one module build, into
+    /// `dir`.
+    async fn link_one(&self, module: &Module, dir: &Path) -> Result<(), Error> {
+        // Not while a delete of it removes its files, under the same lock.
+        let lock = self.lock(&module.id);
+        let _held = lock.lock().await;
+        self.fetch(module).await?;
+        for file in &module.files {
+            let to = dir.join(format!("s{}.{}", module.id, file.ext));
+            link_or_copy(&self.file(&module.id, &file.ext), &to).map_err(internal)?;
+            let bytes = tokio::fs::read(&to).await.map_err(internal)?;
+            if sha256(&bytes) != file.sha256 {
+                return Err(internal(format!(
+                    "snapshot {}'s {} isn't the build its record names",
+                    snapshot::module(&module.id),
+                    file.ext
+                )));
+            }
+        }
         Ok(())
     }
 

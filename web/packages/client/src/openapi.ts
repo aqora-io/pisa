@@ -355,7 +355,7 @@ export interface paths {
         put?: never;
         /**
          * Judge a run and store the verdict
-         * @description Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches, in the run's export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A run with heads that hold only through links (the audit's `unsettled`) is a 409 `conflict` at once, naming the settle to send. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
+         * @description Audits the run that the spec snapshots start, as `GET /snapshots/audit` does, and runs `lake comparator`, which shares no code with the audit, on exactly the pairs the audit compared, each spec snapshot against each head it reaches. Comparator judges the modules pisa built and kernel-checked when the snapshots were created, exported with Lean's bundled `leanexport`, and builds nothing; its configurations are the export's (`GET /snapshots/export`). A head passes comparator if each theorem of the spec is proved there with the same statement, the definitions those statements use are the same but for the spec's holes and `allow`, and the proofs use only the standard axioms and the spec's assumptions. The run is `accepted` when the audit is `clean` and comparator accepted every pair. The result is stored, and `GET /snapshots/accept/{id}` reads it again. A run with heads that hold only through links (the audit's `unsettled`) is a 409 `conflict` at once, naming the settle to send. A Mathlib-sized pair takes about half a minute, or a minute paranoid: send it with `Prefer: respond-async`.
          */
         post: operations["acceptRun"];
         delete?: never;
@@ -413,7 +413,7 @@ export interface paths {
         };
         /**
          * A run as a Lake project
-         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. `POST /snapshots/accept` runs comparator on it. With `profile=palomar`, one pair is a Palomar package in `palomar/` instead: its challenge and solution named `challenge_module` and `solution_module`, and every module the pair needs made a module-system file; a `lakefile.toml` that requires Mathlib alone, at the commit the worker's manifest resolved, and that manifest without the worker's other packages, each package pinned to its commit; the pair's configuration as `comparator.json`; and `formalization.yaml`, `REVIEW.md` and `conversion.json` for what pisa can't decide and what it changed. A pair whose spec permits an axiom of its own, whose challenge imports anything but Mathlib, Init and Lean, that imports a module that is neither the run's, Lean's, Mathlib's nor of a package Mathlib builds on (an allowlist, so the worker's Physlib is refused), or whose spec is its own head is a `bad_request` that names it.
+         * @description The run that the spec snapshots start, as `GET /snapshots/audit?against=` walks it, as a Lake project in `pisa-run/` for `lake comparator`, which shares no code with the audit: every module the spec snapshots and their heads need, the worker project's toolchain, manifest and requirements, and a configuration in `comparator/` for each spec snapshot and head it reaches. Each names the spec's theorems, its holes and `allow` as definition holes, and the standard axioms and the spec's assumptions as permitted. It is for judging the run outside pisa: `POST /snapshots/accept` judges pisa's own builds of the same modules, with these configurations naming them by their hash. With `profile=palomar`, one pair is a Palomar package in `palomar/` instead: its challenge and solution named `challenge_module` and `solution_module`, and every module the pair needs made a module-system file; a `lakefile.toml` that requires Mathlib alone, at the commit the worker's manifest resolved, and that manifest without the worker's other packages, each package pinned to its commit; the pair's configuration as `comparator.json`; and `formalization.yaml`, `REVIEW.md` and `conversion.json` for what pisa can't decide and what it changed. A pair whose spec permits an axiom of its own, whose challenge imports anything but Mathlib, Init and Lean, that imports a module that is neither the run's, Lean's, Mathlib's nor of a package Mathlib builds on (an allowlist, so the worker's Physlib is refused), or whose spec is its own head is a `bad_request` that names it.
          */
         get: operations["exportRun"];
         put?: never;
@@ -576,19 +576,25 @@ export interface components {
         AcceptPair: {
             accepted: boolean;
             /**
-             * @description The spec's module as the export names it, which comparator judged as
-             *     the challenge: `PisaSpec.<name>` or `PisaRun.<name>` for a named
-             *     run's, else `spec_module`.
+             * @description The module comparator judged as the challenge, as its configuration
+             *     names it: `spec_module`, which pisa built. An acceptance stored before
+             *     comparator judged pisa's own builds names it as the export does,
+             *     `PisaSpec.<name>` or `PisaRun.<name>` for a named run's.
              */
             challenge_module?: string;
-            /** @description Its comparator configuration in the export. */
+            /**
+             * @description The pair's configuration in `GET /snapshots/export`'s project,
+             *     `comparator/<n>.json`. Comparator judged the pair by it, with the
+             *     modules named as `challenge_module` and `solution_module` name them.
+             */
             config: string;
             /** @description Why it isn't accepted, if it isn't. */
             error?: components["schemas"]["PairError"];
             /**
              * Format: int32
-             * @description Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when it
-             *     ran past `timeout`, or didn't run.
+             * @description Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when the
+             *     pair ran past `timeout`, a module's export failed, or comparator
+             *     didn't run.
              */
             exit_code?: number;
             /** @description The head. */
@@ -607,11 +613,11 @@ export interface components {
             kernels?: components["schemas"]["KernelVerdict"][];
             /** @description What the configuration leaves out of what it would name, and why. */
             left_out?: components["schemas"]["LeftOut"][];
-            /** @description The end of what it printed. */
+            /** @description The end of what comparator printed; empty when it didn't run. */
             output: string;
             /**
-             * @description The head's module as the export names it, which comparator judged as
-             *     the solution: `PisaRun.<name>` for a named run's, else `head_module`.
+             * @description The module comparator judged as the solution: `head_module`, or as the
+             *     export names it in an older acceptance.
              */
             solution_module?: string;
             /** @description The spec snapshot. */
@@ -632,8 +638,10 @@ export interface components {
          *     against its spec, as `GET /snapshots/audit` does, and runs
          *     `lake comparator`, which shares no code with the audit, on exactly the
          *     pairs the audit compared, each spec snapshot against each head it
-         *     reaches, in the Lake project `GET /snapshots/export` gives. The result is
-         *     stored: `GET /snapshots/accept/{id}` reads it again.
+         *     reaches. Comparator judges the modules pisa built and kernel-checked when
+         *     the snapshots were created, exported with Lean's bundled `leanexport`, and
+         *     builds nothing. The result is stored: `GET /snapshots/accept/{id}` reads
+         *     it again.
          */
         AcceptRequest: {
             /** @description The spec's snapshot ids, as for the audit. */
@@ -644,12 +652,6 @@ export interface components {
              */
             allow?: string[];
             /**
-             * Format: int64
-             * @description Seconds more for the first pair comparator runs, which builds the
-             *     run's snapshot modules that later pairs replay: 1800 by default.
-             */
-            build_timeout?: number;
-            /**
              * @description Also run the external kernels Lean bundles: `leanchecker-paranoid`,
              *     `lean4lean`, `nanoda`, `con-leche` and `con-ron`.
              */
@@ -657,7 +659,7 @@ export interface components {
             /**
              * Format: int64
              * @description The time limit in seconds for each spec snapshot and head, in which
-             *     comparator builds and exports both and checks the head: 600 by
+             *     pisa exports both modules and comparator checks the head: 600 by
              *     default.
              */
             timeout?: number;
@@ -2226,11 +2228,14 @@ export interface components {
          */
         PairError: {
             kind: components["schemas"]["PairErrorKind"];
-            /** @description What comparator said, e.g. its last error. */
+            /**
+             * @description What comparator said, e.g. its last error, or why a module's export
+             *     failed.
+             */
             message: string;
         };
         /** @enum {string} */
-        PairErrorKind: "refused" | "build_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge" | "unsupported";
+        PairErrorKind: "refused" | "build_failed" | "export_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge" | "unsupported";
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
          *     in Unicode code points, not UTF-16 units.

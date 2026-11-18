@@ -57,6 +57,15 @@ jobs:
         run: lake build
       - name: Real-Lean tests
         run: cargo test -p pisa-worker --test real_lean -- --ignored
+      # Comparator sandboxes the kernels with bwrap, and so does the worker
+      # the exporter: Ubuntu's AppArmor keeps it from making namespaces.
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Real-comparator tests
+        run: cargo test -p pisa-worker --test real_comparator -- --ignored
       # Lean Beam is beta: this catches a toolchain whose Beam tools changed.
       - name: Real-Beam tests
         run: cargo test -p pisa-beam --test real_beam -- --ignored

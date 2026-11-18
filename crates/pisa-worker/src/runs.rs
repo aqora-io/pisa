@@ -1,23 +1,23 @@
-//! A run as a Lake project, for `lake comparator` to judge apart from pisa's
-//! own audit (`/snapshots/export`), and the run's acceptance: the audit and
-//! comparator's verdict on the pairs it compared, stored
-//! (`/snapshots/accept`).
+//! A run's acceptance: the audit and comparator's verdict on the pairs it
+//! compared, stored (`/snapshots/accept`); and the run as a Lake project, for
+//! `lake comparator` to judge outside pisa (`/snapshots/export`).
 //!
-//! The project holds every module the run's spec snapshots and heads need,
-//! as their code was stored, and a comparator configuration for each spec
-//! snapshot and head it reaches, the pairs the audit compares: the spec's
-//! module is the challenge and the head's the solution. Its Lake
-//! configuration is the worker's project's, so the modules build on what they
-//! were built on.
+//! Both start from the run as acceptance judges it: a comparator
+//! configuration for each spec snapshot and head the audit compares, whose
+//! module is the challenge and the head's the solution, named by their hash
+//! as pisa built them. Acceptance judges those builds: it links the modules
+//! the pairs need into a private directory, checking each file against its
+//! record, and comparator judges each pair on exports of them, building
+//! nothing (see [`judge`]). It runs on a slot of the worker, in its cgroup,
+//! and sandboxes the kernels itself.
 //!
-//! Comparator runs on a slot of the worker, in its cgroup, and sandboxes the
-//! code it judges itself. The project is kept under the worker's
-//! [`runs_dir`](crate::launcher::Launcher::runs_dir), named by its modules and
-//! Lake configuration, so that judging the same run again doesn't build it
-//! again: only its configurations and README are written afresh.
+//! The export holds every module the run's spec snapshots and heads need,
+//! as their code was stored, and the configurations, a named run's modules
+//! named by the run. Its Lake configuration is the worker's project's, so
+//! the modules build on what they were built on.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -30,9 +30,9 @@ use pisa_protocol::verify::Declaration;
 use pisa_protocol::wire::{
     ExportedFile, ExportedPair, ExportedRun, SnapshotAcceptJob, SnapshotExportJob,
 };
+use pisa_snapshots::RunPair;
 use pisa_snapshots::review::review;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::catalog::{ModuleMeta, record_fits};
 use crate::launcher::Ran;
@@ -42,13 +42,10 @@ use crate::snapshots::Snapshots;
 mod judge;
 mod palomar;
 
-pub use judge::{JudgeOptions, Judgment, ModulesToJudge, PairToJudge, judge};
+pub use judge::{JudgeOptions, Judgment, ModulesToJudge, PairToJudge, export_targets, judge};
 
 /// How many of comparator's last lines of output a pair keeps.
 const OUTPUT_LINES: usize = 40;
-
-/// How many judged runs a worker keeps built.
-const KEPT_RUNS: usize = 4;
 
 /// The project's Lake package.
 const NAME: &str = "pisa_run";
@@ -65,46 +62,57 @@ pub async fn export(
     project: Option<&Path>,
     job: &SnapshotExportJob,
 ) -> Result<ExportedRun, Error> {
-    let run = audited_export(snapshots, project, &job.against, &job.allow)
-        .await?
-        .1;
+    let judged = judged_run(snapshots, &job.against, &job.allow).await?;
+    let run = package(snapshots, project, judged).await?;
     match &job.palomar {
         Some(palomar) => palomar::package(&run, palomar, &job.against, &job.allow),
         None => Ok(run),
     }
 }
 
-/// [`export`], with the audit whose pairs it exports.
-async fn audited_export(
+/// A run as acceptance judges it: its audit, and each pair the audit
+/// compared with comparator's configuration for it, which names the
+/// modules by their hash, as pisa built them.
+struct JudgedRun {
+    audit: AuditSnapshotsResponse,
+    /// One per comparison, in the same order.
+    pairs: Vec<JudgedPair>,
+    /// The same, as entries and modules.
+    run: Vec<RunPair>,
+    /// The records of the modules the pairs need, by id.
+    records: HashMap<String, ModuleMeta>,
+}
+
+struct JudgedPair {
+    spec: String,
+    head: String,
+    /// Its configuration, as JSON.
+    configuration: String,
+    /// Its configuration's path in the export: `comparator/<n>.json`, `n`
+    /// counting from 1.
+    config: String,
+    theorems: u64,
+    left_out: Vec<LeftOut>,
+}
+
+/// The run that spec snapshots `against` start, with `allow` naming what its
+/// heads may change besides the spec's holes, as acceptance judges it.
+async fn judged_run(
     snapshots: &Snapshots,
-    project: Option<&Path>,
     against: &[String],
     allow: &[String],
-) -> Result<(AuditSnapshotsResponse, ExportedRun), Error> {
+) -> Result<JudgedRun, Error> {
     let run = snapshots.reader().audit_run(against, allow).await?;
     let catalog = snapshots.catalog();
-    let mut metas: HashMap<String, ModuleMeta> = HashMap::new();
+    let mut records: HashMap<String, ModuleMeta> = HashMap::new();
     let mut record = async |m: &str| -> Result<ModuleMeta, Error> {
-        if let Some(meta) = metas.get(m) {
+        if let Some(meta) = records.get(m) {
             return Ok(meta.clone());
         }
         let meta = catalog.module(m).await?;
-        metas.insert(m.to_string(), meta.clone());
+        records.insert(m.to_string(), meta.clone());
         Ok(meta)
     };
-    let mut needed = BTreeSet::new();
-    for pair in &run.pairs {
-        for m in [&pair.spec_module, &pair.head_module] {
-            needed.extend(record(m).await?.modules.iter().map(|m| m.id.clone()));
-        }
-    }
-    // The pairs of a named run are named by the run, the others by their
-    // hash.
-    let modules: Vec<String> = needed.iter().cloned().collect();
-    let names = snapshots.reader().readable_names(&run.pairs).await?;
-    let named = |m: &str| names.get(m).cloned().unwrap_or_else(|| snapshot::module(m));
-    let path = |m: &str| format!("{}.lean", named(m).replace('.', "/"));
-    let mut files = Vec::new();
     let mut pairs = Vec::new();
     for (n, (compared, pair)) in run.audit.comparisons.iter().zip(&run.pairs).enumerate() {
         let spec_meta = record(&pair.spec_module).await?;
@@ -139,7 +147,10 @@ async fn audited_export(
             }
         }
         let holes: Vec<String> = pair.holes.iter().chain(allow).cloned().collect();
-        let (challenge, solution) = (named(&pair.spec_module), named(&pair.head_module));
+        let (challenge, solution) = (
+            snapshot::module(&pair.spec_module),
+            snapshot::module(&pair.head_module),
+        );
         let named = config(
             &pair.spec_module,
             (&challenge, &solution),
@@ -149,27 +160,73 @@ async fn audited_export(
             (&spec_defs, &head_defs),
             &head_axioms,
         );
-        let path = format!("comparator/{}.json", n + 1);
-        files.push(file(&path, named.text));
-        pairs.push(ExportedPair {
+        pairs.push(JudgedPair {
             spec: compared.spec.clone(),
             head: compared.head.clone(),
-            spec_module: snapshot::module(&pair.spec_module),
-            head_module: snapshot::module(&pair.head_module),
-            challenge_module: challenge,
-            solution_module: solution,
-            config: path,
+            configuration: named.text,
+            config: format!("comparator/{}.json", n + 1),
             theorems: named.theorems,
             left_out: named.left_out,
         });
     }
+    Ok(JudgedRun {
+        audit: run.audit,
+        pairs,
+        run: run.pairs,
+        records,
+    })
+}
+
+/// `judged` as a Lake project, for `lake comparator` outside pisa: the
+/// pairs of a named run named by the run, and the modules they import by
+/// those names.
+async fn package(
+    snapshots: &Snapshots,
+    project: Option<&Path>,
+    judged: JudgedRun,
+) -> Result<ExportedRun, Error> {
+    let mut needed = BTreeSet::new();
+    for pair in &judged.run {
+        for m in [&pair.spec_module, &pair.head_module] {
+            let meta = &judged.records[m.as_str()];
+            needed.extend(meta.modules.iter().map(|m| m.id.clone()));
+        }
+    }
+    // The pairs of a named run are named by the run, the others by their
+    // hash.
+    let modules: Vec<String> = needed.iter().cloned().collect();
+    let names = snapshots.reader().readable_names(&judged.run).await?;
+    let named = |m: &str| names.get(m).cloned().unwrap_or_else(|| snapshot::module(m));
+    let path = |m: &str| format!("{}.lean", named(m).replace('.', "/"));
+    let mut files = Vec::new();
+    let mut pairs = Vec::new();
+    for (pair, modules) in judged.pairs.into_iter().zip(&judged.run) {
+        let (challenge, solution) = (named(&modules.spec_module), named(&modules.head_module));
+        let mut config: Value = serde_json::from_str(&pair.configuration).map_err(|e| {
+            Error::new(ErrorKind::Internal, format!("reading a configuration: {e}"))
+        })?;
+        config["challenge_module"] = challenge.clone().into();
+        config["solution_module"] = solution.clone().into();
+        files.push(file(&pair.config, pretty(&config)));
+        pairs.push(ExportedPair {
+            spec: pair.spec,
+            head: pair.head,
+            spec_module: snapshot::module(&modules.spec_module),
+            head_module: snapshot::module(&modules.head_module),
+            challenge_module: challenge,
+            solution_module: solution,
+            config: pair.config,
+            theorems: pair.theorems,
+            left_out: pair.left_out,
+        });
+    }
     for m in &needed {
-        let code = record(m).await?.code;
-        files.push(file(&path(m), snapshot::rename_imports(&code, &names)));
+        let code = &judged.records[m.as_str()].code;
+        files.push(file(&path(m), snapshot::rename_imports(code, &names)));
     }
     // The snapshots on each module, for the README's table.
     let mut on: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    for (entry, entry_meta) in catalog.entries_on(&modules, &[]).await? {
+    for (entry, entry_meta) in snapshots.catalog().entries_on(&modules, &[]).await? {
         let labels: Vec<String> = entry_meta
             .labels
             .iter()
@@ -206,24 +263,30 @@ async fn audited_export(
         files: table,
     };
     files.push(file("README.md", readme(&pairs, &about)));
-    let forks = run.audit.forks.clone();
-    Ok((
-        run.audit,
-        ExportedRun {
-            files,
-            pairs,
-            forks,
-        },
-    ))
+    Ok(ExportedRun {
+        files,
+        pairs,
+        forks: judged.audit.forks,
+    })
+}
+
+/// A judgment's private directory, removed when the judgment is done.
+struct Judging(PathBuf);
+
+impl Drop for Judging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Judges the run `job` names: audits it, and judges the pairs the audit
-/// compared with `lake comparator`, each in turn, in one export, so that
-/// Lake builds each module once. Stores the result and returns it.
+/// compared with `lake comparator`, each in turn, on exports of the modules
+/// pisa built. Stores the result and returns it.
 pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptResponse, Error> {
     let project = pool.launcher().project();
-    let (mut audit, run) =
-        audited_export(pool.snapshots(), project, &job.against, &job.allow).await?;
+    let snapshots = pool.snapshots();
+    let run = judged_run(snapshots, &job.against, &job.allow).await?;
+    let mut audit = run.audit;
     // A head that holds only through links would be judged on records that
     // read `sorry`: the run is settled first.
     if !audit.unsettled.is_empty() {
@@ -240,27 +303,43 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     }
     // What the leader reads beside the verdict, kept with it, read with the
     // audit: a snapshot deleted while comparator runs takes nothing from it.
-    let reader = pool.snapshots().reader();
+    let reader = snapshots.reader();
     (audit.review, audit.review_left_out) =
         review(reader, &audit.comparisons, &job.allow, DEFAULT_REVIEW_LIMIT).await?;
-    let key = key(&run);
-    // One judgment at a time of a run, in its directory.
-    let lock = pool.snapshots().lock(&format!("run:{key}"));
-    let _judging = lock.lock().await;
-    let runs = pool.launcher().runs_dir();
-    evict(pool, &runs, &key);
-    let (sources, to_judge) = judged_run(&run);
+    // The modules the pairs need, linked before the judgment waits for a
+    // slot: a snapshot deleted after takes nothing from it.
+    let judging =
+        Judging((pool.launcher().judging_dir()).join(uuid::Uuid::new_v4().simple().to_string()));
+    let mut ids: Vec<String> = Vec::new();
+    for pair in &run.run {
+        for m in [&pair.spec_module, &pair.head_module] {
+            if !ids.contains(m) {
+                ids.push(m.clone());
+            }
+        }
+    }
+    let closures = snapshots.link_verified(&ids, &judging.0).await?;
     let modules = ModulesToJudge {
-        root: runs.join(&key),
-        sources,
+        root: judging.0.clone(),
+        closures: (closures.into_iter())
+            .map(|(id, closure)| (snapshot::module(&id), closure))
+            .collect(),
     };
+    let to_judge: Vec<PairToJudge> = (run.pairs.iter().zip(&run.run))
+        .map(|(pair, modules)| PairToJudge {
+            spec_module: snapshot::module(&modules.spec_module),
+            head_module: snapshot::module(&modules.head_module),
+            configuration: pair.configuration.clone(),
+            theorems: pair.theorems,
+        })
+        .collect();
     let options = JudgeOptions {
         paranoid: job.paranoid,
         timeout: Duration::from_secs(job.timeout_secs),
-        build_timeout: Duration::from_secs(job.build_timeout_secs),
     };
     let mut slot = pool.acquire("").await;
-    // Comparator builds the modules, so free the slot's memory first.
+    // The exporter and the kernels load the modules, so free the slot's
+    // memory first.
     slot.retire_and_wait("evict").await;
     let judgments = judge(
         pool.launcher(),
@@ -272,14 +351,15 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
     )
     .await?;
     drop(slot);
-    let pairs: Vec<AcceptPair> = (run.pairs.into_iter().zip(judgments))
-        .map(|(pair, judged)| AcceptPair {
+    drop(judging);
+    let pairs: Vec<AcceptPair> = (run.pairs.into_iter().zip(to_judge).zip(judgments))
+        .map(|((pair, judged_as), judged)| AcceptPair {
             spec: pair.spec,
             head: pair.head,
-            spec_module: pair.spec_module,
-            head_module: pair.head_module,
-            challenge_module: pair.challenge_module,
-            solution_module: pair.solution_module,
+            challenge_module: judged_as.spec_module.clone(),
+            solution_module: judged_as.head_module.clone(),
+            spec_module: judged_as.spec_module,
+            head_module: judged_as.head_module,
             config: pair.config,
             accepted: judged.error.is_none(),
             error: judged.error,
@@ -291,7 +371,6 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
         })
         .collect();
     let clean = audit.clean == Some(true);
-    let snapshots = pool.snapshots();
     let specs = (job.against.iter())
         .map(|a| snapshots.reader().parse(a))
         .collect::<Result<Vec<_>, _>>()?;
@@ -334,119 +413,9 @@ fn fit(accepted: &mut AcceptResponse) {
     }
 }
 
-/// Whether `path` is one of a run's files that don't name what is built:
-/// its configurations and README, which an export with another `allow`
-/// writes differently.
-fn judging_only(path: &str) -> bool {
-    path.starts_with("comparator/") || path == "README.md"
-}
-
-/// The name of `run`'s directory: a hash of its modules and its Lake
-/// configuration, which are what Lake builds.
-fn key(run: &ExportedRun) -> String {
-    let mut built: Vec<&ExportedFile> = run
-        .files
-        .iter()
-        .filter(|f| !judging_only(&f.path))
-        .collect();
-    built.sort_by(|a, b| a.path.cmp(&b.path));
-    let mut hash = Sha256::new();
-    for f in built {
-        for part in [f.path.as_bytes(), f.text.as_bytes()] {
-            hash.update((part.len() as u64).to_le_bytes());
-            hash.update(part);
-        }
-    }
-    hex(&hash.finalize())
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-
-/// What [`judge`] takes of `run`: its files but the pairs' configurations,
-/// and its pairs, each with its configuration.
-fn judged_run(run: &ExportedRun) -> (Vec<ExportedFile>, Vec<PairToJudge>) {
-    let text = |path: &str| {
-        let file = run.files.iter().find(|f| f.path == path);
-        file.map_or_else(String::new, |f| f.text.clone())
-    };
-    let pairs = (run.pairs.iter())
-        .map(|pair| PairToJudge {
-            spec_module: pair.spec_module.clone(),
-            head_module: pair.head_module.clone(),
-            configuration: text(&pair.config),
-            theorems: pair.theorems,
-        })
-        .collect();
-    let sources = (run.files.iter())
-        .filter(|f| !f.path.starts_with("comparator/"))
-        .cloned()
-        .collect();
-    (sources, pairs)
-}
-
-/// Writes a run's `files` into `dir`, with the project's packages, which are
-/// built already, as its own. A new run is written beside it and moved into
-/// place; a run already there gets only its configurations and README again,
-/// so that Lake finds what it built.
-fn write(dir: &Path, files: &[&ExportedFile], project: Option<&Path>) -> std::io::Result<()> {
-    let put = |root: &Path, f: &ExportedFile| -> std::io::Result<()> {
-        let path = root.join(&f.path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, &f.text)
-    };
-    if dir.is_dir() {
-        let _ = std::fs::remove_dir_all(dir.join("comparator"));
-        for f in files.iter().filter(|f| judging_only(&f.path)) {
-            put(dir, f)?;
-        }
-    } else {
-        let new = dir.with_extension("tmp");
-        let _ = std::fs::remove_dir_all(&new);
-        for f in files {
-            put(&new, f)?;
-        }
-        let packages = project.map(|p| p.join(".lake").join("packages"));
-        if let Some(packages) = packages.filter(|p| p.is_dir()) {
-            std::fs::create_dir_all(new.join(".lake"))?;
-            std::os::unix::fs::symlink(std::path::absolute(packages)?, new.join(".lake/packages"))?;
-        }
-        std::fs::rename(&new, dir)?;
-    }
-    // When it was last judged, for `evict`.
-    std::fs::write(dir.join(".used"), [])
-}
-
-/// Removes the runs in `runs` that were judged longest ago, keeping
-/// [`KEPT_RUNS`], `current` among them, and any being judged.
-fn evict(pool: &Pool, runs: &Path, current: &str) {
-    let Ok(entries) = std::fs::read_dir(runs) else {
-        return;
-    };
-    let mut kept: Vec<(std::time::SystemTime, String)> = entries
-        .filter_map(|e| {
-            let e = e.ok()?;
-            let name = e.file_name().into_string().ok()?;
-            let used = e.path().join(".used").metadata().ok()?.modified().ok()?;
-            (name != current && !name.ends_with(".tmp")).then_some((used, name))
-        })
-        .collect();
-    kept.sort();
-    let surplus = (kept.len() + 1).saturating_sub(KEPT_RUNS);
-    for (_, name) in kept.into_iter().take(surplus) {
-        let lock = pool.snapshots().lock(&format!("run:{name}"));
-        if let Ok(_free) = lock.try_lock() {
-            let _ = std::fs::remove_dir_all(runs.join(&name));
-        }
-    }
-}
-
-/// The lines with which comparator says what it is doing, so that the last
-/// one before an error says which step failed.
-const STEPS: [&str; 4] = ["Resolving dependencies", "Building", "Exporting", "Running"];
 
 /// The bundled kernels that check proofs with non-standard axioms, as Lake
 /// names them and runs them: their executables in the toolchain's `bin`, and
@@ -502,10 +471,24 @@ fn external_config(config: &str, bin: &Path) -> String {
     pretty(&config)
 }
 
-/// The arguments of `lake` for a pair's `config`: `--paranoid` runs every
-/// bundled kernel, unless the config names `external` kernels instead.
-fn comparator_args(config: &str, paranoid: bool, external: bool) -> Vec<&str> {
-    let mut args = vec!["comparator", "--config", config];
+/// The arguments of `lake` for a pair's `config`, judged on `exports` of
+/// its challenge and solution: `--paranoid` runs every bundled kernel, unless
+/// the config names `external` kernels instead.
+fn comparator_args<'a>(
+    config: &'a str,
+    exports: (&'a str, &'a str),
+    paranoid: bool,
+    external: bool,
+) -> Vec<&'a str> {
+    let mut args = vec![
+        "comparator",
+        "--challenge-from-export",
+        exports.0,
+        "--solution-from-export",
+        exports.1,
+        "--config",
+        config,
+    ];
     if paranoid && !external {
         args.push("--paranoid");
     }
@@ -589,10 +572,10 @@ fn with_cap(mut error: PairError, cap: Option<(&'static str, u64)>) -> PairError
 /// Why comparator didn't accept a pair, from how its run ended (`ran`, and
 /// `oom` if the worker's memory limit killed something meanwhile); `None`
 /// if it accepted it, which only its exit code says: its output can say
-/// anything, as the solution prints some of it. Comparator exits 0 for a
-/// pair it accepts, 2 when it can't start, and 1 for any error, a failed
-/// build in its sandbox included: its last error line, and the step it was
-/// on, tell them apart. That can only label a failure, never excuse one.
+/// anything, as a kernel prints some of it and a declaration's name is in
+/// its errors. Comparator exits 0 for a pair it accepts, 2 when it can't
+/// start, and 1 for any error: its last error line tells them apart. That
+/// can only label a failure, never excuse one.
 fn classify(ran: &Ran, oom: bool) -> Option<PairError> {
     if ran.code == Some(0) {
         return None;
@@ -611,15 +594,7 @@ fn classify(ran: &Ran, oom: bool) -> Option<PairError> {
         ),
         None => (PairErrorKind::Timeout, ran.output.clone()),
         Some(1) => {
-            let step = lines
-                .iter()
-                .rev()
-                .find(|l| STEPS.iter().any(|s| l.starts_with(s)));
             let kind = match error {
-                Some(e) if e.starts_with("Child exited with") => match step {
-                    Some(s) if s.starts_with("Resolving dependencies") => PairErrorKind::CannotRun,
-                    _ => PairErrorKind::BuildFailed,
-                },
                 Some(e) if e.starts_with("Error while interacting with") => {
                     PairErrorKind::CannotRun
                 }
@@ -650,8 +625,7 @@ fn file(path: &str, text: String) -> ExportedFile {
 
 /// The Lake configuration: the project's toolchain and manifest, and a
 /// lakefile with its requirements.
-#[doc(hidden)]
-pub fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedFile>, Error> {
+fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedFile>, Error> {
     let Some(project) = project else {
         // As in tests, which build nothing.
         let manifest = json!({"version": "1.3.0", "packagesDir": ".lake/packages",
@@ -1222,8 +1196,14 @@ mod tests {
                 external,
                 "{config} {paranoid}"
             );
-            let args = comparator_args("comparator/1.json", paranoid, external);
-            let mut expected = vec!["comparator", "--config", "comparator/1.json"];
+            let args = comparator_args("comparator/1.json", ("c", "s"), paranoid, external);
+            let mut expected = vec!["comparator", "--challenge-from-export", "c"];
+            expected.extend([
+                "--solution-from-export",
+                "s",
+                "--config",
+                "comparator/1.json",
+            ]);
             if paranoid && !external {
                 expected.push("--paranoid");
             }
@@ -1363,16 +1343,6 @@ mod tests {
             kind(&ran(Some(1), &kernel), false),
             Some(PairErrorKind::Refused)
         );
-        let unbuilt = "Resolving dependencies\nBuilding PisaSnap.sa\nerror: Child exited with 1\n";
-        assert_eq!(
-            kind(&ran(Some(1), unbuilt), false),
-            Some(PairErrorKind::BuildFailed)
-        );
-        let unresolved = "Resolving dependencies\nerror: Child exited with 1\n";
-        assert_eq!(
-            kind(&ran(Some(1), unresolved), false),
-            Some(PairErrorKind::CannotRun)
-        );
         let interacting = format!(
             "{built}Running nanoda kernel on solution\nError while interacting with nanoda kernel\n\
              error: Error while interacting with nanoda kernel: no such file\n"
@@ -1408,37 +1378,6 @@ mod tests {
             kind(&ran(Some(1), killed), true),
             Some(PairErrorKind::OutOfMemory)
         );
-    }
-
-    /// A run's directory is named by what Lake builds, so an export with
-    /// other configurations or README, as another `allow` gives, uses it.
-    #[test]
-    fn a_runs_key_is_what_lake_builds() {
-        let run = |files: &[(&str, &str)]| ExportedRun {
-            files: files.iter().map(|(p, t)| file(p, t.to_string())).collect(),
-            pairs: Vec::new(),
-            forks: Vec::new(),
-        };
-        let one = run(&[
-            ("PisaSnap/sa.lean", "theorem t : 1 = 1 := rfl"),
-            ("lakefile.toml", "name = \"pisa_run\""),
-            ("comparator/1.json", "{}"),
-            ("README.md", "one"),
-        ]);
-        let judged_otherwise = run(&[
-            ("README.md", "two"),
-            ("lakefile.toml", "name = \"pisa_run\""),
-            ("PisaSnap/sa.lean", "theorem t : 1 = 1 := rfl"),
-            ("comparator/1.json", "{\"definition_names\": [\"g\"]}"),
-            ("comparator/2.json", "{}"),
-        ]);
-        assert_eq!(key(&one), key(&judged_otherwise));
-        let other_code = run(&[
-            ("PisaSnap/sa.lean", "theorem t : 1 = 1 := by rfl"),
-            ("lakefile.toml", "name = \"pisa_run\""),
-        ]);
-        assert_ne!(key(&one), key(&other_code));
-        assert_eq!(key(&one).len(), 64);
     }
 
     /// With Mathlib, the README says to fetch its build first, as comparator

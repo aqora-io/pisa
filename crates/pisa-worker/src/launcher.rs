@@ -20,11 +20,15 @@ pub struct Launcher {
     repl: PathBuf,
     lean: PathBuf,
     lake: PathBuf,
+    /// `--lean-export`, if set; else the toolchain's own.
+    lean_export: Option<PathBuf>,
     tool: PathBuf,
     project: Option<PathBuf>,
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
     env: Option<Vec<(OsString, OsString)>>,
+    /// The project's module search path, before any root of snapshot modules.
+    base_path: Vec<PathBuf>,
     /// The project's module search path plus the snapshot cache and the
     /// `Pisa` library, for the REPL.
     lean_path: OsString,
@@ -34,6 +38,10 @@ pub struct Launcher {
     sandbox: Sandbox,
     work_dir: PathBuf,
     snapshot_root: PathBuf,
+    /// The pool version the worker serves.
+    version: String,
+    /// The project's toolchain's prefix, once [`toolchain_prefix`](Self::toolchain_prefix) found it.
+    prefix: tokio::sync::OnceCell<PathBuf>,
     cgroups: Option<Cgroups>,
 }
 
@@ -255,6 +263,21 @@ fn with_tail(message: String, tail: &str) -> String {
     }
 }
 
+/// Why [`Launcher::lean_export`] exported nothing.
+#[derive(Debug)]
+pub enum LeanExportError {
+    /// The worker couldn't run the exporter or watch it run: nothing about
+    /// the module.
+    Worker(String),
+    /// It ran past its time.
+    Timeout,
+    /// The slot's memory limit killed it.
+    OutOfMemory,
+    /// It exited with an error, as it does when the module lacks a target:
+    /// how, and the end of what it wrote to stderr.
+    Failed(String),
+}
+
 /// Why [`Launcher::export`] made no export.
 #[derive(Debug)]
 pub enum ExportError {
@@ -283,8 +306,10 @@ impl Launcher {
         // again from the store, so nothing stale survives a restart.
         let snapshot_root = work_dir.join("snapshots").join(version);
         let _ = std::fs::remove_dir_all(&snapshot_root);
-        // Runs comparator judged, kept for the next judgment of the same run;
-        // see `runs`.
+        // What judgments left, which none will finish now; see `runs`. And
+        // the runs that comparator built, before it judged exports, which
+        // no release reads any more.
+        let _ = std::fs::remove_dir_all(work_dir.join("judging"));
         let _ = std::fs::remove_dir_all(work_dir.join("runs"));
         std::fs::create_dir_all(snapshot_root.join(pisa_protocol::snapshot::ROOT))
             .with_context(|| format!("creating {}", snapshot_root.display()))?;
@@ -293,9 +318,8 @@ impl Launcher {
             .and_then(|env| env.iter().find(|(k, _)| k == "LEAN_PATH"))
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var_os("LEAN_PATH"));
-        let build_paths: Vec<PathBuf> = base
-            .iter()
-            .flat_map(std::env::split_paths)
+        let base_path: Vec<PathBuf> = base.iter().flat_map(std::env::split_paths).collect();
+        let build_paths: Vec<PathBuf> = (base_path.iter().cloned())
             .chain([snapshot_root.clone()])
             .collect();
         let build_path = std::env::join_paths(&build_paths).context("building LEAN_PATH")?;
@@ -332,14 +356,18 @@ impl Launcher {
             // Usually a bare `lean`, found on the project environment's PATH.
             lean: cfg.lean.clone(),
             lake: cfg.lake.clone(),
+            lean_export: cfg.lean_export.clone(),
             tool: cfg.tool.clone(),
             project: cfg.project.clone(),
             env,
+            base_path,
             lean_path,
             build_path,
             sandbox: cfg.sandbox,
             work_dir,
             snapshot_root,
+            version: version.to_string(),
+            prefix: tokio::sync::OnceCell::new(),
             cgroups,
         })
     }
@@ -368,10 +396,21 @@ impl Launcher {
         self.project.as_deref()
     }
 
-    /// Where runs exported for comparator are kept between judgments, each
-    /// built once.
-    pub fn runs_dir(&self) -> PathBuf {
-        self.work_dir.join("runs")
+    /// Where acceptance judges runs, each judgment in a private directory of
+    /// its own: emptied when the worker starts.
+    pub fn judging_dir(&self) -> PathBuf {
+        self.work_dir.join("judging")
+    }
+
+    /// Where acceptance keeps the exports of modules for comparator, which
+    /// outlive the worker.
+    pub fn exports_dir(&self) -> PathBuf {
+        self.work_dir.join("exports")
+    }
+
+    /// The pool version the worker serves.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     /// A private writable directory for the slot, visible inside the sandbox
@@ -406,17 +445,32 @@ impl Launcher {
         let dir = self.slot_dir(slot);
         std::fs::create_dir_all(&dir)?;
         let cwd = self.project.clone().unwrap_or_else(|| dir.clone());
+        let place = Place {
+            cwd: &cwd,
+            writable: Some(&dir),
+            read_only: &[&self.snapshot_root],
+        };
+        self.command_at(slot, program, args, lean_path, &place)
+    }
+
+    /// `program` with `args`, set up like a REPL for `slot` but in `place`.
+    fn command_at(
+        &self,
+        slot: usize,
+        program: &Path,
+        args: &[&str],
+        lean_path: &OsString,
+        place: &Place,
+    ) -> std::io::Result<Command> {
         let mut cmd = match self.sandbox {
             Sandbox::None => {
                 let mut cmd = Command::new(program);
-                cmd.current_dir(&cwd);
+                cmd.current_dir(place.cwd);
                 cmd
             }
             Sandbox::Bwrap => {
                 let mut cmd = Command::new("bwrap");
-                cmd.args(bwrap_args(&dir, &self.snapshot_root, &cwd))
-                    .arg("--")
-                    .arg(program);
+                cmd.args(bwrap_args(place)).arg("--").arg(program);
                 cmd
             }
         };
@@ -591,35 +645,135 @@ impl Launcher {
         })
     }
 
-    /// The `bin` of the toolchain that builds the project in `dir`, where
-    /// Lean's bundled kernels are, found as `lean --print-prefix` there says.
-    pub async fn toolchain_bin(&self, dir: &Path) -> std::io::Result<PathBuf> {
-        // Both `lean` and `lake` resolve through elan in `dir`, by its `lean-toolchain`.
-        let mut cmd = Command::new(&self.lean);
-        cmd.arg("--print-prefix")
-            .current_dir(dir)
-            .env_clear()
-            .stdin(Stdio::null());
-        for key in LAKE_ENV {
-            if let Some(value) = std::env::var_os(key) {
-                cmd.env(key, value);
+    /// The prefix of the toolchain that builds the project, where Lean's
+    /// bundled exporter and kernels are, as `lean --print-prefix` in the
+    /// project says. It is found once.
+    pub async fn toolchain_prefix(&self) -> std::io::Result<PathBuf> {
+        let found = self.prefix.get_or_try_init(|| async {
+            // `lean` resolves through elan by the project's `lean-toolchain`,
+            // as `lake` does.
+            let dir = self.project.as_deref().unwrap_or(&self.work_dir);
+            let mut cmd = Command::new(&self.lean);
+            cmd.arg("--print-prefix")
+                .current_dir(dir)
+                .env_clear()
+                .stdin(Stdio::null());
+            for key in LAKE_ENV {
+                if let Some(value) = std::env::var_os(key) {
+                    cmd.env(key, value);
+                }
             }
+            let out = cmd.output().await?;
+            let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !out.status.success() || prefix.is_empty() {
+                return Err(std::io::Error::other(format!(
+                    "`lean --print-prefix` gave no prefix: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )));
+            }
+            Ok(PathBuf::from(prefix))
+        });
+        found.await.cloned()
+    }
+
+    /// The exporter acceptance runs: `--lean-export`, or the toolchain's own
+    /// `leanexport`, which writes the export format of the compiler that
+    /// built the modules.
+    pub async fn lean_exporter(&self) -> std::io::Result<PathBuf> {
+        match &self.lean_export {
+            Some(exporter) => Ok(exporter.clone()),
+            None => Ok(self.toolchain_prefix().await?.join("bin/leanexport")),
         }
-        let out = cmd.output().await?;
-        let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !out.status.success() || prefix.is_empty() {
-            return Err(std::io::Error::other(format!(
-                "`lean --print-prefix` gave no prefix: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
+    }
+
+    /// Exports `targets` of `module`, a snapshot module under `root`, to
+    /// `output`, with Lean's bundled exporter, in the slot's sandbox and
+    /// cgroup, for at most `timeout`. `root` takes the place of the snapshot
+    /// cache on its search path: Lean looks a module up only in the first
+    /// root that has its top-level directory. The exporter can write nothing
+    /// but its output, and has `LEAN_SYSROOT`, so that it never runs a
+    /// `lean` it finds to ask for the toolchain, and `LEAN_ABORT_ON_PANIC`,
+    /// so that a target it can't find fails it instead of leaving it out.
+    pub async fn lean_export(
+        &self,
+        slot: usize,
+        root: &Path,
+        module: &str,
+        targets: &[String],
+        output: std::fs::File,
+        timeout: Duration,
+    ) -> Result<(), LeanExportError> {
+        let worker = |e: std::io::Error| LeanExportError::Worker(e.to_string());
+        let prefix = self.toolchain_prefix().await.map_err(worker)?;
+        let exporter = self.lean_exporter().await.map_err(worker)?;
+        let before = self.oom_kills(slot);
+        let mut cmd = self
+            .lean_export_command(slot, root, (module, targets), &prefix, &exporter)
+            .map_err(worker)?;
+        cmd.stdin(Stdio::null())
+            .stdout(output)
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().map_err(worker)?;
+        drop(cmd);
+        let stderr = child.stderr.take().map(read_tail);
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status.map_err(worker)?,
+            Err(_) => {
+                let _ = child.kill().await;
+                self.wait_idle(slot).await;
+                return Err(LeanExportError::Timeout);
+            }
+        };
+        if self.oom_kills(slot) > before {
+            return Err(LeanExportError::OutOfMemory);
         }
-        Ok(PathBuf::from(prefix).join("bin"))
+        if status.success() {
+            return Ok(());
+        }
+        let tail = match stderr {
+            Some(read) => read.await.unwrap_or_default(),
+            None => String::new(),
+        };
+        // A panic's backtrace says nothing of the module.
+        let tail = tail.split("\nbacktrace:").next().unwrap_or_default();
+        Err(LeanExportError::Failed(with_tail(
+            format!("it exited with {status}"),
+            tail,
+        )))
+    }
+
+    /// The command of [`lean_export`](Self::lean_export): `exporter` on
+    /// `export`, a module and its targets, with `prefix` as the sysroot.
+    fn lean_export_command(
+        &self,
+        slot: usize,
+        root: &Path,
+        export: (&str, &[String]),
+        prefix: &Path,
+        exporter: &Path,
+    ) -> std::io::Result<Command> {
+        let lean_path =
+            std::env::join_paths(self.base_path.iter().map(PathBuf::as_path).chain([root]))
+                .map_err(std::io::Error::other)?;
+        let mut args = vec![export.0, "--"];
+        args.extend(export.1.iter().map(String::as_str));
+        let place = Place {
+            cwd: self.project.as_deref().unwrap_or(root),
+            writable: None,
+            read_only: &[root],
+        };
+        let mut cmd = self.command_at(slot, exporter, &args, &lean_path, &place)?;
+        cmd.env("LEAN_SYSROOT", prefix)
+            .env("LEAN_ABORT_ON_PANIC", "1");
+        Ok(cmd)
     }
 
     /// Runs `lake` with `args` in `dir`, in `slot`'s cgroup but outside the
-    /// sandbox, for at most `timeout`: `lake comparator` sandboxes the code it
-    /// judges itself. Its stdout and stderr share one pipe, so that the
-    /// output keeps the order they were written in.
+    /// sandbox, for at most `timeout`, after which its code is `None`:
+    /// `lake comparator` sandboxes what it runs itself. Its stdout and stderr
+    /// share one pipe, so that the output keeps the order they were written
+    /// in.
     pub async fn lake(
         &self,
         slot: usize,
@@ -660,10 +814,7 @@ impl Launcher {
         };
         // A process Lake started may outlive it and keep the pipes open, so
         // take what was read by then.
-        let mut output = String::from_utf8_lossy(&output.finish().await).into_owned();
-        if code.is_none() {
-            output.push_str(&format!("\nlake ran for more than {}s", timeout.as_secs()));
-        }
+        let output = String::from_utf8_lossy(&output.finish().await).into_owned();
         self.wait_idle(slot).await;
         Ok(Ran { code, output })
     }
@@ -718,10 +869,23 @@ pub fn compile_args(root: &Path, file: &Path, olean: &Path) -> Vec<String> {
     ]
 }
 
+/// Where a process runs, and what of the worker's files it may write and
+/// read besides a read-only `/`.
+struct Place<'a> {
+    cwd: &'a Path,
+    /// The one directory it may write, the slot's for Lean; none for the
+    /// exporter.
+    writable: Option<&'a Path>,
+    /// Bound read-only after the sandbox's fresh `/tmp`, which may cover
+    /// them: the snapshot cache, or the modules of a judgment.
+    read_only: &'a [&'a Path],
+}
+
 /// No network, no view of other processes, a read-only filesystem except
-/// for the slot directory, and a fresh /tmp. The snapshot cache is bound
-/// read-only after the tmpfs, since it usually lives under /tmp.
-fn bwrap_args(slot_dir: &Path, snapshot_root: &Path, cwd: &Path) -> Vec<OsString> {
+/// for `place`'s writable directory, if it has one, and a fresh /tmp. Its
+/// read-only paths are bound after the tmpfs, since they usually live under
+/// /tmp.
+fn bwrap_args(place: &Place) -> Vec<OsString> {
     let mut args: Vec<OsString> = [
         "--unshare-all",
         "--die-with-parent",
@@ -739,13 +903,13 @@ fn bwrap_args(slot_dir: &Path, snapshot_root: &Path, cwd: &Path) -> Vec<OsString
     .into_iter()
     .map(OsString::from)
     .collect();
-    args.extend(["--bind".into(), slot_dir.into(), slot_dir.into()]);
-    args.extend([
-        "--ro-bind".into(),
-        snapshot_root.into(),
-        snapshot_root.into(),
-    ]);
-    args.extend(["--chdir".into(), cwd.into()]);
+    if let Some(dir) = place.writable {
+        args.extend(["--bind".into(), dir.into(), dir.into()]);
+    }
+    for path in place.read_only {
+        args.extend(["--ro-bind".into(), path.into(), path.into()]);
+    }
+    args.extend(["--chdir".into(), place.cwd.into()]);
     args
 }
 
@@ -889,6 +1053,66 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, super::ExportError::Export(_)), "{e:?}");
+    }
+
+    /// The exporter runs in the slot's sandbox with nothing of the worker's
+    /// writable, the judgment's modules in the snapshot cache's place on its
+    /// search path, a sysroot, so that it never asks a `lean` it finds for
+    /// one, and aborting on a panic, so that a missing target fails it.
+    #[tokio::test]
+    async fn the_exporter_runs_with_sysroot_and_abort_on_panic_and_no_writable_path() {
+        use clap::Parser;
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().to_str().unwrap().to_string();
+        let args = [
+            "pisa-worker",
+            "--database-url",
+            "x",
+            "--sandbox",
+            "bwrap",
+            "--work-dir",
+            &work,
+        ];
+        let cfg = crate::config::WorkerConfig::try_parse_from(args).unwrap();
+        let launcher = super::Launcher::new(&cfg, "w", "v").await.unwrap();
+        let root = launcher.judging_dir().join("j");
+        let targets = ["t".to_string(), "Nat".to_string()];
+        let cmd = launcher
+            .lean_export_command(
+                0,
+                &root,
+                ("PisaSnap.sa", &targets),
+                Path::new("/tc"),
+                Path::new("/tc/bin/leanexport"),
+            )
+            .unwrap();
+        let cmd = cmd.as_std();
+        assert_eq!(cmd.get_program(), "bwrap");
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        let (sandbox, run) = args.split_at(args.iter().position(|a| *a == "--").unwrap());
+        assert_eq!(
+            run,
+            ["--", "/tc/bin/leanexport", "PisaSnap.sa", "--", "t", "Nat"]
+        );
+        assert!(!sandbox.contains(&"--bind"), "{sandbox:?}");
+        let root = root.to_str().unwrap();
+        for bound in [["--ro-bind", "/", "/"], ["--ro-bind", root, root]] {
+            assert!(sandbox.windows(3).any(|w| w == bound), "{sandbox:?}");
+        }
+        assert!(sandbox.windows(2).any(|w| w == ["--tmpfs", "/tmp"]));
+        let env = |key: &str| {
+            let value = cmd.get_envs().find(|(k, _)| *k == key).and_then(|(_, v)| v);
+            value.map(|v| v.to_str().unwrap().to_string())
+        };
+        assert_eq!(env("LEAN_SYSROOT").as_deref(), Some("/tc"));
+        assert_eq!(env("LEAN_ABORT_ON_PANIC").as_deref(), Some("1"));
+        let roots: Vec<PathBuf> = std::env::split_paths(&env("LEAN_PATH").unwrap()).collect();
+        assert_eq!(roots.last(), Some(&PathBuf::from(root)), "{roots:?}");
+        assert!(
+            !roots.iter().any(|r| r == launcher.snapshot_root()),
+            "{roots:?}"
+        );
     }
 
     #[test]

@@ -58,11 +58,12 @@ PROJECT=lean-core docker compose up --build   # no Mathlib, for quick checks
 python3 scripts/e2e.py [--mathlib] [--search] [--beam]   # end-to-end checks against the running stack
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
 (cd docker/pisa-lean && lake build) && cargo test -p pisa-worker --test real_lean -- --ignored   # the report and the verifier on real Lean
+cargo test -p pisa-worker --test real_comparator -- --ignored   # acceptance on real Lean, which needs bwrap
 ```
 
 CI (`.github/workflows/ci.yml`) runs these on every pull request and push to
 main: the workspace's tests with PostgreSQL as well as SQLite, the real-Lean
-tests, the web and Python clients' tests, and `scripts/e2e.py` on a
+tests, acceptance's with bwrap, the web and Python clients' tests, and `scripts/e2e.py` on a
 `lean-core` stack, with `--beam` (and `PISA_BEAM_SLOTS=1`) but without
 `--mathlib` or `--search`.
 
@@ -233,6 +234,23 @@ and the rest of the API works.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that accepts runs on pisa's own builds:
+- `POST /snapshots/accept` builds nothing: comparator judges exports of the
+  modules pisa built when the snapshots were created (see
+  [Accepting a run](#comparator)). `build_timeout` is gone from the request
+  and from the clients' accept options, and `timeout` is a pair's exports
+  and comparator together.
+- An acceptance's pairs name the modules comparator judged by their hash:
+  `challenge_module` and `solution_module` are `spec_module` and
+  `head_module`, a named run's too. A pair whose module couldn't be exported
+  is `export_failed`; `build_failed` is only in acceptances stored before.
+- Workers run the toolchain's `leanexport` (`PISA_LEAN_EXPORT` names
+  another) and keep exports in their work directory's `exports/`. They
+  remove `runs/`, where comparator built runs, as they start.
+- A server of this release queues acceptances that a worker of the release
+  before would build with no time beyond `timeout`: upgrade the workers
+  with the servers.
 
 To the release that restarts after a reboot and names its commit:
 - Compose keeps Garage's and PostgreSQL's data in the named volumes
@@ -466,7 +484,7 @@ pnpm -C web generate
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; with `profile=palomar`, `pair=<n>`, `challenge_module`, `solution_module`, one pair as a Palomar package; see [Accepting a run](#comparator) |
-| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?, build_timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, kernels?: [{name, verdict, reason?}], output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
+| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, kernels?: [{name, verdict, reason?}], output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
 | `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
 | `GET /runs/{name}` | `?version=` → `{name, root, heads, module?, snapshot_id?}`: the run, and what `import PisaRun.<name>` resolves to when its heads are on one module; see [Naming a run](#run-names) |
@@ -1413,7 +1431,12 @@ GET /snapshots/audit?against=v4.35.0-1a2b3c4d~9c0e…
 <a id="comparator"></a>
 **Accepting a run.** The audit's comparison is pisa's own code.
 `lake comparator`, which Lean ships, judges a run with none of it, and
-accepting a run takes both:
+accepting a run takes both. "Accepted" means that comparator judged the
+modules pisa built and kernel-checked when the snapshots were created,
+exported with Lean's bundled `leanexport`, and found that each head proves
+its spec's theorems: acceptance builds nothing. The export is for others to judge the run
+with comparator outside pisa, from source; `scripts/e2e.py` checks that it
+builds with `lake build` and that comparator accepts it there.
 - **The export.** `GET /snapshots/export?against=<id>` (repeated, with
   `allow=` as for the audit) answers the run as a Lake project in
   `pisa-run/`, as a tar.gz:
@@ -1424,8 +1447,9 @@ accepting a run takes both:
     hash names. Other modules, those the pairs import among them, are
     `PisaSnap/s….lean`. Each file imports the others by those names, and the
     configurations name the modules the same way: the export is a renamed
-    build of what pisa built, and an acceptance's pairs record the names
-    comparator judged, `challenge_module` and `solution_module`;
+    build of what pisa built. Acceptance judges pisa's builds, with the same
+    configurations naming the modules by their hash, which its pairs record
+    as `challenge_module` and `solution_module`;
   - the worker project's `lean-toolchain` and `lake-manifest.json`, and a
     `lakefile.toml` that requires what the project requires and builds the
     modules with `autoImplicit` off, as pisa builds them;
@@ -1450,31 +1474,51 @@ accepting a run takes both:
   as `audit?against=` does with the same `allow`, and runs
   `lake comparator --paranoid` (without `--paranoid` and with `external_kernels` for a
   pair whose spec permits an axiom, as below) on a worker on exactly the pairs the audit
-  compared, each in turn, in one export so that each module builds once. The worker keeps the last 4 runs it
-  judged as they were built, by their modules and Lake configuration, so
-  judging the same run again, with another `allow` too, doesn't build it again. `paranoid: false` uses Lean's
-  kernel only, and `timeout` (default 600) is each pair's limit in seconds.
-  The first pair comparator runs builds the run's snapshot modules, which
-  later pairs replay, so it has `build_timeout` (default 1800) more. A pair
-  that runs out keeps what Lake printed until then in its `output`. A run
+  compared, each in turn:
+  - The worker links the module of each spec snapshot and head, and every
+    module it builds on, into a directory of the judgment's own: the files
+    pisa built and kernel-checked when the snapshots were created, each
+    checked against the SHA-256 its record holds. A snapshot deleted after
+    that takes nothing from the judgment.
+  - It exports each pair's two modules with the toolchain's `leanexport`, in
+    its sandbox, with nothing writable: the targets comparator would export,
+    the theorems, axioms and definition holes the configuration names and
+    the constants the kernel builds in. The exports are kept by what they are
+    made of (the modules' builds, the targets, the exporter and the pool
+    version), the 64 used last, so a module judged again isn't exported
+    again.
+  - Comparator judges the pair on the two exports
+    (`--challenge-from-export`, `--solution-from-export`), with the export's
+    configuration naming the modules by their hash. It builds nothing and
+    loads no project, so no code of the run runs while it is judged, and
+    nothing a pair or a judgment does reaches another.
+
+  `paranoid: false` uses Lean's kernel only, and `timeout` (default 600) is
+  each pair's limit in seconds, its two exports and comparator together. A
+  pair that runs out keeps what comparator printed until then in its
+  `output`. A run
   whose audit lists `unsettled` heads, which hold only through links, is a
   409 `conflict` at once, naming the settle to send first: comparator would
   judge records that read `sorry`. Nothing is stored.
   Each pair has comparator's `exit_code` (0 accepted, 1 refused or failed, 2
-  couldn't start, none past `timeout`) and the end of its `output`. A pair
+  couldn't start, none past `timeout` or when it didn't run) and the end of
+  its `output`. A pair
   not accepted says why in `error.kind`: `refused`, comparator's verdict;
-  `build_failed`, a module that didn't build in its sandbox; `timeout`;
+  `export_failed`, pisa couldn't export a module from its build, so
+  comparator didn't run; `timeout`;
   `out_of_memory`; `cannot_run`, comparator couldn't start or run its checks;
   `unsupported`, comparator's last error line says con-leche or con-ron
   exited with 2, in a run that ran them: they don't support a non-standard
   axiom;
   or `nothing_to_judge`, a spec that names no theorem comparator can judge,
-  for which it doesn't run. Only `refused` is a verdict on the proofs. The run
+  for which it doesn't run. `build_failed`, a module that didn't build in
+  comparator's sandbox, is only in acceptances stored while comparator built
+  the run. Only `refused` is a verdict on the proofs. The run
   is `accepted` when the audit is `clean` (`clean`, with the whole `audit`
   and the `heads` both judged), comparator accepted every pair, and there is
   one at least. Only comparator's exit code decides whether a pair is accepted,
-  never what it printed, which the solution's own build and the names in its
-  declarations can imitate.
+  never what it printed, which a kernel's output and the names in the
+  solution's declarations can imitate.
   With `paranoid`, comparator also runs the kernels Lean bundles, except when
   the spec permits a non-standard axiom: con-leche and con-ron don't support
   one, and `--paranoid` fails when they decline. Then pisa writes the
@@ -1498,8 +1542,9 @@ accepting a run takes both:
   over the record's 6 MiB is stored without its pairs' `output`, then
   without the review, and `truncated` says which. A pair that imports
   Mathlib takes about 25 s, or 45 s paranoid, so send it with
-  `Prefer: respond-async`. Or untar the export and run `lake comparator
-  --paranoid --config comparator/1.json` there: it needs `bwrap`. For a pair
+  `Prefer: respond-async`. Or untar the export, `lake build` it and run
+  `lake comparator --paranoid --config comparator/1.json` there: it needs
+  `bwrap`. For a pair
   whose spec permits an axiom of its own, `--paranoid` exits 1 when con-leche
   exits 2, though pisa accepts it: pisa runs it without `--paranoid`, with the
   kernels that support the axiom named in the configuration, to which you add
@@ -1590,11 +1635,21 @@ accepting a run takes both:
 
   New headers and names change what Lean builds: build the package, judge
   it with comparator, and cross-check it in pisa before publishing it.
-- **The worker.** Comparator runs on a REPL slot, in its cgroup and outside
-  pisa's sandbox, as it sandboxes the code it judges itself with `bwrap`,
-  with only `PATH`, `HOME`, `ELAN_HOME`, `LANG` and `TMPDIR` of the worker's
-  environment. It needs `/run/user`, which the worker image creates.
-  `PISA_LAKE` names `lake` (default `lake`).
+- **The worker.** A judgment takes a REPL slot. The exporter runs in pisa's
+  sandbox and the slot's cgroup, with the judgment's modules on its search
+  path in the snapshot cache's place, `LEAN_SYSROOT` the toolchain's prefix,
+  so that it never runs a `lean` it finds to ask for one, and
+  `LEAN_ABORT_ON_PANIC=1`, so that a target it can't find fails the export
+  instead of leaving it out. `PISA_LEAN_EXPORT` names it (default
+  `<prefix>/bin/leanexport`, `<prefix>` being `lean --print-prefix` in the
+  project). Comparator runs in the slot's cgroup and outside pisa's sandbox,
+  as it sandboxes the kernels itself with `bwrap`, with only `PATH`, `HOME`,
+  `ELAN_HOME`, `LANG` and `TMPDIR` of the worker's environment, in the
+  judgment's directory, where a copy of the project's `lean-toolchain` has
+  elan pick its `lake`. It needs `/run/user`, which the worker image
+  creates. `PISA_LAKE` names `lake` (default `lake`). A judgment's directory
+  goes when it is done, and any left at once when the worker starts; the
+  exports are kept in the work directory's `exports/` across restarts.
 
 <a id="agent-runs"></a>
 **Running agents on snapshots.** A leader hands targets to agents, and
@@ -2033,7 +2088,9 @@ proof is caught.
 Either way, the `.olean` is imported without re-checking, as with Mathlib's
 cache: whoever can write the store can still install an unchecked module, and
 the recorded SHA-256 catches only corruption, not a malicious write. The base
-Mathlib/Physlib oleans and the kernel are the trusted base.
+Mathlib/Physlib oleans and the kernel are the trusted base. Acceptance judges
+these same files, exported, not the stored code (see
+[Accepting a run](#comparator)): what it accepts is what the store holds.
 
 **Searching them.** The servers can search snapshot declarations, by
 label, next to Mathlib's; see [Snapshots in search](#snapshot-search).
@@ -2042,9 +2099,8 @@ label, next to Mathlib's; see [Snapshots in search](#snapshot-search).
 
 Each client takes a default version and timeout. A create that names a spec,
 with `replaces`, `amends` or `refutes`, runs on that spec's version and sends
-none; an acceptance has limits of its own, 600 s a pair and 1800 s more to
-build the run, which a call can set (`timeout`, `build_timeout`), and doesn't
-take the client's timeout.
+none; an acceptance has a limit of its own, 600 s a pair, which a call can
+set (`timeout`), and doesn't take the client's timeout.
 
 A client may also take a [scope](#scopes), which it sends with every request:
 `Client::with_scope` in Rust, `Client(url, scope={...})` in Python and

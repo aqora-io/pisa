@@ -23,6 +23,7 @@ import { parseList } from "../../labels.ts";
 const ERROR: Record<PairErrorKind, string> = {
   refused: "refused",
   build_failed: "a build failed",
+  export_failed: "an export failed",
   timeout: "ran out of time",
   out_of_memory: "ran out of memory",
   cannot_run: "couldn't run",

@@ -443,7 +443,7 @@ class AuditSnapshotsResponse(TypedDict):
     unsettled: NotRequired[list[AuditUnsettled]]
 
 class PairError(TypedDict):
-    kind: Literal["refused", "build_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge", "unsupported"]
+    kind: Literal["refused", "build_failed", "export_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge", "unsupported"]
     message: str
 
 class LeftOut(TypedDict):
@@ -471,14 +471,19 @@ class AcceptPair(TypedDict):
     # Their modules, `PisaSnap.s…`: the code judged, named when a snapshot goes.
     spec_module: NotRequired[str]
     head_module: NotRequired[str]
-    # Their modules as the export names them, which comparator judged: a
-    # named run's `PisaSpec.<name>` and `PisaRun.<name>`.
+    # The modules comparator judged: `spec_module` and `head_module`, pisa's
+    # own builds. An older acceptance names them as the export does, a named
+    # run's `PisaSpec.<name>` and `PisaRun.<name>`.
     challenge_module: NotRequired[str]
     solution_module: NotRequired[str]
+    # The pair's configuration in the export, `comparator/<n>.json`.
     config: str
     accepted: bool
     error: NotRequired[PairError]
+    # None when the pair ran out of time, a module's export failed, or
+    # comparator didn't run.
     exit_code: NotRequired[int]
+    # The end of what comparator printed.
     output: str
     # An accepted pair lists the kernels pisa configured, each `accepted`, and
     # `unsupported` for any left out; a failed pair lists them as comparator
@@ -1046,13 +1051,13 @@ class Client:
         allow: list[str] | None = None,
         paranoid: bool = True,
         timeout: int | None = None,
-        build_timeout: int | None = None,
     ) -> AcceptResponse:
         """Audit the run and run `lake comparator` on the pairs the audit
-        compared, and store the result. Paranoid runs the external kernels
-        Lean bundles too. `timeout` is each pair's limit and `build_timeout`
-        the first pair's more for building the run, the server's (600, 1800)
-        unless given: not the client's `timeout`."""
+        compared, and store the result. Comparator judges pisa's own builds
+        of the modules, exported, and builds nothing. Paranoid runs the
+        external kernels Lean bundles too. `timeout` is each pair's limit, for
+        its exports and comparator, the server's (600) unless given: not the
+        client's `timeout`."""
     def submit_accept_run(
         self,
         against: list[str],
@@ -1060,7 +1065,6 @@ class Client:
         allow: list[str] | None = None,
         paranoid: bool = True,
         timeout: int | None = None,
-        build_timeout: int | None = None,
     ) -> Job:
         """Like `accept_run`, as a job."""
     def get_acceptance(self, id: str) -> AcceptResponse:
@@ -1588,13 +1592,13 @@ class AsyncClient:
         allow: list[str] | None = None,
         paranoid: bool = True,
         timeout: int | None = None,
-        build_timeout: int | None = None,
     ) -> Future[AcceptResponse]:
         """Audit the run and run `lake comparator` on the pairs the audit
-        compared, and store the result. Paranoid runs the external kernels
-        Lean bundles too. `timeout` is each pair's limit and `build_timeout`
-        the first pair's more for building the run, the server's (600, 1800)
-        unless given: not the client's `timeout`."""
+        compared, and store the result. Comparator judges pisa's own builds
+        of the modules, exported, and builds nothing. Paranoid runs the
+        external kernels Lean bundles too. `timeout` is each pair's limit, for
+        its exports and comparator, the server's (600) unless given: not the
+        client's `timeout`."""
     def submit_accept_run(
         self,
         against: list[str],
@@ -1602,7 +1606,6 @@ class AsyncClient:
         allow: list[str] | None = None,
         paranoid: bool = True,
         timeout: int | None = None,
-        build_timeout: int | None = None,
     ) -> Future[Job]:
         """Like `accept_run`, as a job."""
     def get_acceptance(self, id: str) -> Future[AcceptResponse]:

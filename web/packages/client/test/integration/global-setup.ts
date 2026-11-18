@@ -46,9 +46,12 @@ export default async function setup(project: TestProject): Promise<() => void> {
     // Snapshots are built and re-checked by the `pisa` tool, here its stand-in.
     "--tool",
     join(BIN, "fake-pisa"),
-    // Runs are accepted with `lake comparator`, here a stand-in.
+    // Runs are accepted with `lake comparator`, here a stand-in, on modules
+    // exported with `leanexport`, here a stand-in too.
     "--lake",
     join(BIN, "fake-lake"),
+    "--lean-export",
+    join(BIN, "fake-leanexport"),
     // Sessions run on Lean Beam, here its stand-in.
     "--beam-slots",
     "1",

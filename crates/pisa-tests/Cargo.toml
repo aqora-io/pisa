@@ -22,6 +22,10 @@ path = "src/bin/fake-pisa.rs"
 name = "fake-lake"
 path = "src/bin/fake-lake.rs"
 
+[[bin]]
+name = "fake-leanexport"
+path = "src/bin/fake-leanexport.rs"
+
 # pisa-beam's stand-in for lean-beam-mcp, under a name of its own here.
 [[bin]]
 name = "fake-beam"

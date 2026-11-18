@@ -69,14 +69,14 @@ RUN cp /opt/project/lean-toolchain /opt/pisa/lean-toolchain \
     && cd /opt/pisa && lake build
 
 FROM lean AS worker
-# lake comparator builds a run's export on these packages, read-only in its
-# sandbox. A package that enables Lake's artifact cache, as Physlib does,
-# writes to its build files whenever Lake replays one; without the cache Lake
-# uses the builds where they are. The sandbox covers /run/user, which has to
-# exist for that. Lean Beam's `lake setup-file` replays what a document
-# imports on the packages, read-only too, and the first replay of a Mathlib
-# module that the project's build doesn't reach writes a build file, so
-# Mathlib is replayed here.
+# Lean Beam's `lake setup-file` replays what a document imports on these
+# packages, read-only. A package that enables Lake's artifact cache, as
+# Physlib does, writes to its build files whenever Lake replays one; without
+# the cache Lake uses the builds where they are. The first replay of a
+# Mathlib module that the project's build doesn't reach writes a build file,
+# so Mathlib is replayed here. lake comparator judges exports of the worker's
+# own builds and builds nothing; its sandbox covers /run/user, which has to
+# exist.
 RUN if [ -d /opt/project/.lake/packages ]; then \
         find /opt/project/.lake/packages -mindepth 2 -maxdepth 2 -name lakefile.toml \
             -exec sed -i -e '/^enableArtifactCache/d' -e '/^restoreAllArtifacts/d' {} +; \

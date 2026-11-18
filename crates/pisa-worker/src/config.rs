@@ -21,10 +21,15 @@ pub struct WorkerConfig {
     /// The `lean` executable, used to explain imports the REPL fails to load.
     #[arg(long, env = "PISA_LEAN", default_value = "lean")]
     pub lean: PathBuf,
-    /// `lake`, which runs `lake comparator` on a run's export. Elan's picks
-    /// the toolchain the export names, which is the project's.
+    /// `lake`, which runs `lake comparator` on the exports of a run's
+    /// modules. Elan's picks the toolchain of the project's `lean-toolchain`.
     #[arg(long, env = "PISA_LAKE", default_value = "lake")]
     pub lake: PathBuf,
+    /// Lean's bundled `leanexport`, which exports the snapshot modules
+    /// comparator judges. Defaults to the one in the toolchain of `--lean`,
+    /// as the project resolves it.
+    #[arg(long, env = "PISA_LEAN_EXPORT")]
+    pub lean_export: Option<PathBuf>,
     /// The `pisa` tool (`docker/pisa-lean`), which builds snapshot modules and
     /// re-verifies them through the kernel.
     #[arg(

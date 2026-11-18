@@ -140,6 +140,9 @@ impl Snapshots {
         let dir = root.join(snapshot::ROOT);
         let file = dir.join(format!("s{id}.lean"));
         let olean = file.with_extension("olean");
+        // The module is the files its compile writes here, which acceptance
+        // judges: what else is here, as code the slot ran may have left, goes.
+        let _ = tokio::fs::remove_dir_all(&dir).await;
         if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             return fail(outcome, internal(e));
         }

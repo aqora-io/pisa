@@ -191,10 +191,10 @@ export interface AuditParams {
   reviewLimit?: number;
 }
 
-/** An acceptance's limits: `timeout` for each pair (600 by default) and
- *  `buildTimeout` more for the first, which builds the run (1800). The
- *  server's unless given, not the client's timeout. */
-export type AcceptOptions = Omit<RunOptions, "version"> & { buildTimeout?: number };
+/** An acceptance's limit: `timeout` for each pair, its exports and
+ *  comparator (600 by default). The server's unless given, not the client's
+ *  timeout. */
+export type AcceptOptions = Omit<RunOptions, "version">;
 
 /** A session's check takes no version: the session's id carries it. Of
  *  `detail`, only `declarations` applies. */
@@ -605,7 +605,6 @@ export class PisaClient {
     // An acceptance has limits of its own, not the client's.
     const body: AcceptRequest = { against };
     if (options.timeout !== undefined) body.timeout = options.timeout;
-    if (options.buildTimeout !== undefined) body.build_timeout = options.buildTimeout;
     if (params.allow !== undefined && params.allow.length > 0) body.allow = params.allow;
     if (params.paranoid !== undefined) body.paranoid = params.paranoid;
     return body;

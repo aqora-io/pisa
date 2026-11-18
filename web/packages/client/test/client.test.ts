@@ -298,8 +298,8 @@ describe("PisaClient", () => {
       },
     });
     await client.acceptRun(["v2~s0"]);
-    await client.acceptRun(["v2~s0"], {}, { timeout: 900, buildTimeout: 3600 });
-    expect(sent).toEqual([{ against: ["v2~s0"] }, { against: ["v2~s0"], timeout: 900, build_timeout: 3600 }]);
+    await client.acceptRun(["v2~s0"], {}, { timeout: 900 });
+    expect(sent).toEqual([{ against: ["v2~s0"] }, { against: ["v2~s0"], timeout: 900 }]);
   });
 
   it("amends, refutes and resubmits", async () => {

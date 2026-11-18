@@ -11,13 +11,13 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
-    ACCEPT_BUILD_TIMEOUT, ACCEPT_TIMEOUT, AcceptRequest, AcceptResponse, Accepted, ApiErrors,
-    AuditSnapshotsResponse, CheckResult, CreateSnapshotRequest, CreateSnapshotResponse,
-    DEFAULT_REVIEW_LIMIT, DeleteSnapshotResponse, Detail, Error, ErrorKind, JobKind, JobStatus,
-    ListAcceptancesResponse, ListDependentsResponse, ListSnapshotsResponse, MAX_REASON,
-    MAX_REVIEW_LIMIT, PreferAsync, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
-    ResubmitSnapshotsRequest, ResubmitSnapshotsResponse, SettleRunRequest, Snapshot,
-    SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest, VerifySnapshotResponse,
+    ACCEPT_TIMEOUT, AcceptRequest, AcceptResponse, Accepted, ApiErrors, AuditSnapshotsResponse,
+    CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, DEFAULT_REVIEW_LIMIT,
+    DeleteSnapshotResponse, Detail, Error, ErrorKind, JobKind, JobStatus, ListAcceptancesResponse,
+    ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, MAX_REVIEW_LIMIT, PreferAsync,
+    RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
+    ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
+    UpdateSnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -641,8 +641,10 @@ fn run_version(against: &[String]) -> Result<String, ApiError> {
         project's toolchain, manifest and requirements, and a configuration in `comparator/` \
         for each spec snapshot and head it reaches. Each names the spec's theorems, its holes \
         and `allow` as definition holes, and the standard axioms and the spec's assumptions as \
-        permitted. `POST /snapshots/accept` runs comparator on it. With `profile=palomar`, one \
-        pair is a Palomar package in `palomar/` instead: its challenge and solution named \
+        permitted. It is for judging the run outside pisa: `POST /snapshots/accept` judges \
+        pisa's own builds of the same modules, with these configurations naming them by their \
+        hash. With `profile=palomar`, one pair is a Palomar package in `palomar/` instead: its \
+        challenge and solution named \
         `challenge_module` and `solution_module`, and every module the pair needs made a \
         module-system file; a `lakefile.toml` that requires Mathlib alone, at the commit the \
         worker's manifest resolved, and that manifest without the worker's other packages, \
@@ -803,8 +805,10 @@ fn tarball(run: &ExportedRun, root: &str) -> std::io::Result<Vec<u8>> {
     summary = "Judge a run and store the verdict",
     description = "Audits the run that the spec snapshots start, as `GET /snapshots/audit` \
         does, and runs `lake comparator`, which shares no code with the audit, on exactly the \
-        pairs the audit compared, each spec snapshot against each head it reaches, in the run's \
-        export (`GET /snapshots/export`). A head passes comparator if each theorem of the spec \
+        pairs the audit compared, each spec snapshot against each head it reaches. Comparator \
+        judges the modules pisa built and kernel-checked when the snapshots were created, \
+        exported with Lean's bundled `leanexport`, and builds nothing; its configurations are \
+        the export's (`GET /snapshots/export`). A head passes comparator if each theorem of the spec \
         is proved there with the same statement, the definitions those statements use are the \
         same but for the spec's holes and `allow`, and the proofs use only the standard axioms \
         and the spec's assumptions. The run is `accepted` when the audit is `clean` and \
@@ -839,7 +843,7 @@ pub async fn accept(
         allow: req.allow,
         paranoid: req.paranoid,
         timeout_secs: req.timeout.unwrap_or(ACCEPT_TIMEOUT),
-        build_timeout_secs: req.build_timeout.unwrap_or(ACCEPT_BUILD_TIMEOUT),
+        build_timeout_secs: 0,
     });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::AcceptRun, p).await

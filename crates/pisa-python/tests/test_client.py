@@ -53,8 +53,9 @@ def url(db):
          "--slots", "2", "--repl", BIN / "fake-repl", "--lean", BIN / "fake-lean",
          # Snapshots are built and re-checked by the `pisa` tool, here its stand-in.
          "--tool", BIN / "fake-pisa",
-         # Runs are accepted with `lake comparator`, here a stand-in.
-         "--lake", BIN / "fake-lake",
+         # Runs are accepted with `lake comparator`, here a stand-in, on modules
+         # exported with `leanexport`, here a stand-in too.
+         "--lake", BIN / "fake-lake", "--lean-export", BIN / "fake-leanexport",
          # Sessions run on Lean Beam, here its stand-in.
          "--beam-slots", "1", "--beam-bin", BIN / "fake-beam"],
         env=env,

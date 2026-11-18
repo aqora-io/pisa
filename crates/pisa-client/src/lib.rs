@@ -282,12 +282,9 @@ pub struct AcceptOptions {
     pub allow: Vec<String>,
     /// Also run the external kernels Lean bundles (true by default).
     pub paranoid: bool,
-    /// Each pair's limit in seconds; the server's default (600) unless set,
-    /// not the client's timeout.
+    /// Each pair's limit in seconds, for its exports and comparator; the
+    /// server's default (600) unless set, not the client's timeout.
     pub timeout: Option<u64>,
-    /// Seconds more for the first pair, which builds the run's modules; the
-    /// server's default (1800) unless set.
-    pub build_timeout: Option<u64>,
 }
 
 impl Default for AcceptOptions {
@@ -296,7 +293,6 @@ impl Default for AcceptOptions {
             allow: Vec::new(),
             paranoid: true,
             timeout: None,
-            build_timeout: None,
         }
     }
 }
@@ -1709,7 +1705,6 @@ impl Client {
             allow: options.allow.clone(),
             paranoid: options.paranoid,
             timeout: options.timeout,
-            build_timeout: options.build_timeout,
         })
     }
 
@@ -2066,7 +2061,7 @@ mod tests {
         let req = c
             .accept_request(["b~s"], &AcceptOptions::default())
             .unwrap();
-        assert_eq!((req.timeout, req.build_timeout), (None, None));
+        assert_eq!(req.timeout, None);
         let asked = AcceptOptions {
             timeout: Some(900),
             ..Default::default()

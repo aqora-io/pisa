@@ -710,7 +710,7 @@ impl Base {
         })
     }
 
-    #[pyo3(signature = (against, *, allow = None, paranoid = true, timeout = None, build_timeout = None))]
+    #[pyo3(signature = (against, *, allow = None, paranoid = true, timeout = None))]
     fn accept_run<'py>(
         &self,
         py: Python<'py>,
@@ -718,19 +718,17 @@ impl Base {
         allow: Option<Vec<String>>,
         paranoid: bool,
         timeout: Option<u64>,
-        build_timeout: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let opts = pisa_client::AcceptOptions {
             allow: allow.unwrap_or_default(),
             paranoid,
             timeout,
-            build_timeout,
         };
         self.call(py, async move { inner.accept_run(&against, &opts).await })
     }
 
-    #[pyo3(signature = (against, *, allow = None, paranoid = true, timeout = None, build_timeout = None))]
+    #[pyo3(signature = (against, *, allow = None, paranoid = true, timeout = None))]
     fn submit_accept_run<'py>(
         &self,
         py: Python<'py>,
@@ -738,14 +736,12 @@ impl Base {
         allow: Option<Vec<String>>,
         paranoid: bool,
         timeout: Option<u64>,
-        build_timeout: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         let opts = pisa_client::AcceptOptions {
             allow: allow.unwrap_or_default(),
             paranoid,
             timeout,
-            build_timeout,
         };
         self.call(py, async move {
             Ok(queued(inner.submit_accept_run(&against, &opts).await?))

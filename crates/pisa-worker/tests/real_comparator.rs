@@ -1,13 +1,13 @@
 //! `lake comparator` as acceptance runs it, on real Lean: snapshot modules
 //! are built as a worker builds them, and a run's pairs judged with
-//! [`runs::judge`]. What a judged solution's code does while it is judged
-//! must not reach what comparator judges after it: the next pair's
-//! challenge, a later judgment's, or the programs an export runs. The judged
-//! code here runs with `#eval`, which a worker's policy refuses unless it
-//! allows metaprogramming, so these test the comparator layer, not what a
-//! default worker would store. Each test needs elan on `PATH`,
-//! `docker/pisa-lean` built and a `bwrap` that works, so they are ignored by
-//! default:
+//! [`runs::judge`], on exports of those builds. What a judged solution's
+//! code does when it is built must not reach what comparator judges after
+//! it: the next pair's challenge, a later judgment's, or the programs an
+//! export runs. The judged code here runs with `#eval`, which a worker's
+//! policy refuses unless it allows metaprogramming, so these test the
+//! comparator layer, not what a default worker would store. Each test needs
+//! elan on `PATH`, `docker/pisa-lean` built and a `bwrap` that works, so they
+//! are ignored by default:
 //!
 //! ```text
 //! (cd docker/pisa-lean && lake build)
@@ -16,17 +16,20 @@
 
 mod lean;
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
-use pisa_protocol::api::PairErrorKind;
+use pisa_protocol::api::{KernelOutcome, PairErrorKind};
 use pisa_protocol::repl::Severity;
 use pisa_protocol::snapshot;
-use pisa_protocol::wire::ExportedFile;
 use pisa_worker::WorkerConfig;
+use pisa_worker::catalog::{Module, ModuleFile};
 use pisa_worker::launcher::Launcher;
 use pisa_worker::runs::{self, JudgeOptions, Judgment, ModulesToJudge, PairToJudge};
+use sha2::{Digest, Sha256};
 
 use lean::docker;
 
@@ -97,6 +100,8 @@ struct Harness {
     launcher: Launcher,
     project: tempfile::TempDir,
     _work: tempfile::TempDir,
+    /// How many judgments it has run, which names the next one's directory.
+    judgments: AtomicUsize,
 }
 
 fn bwrap_works() -> bool {
@@ -158,19 +163,21 @@ impl Harness {
             launcher,
             project,
             _work: work,
+            judgments: AtomicUsize::new(0),
         }
     }
 
     /// Builds each of `codes` as a worker builds a snapshot, compiled in
     /// the slot's sandbox and its files moved into the snapshot root as
-    /// `install` moves them, and gives the modules to judge them on.
+    /// `install` moves them, and gives the modules to judge them on: the
+    /// snapshot root, and each module's record of its build, which imports
+    /// nothing of the others.
     async fn build(&self, codes: &[&str]) -> ModulesToJudge {
         let root = self.launcher.slot_dir(SLOT).join("build");
         let dir = root.join(snapshot::ROOT);
         std::fs::create_dir_all(&dir).unwrap();
         let installed = self.launcher.snapshot_root().join(snapshot::ROOT);
-        let mut sources =
-            runs::project_files(Some(self.project.path()), &[snapshot::ROOT]).unwrap();
+        let mut closures = HashMap::new();
         for code in codes {
             let id = snapshot::id(code);
             let file = dir.join(format!("s{id}.lean"));
@@ -189,34 +196,65 @@ impl Harness {
                 "building s{id} failed: {compiled:?}"
             );
             let prefix = format!("s{id}.");
+            let mut files = Vec::new();
             for entry in std::fs::read_dir(&dir).unwrap() {
                 let name = entry.unwrap().file_name().into_string().unwrap();
-                if name.strip_prefix(&prefix).is_some_and(|ext| ext != "lean") {
-                    std::fs::rename(dir.join(&name), installed.join(&name)).unwrap();
-                }
+                let Some(ext) = name.strip_prefix(&prefix).filter(|ext| *ext != "lean") else {
+                    continue;
+                };
+                let bytes = std::fs::read(dir.join(&name)).unwrap();
+                files.push(ModuleFile {
+                    ext: ext.to_string(),
+                    sha256: hex::encode(Sha256::digest(&bytes)),
+                });
+                std::fs::rename(dir.join(&name), installed.join(&name)).unwrap();
             }
-            sources.push(ExportedFile {
-                path: format!("{}/s{id}.lean", snapshot::ROOT),
-                text: code.to_string(),
-            });
+            let module = Module {
+                id: id.clone(),
+                build: "real-comparator".into(),
+                files,
+            };
+            closures.insert(snapshot::module(&id), vec![module]);
         }
         ModulesToJudge {
-            root: self.launcher.runs_dir().join("run"),
-            sources,
+            root: self.launcher.snapshot_root().to_path_buf(),
+            closures,
         }
     }
 
     /// Judges `pairs` on `modules` as acceptance does, without `--paranoid`.
     async fn judge(&self, modules: &ModulesToJudge, pairs: &[PairToJudge]) -> Vec<Judgment> {
+        self.judge_with(modules, pairs, false).await
+    }
+
+    /// Judges `pairs` on `modules` as acceptance does: in a directory of the
+    /// judgment's own, which holds links of the modules' files.
+    async fn judge_with(
+        &self,
+        modules: &ModulesToJudge,
+        pairs: &[PairToJudge],
+        paranoid: bool,
+    ) -> Vec<Judgment> {
+        let n = self.judgments.fetch_add(1, Ordering::Relaxed);
+        let root = self.launcher.judging_dir().join(n.to_string());
+        let into = root.join(snapshot::ROOT);
+        std::fs::create_dir_all(&into).unwrap();
+        for entry in std::fs::read_dir(modules.root.join(snapshot::ROOT)).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::hard_link(entry.path(), into.join(entry.file_name())).unwrap();
+        }
+        let judging = ModulesToJudge {
+            root,
+            closures: modules.closures.clone(),
+        };
         let options = JudgeOptions {
-            paranoid: false,
+            paranoid,
             timeout: Duration::from_secs(300),
-            build_timeout: Duration::from_secs(300),
         };
         let judged = runs::judge(
             &self.launcher,
             SLOT,
-            modules,
+            &judging,
             Some(self.project.path()),
             pairs,
             &options,
@@ -239,13 +277,18 @@ impl Harness {
 /// A pair as pisa configures it: `spec`'s module the challenge and `head`'s
 /// the solution, compared on `theorem`, with the standard axioms.
 fn pair(spec: &str, head: &str, theorem: &str) -> PairToJudge {
+    pair_with(spec, head, theorem, &[])
+}
+
+/// [`pair`] with `holes` as its definition holes.
+fn pair_with(spec: &str, head: &str, theorem: &str, holes: &[&str]) -> PairToJudge {
     let spec = snapshot::module(&snapshot::id(spec));
     let head = snapshot::module(&snapshot::id(head));
     let configuration = serde_json::json!({
         "challenge_module": spec,
         "solution_module": head,
         "theorem_names": [theorem],
-        "definition_names": [],
+        "definition_names": holes,
         "permitted_axioms": ["propext", "Quot.sound", "Classical.choice"],
     });
     PairToJudge {
@@ -282,11 +325,10 @@ async fn the_harness_judges_a_good_pair_and_a_mismatch() {
     assert_mismatch(&judged[1]);
 }
 
-/// E's code, run as Lake builds E for the first pair, writes over the
-/// `.olean` of S, the next pair's challenge too. Lake replays S from it, as
-/// its trace is intact, so comparator would compare H with a forged S.
-///
-/// Expected to fail until acceptance stops building in a shared `.lake`.
+/// E's code, were it run as Lake builds E for the first pair, would write
+/// over the `.olean` of S, the next pair's challenge too: Lake would replay
+/// S from it, as its trace is intact, and comparator would compare H with a
+/// forged S. Judged on exports of pisa's builds, nothing is built.
 #[tokio::test]
 #[ignore = "real Lean and bwrap"]
 async fn a_pair_cannot_forge_the_next_pairs_challenge() {
@@ -299,10 +341,9 @@ async fn a_pair_cannot_forge_the_next_pairs_challenge() {
     assert_mismatch(&judged[1]);
 }
 
-/// A judgment of E against S leaves its forged S behind, in the run's
-/// directory, for a later judgment of a run with the same modules.
-///
-/// Expected to fail until acceptance stops building in a shared `.lake`.
+/// A judgment of E against S, were E built for it, would leave its forged S
+/// behind for a later judgment of a run with the same modules. Each judgment
+/// has a directory of its own, and an export is kept by what it is made of.
 #[tokio::test]
 #[ignore = "real Lean and bwrap"]
 async fn a_rejudgment_cannot_use_what_the_last_one_left() {
@@ -314,10 +355,9 @@ async fn a_rejudgment_cannot_use_what_the_last_one_left() {
     assert_mismatch(&judged[0]);
 }
 
-/// P's code, run as Lake builds P, plants a `lean` that the exporter runs
-/// to find its prefix: for P's own export and for every export after it.
-///
-/// Expected to fail until acceptance stops building in a shared `.lake`.
+/// P's code, were it run as Lake builds P, would plant a `lean` that the
+/// exporter runs to find its prefix: for P's own export and for every export
+/// after it. pisa's exporter is told its prefix, and builds nothing.
 #[tokio::test]
 #[ignore = "real Lean and bwrap"]
 async fn an_export_runs_no_program_the_judged_code_wrote() {
@@ -340,4 +380,103 @@ async fn an_export_runs_no_program_the_judged_code_wrote() {
             j.output
         );
     }
+}
+
+/// A spec with a hole, and a head that fills it and proves the spec's
+/// theorem, are accepted from the exports of their builds, by every kernel
+/// Lean bundles and Lean's own.
+#[tokio::test]
+#[ignore = "real Lean and bwrap"]
+async fn a_spec_and_head_are_accepted_from_their_exports() {
+    let h = Harness::new().await;
+    let spec = "def cost : Nat := sorry\ntheorem t : cost = cost := sorry\n";
+    let head = "def cost : Nat := 3\ntheorem t : cost = cost := rfl\n";
+    let modules = h.build(&[spec, head]).await;
+    let judged = h
+        .judge_with(&modules, &[pair_with(spec, head, "t", &["cost"])], true)
+        .await;
+    assert!(
+        judged[0].error.is_none() && judged[0].exit_code == Some(0),
+        "{}",
+        judged[0].output
+    );
+    assert!(judged[0].output.contains("Your solution is okay!"));
+    let kernels: Vec<(&str, KernelOutcome)> = (judged[0].kernels.iter())
+        .map(|k| (k.name.as_str(), k.verdict))
+        .collect();
+    let names = [
+        "Lean paranoid",
+        "lean4lean",
+        "nanoda",
+        "con-leche",
+        "con-ron",
+        "Lean default",
+    ];
+    assert_eq!(kernels, names.map(|n| (n, KernelOutcome::Accepted)));
+    // Each kernel ran, as comparator says.
+    for name in names {
+        let ran = format!("{name} kernel accepts the solution");
+        assert!(
+            judged[0].output.contains(&ran),
+            "{name}: {}",
+            judged[0].output
+        );
+    }
+}
+
+/// pisa exports a pair's modules with the targets Lake's own comparator
+/// exports, in its order: as it prints them when it builds the challenge
+/// itself and exports it.
+#[tokio::test]
+#[ignore = "real Lean and bwrap"]
+async fn exports_name_the_targets_lake_would() {
+    assert!(bwrap_works(), "bwrap can't sandbox here");
+    let dir = tempfile::tempdir().unwrap();
+    let put = |path: &str, text: &str| {
+        let path = dir.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let toolchain = std::fs::read_to_string(docker().join("lean-core/lean-toolchain")).unwrap();
+    put("lean-toolchain", &toolchain);
+    put(
+        "lakefile.toml",
+        "name = \"drift\"\ndefaultTargets = [\"PisaSnap\"]\n\n\
+         [[lean_lib]]\nname = \"PisaSnap\"\nglobs = [\"PisaSnap.+\"]\n",
+    );
+    put(
+        "lake-manifest.json",
+        r#"{"version": "1.3.0", "packagesDir": ".lake/packages", "packages": [],
+            "name": "drift", "lakeDir": ".lake", "fixedToolchain": false}"#,
+    );
+    put(
+        "PisaSnap/sa.lean",
+        "def cost : Nat := 1\naxiom lit : 1 = 1\ntheorem t : cost = cost := rfl\n\
+         theorem u : 1 = 1 := lit\n",
+    );
+    let configuration = serde_json::json!({
+        "challenge_module": "PisaSnap.sa",
+        "solution_module": "PisaSnap.sa",
+        "theorem_names": ["t", "u"],
+        "definition_names": ["cost"],
+        "permitted_axioms": ["propext", "Quot.sound", "Classical.choice", "lit"],
+    })
+    .to_string();
+    put("comparator.json", &configuration);
+    let out = std::process::Command::new("lake")
+        .args(["comparator", "--config", "comparator.json"])
+        .current_dir(dir.path())
+        .output()
+        .expect("running lake (is elan on PATH?)");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let line = (stdout.lines())
+        .find_map(|l| l.strip_prefix("Exporting #["))
+        .unwrap_or_else(|| {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            panic!("Lake exported nothing:\n{stdout}\n{stderr}")
+        });
+    let (names, module) = line.split_once("] from ").unwrap();
+    assert_eq!(module, "PisaSnap.sa");
+    let lakes: Vec<&str> = names.split(", ").collect();
+    assert_eq!(runs::export_targets(&configuration), lakes);
 }

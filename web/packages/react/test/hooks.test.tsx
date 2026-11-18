@@ -437,11 +437,11 @@ describe("accepting a run", () => {
       call.method === "POST" ? new Response(JSON.stringify(job), { status: 202 }) : envelope(job, { accepted: true, pairs: [] }),
     );
     const { result } = renderHook(() => useAcceptRun(), { wrapper: wrapper(client) });
-    await act(() => result.current.mutateAsync({ against: ["v~s"], paranoid: false, timeout: 900, buildTimeout: 3600 }));
+    await act(() => result.current.mutateAsync({ against: ["v~s"], paranoid: false, timeout: 900 }));
     expect(result.current.data?.accepted).toBe(true);
     expect(calls[0]).toMatchObject({
       path: "/snapshots/accept",
-      body: { against: ["v~s"], paranoid: false, timeout: 900, build_timeout: 3600 },
+      body: { against: ["v~s"], paranoid: false, timeout: 900 },
     });
     expect(calls[0]?.headers["prefer"]).toBe("respond-async");
   });

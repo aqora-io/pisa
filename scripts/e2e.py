@@ -558,12 +558,14 @@ def run_names(outside):
         assert f"pisa-run/{path}" in names, names
     judged = {("PisaSpec.e2e.main", "PisaRun.e2e.main"), ("PisaSpec.e2e.lemma", "PisaRun.e2e.lemma")}
     assert {(c["challenge_module"], c["solution_module"]) for c in configs} == judged, configs
+    # Acceptance judges pisa's own builds, named by their hash.
     verdict = post("/snapshots/accept", {"against": specs})
     assert verdict["accepted"] and verdict["clean"], verdict
-    assert {(p["challenge_module"], p["solution_module"]) for p in verdict["pairs"]} == judged, verdict
+    assert all((p["challenge_module"], p["solution_module"]) == (p["spec_module"], p["head_module"])
+               for p in verdict["pairs"]), verdict
     if outside:
         built_outside(archive)
-    step("run names: the export names each pair by its run, builds and is accepted")
+    step("run names: the export names each pair by its run, builds, and the run is accepted")
 
     # Named again, the run keeps one name.
     status, run = call("PUT", "/runs/e2e.renamed", {"snapshot_id": resent["snapshot"]["id"]})

@@ -72,6 +72,7 @@ mod reexport;
 mod tests;
 mod verify;
 
+pub(crate) use cache::link_or_copy;
 use cache::*;
 use create::*;
 pub use delete::FileSweep;

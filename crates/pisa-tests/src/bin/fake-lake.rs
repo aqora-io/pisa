@@ -1,30 +1,111 @@
-//! A stand-in for `lake comparator` in tests. It reads the configuration,
-//! checks that the challenge's and the solution's files are there, and judges
-//! the solution by its text, printing its steps and its errors as comparator
-//! does (`Resolving dependencies`, `Building <module>`, then `error: …` on
-//! stderr):
+//! A stand-in for `lake comparator` in tests, as pisa runs it: on the
+//! challenge's and the solution's exports (`--challenge-from-export` and
+//! `--solution-from-export`, as fake-leanexport writes them), building
+//! nothing. Without both it can't start (exit 2), and so it can't with an
+//! export of another module than the configuration names, or of other targets
+//! than Lake would export, in Lake's order. Then it reads the configuration
+//! and judges the solution by its code, printing its errors as comparator
+//! does (`error: …` on stderr):
 //! - a solution that says `sorry` is refused for its axiom, and one that says
 //!   `SLEEP` takes 5 s;
 //! - a definition name that isn't a `def` in both modules is refused, as
 //!   comparator refuses one that isn't a definition;
-//! - a module that says `BUILD_FAIL` fails to build, and one that says
-//!   `CANNOT_RUN` keeps it from starting (exit 2);
+//! - a module that says `CANNOT_RUN` keeps it from starting (exit 2);
 //! - it runs the kernels `--paranoid` names, or those of the configuration's
 //!   `external_kernels`, and then Lean's own: a solution that says
 //!   `KERNEL_DECLINE` has con-leche and con-ron decline it (exit 2), and one
-//!   that says `KERNEL_REJECT` has nanoda reject it;
-//! - a module that says `SLOW_BUILD` takes 3 s to build, the first time.
+//!   that says `KERNEL_REJECT` has nanoda reject it.
 //!
-//! It prints its arguments first, for tests to read. It "builds" each module
-//! once in the project: `Built <module>` the first time, with a mark under
-//! `.lake/build`, and `Replayed <module>` after.
+//! It prints its arguments first, for tests to read.
 
-use std::path::Path;
 use std::process::exit;
+
+use serde_json::Value;
 
 fn fail(message: &str) -> ! {
     eprintln!("error: {message}");
     exit(1);
+}
+
+fn cannot_run(message: &str) -> ! {
+    eprintln!("error: {message}");
+    exit(2);
+}
+
+/// The constants the kernel builds in, which Lake exports from both sides
+/// after the theorems and axioms, as Lake 4.36.0-rc2's `CLI/Check.lean`
+/// lists them (`primitiveTargets`).
+const PRIMITIVES: [&str; 26] = [
+    "Nat.add",
+    "Nat.sub",
+    "Nat.mul",
+    "Nat.pow",
+    "Nat.gcd",
+    "Nat.div",
+    "Nat.mod",
+    "Nat.beq",
+    "Nat.ble",
+    "Nat.land",
+    "Nat.lor",
+    "Nat.xor",
+    "Nat.shiftLeft",
+    "Nat.shiftRight",
+    "String.ofList",
+    "Char.ofNat",
+    "List",
+    "eagerReduce",
+    "Nat",
+    "String",
+    "String.mk",
+    "Char",
+    "optParam",
+    "autoParam",
+    "semiOutParam",
+    "outParam",
+];
+
+/// What Lake exports of each module for `config`: `Quot` and its parts if
+/// `Quot.sound` is permitted, the theorems, the permitted axioms, the
+/// kernel's own constants, and the definition holes.
+fn targets(config: &Value) -> Vec<String> {
+    let names = |key: &str| -> Vec<String> {
+        let names = config[key].as_array().into_iter().flatten();
+        names.filter_map(Value::as_str).map(String::from).collect()
+    };
+    let axioms = names("permitted_axioms");
+    let mut targets = Vec::new();
+    if axioms.iter().any(|a| a == "Quot.sound") {
+        targets.extend(["Quot", "Quot.mk", "Quot.lift", "Quot.ind"].map(String::from));
+    }
+    targets.extend(names("theorem_names"));
+    targets.extend(axioms);
+    targets.extend(PRIMITIVES.map(String::from));
+    targets.extend(names("definition_names"));
+    targets
+}
+
+/// The code of the module exported to `path` as `config[key]` names it,
+/// which must be what it exported, and of [`targets`].
+fn exported(path: &str, config: &Value, key: &str) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        cannot_run(&format!("could not read the export {path}"));
+    };
+    let export: Value = serde_json::from_str(&text).unwrap();
+    let module = config[key].as_str().unwrap_or_default();
+    if export["module"] != module {
+        cannot_run(&format!(
+            "{path} exports {}, where the configuration's {key} is {module}",
+            export["module"]
+        ));
+    }
+    let wanted = targets(config);
+    let given: Vec<String> = serde_json::from_value(export["targets"].clone()).unwrap();
+    if given != wanted {
+        cannot_run(&format!(
+            "{path} exports {given:?}, where Lake would export {wanted:?}"
+        ));
+    }
+    export["code"].as_str().unwrap_or_default().to_string()
 }
 
 /// Runs the kernels as comparator does, each printing `Running`, its own
@@ -62,45 +143,23 @@ fn main() {
         exit(2);
     }
     println!("fake-lake {}", args.join(" "));
-    let config = args
-        .windows(2)
-        .find(|w| w[0] == "--config")
-        .map_or("comparator.json", |w| w[1].as_str());
-    let Ok(text) = std::fs::read_to_string(config) else {
-        eprintln!("error: could not read the configuration {config}");
-        exit(2);
+    let flag = |name: &str| args.windows(2).find(|w| w[0] == name).map(|w| w[1].clone());
+    let (Some(challenge), Some(solution)) = (
+        flag("--challenge-from-export"),
+        flag("--solution-from-export"),
+    ) else {
+        cannot_run("the fake comparator judges exports only: it would build the modules");
     };
-    let config: serde_json::Value = serde_json::from_str(&text).unwrap();
-    println!("Resolving dependencies");
-    let mut codes = Vec::new();
-    for key in ["challenge_module", "solution_module"] {
-        let module = config[key].as_str().unwrap_or_default();
-        let path = format!("{}.lean", module.replace('.', "/"));
-        let Ok(code) = std::fs::read_to_string(Path::new(&path)) else {
-            fail(&format!("no module {module} at {path}"));
-        };
-        if code.contains("CANNOT_RUN") {
-            eprintln!("error: the fake comparator can't run here");
-            exit(2);
-        }
-        println!("Building {module}");
-        if code.contains("BUILD_FAIL") {
-            fail("Child exited with 1");
-        }
-        let built = Path::new(".lake/build").join(format!("{module}.built"));
-        if code.contains("SLOW_BUILD") && !built.exists() {
-            std::thread::sleep(std::time::Duration::from_secs(3));
-        }
-        if built.exists() {
-            println!("Replayed {module}");
-        } else {
-            std::fs::create_dir_all(".lake/build").unwrap();
-            std::fs::write(&built, "").unwrap();
-            println!("Built {module}");
-        }
-        codes.push(code);
+    let config = flag("--config").unwrap_or_else(|| "comparator.json".into());
+    let Ok(text) = std::fs::read_to_string(&config) else {
+        cannot_run(&format!("could not read the configuration {config}"));
+    };
+    let config: Value = serde_json::from_str(&text).unwrap();
+    let challenge = exported(&challenge, &config, "challenge_module");
+    let solution = exported(&solution, &config, "solution_module");
+    if challenge.contains("CANNOT_RUN") || solution.contains("CANNOT_RUN") {
+        cannot_run("the fake comparator can't run here");
     }
-    let (challenge, solution) = (&codes[0], &codes[1]);
     let definitions = config["definition_names"].as_array().into_iter().flatten();
     for name in definitions.filter_map(|n| n.as_str()) {
         let def = format!("def {name} ");
@@ -135,10 +194,6 @@ fn main() {
             .map(|(k, _)| k.clone())
             .collect()
     };
-    println!(
-        "Exporting #[t] from {}",
-        config["solution_module"].as_str().unwrap_or_default()
-    );
-    kernels(&names, solution);
+    kernels(&names, &solution);
     println!("Your solution is okay!");
 }

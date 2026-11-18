@@ -209,10 +209,10 @@ pub struct SnapshotAcceptJob {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
     pub paranoid: bool,
-    /// For each pair.
+    /// For each pair: its exports and comparator.
     pub timeout_secs: u64,
-    /// More for the first pair comparator runs, which builds the run's
-    /// modules that later pairs replay.
+    /// Ignored, as acceptance builds nothing: kept so that a worker reads a
+    /// job a server of the release before queued.
     #[serde(default)]
     pub build_timeout_secs: u64,
 }
