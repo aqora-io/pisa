@@ -459,9 +459,10 @@ class LeftOut(TypedDict):
 class KernelVerdict(TypedDict):
     """What one kernel said of a solution."""
     name: str
-    verdict: Literal["accepted", "rejected", "unsupported", "cannot_run"]
+    verdict: Literal["accepted", "rejected", "unsupported", "cannot_run", "failed", "out_of_memory"]
     # For `unsupported`, pisa's fixed text on why it didn't run the kernel; for
-    # a pair comparator failed, the line comparator printed for it.
+    # a kernel that didn't accept, the first line it printed, cut at 200
+    # characters.
     reason: NotRequired[str]
 
 class AcceptPair(TypedDict):

@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     OUTPUT_LINES, accepted_kernels, classify, comparator_args, external_config, failed_kernels,
-    hex, leaves_out_declining, tail, with_cap,
+    hex, leaves_out_declining, run_kernels, tail, with_cap,
 };
 use crate::catalog::Module;
 use crate::launcher::{Launcher, LeanExportError};
@@ -380,10 +380,11 @@ pub async fn judge(
         // From the whole output, before it is cut to its end.
         let kernels = match ran.code {
             Some(0) => accepted_kernels(options.paranoid, left_out),
-            _ => failed_kernels(&ran.output, left_out),
+            _ => failed_kernels(&ran.output, options.paranoid, left_out, oom),
         };
         judgments.push(Judgment {
-            error: classify(&ran, oom).map(|e| with_cap(e, launcher.memory_max_mb(slot))),
+            error: classify(&ran, oom, &run_kernels(options.paranoid, left_out))
+                .map(|e| with_cap(e, launcher.memory_max_mb(slot))),
             exit_code: ran.code,
             output: tail(&ran.output, OUTPUT_LINES),
             kernels,

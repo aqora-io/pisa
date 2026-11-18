@@ -2148,14 +2148,16 @@ pub struct AcceptPair {
 }
 
 /// What one kernel said of a solution: as pisa configured it, for an accepted
-/// pair, and else as comparator printed it, for the reader.
+/// pair, and else as comparator printed it and exited, for the reader.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct KernelVerdict {
     /// The kernel's name, e.g. `nanoda` or `Lean default`.
     pub name: String,
     pub verdict: KernelOutcome,
     /// For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;
-    /// for a pair comparator failed, the line comparator printed for it.
+    /// for a kernel that didn't accept, the first line it printed, cut at 200
+    /// characters, which is for the reader and not a verdict: a kernel that
+    /// was killed said nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -2165,14 +2167,24 @@ pub struct KernelVerdict {
 pub enum KernelOutcome {
     /// The kernel checked the solution and accepts it.
     Accepted,
-    /// The kernel exited with an error.
+    /// The kernel exited with 1, which a kernel does to reject a proof.
     Rejected,
     /// The kernel doesn't support what the spec permits, a non-standard
-    /// axiom (con-leche and con-ron don't), so pisa didn't run it: no
-    /// verdict on the proof.
+    /// axiom (con-leche and con-ron don't): pisa didn't run it, or it
+    /// declined the proof (exit 2). No verdict on the proof.
     Unsupported,
-    /// Comparator couldn't run the kernel.
+    /// The kernel couldn't run, or exited with something other than 0, 1 or
+    /// a decline, e.g. 3 for a kernel's usage or internal error, or 128 or
+    /// more for a signal that wasn't the worker's memory limit's. No verdict
+    /// on the proof.
     CannotRun,
+    /// The kernel exited non-zero after the first kernel that failed, which
+    /// is the only one whose code comparator reports, so there is none to
+    /// say what happened to it. No verdict on the proof.
+    Failed,
+    /// The worker's memory limit killed the kernel (exit 128 or more while
+    /// the slot's out-of-memory count moved). No verdict on the proof.
+    OutOfMemory,
 }
 
 /// Why comparator didn't accept a pair: its verdict, or what kept it from
@@ -2189,7 +2201,8 @@ pub struct PairError {
 #[serde(rename_all = "snake_case")]
 pub enum PairErrorKind {
     /// Comparator judged the head and refused it: a statement or a
-    /// definition differs, an axiom isn't permitted, or a kernel rejected it.
+    /// definition differs, an axiom isn't permitted, or a kernel rejected it
+    /// (exit 1). Never a kernel that was killed or couldn't run.
     Refused,
     /// A module didn't build or export in comparator's sandbox, which is no
     /// verdict on the proofs. Only acceptances stored while comparator built
@@ -2200,15 +2213,18 @@ pub enum PairErrorKind {
     ExportFailed,
     /// It ran past the request's `timeout`.
     Timeout,
-    /// The worker's memory limit killed it.
+    /// The worker's memory limit killed it, comparator or one of its kernels
+    /// (con-ron's parallel workers outgrow a slot, for one).
     OutOfMemory,
     /// Comparator couldn't start or run its checks: a missing `bwrap`, a
-    /// configuration it couldn't read, a kernel it couldn't run.
+    /// configuration it couldn't read, a kernel it couldn't run or that
+    /// exited with a code that is no verdict (3, or a kill the memory limit
+    /// didn't cause).
     CannotRun,
     /// The spec names no theorem comparator can judge, so it didn't run.
     NothingToJudge,
-    /// Comparator's final error line says con-leche or con-ron exited with 2,
-    /// in a run that ran them: they don't support a non-standard axiom, so
+    /// Comparator's final error line says con-leche or con-ron, which pisa
+    /// ran, exited with 2: they don't support a non-standard axiom, so
     /// there is no verdict on the proof from those kernels, and the pair isn't
     /// accepted.
     Unsupported,

@@ -10,11 +10,14 @@
 //!   `SLEEP` takes 5 s;
 //! - a definition name that isn't a `def` in both modules is refused, as
 //!   comparator refuses one that isn't a definition;
-//! - a module that says `CANNOT_RUN` keeps it from starting (exit 2);
+//! - a module that says `-- CANNOT_RUN` keeps it from starting (exit 2);
 //! - it runs the kernels `--paranoid` names, or those of the configuration's
 //!   `external_kernels`, and then Lean's own: a solution that says
 //!   `KERNEL_DECLINE` has con-leche and con-ron decline it (exit 2), and one
-//!   that says `KERNEL_REJECT` has nanoda reject it.
+//!   that says `KERNEL_REJECT` has nanoda reject it, one that says
+//!   `KERNEL_CANNOT_RUN` has lean4lean exit 3 with a line of its own, and one
+//!   that says `KERNEL_KILLED` has con-ron exit 137, as a kernel the memory
+//!   limit killed does, without a word.
 //!
 //! It prints its arguments first, for tests to read.
 
@@ -108,7 +111,7 @@ fn exported(path: &str, config: &Value, key: &str) -> String {
     export["code"].as_str().unwrap_or_default().to_string()
 }
 
-/// Runs the kernels as comparator does, each printing `Running`, its command,
+/// Runs the kernels as comparator does, each printing its command, `Running`,
 /// its own output and its verdict, Lean's default kernel last, and then fails
 /// with the first failure: `kernels` are a configuration's `external_kernels`,
 /// in Lake's order. nanoda rejects a solution that says `KERNEL_REJECT`, and
@@ -119,14 +122,21 @@ fn kernels(kernels: &[(String, Vec<String>)], solution: &str) {
     let default = ("Lean default".to_string(), Vec::new());
     for (kernel, command) in kernels.iter().chain([&default]) {
         let kernel = kernel.as_str();
-        println!("Running {kernel} kernel on solution");
+        // Lake prints no command: it is before `Running`, for tests to read,
+        // so that the kernel's own first line is the first of its section.
         println!("{kernel} command: {}", command.join(" "));
+        println!("Running {kernel} kernel on solution");
         let (verdict, exit) = match kernel {
             "nanoda" if solution.contains("KERNEL_REJECT") => ("rejected", Some(1)),
             "con-leche" | "con-ron" if solution.contains("KERNEL_DECLINE") => {
                 eprintln!("{kernel}: declined: non-standard axiom (lit) (--verified)");
                 ("rejected", Some(2))
             }
+            "lean4lean" if solution.contains("KERNEL_CANNOT_RUN") => {
+                eprintln!("lean4lean: cannot read the export (--import)");
+                ("rejected", Some(3))
+            }
+            "con-ron" if solution.contains("KERNEL_KILLED") => ("rejected", Some(137)),
             _ => ("accepts", None),
         };
         println!("{kernel} kernel {verdict} the solution");
@@ -160,7 +170,7 @@ fn main() {
     let config: Value = serde_json::from_str(&text).unwrap();
     let challenge = exported(&challenge, &config, "challenge_module");
     let solution = exported(&solution, &config, "solution_module");
-    if challenge.contains("CANNOT_RUN") || solution.contains("CANNOT_RUN") {
+    if challenge.contains("-- CANNOT_RUN") || solution.contains("-- CANNOT_RUN") {
         cannot_run("the fake comparator can't run here");
     }
     let definitions = config["definition_names"].as_array().into_iter().flatten();

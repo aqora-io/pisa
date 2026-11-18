@@ -1505,14 +1505,15 @@ builds with `lake build` and that comparator accepts it there.
   not accepted says why in `error.kind`: `refused`, comparator's verdict;
   `export_failed`, pisa couldn't export a module from its build, so
   comparator didn't run; `timeout`;
-  `out_of_memory`; `cannot_run`, comparator couldn't start or run its checks;
-  `unsupported`, comparator's last error line says con-leche or con-ron
-  exited with 2, in a run that ran them: they don't support a non-standard
-  axiom;
+  `out_of_memory`, the worker's memory limit killed comparator or a kernel;
+  `cannot_run`, comparator couldn't start or run its checks, or a kernel
+  couldn't run or exited with a code that is no verdict;
+  `unsupported`, comparator's last error line says con-leche or con-ron,
+  which pisa ran, exited with 2: they don't support a non-standard axiom;
   or `nothing_to_judge`, a spec that names no theorem comparator can judge,
   for which it doesn't run. `build_failed`, a module that didn't build in
   comparator's sandbox, is only in acceptances stored while comparator built
-  the run. Only `refused` is a verdict on the proofs. The run
+  the run. Only `refused` is a verdict on the proofs: a kernel that was killed or couldn't run never makes one. The run
   is `accepted` when the audit is `clean` (`clean`, with the whole `audit`
   and the `heads` both judged), comparator accepted every pair, and there is
   one at least. Only comparator's exit code decides whether a pair is accepted,
@@ -1526,7 +1527,8 @@ builds with `lake build` and that comparator accepts it there.
   con-leche and con-ron check declarations in parallel, a worker for each
   core, and a worker takes gigabytes: con-ron about 6250 MiB, con-leche about
   3790 MiB. On a computation-heavy proof a dozen workers outgrow a slot, and
-  the kernel is killed, which Lake prints as `rejected`. So when the slot has a
+  the kernel is killed, which Lake prints as `rejected`, as it does for any
+  non-zero exit. So when the slot has a
   memory limit (`PISA_MEMORY_MAX_MB`), pisa passes `--jobs=N` to them, one
   argument (`--jobs N` exits 3): the limit less 3072 MiB, over a worker's
   memory, at least 1. A 16000 MiB slot runs con-ron with `--jobs=2` and
@@ -1536,10 +1538,24 @@ builds with `lake build` and that comparator accepts it there.
   `kernels` list each kernel's verdict: for an accepted pair, what pisa
   configured in Lake's order, each `accepted`, and con-leche and con-ron
   `unsupported`, with a `reason`, when they were left out. For a pair
-  comparator failed, they are as comparator printed them, for the reader. A
-  pair whose final error line says con-leche or con-ron exited with 2,
-  kernels a spec without an axiom of its own doesn't leave out, is
-  `unsupported`; any other failure is
+  comparator failed, they are in that order too, as comparator printed and
+  exited them, for the reader. Lake's final error line,
+  `error: <kernel> exited with N`, reports the code of the first kernel that
+  failed only, and pisa reads it from the last such line that names a kernel
+  it configured, exactly. For that kernel, 1 is `rejected` and the pair
+  `refused`; 2 for con-leche or con-ron is `unsupported`; 128 or more while the
+  slot's out-of-memory count moved is `out_of_memory`; any other code
+  (3, a kill without it, 42) is `cannot_run`. A kill is never `refused`.
+  Kernels before the first failure are `accepted`, and after it `failed` if
+  Lake printed that they rejected the solution, as it does for any non-zero
+  exit, and no code is known, else `accepted`. A kernel that didn't accept
+  has its own first line in `reason`, cut at 200 characters, such as
+  `con-ron: declined: non-standard axiom ...`; a kernel that was killed has none. A
+  line of the output can be imitated by the solution, so these are for the
+  reader and never settle a pair, which only the exit code does. A pair whose
+  final error line says con-leche or con-ron exited with 2 is `unsupported`;
+  a pair whose kernel couldn't run, or exited with another code, is
+  `cannot_run`; any other failure is
   `refused`. The result is stored with an `id`, and
   `GET /snapshots/accept/{id}` reads it again; `GET /snapshots/accept?spec=<id>`
   lists a spec snapshot's, newest first. It names the code it judged, which

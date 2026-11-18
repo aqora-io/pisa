@@ -37,6 +37,8 @@ const KERNEL: Record<KernelOutcome, string> = {
   rejected: "rejects",
   unsupported: "not supported",
   cannot_run: "couldn't run",
+  failed: "failed, no code",
+  out_of_memory: "ran out of memory",
 };
 
 /** Why a configuration leaves a name out, in words. */
@@ -76,6 +78,7 @@ function Pair({ pair }: { pair: AcceptPair }) {
             <li key={k.name} title={k.reason}>
               <span className="font-mono">{k.name}</span>{" "}
               <Badge tone={k.verdict === "accepted" ? "green" : k.verdict === "unsupported" ? "amber" : "red"}>{KERNEL[k.verdict]}</Badge>
+              {k.reason !== undefined && k.verdict !== "unsupported" && <span className="text-xs text-gray-600"> {k.reason}</span>}
             </li>
           ))}
         </ul>

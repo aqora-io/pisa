@@ -2083,17 +2083,19 @@ export interface components {
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
         /** @enum {string} */
-        KernelOutcome: "accepted" | "rejected" | "unsupported" | "cannot_run";
+        KernelOutcome: "accepted" | "rejected" | "unsupported" | "cannot_run" | "failed" | "out_of_memory";
         /**
          * @description What one kernel said of a solution: as pisa configured it, for an accepted
-         *     pair, and else as comparator printed it, for the reader.
+         *     pair, and else as comparator printed it and exited, for the reader.
          */
         KernelVerdict: {
             /** @description The kernel's name, e.g. `nanoda` or `Lean default`. */
             name: string;
             /**
              * @description For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;
-             *     for a pair comparator failed, the line comparator printed for it.
+             *     for a kernel that didn't accept, the first line it printed, cut at 200
+             *     characters, which is for the reader and not a verdict: a kernel that
+             *     was killed said nothing.
              */
             reason?: string;
             verdict: components["schemas"]["KernelOutcome"];

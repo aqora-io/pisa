@@ -2292,19 +2292,21 @@
           "accepted",
           "rejected",
           "unsupported",
-          "cannot_run"
+          "cannot_run",
+          "failed",
+          "out_of_memory"
         ],
         "type": "string"
       },
       "KernelVerdict": {
-        "description": "What one kernel said of a solution: as pisa configured it, for an accepted\npair, and else as comparator printed it, for the reader.",
+        "description": "What one kernel said of a solution: as pisa configured it, for an accepted\npair, and else as comparator printed it and exited, for the reader.",
         "properties": {
           "name": {
             "description": "The kernel's name, e.g. `nanoda` or `Lean default`.",
             "type": "string"
           },
           "reason": {
-            "description": "For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;\nfor a pair comparator failed, the line comparator printed for it.",
+            "description": "For a kernel pisa didn't run (`unsupported`), pisa's fixed text on why;\nfor a kernel that didn't accept, the first line it printed, cut at 200\ncharacters, which is for the reader and not a verdict: a kernel that\nwas killed said nothing.",
             "type": "string"
           },
           "verdict": {

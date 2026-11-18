@@ -867,6 +867,33 @@ async fn a_spec_axiom_runs_the_kernels_that_support_it() {
     assert_eq!(error.message, "nanoda exited with 1");
     assert!(verdicts(&r).contains(&("nanoda".to_string(), Rejected)));
 
+    // A kernel that can't run, and one that is killed, are labelled so and
+    // never `rejected`: Lake prints "rejected" for any non-zero exit.
+    let r = judge("", "KERNEL_CANNOT_RUN").await;
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert_eq!(error.kind, PairErrorKind::CannotRun, "{r:?}");
+    assert_eq!(error.message, "lean4lean exited with 3");
+    let lean4lean = &pair.kernels[3];
+    assert_eq!(
+        (lean4lean.name.as_str(), lean4lean.verdict),
+        ("lean4lean", KernelOutcome::CannotRun)
+    );
+    let reason = lean4lean.reason.as_deref().unwrap();
+    assert!(reason.starts_with("lean4lean: cannot read"), "{reason}");
+    assert!(pair.kernels.iter().all(|k| k.verdict != Rejected), "{r:?}");
+    let r = judge("", "KERNEL_KILLED").await;
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert_eq!(error.kind, PairErrorKind::CannotRun, "{r:?}");
+    assert_eq!(error.message, "con-ron exited with 137");
+    let con_ron = &pair.kernels[2];
+    assert_eq!(
+        (con_ron.name.as_str(), con_ron.verdict, &con_ron.reason),
+        ("con-ron", KernelOutcome::CannotRun, &None)
+    );
+    assert!(pair.kernels.iter().all(|k| k.verdict != Rejected), "{r:?}");
+
     // No spec axiom: con-leche and con-ron run, and decline.
     let r = judge("", "KERNEL_DECLINE").await;
     let pair = &r.pairs[0];
@@ -878,7 +905,20 @@ async fn a_spec_axiom_runs_the_kernels_that_support_it() {
     let all = [kernels.as_slice(), &["nanoda", "Lean default"]].concat();
     assert_eq!(ran_kernels(&pair.output), all);
     assert!(pair.output.contains("con-ron command: "), "{}", pair.output);
-    assert!(verdicts(&r).contains(&("con-ron".to_string(), Rejected)));
+    assert_eq!(error.message, "con-leche exited with 2");
+    let said = |name: &str| pair.kernels.iter().find(|k| k.name == name).unwrap();
+    assert_eq!(said("con-leche").verdict, Unsupported);
+    let reason = said("con-leche").reason.as_deref().unwrap();
+    assert!(reason.starts_with("con-leche: declined"), "{reason}");
+    // con-ron failed too, but Lake reports only the first failure's code.
+    assert_eq!(said("con-ron").verdict, KernelOutcome::Failed);
+    assert!(
+        said("con-ron")
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("con-ron: declined")
+    );
 }
 
 /// A hole that isn't a plain definition, and an `allow` name the head
