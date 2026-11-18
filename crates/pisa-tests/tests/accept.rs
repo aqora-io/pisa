@@ -1038,21 +1038,18 @@ async fn a_head_deleted_during_comparator_doesnt_lose_the_acceptance() {
     get(&c, &format!("/snapshots/accept/{}", r.id)).await;
 }
 
-/// A head deleted while pisa exports it leaves the acceptance whole too:
-/// the modules are judged from links of their verified files, made before
-/// the exports, which the delete doesn't remove.
+/// A head deleted while pisa exports the spec, before the head's own export
+/// starts, is still judged: the modules are exported from links of their
+/// verified files, made before the exports, which the delete doesn't
+/// remove from the snapshot cache.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_head_deleted_during_its_export_leaves_the_acceptance_whole() {
+async fn a_head_deleted_while_the_spec_exports_is_judged_from_its_link() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let s = create(
-        &c,
-        json!({"code": "import Foo\n\ntheorem u : 3 = 3 := sorry"}),
-    )
-    .await;
-    let slow = "import Foo\n\n-- SLOW_EXPORT 3000\ntheorem u : 3 = 3 := rfl";
+    let slow = "import Foo\n\n-- SLOW_EXPORT 3000\ntheorem u : 3 = 3 := sorry";
+    let s = create(&c, json!({"code": slow})).await;
     let h = create(
         &c,
-        json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
+        json!({"code": "import Foo\n\ntheorem u : 3 = 3 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
     .await;
     let delete = async {
@@ -1067,6 +1064,10 @@ async fn a_head_deleted_during_its_export_leaves_the_acceptance_whole() {
     assert!(r.accepted && pair.accepted, "{r:?}");
     assert_eq!(pair.head_module, module(&h));
     get(&c, &format!("/snapshots/accept/{}", r.id)).await;
+    // The delete took the head out of the snapshot cache.
+    let cache = c.dir.path().join("w0/snapshots").join(c.version("v"));
+    let olean = format!("{}.olean", module(&h).replace('.', "/"));
+    assert!(!cache.join(olean).exists());
 }
 
 /// What a slot's build directory holds before a build isn't installed with
