@@ -2613,7 +2613,7 @@ is the model, or `null` if no snapshot code is sent to one (also when
   module name; its signature as Lean prints it (the name, arguments and type,
   not the proof or the value of a definition); its docstring, up to 2,000
   characters; and, for at most 30 declarations it uses outside the Init, Std
-  and Lean libraries, the name and the description, or if that isn't written
+  and Lean libraries (including, for a definition, those its value uses), the name and the description, or if that isn't written
   yet the signature (300 characters) and docstring (200 characters). Those it
   uses can be Mathlib or Physlib declarations, or other declarations of the
   same snapshot or of the snapshots it imports.
@@ -2622,17 +2622,21 @@ is the model, or `null` if no snapshot code is sent to one (also when
   signature, its type printed with full names, and the description just
   written, to check that the description states the hypothesis. If it leaves
   one out, the declaration is described once more.
-- **Not sent.** Proofs and definition values, a module's `code` as a whole,
+- **Not sent.** The text of proofs and of definition values (only the names of
+  what a definition's value uses go out, as above), a module's `code` as a whole,
   its imports, comments, labels, scopes, the snapshot's id, and who created it.
 - **Instructions.** Each request also carries the fixed instructions and
   glossary of `informalize.rs`.
 - **Another provider.** The embedder (`PISA_SEARCH_TEI`, Scaleway by default)
   gets each snapshot declaration's signature, docstring and description,
-  whether or not a describe model is set; it is a separate setting.
+  whether or not a describe model is set, while snapshots are searched; it is
+  a separate setting.
 - **Turning it off.** Leave `PISA_SEARCH_DESCRIBE_MODEL` empty (compose
   `PISA_SEARCH_DESCRIBE_MODEL`, the chart's `search.describeModel`), or set
   `PISA_SEARCH_NO_SNAPSHOTS`; restart the servers, and check `/health`.
-  Descriptions already written stay in the database and keep being searched.
+  If you only emptied the model, descriptions already written stay in the
+  database and keep being searched; with `PISA_SEARCH_NO_SNAPSHOTS`, snapshots
+  aren't searched at all.
 
 **Quality.** These reports track it:
 - `search/eval/<env_id>-qdrant.md`: recall, MRR and nDCG on LeanSearch v2's
