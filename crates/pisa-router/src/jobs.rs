@@ -195,7 +195,14 @@ fn expired_message(id: &str, kind: JobKind, job: ExpiredJob) -> String {
         (ExpiredOutcome::Cancelled, _) => format!("was cancelled at {at}"),
     };
     let kind = kind_name(kind);
-    format!("job {id} expired: a {kind} that {ended}; see the README's Recovering a lost job")
+    let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!(
+        "job {id} expired: {article} {kind} that {ended}; see the README's Recovering a lost job"
+    )
 }
 
 /// `micros` since the Unix epoch, as RFC 3339 in UTC.
@@ -321,6 +328,12 @@ mod tests {
             says(JobKind::CreateSnapshot, ExpiredOutcome::Done, Some(200)),
             format!(
                 "job abc expired: a create_snapshot that answered 200 at 2026-03-17T12:24:05Z{see}"
+            )
+        );
+        assert_eq!(
+            says(JobKind::AcceptRun, ExpiredOutcome::Done, Some(200)),
+            format!(
+                "job abc expired: an accept_run that answered 200 at 2026-03-17T12:24:05Z{see}"
             )
         );
         assert_eq!(
