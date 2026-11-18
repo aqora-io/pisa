@@ -1,5 +1,6 @@
 //! `lake comparator` as acceptance runs it, on real Lean: snapshot modules
-//! are built as a worker builds them, and a run's pairs judged with
+//! are built as a worker builds them, linked for a judgment with
+//! [`Snapshots::link_verified`], and a run's pairs judged with
 //! [`runs::judge`], on exports of those builds. What a judged solution's
 //! code does when it is built must not reach what comparator judges after
 //! it: the next pair's challenge, a later judgment's, or the programs an
@@ -16,19 +17,26 @@
 
 mod lean;
 
-use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
-use pisa_protocol::api::{KernelOutcome, PairErrorKind};
+use object_store::memory::InMemory;
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt};
+use pisa_protocol::api::{CheckResult, KernelOutcome, PairErrorKind};
 use pisa_protocol::repl::Severity;
 use pisa_protocol::snapshot;
+use pisa_protocol::verify::ProofStatus;
 use pisa_worker::WorkerConfig;
-use pisa_worker::catalog::{Module, ModuleFile};
+use pisa_worker::catalog::{Catalog, Module, ModuleFile, ModuleMeta};
+use pisa_worker::db::Db;
 use pisa_worker::launcher::Launcher;
+use pisa_worker::policy::Policy;
 use pisa_worker::runs::{self, JudgeOptions, Judgment, ModulesToJudge, PairToJudge};
+use pisa_worker::snapshots::Snapshots;
 use sha2::{Digest, Sha256};
 
 use lean::docker;
@@ -73,10 +81,8 @@ fn e() -> String {
 }
 
 /// G's proof, and code that runs as Lake builds it: it writes a `lean` into
-/// the project's `.lake/build/bin`, which `lake env` puts first on `PATH`.
-/// That `lean` says `PLANTED` on the stderr of the program that ran it, as
-/// whoever runs `lean --print-prefix` swallows its own, and then runs the
-/// real one.
+/// the project's `.lake/build/bin`, which `lake env` puts first on `PATH`,
+/// for the exporter to run. It builds in the project, as a worker builds.
 const P: &str = r##"theorem c : 2 = 2 := rfl
 
 #eval show IO Unit from do
@@ -84,8 +90,7 @@ const P: &str = r##"theorem c : 2 = 2 := rfl
     let bin : System.FilePath := ".lake/build/bin"
     IO.FS.createDirAll bin
     let lean := bin / "lean"
-    IO.FS.writeFile lean
-      s!"#!/bin/sh\necho \"PLANTED $0 $*\" >/proc/$PPID/fd/2\nexec {(← IO.appPath)} \"$@\"\n"
+    IO.FS.writeFile lean s!"#!/bin/sh\nexec {(← IO.appPath)} \"$@\"\n"
     IO.setAccessRights lean { user := { read := true, write := true, execution := true } }
   catch e =>
     IO.eprintln s!"planting failed: {e}"
@@ -94,10 +99,17 @@ const P: &str = r##"theorem c : 2 = 2 := rfl
 /// The slot everything runs on.
 const SLOT: usize = 0;
 
+/// The pool version of the launcher and its snapshots.
+const VERSION: &str = "v";
+
 /// A worker's launcher, sandboxed with bwrap, on a copy of
-/// `docker/lean-core` as its project.
+/// `docker/lean-core` as its project, and its snapshots, on a store and a
+/// catalog of its own.
 struct Harness {
     launcher: Launcher,
+    snapshots: Snapshots,
+    store: Arc<dyn ObjectStore>,
+    catalog: Catalog,
     project: tempfile::TempDir,
     _work: tempfile::TempDir,
     /// How many judgments it has run, which names the next one's directory.
@@ -156,28 +168,48 @@ impl Harness {
             &path(work.path()),
         ])
         .unwrap();
-        let launcher = Launcher::new(&cfg, "real-comparator", "v")
+        let launcher = Launcher::new(&cfg, "real-comparator", VERSION)
             .await
             .expect("starting the launcher (is elan on PATH?)");
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let db = Db::memory().await;
+        let policy = Policy {
+            allowed_axioms: (pisa_worker::policy::DEFAULT_AXIOMS.split(','))
+                .map(String::from)
+                .collect(),
+            allowed_options: Vec::new(),
+            allow_metaprogramming: false,
+        };
+        let snapshots = Snapshots::new(
+            store.clone(),
+            db.clone(),
+            VERSION.into(),
+            launcher.snapshot_root().to_path_buf(),
+            Duration::from_secs(60),
+            policy,
+        );
         Harness {
             launcher,
+            snapshots,
+            store,
+            catalog: Catalog::new(db, VERSION.into()),
             project,
             _work: work,
             judgments: AtomicUsize::new(0),
         }
     }
 
-    /// Builds each of `codes` as a worker builds a snapshot, compiled in
-    /// the slot's sandbox and its files moved into the snapshot root as
-    /// `install` moves them, and gives the modules to judge them on: the
-    /// snapshot root, and each module's record of its build, which imports
-    /// nothing of the others.
-    async fn build(&self, codes: &[&str]) -> ModulesToJudge {
+    /// Builds each of `codes` as a worker builds a snapshot: compiled in
+    /// the slot's sandbox, its files moved into the snapshot root as
+    /// `install` moves them and uploaded to the store, and its record,
+    /// which imports nothing of the others, kept in the catalog. Returns
+    /// their ids.
+    async fn build(&self, codes: &[&str]) -> Vec<String> {
         let root = self.launcher.slot_dir(SLOT).join("build");
         let dir = root.join(snapshot::ROOT);
         std::fs::create_dir_all(&dir).unwrap();
         let installed = self.launcher.snapshot_root().join(snapshot::ROOT);
-        let mut closures = HashMap::new();
+        let mut ids = Vec::new();
         for code in codes {
             let id = snapshot::id(code);
             let file = dir.join(format!("s{id}.lean"));
@@ -195,6 +227,7 @@ impl Harness {
                 compiled.status.is_some_and(|s| s.success()) && !failed,
                 "building s{id} failed: {compiled:?}"
             );
+            let build = "real-comparator";
             let prefix = format!("s{id}.");
             let mut files = Vec::new();
             for entry in std::fs::read_dir(&dir).unwrap() {
@@ -207,45 +240,103 @@ impl Harness {
                     ext: ext.to_string(),
                     sha256: hex::encode(Sha256::digest(&bytes)),
                 });
+                // Where a worker uploads a build's file.
+                let blob = format!("snapshots/{VERSION}/{id}.{build}.{ext}.zst");
+                let compressed = zstd::encode_all(&bytes[..], 3).unwrap();
+                (self.store.put(&ObjectPath::from(blob), compressed.into()))
+                    .await
+                    .unwrap();
                 std::fs::rename(dir.join(&name), installed.join(&name)).unwrap();
             }
-            let module = Module {
-                id: id.clone(),
-                build: "real-comparator".into(),
-                files,
+            let meta = ModuleMeta {
+                imports: Vec::new(),
+                modules: vec![Module {
+                    id: id.clone(),
+                    build: build.into(),
+                    files,
+                }],
+                header: String::new(),
+                code: code.to_string(),
+                status: ProofStatus::Proved,
+                verified: true,
+                macros: false,
+                result: CheckResult::default(),
+                created: 0,
             };
-            closures.insert(snapshot::module(&id), vec![module]);
+            self.catalog.commit_module(&id, &meta, None).await.unwrap();
+            ids.push(id);
         }
-        ModulesToJudge {
-            root: self.launcher.snapshot_root().to_path_buf(),
-            closures,
-        }
+        ids
     }
 
-    /// Judges `pairs` on `modules` as acceptance does, without `--paranoid`.
-    async fn judge(&self, modules: &ModulesToJudge, pairs: &[PairToJudge]) -> Vec<Judgment> {
-        self.judge_with(modules, pairs, false).await
+    /// Writes a `lean` into the project's `.lake/build/bin`, which `lake env`
+    /// puts first on the `PATH` of the programs the worker runs, the
+    /// exporter among them, as judged code that could write there would.
+    /// Run for a program, it writes `PLANTED` into that program's standard
+    /// output (`/proc/$PPID/fd/1`), which is the exporter's export, 16 MiB
+    /// in: past the export's end, as the exporter writes its own from the
+    /// start of the file. Then it runs the real `lean`.
+    async fn plant_lean(&self) {
+        let bin = self.project.path().join(".lake/build/bin");
+        let out = std::process::Command::new("lake")
+            .args(["env", "printenv", "PATH"])
+            .current_dir(self.project.path())
+            .output()
+            .unwrap();
+        let path = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            std::env::split_paths(path.trim()).next(),
+            Some(bin.clone()),
+            "`lake env` doesn't put {} first on PATH: {path}",
+            bin.display()
+        );
+        let lean = self
+            .launcher
+            .toolchain_prefix()
+            .await
+            .unwrap()
+            .join("bin/lean");
+        std::fs::create_dir_all(&bin).unwrap();
+        let planted = bin.join("lean");
+        std::fs::write(
+            &planted,
+            format!(
+                "#!/bin/sh\nprintf 'PLANTED %s\\n' \"$0\" | \
+                 dd of=/proc/$PPID/fd/1 bs=1M seek=16 conv=notrunc 2>/dev/null\n\
+                 exec {} \"$@\"\n",
+                lean.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&planted).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&planted, perms).unwrap();
     }
 
-    /// Judges `pairs` on `modules` as acceptance does: in a directory of the
-    /// judgment's own, which holds links of the modules' files.
+    /// Judges `pairs` on the modules `ids` as acceptance does, without
+    /// `--paranoid`.
+    async fn judge(&self, ids: &[String], pairs: &[PairToJudge]) -> Vec<Judgment> {
+        self.judge_with(ids, pairs, false).await
+    }
+
+    /// Judges `pairs` on the modules `ids` as acceptance does: in a
+    /// directory of the judgment's own, which holds the modules' files as
+    /// [`Snapshots::link_verified`] links them, each hashed again against
+    /// its record.
     async fn judge_with(
         &self,
-        modules: &ModulesToJudge,
+        ids: &[String],
         pairs: &[PairToJudge],
         paranoid: bool,
     ) -> Vec<Judgment> {
         let n = self.judgments.fetch_add(1, Ordering::Relaxed);
         let root = self.launcher.judging_dir().join(n.to_string());
-        let into = root.join(snapshot::ROOT);
-        std::fs::create_dir_all(&into).unwrap();
-        for entry in std::fs::read_dir(modules.root.join(snapshot::ROOT)).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::hard_link(entry.path(), into.join(entry.file_name())).unwrap();
-        }
+        let closures = self.snapshots.link_verified(ids, &root).await.unwrap();
         let judging = ModulesToJudge {
             root,
-            closures: modules.closures.clone(),
+            closures: (closures.into_iter())
+                .map(|(id, closure)| (snapshot::module(&id), closure))
+                .collect(),
         };
         let options = JudgeOptions {
             paranoid,
@@ -358,31 +449,40 @@ async fn a_rejudgment_cannot_use_what_the_last_one_left() {
     assert_mismatch(&judged[0]);
 }
 
-/// P's code, were it run as Lake builds P, would plant a `lean` that the
-/// exporter runs to find its prefix: for P's own export and for every export
-/// after it. pisa's exporter is told its prefix, and builds nothing.
+/// A `lean` first on the exporter's `PATH`, which the exporter would run to
+/// find the toolchain without `LEAN_SYSROOT`, for each export. P's code, as
+/// it builds, can't write one: the project is read-only in the slot's
+/// sandbox. So the harness plants one there itself, as judged code that
+/// found a way would, which writes into each export it is run for. The
+/// exporter has `LEAN_SYSROOT` and runs no `lean`: both pairs are judged on
+/// their exports, accepted and refused as they should be, and no export
+/// holds what the planted `lean` writes.
 #[tokio::test]
 #[ignore = "real Lean and bwrap"]
 async fn an_export_runs_no_program_the_judged_code_wrote() {
     let h = Harness::new().await;
     let modules = h.build(&[C, P, S, H]).await;
+    let planted = h.project.path().join(".lake/build/bin/lean");
+    assert!(!planted.exists(), "P's build wrote into the project");
+    h.plant_lean().await;
     let judged = h.judge(&modules, &[pair(C, P, "c"), pair(S, H, "t")]).await;
-    // Both pairs were judged through their exports, so a lean P planted
-    // would have run.
     assert!(
         judged[0].error.is_none() && judged[0].exit_code == Some(0),
         "{}",
         judged[0].output
     );
     assert_mismatch(&judged[1]);
-    for (n, j) in judged.iter().enumerate() {
-        assert!(
-            !j.output.contains("PLANTED"),
-            "pair {} ran the lean P planted:\n{}",
-            n + 1,
-            j.output
-        );
+    let exports = h.launcher.judging_dir().join("0/exports");
+    let mut read = 0;
+    for entry in std::fs::read_dir(&exports).unwrap() {
+        let path = entry.unwrap().path();
+        let bytes = std::fs::read(&path).unwrap();
+        let planted = bytes.windows(7).any(|w| w == b"PLANTED");
+        assert!(!planted, "the planted lean wrote into {}", path.display());
+        read += 1;
     }
+    // Each pair's challenge and solution.
+    assert_eq!(read, 4, "{}", exports.display());
 }
 
 /// A spec with a hole, and a head that fills it and proves the spec's

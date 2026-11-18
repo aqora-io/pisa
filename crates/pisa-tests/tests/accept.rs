@@ -1121,8 +1121,11 @@ async fn a_head_deleted_while_the_spec_exports_is_judged_from_its_link() {
         json!({"code": "import Foo\n\ntheorem u : 3 = 3 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
     .await;
+    let cache = c.dir.path().join("w0/snapshots").join(c.version("v"));
+    let olean = cache.join(format!("{}.olean", module(&h).replace('.', "/")));
     let delete = async {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(olean.exists(), "the head isn't in the snapshot cache");
         let r = c.client.delete(c.url(&format!("/snapshots/{}", id(&h))));
         assert_eq!(r.send().await.unwrap().status(), 200);
     };
@@ -1134,9 +1137,7 @@ async fn a_head_deleted_while_the_spec_exports_is_judged_from_its_link() {
     assert_eq!(pair.head_module, module(&h));
     get(&c, &format!("/snapshots/accept/{}", r.id)).await;
     // The delete took the head out of the snapshot cache.
-    let cache = c.dir.path().join("w0/snapshots").join(c.version("v"));
-    let olean = format!("{}.olean", module(&h).replace('.', "/"));
-    assert!(!cache.join(olean).exists());
+    assert!(!olean.exists());
 }
 
 /// What a slot's build directory holds before a build isn't installed with
