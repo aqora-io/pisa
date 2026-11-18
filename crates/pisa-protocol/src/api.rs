@@ -145,9 +145,10 @@ pub struct Error {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing: Option<Box<Timing>>,
     /// For `worker_lost`: whether sending the request again is safe, which
-    /// it isn't for `POST /snapshots/accept` (a finished first run may be
-    /// stored already: check `GET /snapshots/accept?spec=` first) and for a
-    /// document edit (check the document's revision first).
+    /// it isn't for a document edit (check the document's revision first).
+    /// A lost `POST /snapshots/accept` stored nothing, as an acceptance is
+    /// stored only with its job's answer: sending it again judges the run
+    /// again, from the start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resend_safe: Option<bool>,
 }

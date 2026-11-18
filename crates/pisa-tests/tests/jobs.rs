@@ -365,10 +365,10 @@ async fn a_job_whose_worker_is_lost_says_so() {
     }
 }
 
-/// An accept may have been stored by the run that was lost: its error says
-/// to check before sending it again.
+/// A lost accept stored nothing, as an acceptance is stored only with its
+/// job's answer: its error says sending it again is safe.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_lost_accept_is_not_safe_to_resend() {
+async fn a_lost_accept_is_safe_to_resend() {
     let mut cfg = router_config();
     cfg.max_retries = 0;
     let c = Cluster::start_with(cfg, &[], |w| w).await;
@@ -388,7 +388,7 @@ async fn a_lost_accept_is_not_safe_to_resend() {
     let (status, r) = look(&c, &c.url(&format!("/jobs/{job}")), "30").await;
     assert_eq!(
         (status, &r["error"]["kind"], &r["error"]["resend_safe"]),
-        (503, &json!("worker_lost"), &json!(false)),
+        (503, &json!("worker_lost"), &json!(true)),
         "{r}"
     );
 }

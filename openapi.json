@@ -1817,7 +1817,7 @@
             "type": "string"
           },
           "resend_safe": {
-            "description": "For `worker_lost`: whether sending the request again is safe, which\nit isn't for `POST /snapshots/accept` (a finished first run may be\nstored already: check `GET /snapshots/accept?spec=` first) and for a\ndocument edit (check the document's revision first).",
+            "description": "For `worker_lost`: whether sending the request again is safe, which\nit isn't for a document edit (check the document's revision first).\nA lost `POST /snapshots/accept` stored nothing, as an acceptance is\nstored only with its job's answer: sending it again judges the run\nagain, from the start.",
             "type": "boolean"
           },
           "timing": {

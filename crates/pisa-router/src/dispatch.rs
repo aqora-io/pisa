@@ -450,13 +450,14 @@ impl Dispatcher {
                 {
                     Looking::Done(Box::new(Err(DispatchError::ServerStopped)))
                 }
+                // No async kind is a document edit, the one unsafe to resend.
                 Stage::GaveUp {
                     attempts,
                     exhausted,
                 } => Looking::Done(Box::new(Err(DispatchError::WorkerLost {
                     attempts,
                     attempts_exhausted: exhausted,
-                    resend_safe: kind != JobKind::AcceptRun,
+                    resend_safe: true,
                 }))),
                 Stage::Expired {
                     outcome,
@@ -594,7 +595,7 @@ fn decode(result: serde_json::Value) -> JobResult {
 mod tests {
     use super::*;
     use pisa_db::db::Db;
-    use pisa_protocol::wire::{CheckJob, SnapshotAcceptJob, SnapshotRebuildJob};
+    use pisa_protocol::wire::{CheckJob, DocumentEditJob, SnapshotAcceptJob, SnapshotRebuildJob};
 
     #[tokio::test]
     async fn a_held_job_is_no_workers_and_reads_lost_once_its_server_stops() {
@@ -676,7 +677,14 @@ mod tests {
             runs: Vec::new(),
             source: None,
         });
-        for (job, resend_safe) in [(accept, false), (check, true)] {
+        let edit = Job::DocumentEdit(DocumentEditJob {
+            document: "d".into(),
+            code: String::new(),
+            revision: 1,
+            timeout_secs: 1,
+            runs: Vec::new(),
+        });
+        for (job, resend_safe) in [(accept, true), (check, true), (edit, false)] {
             let p = Prepared {
                 job,
                 route: Route {

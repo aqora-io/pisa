@@ -990,6 +990,44 @@ mod tests {
         }
     }
 
+    /// An accept whose job was given up as lost, sync or async, stores
+    /// nothing when its worker answers after all: a lost accept stored
+    /// nothing, so sending it again is safe.
+    #[tokio::test]
+    async fn a_lost_accept_stores_nothing() {
+        for q in queues().await {
+            let catalog = crate::catalog::Catalog::new(q.db().clone(), q.name().to_string());
+            let specs = ["s".to_string()];
+            let short = Duration::from_millis(1);
+            let mut new = job(Some("v"), 1);
+            new.max_attempts = 1;
+            // Sync: the server's poll finds it lost.
+            let id = q.enqueue(&new).await.unwrap();
+            let a = q.claim("a", &[id], short).await.unwrap().remove(0);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(matches!(q.poll(id).await.unwrap(), Poll::Lost { .. }));
+            let late = catalog.new_acceptance("a1", &specs, &json!(1)).unwrap();
+            let at = a.claimed_micros;
+            assert!(!(q.complete_accepted("a", id, at, &json!(1), &late).await).unwrap());
+            // Async: its status closes it given up.
+            let (id, token) = q.enqueue_async(&new, "accept_run").await.unwrap();
+            let a = q.claim("a", &[id], short).await.unwrap().remove(0);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(
+                matches!(stage, Stage::GaveUp { attempts: 1, .. }),
+                "{stage:?}"
+            );
+            let late = catalog.new_acceptance("a2", &specs, &json!(2)).unwrap();
+            let at = a.claimed_micros;
+            assert!(!(q.complete_accepted("a", id, at, &json!(2), &late).await).unwrap());
+            assert_eq!(
+                catalog.acceptances_of("s", 10).await.unwrap(),
+                Vec::<Value>::new()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_job_is_read_and_cancelled_in_its_scope_only() {
         use crate::scope::{Scope, within};

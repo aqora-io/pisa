@@ -253,7 +253,10 @@ To the release that shows a running acceptance's progress:
 - Compose and the Helm chart set `PISA_LEASE_SECS` to 30, from the default
   10: a dead worker's job waits up to 30 s for another worker.
 - A worker of this release stores an acceptance only with its job's
-  answer, and stops a judgment whose claim moved to another attempt.
+  answer, and stops a judgment whose claim moved to another attempt. So a
+  lost accept stored nothing, and its `worker_lost` has `resend_safe`
+  true; one that a worker of the release before ran may have stored its
+  acceptance.
 
 To the release that accepts runs on pisa's own builds:
 - `POST /snapshots/accept` builds nothing: comparator judges exports of the
@@ -864,7 +867,7 @@ Python and `PisaError.resendSafe` in TypeScript.
 | Creates (replace, amend, refute) | `true`: a resend with the same `key` replays; the clients always send one |
 | Rebuild, settle, resubmit | `true`: their creates carry the plan's keys |
 | Delete, document close | `true`: a second run answers `not_found`, which means done |
-| Accept | `false`: a finished first run may be stored already; check `GET /snapshots/accept?spec=` first |
+| Accept | `true`: an acceptance is stored only with its job's answer, so a lost one stored nothing; a resend judges the run again, from the start |
 | Document edit | `false`: check the document's revision first |
 
 The clients send a lost request again by themselves when it is safe to send

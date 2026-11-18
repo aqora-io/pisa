@@ -50,10 +50,11 @@ pub enum Job {
 
 impl Job {
     /// Whether sending the request again after this job was lost is safe:
-    /// not for an accept, whose finished first run may be stored already, or
-    /// a document edit, which may have changed the document.
+    /// not for a document edit, which may have changed the document. A lost
+    /// accept stored nothing, as its acceptance is stored only in the
+    /// transaction that completes its job (`Queue::complete_accepted`).
     pub fn resend_safe(&self) -> bool {
-        !matches!(self, Job::SnapshotAccept(_) | Job::DocumentEdit(_))
+        !matches!(self, Job::DocumentEdit(_))
     }
 }
 
@@ -502,7 +503,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_accept_or_a_document_edit_is_unsafe_to_resend() {
+    fn only_a_document_edit_is_unsafe_to_resend() {
         use serde_json::json;
         let code = |kind: &str| json!({"kind": kind, "code": "", "timeout_secs": 1});
         let jobs = [
@@ -544,7 +545,7 @@ mod tests {
         for job in &jobs {
             // A new kind fails to compile here until it is added above.
             let resend_safe = match job {
-                Job::SnapshotAccept(_) | Job::DocumentEdit(_) => false,
+                Job::DocumentEdit(_) => false,
                 Job::Check(_)
                 | Job::SessionStart(_)
                 | Job::SessionTactic(_)
@@ -559,6 +560,7 @@ mod tests {
                 | Job::SnapshotSettle(_)
                 | Job::SnapshotResubmit(_)
                 | Job::SnapshotExport(_)
+                | Job::SnapshotAccept(_)
                 | Job::DocumentOpen(_)
                 | Job::DocumentGoals(_)
                 | Job::DocumentProbe(_)
