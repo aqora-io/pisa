@@ -493,6 +493,17 @@ class AcceptPair(TypedDict):
     kernels: NotRequired[list[KernelVerdict]]
     theorems: int
     left_out: NotRequired[list[LeftOut]]
+    # Where its time and memory went: its exports, then comparator, split by
+    # the kernels pisa saw it run.
+    phases: NotRequired[list[PairPhase]]
+
+class PairPhase(TypedDict):
+    # "exporting challenge", "exporting solution", "judging" (comparator
+    # outside its kernels), or a kernel's name as in `kernels`.
+    name: str
+    seconds: float
+    # The most memory the slot held in it, in MiB; absent without cgroups.
+    peak_memory_mb: NotRequired[int]
 
 class AcceptResponse(TypedDict):
     """A run's acceptance, stored under `id`: `accepted` when the audit is
@@ -651,6 +662,25 @@ JobKind = Literal[
 ]
 JobStatus = Literal["queued", "running", "done", "cancelled"]
 
+class AcceptPhase(TypedDict):
+    # "linking", "exporting" (with `pair` and `side`) or "judging" (with
+    # `pair`); pairs count from 1.
+    name: Literal["linking", "exporting", "judging"]
+    pair: NotRequired[int]
+    side: NotRequired[Literal["challenge", "solution"]]
+
+class JobProgress(TypedDict):
+    """What a running acceptance is doing, from pisa's own steps and the
+    processes in its slot."""
+    phase: AcceptPhase
+    # While judging, the kernel comparator is running; absent between
+    # kernels and without cgroups.
+    kernel: NotRequired[str]
+    # How long it has been in this phase, with this kernel.
+    seconds: float
+    # The most memory the slot has held in that time, in MiB.
+    peak_memory_mb: NotRequired[int]
+
 class Job(TypedDict):
     """An async request's job, as a `submit_*` returns it. Keep it to wait for
     the answer later, also from another process; keep it secret too, as anyone
@@ -658,6 +688,8 @@ class Job(TypedDict):
     id: str
     kind: JobKind
     status: JobStatus
+    # What its worker last said it was doing: only a run's acceptance says.
+    progress: NotRequired[JobProgress]
 
 class SearchHealth(TypedDict):
     ready: bool

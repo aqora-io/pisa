@@ -13,7 +13,7 @@ use pisa_repl::Repl;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::cgroup::Cgroups;
+use crate::cgroup::{Cgroups, Peak};
 use crate::config::{Sandbox, WorkerConfig};
 
 pub struct Launcher {
@@ -830,6 +830,32 @@ impl Launcher {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         tracing::warn!(slot, "processes linger in the slot's cgroup");
+    }
+
+    /// Kills what is left in the slot's cgroup, and waits for it to go
+    /// ([`wait_idle`](Self::wait_idle)); nothing without cgroups.
+    pub async fn kill(&self, slot: usize) {
+        if let Some(cg) = &self.cgroups {
+            cg.kill(slot);
+            self.wait_idle(slot).await;
+        }
+    }
+
+    /// The executables of the processes in the slot's cgroup, of those the
+    /// worker may see; none without cgroups.
+    pub fn slot_executables(&self, slot: usize) -> Vec<PathBuf> {
+        let Some(cg) = &self.cgroups else {
+            return Vec::new();
+        };
+        (cg.procs(slot).into_iter())
+            .filter_map(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
+            .collect()
+    }
+
+    /// The slot's peak memory from now on (see [`Peak`]); `None` without
+    /// cgroups, or a kernel that can't reset it.
+    pub fn peak(&self, slot: usize) -> Option<Peak> {
+        self.cgroups.as_ref()?.peak(slot)
     }
 
     /// OOM kills so far in the slot's cgroup (0 without cgroups).

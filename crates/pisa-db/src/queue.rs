@@ -21,6 +21,7 @@ use pisa_protocol::wire::JobResult;
 use serde_json::Value;
 
 use crate::backend::dispatch;
+use crate::catalog::Acceptance;
 #[cfg(test)]
 use crate::db::Notice;
 use crate::db::{Db, DbError};
@@ -178,6 +179,10 @@ pub struct Status {
     /// What it was submitted as, e.g. `check`.
     pub kind: String,
     pub stage: Stage,
+    /// What its attempt last said it was doing ([`Queue::set_progress`]),
+    /// if it said anything: kept when its claim lapses, and cleared when
+    /// another attempt claims it.
+    pub progress: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +303,9 @@ pub struct Claimed {
     pub job: Value,
     /// When the job was queued, in microseconds since the Unix epoch.
     pub enqueued_micros: i64,
+    /// When this attempt claimed it: with the worker's name, what tells the
+    /// attempt's claim from another's, the same worker's included.
+    pub claimed_micros: i64,
 }
 
 /// The queue's state.
@@ -477,10 +485,63 @@ impl Queue {
         dispatch!(&self.db, claim(&self.name, worker, ids, lease))
     }
 
-    /// Records job `id`'s result if `worker` still holds its claim, and tells
-    /// its server; returns whether it did.
-    pub async fn complete(&self, worker: &str, id: i64, result: &Value) -> Result<bool, DbError> {
-        dispatch!(&self.db, complete(worker, id, result))
+    /// Records job `id`'s result if `worker` still holds the claim it made at
+    /// `claimed_micros` ([`Queue::claim_held`]), and tells its server;
+    /// returns whether it did.
+    pub async fn complete(
+        &self,
+        worker: &str,
+        id: i64,
+        claimed_micros: i64,
+        result: &Value,
+    ) -> Result<bool, DbError> {
+        dispatch!(&self.db, complete(worker, id, claimed_micros, result))
+    }
+
+    /// [`Queue::complete`], and in the same transaction stores `acceptance`,
+    /// the run's acceptance the job's result answers: both if `worker` still
+    /// holds the claim it made at `claimed_micros`, else neither. Returns
+    /// whether it did.
+    pub async fn complete_accepted(
+        &self,
+        worker: &str,
+        id: i64,
+        claimed_micros: i64,
+        result: &Value,
+        acceptance: &Acceptance,
+    ) -> Result<bool, DbError> {
+        dispatch!(
+            &self.db,
+            complete_accepted(worker, id, claimed_micros, result, acceptance)
+        )
+    }
+
+    /// Whether `worker` still holds the claim on job `id` it made at
+    /// `claimed_micros`: no other attempt has claimed the job since, by
+    /// another worker or this one, and it isn't done. A lease that lapsed
+    /// doesn't end it: a worker back from a stall that outlasted its lease
+    /// goes on until another attempt takes the job.
+    pub async fn claim_held(
+        &self,
+        id: i64,
+        worker: &str,
+        claimed_micros: i64,
+    ) -> Result<bool, DbError> {
+        dispatch!(&self.db, claim_held(id, worker, claimed_micros))
+    }
+
+    /// Records what job `id`'s attempt is doing, `progress`, which
+    /// [`Queue::status`] reads, if `worker` still holds the claim it made at
+    /// `claimed_micros`, as [`Queue::claim_held`] says; returns whether it
+    /// does.
+    pub async fn set_progress(
+        &self,
+        id: i64,
+        worker: &str,
+        claimed_micros: i64,
+        progress: &Value,
+    ) -> Result<bool, DbError> {
+        dispatch!(&self.db, set_progress(id, worker, claimed_micros, progress))
     }
 
     /// Renews the leases of the claims `worker` made since it registered at
@@ -577,6 +638,13 @@ mod tests {
     async fn ids(q: &Queue, version: &str) -> Vec<i64> {
         let found = q.candidates(version, 100).await.unwrap();
         found.into_iter().map(|c| c.id).collect()
+    }
+
+    /// Claims job `id` for `worker`; returns when, which names the claim.
+    async fn claimed(q: &Queue, worker: &str, id: i64) -> i64 {
+        let claimed = q.claim(worker, &[id], LEASE).await.unwrap();
+        assert_eq!(claimed.len(), 1, "{id} wasn't claimable");
+        claimed[0].claimed_micros
     }
 
     fn reg(
@@ -730,7 +798,8 @@ mod tests {
                 Poll::Waiting { give_up_at: None }
             ));
 
-            assert!(q.complete("w", id, &json!({"ok": 1})).await.unwrap());
+            let at = claimed[0].claimed_micros;
+            assert!(q.complete("w", id, at, &json!({"ok": 1})).await.unwrap());
             let Poll::Done(result) = q.poll(id).await.unwrap() else {
                 panic!("not done");
             };
@@ -789,7 +858,8 @@ mod tests {
             new.max_attempts = 2;
             let id = q.enqueue(&new).await.unwrap();
             let short = Duration::from_millis(1);
-            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            let a = q.claim("a", &[id], short).await.unwrap();
+            assert_eq!(a.len(), 1);
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(matches!(
                 q.poll(id).await.unwrap(),
@@ -800,7 +870,8 @@ mod tests {
             assert_eq!(ids(&q, "v").await, [id]);
             assert_eq!(q.claim("b", &[id], short).await.unwrap().len(), 1);
             // `a` was too slow: its result goes nowhere.
-            assert!(!q.complete("a", id, &json!(1)).await.unwrap());
+            let at = a[0].claimed_micros;
+            assert!(!q.complete("a", id, at, &json!(1)).await.unwrap());
             tokio::time::sleep(Duration::from_millis(20)).await;
             assert!(ids(&q, "v").await.is_empty());
             assert!(q.claim("c", &[id], LEASE).await.unwrap().is_empty());
@@ -812,6 +883,110 @@ mod tests {
                 }
             ));
             assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
+        }
+    }
+
+    /// A worker that claims its own job again, once its first claim lapsed,
+    /// makes another attempt: the first attempt's claim is held no more, so
+    /// it can neither say its progress nor complete the job, though its
+    /// worker is the same.
+    #[tokio::test]
+    async fn a_reclaim_by_the_same_worker_ends_the_old_attempts_claim() {
+        for q in queues().await {
+            let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
+            let short = Duration::from_millis(1);
+            let first = q.claim("w", &[id], short).await.unwrap().remove(0);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let second = claimed(&q, "w", id).await;
+            assert_ne!(first.claimed_micros, second);
+            let old = first.claimed_micros;
+            assert!(
+                !q.claim_held(id, "w", old).await.unwrap(),
+                "the first attempt still holds the claim"
+            );
+            let progress = json!({"phase": {"name": "linking"}});
+            assert!(!q.set_progress(id, "w", old, &progress).await.unwrap());
+            assert!(
+                !q.complete("w", id, old, &json!(1)).await.unwrap(),
+                "the first attempt completed the job"
+            );
+            assert!(q.claim_held(id, "w", second).await.unwrap());
+            assert!(q.set_progress(id, "w", second, &progress).await.unwrap());
+            assert!(q.complete("w", id, second, &json!(2)).await.unwrap());
+            let Poll::Done(result) = q.poll(id).await.unwrap() else {
+                panic!("not done");
+            };
+            assert_eq!(result, json!(2));
+        }
+    }
+
+    /// A claim whose lease lapsed is still held while no other attempt has
+    /// claimed the job: its worker, back from a stall, goes on and says
+    /// what it is doing. Once another worker claims the job, the claim is
+    /// that attempt's, which starts with no progress.
+    #[tokio::test]
+    async fn a_lapsed_lease_is_still_held() {
+        for q in queues().await {
+            let (id, token) = q
+                .enqueue_async(&job(Some("v"), 1), "accept_run")
+                .await
+                .unwrap();
+            let short = Duration::from_millis(1);
+            let a = q.claim("a", &[id], short).await.unwrap().remove(0);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let at = a.claimed_micros;
+            assert!(
+                q.claim_held(id, "a", at).await.unwrap(),
+                "a lapsed lease ended the claim"
+            );
+            let progress = json!({"phase": {"name": "judging", "pair": 1}, "seconds": 2.0});
+            assert!(q.set_progress(id, "a", at, &progress).await.unwrap());
+            let status = q.status(&token).await.unwrap().unwrap();
+            assert_eq!(status.progress, Some(progress.clone()));
+
+            let b = claimed(&q, "b", id).await;
+            assert!(!q.claim_held(id, "a", at).await.unwrap());
+            assert!(!q.set_progress(id, "a", at, &progress).await.unwrap());
+            let status = q.status(&token).await.unwrap().unwrap();
+            assert!(matches!(status.stage, Stage::Running), "{:?}", status.stage);
+            assert_eq!(status.progress, None, "the new attempt has the old one's");
+            assert!(q.claim_held(id, "b", b).await.unwrap());
+        }
+    }
+
+    /// An accept's result and its acceptance are written together, by the
+    /// attempt that holds the claim: one whose claim moved writes neither.
+    #[tokio::test]
+    async fn an_acceptance_is_stored_only_with_its_jobs_result() {
+        for q in queues().await {
+            let catalog = crate::catalog::Catalog::new(q.db().clone(), q.name().to_string());
+            let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
+            let short = Duration::from_millis(1);
+            let a = q.claim("a", &[id], short).await.unwrap().remove(0);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let b = claimed(&q, "b", id).await;
+            let specs = ["s".to_string()];
+            let stored = |n: u32| json!({"accepted": true, "by": n});
+            let lost = catalog.new_acceptance("a1", &specs, &stored(1)).unwrap();
+            let at = a.claimed_micros;
+            assert!(
+                !q.complete_accepted("a", id, at, &json!(1), &lost)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(catalog.acceptance("a1").await.unwrap(), None);
+            let held = catalog.new_acceptance("a2", &specs, &stored(2)).unwrap();
+            assert!(
+                q.complete_accepted("b", id, b, &json!(2), &held)
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(catalog.acceptance("a2").await.unwrap(), Some(stored(2)));
+            let Poll::Done(result) = q.poll(id).await.unwrap() else {
+                panic!("not done");
+            };
+            assert_eq!(result, json!(2));
+            assert_eq!(catalog.acceptances_of("s", 10).await.unwrap(), [stored(2)]);
         }
     }
 
@@ -846,10 +1021,10 @@ mod tests {
             let status = q.status(&token).await.unwrap().unwrap();
             assert_eq!((status.id, status.kind.as_str()), (id, "check"));
             assert!(matches!(status.stage, Stage::Queued { .. }));
-            assert_eq!(q.claim("w", &[id], LEASE).await.unwrap().len(), 1);
+            let at = claimed(&q, "w", id).await;
             let stage = q.status(&token).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::Running));
-            assert!(q.complete("w", id, &json!({"ok": true})).await.unwrap());
+            assert!(q.complete("w", id, at, &json!({"ok": true})).await.unwrap());
             // Reading leaves it.
             for _ in 0..2 {
                 let stage = q.status(&token).await.unwrap().unwrap().stage;
@@ -884,7 +1059,7 @@ mod tests {
             }
             // Closed: nobody can claim or complete it, and it isn't queued.
             assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
-            assert!(!q.complete("w", id, &json!(1)).await.unwrap());
+            assert!(!q.complete("w", id, 0, &json!(1)).await.unwrap());
             assert_eq!(q.counts(LIVE).await.unwrap().queued, [0, 0]);
         }
     }
@@ -896,7 +1071,8 @@ mod tests {
             new.max_attempts = 1;
             let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
             let short = Duration::from_millis(1);
-            assert_eq!(q.claim("a", &[id], short).await.unwrap().len(), 1);
+            let a = q.claim("a", &[id], short).await.unwrap();
+            assert_eq!(a.len(), 1);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let stage = q.status(&token).await.unwrap().unwrap().stage;
             assert!(matches!(
@@ -907,7 +1083,8 @@ mod tests {
                 }
             ));
             // The worker answers too late.
-            assert!(!q.complete("a", id, &json!(1)).await.unwrap());
+            let at = a[0].claimed_micros;
+            assert!(!q.complete("a", id, at, &json!(1)).await.unwrap());
             let stage = q.status(&token).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::GaveUp { attempts: 1, .. }));
         }
@@ -1233,11 +1410,11 @@ mod tests {
             assert!(matches!(stage, Stage::Expired { .. }), "{stage:?}");
 
             let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
-            q.claim("w", &[id], LEASE).await.unwrap();
+            let at = claimed(&q, "w", id).await;
             assert_eq!(q.cancel(&token).await.unwrap(), None);
             let stage = q.status(&token).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::Running));
-            q.complete("w", id, &json!(1)).await.unwrap();
+            q.complete("w", id, at, &json!(1)).await.unwrap();
             assert_eq!(q.cancel(&token).await.unwrap(), None);
             let stage = q.status(&token).await.unwrap().unwrap().stage;
             assert!(matches!(stage, Stage::Done(_)));
@@ -1250,9 +1427,9 @@ mod tests {
             let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let sync = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             let (id, done) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
-            q.claim("w", &[sync, id], LEASE).await.unwrap();
-            q.complete("w", sync, &json!(1)).await.unwrap();
-            q.complete("w", id, &json!(2)).await.unwrap();
+            let at = q.claim("w", &[sync, id], LEASE).await.unwrap()[0].claimed_micros;
+            q.complete("w", sync, at, &json!(1)).await.unwrap();
+            q.complete("w", id, at, &json!(2)).await.unwrap();
             let mut unclaimed = job(Some("v"), 1);
             unclaimed.max_wait = Duration::from_millis(1);
             let sync_unclaimed = q.enqueue(&unclaimed).await.unwrap();
@@ -1308,8 +1485,8 @@ mod tests {
             let (id, token) = within(a.clone(), q.enqueue_async(&job(Some("v"), 1), "check"))
                 .await
                 .unwrap();
-            q.claim("w", &[id], LEASE).await.unwrap();
-            q.complete("w", id, &json!({"kind": "check", "time": 1.0}))
+            let at = claimed(&q, "w", id).await;
+            q.complete("w", id, at, &json!({"kind": "check", "time": 1.0}))
                 .await
                 .unwrap();
             q.sweep_as_of(later(61)).await.unwrap();
@@ -1341,12 +1518,12 @@ mod tests {
                 .enqueue_async(&job(Some("v"), 1), "accept_run")
                 .await
                 .unwrap();
-            q.claim("w", &[id], LEASE).await.unwrap();
+            let at = claimed(&q, "w", id).await;
             let refused = json!({
                 "kind": "snapshot_accepted",
                 "Err": {"kind": "conflict", "message": "SECRET-ANSWER"}
             });
-            q.complete("w", id, &refused).await.unwrap();
+            q.complete("w", id, at, &refused).await.unwrap();
             q.sweep_as_of(later(25 * 60)).await.unwrap();
             let status = q.status(&token).await.unwrap();
             assert!(!format!("{status:?}").contains("SECRET"));
@@ -1426,8 +1603,8 @@ mod tests {
             let mut tokens = Vec::new();
             for (kind, result, _) in cases {
                 let (id, token) = q.enqueue_async(&job(Some("v"), 1), kind).await.unwrap();
-                q.claim("w", &[id], LEASE).await.unwrap();
-                q.complete("w", id, result).await.unwrap();
+                let at = claimed(&q, "w", id).await;
+                q.complete("w", id, at, result).await.unwrap();
                 tokens.push(token);
             }
             q.sweep_as_of(later(25 * 60)).await.unwrap();
@@ -1462,8 +1639,8 @@ mod tests {
         for q in queues().await {
             q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
-            q.claim("w", &[id], LEASE).await.unwrap();
-            q.complete("w", id, &json!(1)).await.unwrap();
+            let at = claimed(&q, "w", id).await;
+            q.complete("w", id, at, &json!(1)).await.unwrap();
             q.unregister("w").await.unwrap();
             q.sweep_as_of(later(11)).await.unwrap();
             assert!(matches!(q.poll(id).await.unwrap(), Poll::Gone));
@@ -1500,8 +1677,8 @@ mod tests {
             let mut tokens = vec![];
             for kind in ["create_snapshot", "accept_run", "check"] {
                 let (id, token) = q.enqueue_async(&job(Some("v"), 1), kind).await.unwrap();
-                q.claim("w", &[id], LEASE).await.unwrap();
-                q.complete("w", id, &json!(1)).await.unwrap();
+                let at = claimed(&q, "w", id).await;
+                q.complete("w", id, at, &json!(1)).await.unwrap();
                 tokens.push(token);
             }
             q.sweep_as_of(later(61)).await.unwrap();
@@ -1535,9 +1712,9 @@ mod tests {
 
             // A running job isn't given up.
             let id = q.enqueue(&job(Some("v"), 1)).await.unwrap();
-            q.claim("w", &[id], LEASE).await.unwrap();
+            let at = claimed(&q, "w", id).await;
             assert_eq!(q.give_up(id).await.unwrap(), None);
-            assert!(q.complete("w", id, &json!(1)).await.unwrap());
+            assert!(q.complete("w", id, at, &json!(1)).await.unwrap());
         }
     }
 
@@ -1729,8 +1906,8 @@ mod tests {
                     .unwrap()
             };
             heard.insert(format!("{:?}", next().await));
-            q.claim("w", &[id], LEASE).await.unwrap();
-            q.complete("w", id, &json!(1)).await.unwrap();
+            let at = claimed(&q, "w", id).await;
+            q.complete("w", id, at, &json!(1)).await.unwrap();
             // Other tests' queues on a shared PostgreSQL notify too.
             while !heard.contains(&format!("{:?}", Notice::Done(id))) {
                 heard.insert(format!("{:?}", next().await));

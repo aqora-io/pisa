@@ -241,11 +241,14 @@ fn answered(declarations: &mut Vec<Declaration>, detail: &[Detail], pool: &Pool)
     *declarations = full.into_iter().map(|d| d.summarised(allowed)).collect();
 }
 
+/// Runs `job`. An accept says what it is doing to `progress`, and doesn't
+/// store its acceptance, which the claim stores with the job's result.
 pub(crate) async fn run_job(
     pool: &Arc<Pool>,
     sessions: &Sessions,
     documents: Option<&Documents>,
     job: Job,
+    progress: &runs::ProgressSender,
 ) -> JobResult {
     match job {
         Job::Check(c) => {
@@ -297,7 +300,7 @@ pub(crate) async fn run_job(
             error: "a resubmit is planned and run by a server".into(),
         },
         Job::SnapshotAccept(j) => {
-            JobResult::SnapshotAccepted(runs::accept(pool, j).await.map(Box::new))
+            JobResult::SnapshotAccepted(runs::accept(pool, j, progress).await.map(Box::new))
         }
         Job::SnapshotExport(j) => {
             let project = pool.launcher().project();

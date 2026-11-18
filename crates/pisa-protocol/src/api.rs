@@ -258,13 +258,64 @@ pub enum Accepted {
 }
 
 /// An async request, as `/jobs/{id}` reports it until it is done.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Job {
     /// Its id: 32 hex digits, to keep secret, as anyone who has it can read
     /// the answer or cancel the job.
     pub id: String,
     pub kind: JobKind,
     pub status: JobStatus,
+    /// What its worker last said it was doing, which a worker says as often
+    /// as it renews its claim, a third of `PISA_LEASE_SECS`: only a run's
+    /// acceptance says it. It stays while the claim has lapsed, and goes when
+    /// another worker takes the job, until that one says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<JobProgress>,
+}
+
+/// What a running acceptance is doing: from pisa's own steps and the
+/// processes in its slot, never from what comparator prints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct JobProgress {
+    pub phase: AcceptPhase,
+    /// While judging, the kernel comparator is running, as a pair's
+    /// `kernels` name it: found by its executable among the processes in the
+    /// worker's slot. None while comparator reads and compares the exports,
+    /// between kernels, and on a worker without cgroups (`PISA_CGROUP_ROOT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    /// How long it has been in this phase, with this kernel, in seconds.
+    pub seconds: f64,
+    /// The most memory the slot has held in that time, in MiB, as its cgroup
+    /// counts it, page cache included, as its memory limit does. None while
+    /// linking, which is before the slot, and on a worker without cgroups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_mb: Option<u64>,
+}
+
+/// A step of a run's acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "name", rename_all = "snake_case")]
+pub enum AcceptPhase {
+    /// Linking the modules the pairs need into the judgment's directory,
+    /// each file checked against its record.
+    Linking,
+    /// Exporting one side of pair `pair` with `leanexport`. Pairs count from
+    /// 1, in the order of the acceptance's `pairs`, as their
+    /// `comparator/<pair>.json` do.
+    Exporting { pair: u64, side: PairSide },
+    /// Comparator judging pair `pair` on its exports.
+    Judging { pair: u64 },
+}
+
+/// A side of a pair, as comparator names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PairSide {
+    /// The spec snapshot's module.
+    Challenge,
+    /// The head's module.
+    Solution,
 }
 
 /// The endpoint an async request ran.
@@ -2093,7 +2144,7 @@ pub struct ListAcceptancesResponse {
     pub acceptances: Vec<AcceptResponse>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AcceptPair {
     /// The spec snapshot.
     pub spec: String,
@@ -2145,6 +2196,27 @@ pub struct AcceptPair {
     /// What the configuration leaves out of what it would name, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left_out: Vec<LeftOut>,
+    /// Where the pair's time and memory went, in order: its two exports,
+    /// then comparator, split by the kernels pisa saw it run, looking about
+    /// each second. Empty when nothing was exported for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<PairPhase>,
+}
+
+/// A step of judging a pair, and what it took.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PairPhase {
+    /// `exporting challenge` or `exporting solution`, pisa exporting the
+    /// spec snapshot's or the head's module; `judging`, comparator reading
+    /// and comparing the exports, outside its kernels; or a kernel
+    /// comparator ran, named as in `kernels`, found by its executable among
+    /// the processes in the worker's slot.
+    pub name: String,
+    pub seconds: f64,
+    /// The most memory the slot held in it, in MiB, as its cgroup counts it,
+    /// page cache included. None on a worker without cgroups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_memory_mb: Option<u64>,
 }
 
 /// What one kernel said of a solution: as pisa configured it, for an accepted

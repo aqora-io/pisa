@@ -47,6 +47,7 @@ spec:
             - { name: PISA_BEAM_DOCUMENTS, value: {{ $w.beamDocuments | quote }} }
             - { name: PISA_BEAM_MEMORY_MAX_MB, value: {{ $w.beamMemoryMaxMb | quote }} }
             - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ $w.drainTimeoutSecs | quote }} }
+            - { name: PISA_LEASE_SECS, value: {{ $w.leaseSecs | quote }} }
             {{- with $.Values.allowedAxioms }}
             - { name: PISA_ALLOWED_AXIOMS, value: {{ join "," . | quote }} }
             {{- end }}

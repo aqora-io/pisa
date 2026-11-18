@@ -137,6 +137,62 @@ impl Cgroups {
             .parse()
             .ok()
     }
+
+    /// The processes in the slot's cgroup, by pid; none if it doesn't exist.
+    pub fn procs(&self, slot: usize) -> Vec<u32> {
+        let procs = std::fs::read_to_string(self.slot_dir(slot).join("cgroup.procs"));
+        let procs = procs.unwrap_or_default();
+        procs
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    }
+
+    /// Kills every process in the slot's cgroup (`cgroup.kill`), those that
+    /// fork into it meanwhile too. They are gone soon after, not at once.
+    pub fn kill(&self, slot: usize) {
+        match std::fs::write(self.slot_dir(slot).join("cgroup.kill"), "1") {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                tracing::warn!(slot, "killing the slot's processes failed: {e}")
+            }
+            _ => {}
+        }
+    }
+
+    /// The slot's peak memory from now on, which [`Peak::reset`] starts
+    /// again; `None` if the kernel can't reset it (before Linux 6.12).
+    pub fn peak(&self, slot: usize) -> Option<Peak> {
+        let dir = self.slot_dir(slot);
+        std::fs::create_dir_all(&dir).ok()?;
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(dir.join("memory.peak"))
+            .ok()?;
+        let peak = Peak(file);
+        peak.reset().then_some(peak)
+    }
+}
+
+/// An open `memory.peak` of a slot's cgroup. Writing to it resets the peak
+/// that reads through the same file see, and no other reader's.
+pub struct Peak(std::fs::File);
+
+impl Peak {
+    /// Starts the peak again from the slot's memory now; whether it could.
+    pub fn reset(&self) -> bool {
+        use std::os::unix::fs::FileExt;
+        self.0.write_at(b"0", 0).is_ok()
+    }
+
+    /// The most memory the slot held since the last reset, in MiB.
+    pub fn mb(&self) -> Option<u64> {
+        use std::os::unix::fs::FileExt;
+        let mut buf = [0u8; 32];
+        let n = self.0.read_at(&mut buf, 0).ok()?;
+        let bytes: u64 = std::str::from_utf8(&buf[..n]).ok()?.trim().parse().ok()?;
+        Some(bytes / (1024 * 1024))
+    }
 }
 
 #[cfg(test)]

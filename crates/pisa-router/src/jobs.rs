@@ -80,7 +80,12 @@ impl App {
 /// The 202 to a request that prefers `respond-async`: its job.
 pub(crate) fn accepted(id: String, kind: JobKind, status: JobStatus) -> Response {
     let location = format!("/jobs/{id}");
-    let job = Job { id, kind, status };
+    let job = Job {
+        id,
+        kind,
+        status,
+        progress: None,
+    };
     let mut response = no_store((StatusCode::ACCEPTED, Json(job)));
     let headers = response.headers_mut();
     if let Ok(location) = HeaderValue::from_str(&location) {
@@ -271,8 +276,13 @@ pub async fn get(
     match app.dispatcher.look(&id, wait).await {
         Ok(None) => unknown(&id),
         Ok(Some(Looked { kind, state })) => match state {
-            Looking::Pending(status) => {
-                let job = Job { id, kind, status };
+            Looking::Pending(status, progress) => {
+                let job = Job {
+                    id,
+                    kind,
+                    status,
+                    progress,
+                };
                 no_store((StatusCode::ACCEPTED, Json(job)))
             }
             Looking::Done(outcome) => done(id, kind, *outcome),
@@ -296,7 +306,12 @@ pub async fn cancel(State(app): State<Arc<App>>, Path(id): Path<String>) -> Resp
     }
     match app.dispatcher.cancel(&id).await {
         Ok(None) => unknown(&id),
-        Ok(Some((kind, Withdrawn::Status(status)))) => no_store(Json(Job { id, kind, status })),
+        Ok(Some((kind, Withdrawn::Status(status)))) => no_store(Json(Job {
+            id,
+            kind,
+            status,
+            progress: None,
+        })),
         Ok(Some((kind, Withdrawn::Expired(job)))) => expired(&id, kind, job),
         Err(e) => no_store(ApiError::from(e)),
     }

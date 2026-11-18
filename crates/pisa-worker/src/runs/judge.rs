@@ -10,13 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use pisa_protocol::api::{Error, ErrorKind, KernelVerdict, PairError, PairErrorKind};
+use pisa_protocol::api::{
+    AcceptPhase, Error, ErrorKind, KernelVerdict, PairError, PairErrorKind, PairPhase, PairSide,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::{
-    OUTPUT_LINES, accepted_kernels, classify, comparator_args, external_config, failed_kernels,
-    hex, leaves_out_declining, run_kernels, tail, with_cap,
+    OUTPUT_LINES, Progress, accepted_kernels, classify, comparator_args, external_config,
+    failed_kernels, hex, leaves_out_declining, run_kernels, tail, with_cap,
 };
 use crate::catalog::Module;
 use crate::launcher::{Launcher, LeanExportError};
@@ -96,6 +98,8 @@ pub struct Judgment {
     /// The end of what comparator printed.
     pub output: String,
     pub kernels: Vec<KernelVerdict>,
+    /// Where its time and memory went: its exports, then comparator.
+    pub phases: Vec<PairPhase>,
 }
 
 pub struct JudgeOptions {
@@ -292,7 +296,8 @@ fn timed_out(limit: Duration) -> String {
 /// on `slot`, whose memory should be free: each on the exports of its two
 /// modules, `exports/<key>` there, with its configuration as
 /// `comparator/<n>.json`, `n` counting from 1. `project` is the worker's,
-/// whose `lean-toolchain` has elan run the project's `lake`.
+/// whose `lean-toolchain` has elan run the project's `lake`. Each export and
+/// comparator is a phase of `progress`.
 pub async fn judge(
     launcher: &Launcher,
     slot: usize,
@@ -300,7 +305,9 @@ pub async fn judge(
     project: Option<&Path>,
     pairs: &[PairToJudge],
     options: &JudgeOptions,
+    progress: &mut Progress<'_>,
 ) -> Result<Vec<Judgment>, Error> {
+    progress.on_slot(slot);
     let dir = &modules.root;
     let internal =
         |what: &str, e: std::io::Error| Error::new(ErrorKind::Internal, format!("{what}: {e}"));
@@ -328,16 +335,26 @@ pub async fn judge(
                 exit_code: None,
                 output: String::new(),
                 kernels: Vec::new(),
+                phases: Vec::new(),
             });
             continue;
         }
+        let number = n as u64 + 1;
         let deadline = Instant::now() + options.timeout;
         let targets = export_targets(&pair.configuration);
         let mut exported = Vec::new();
         let mut failed = None;
-        for module in [&pair.spec_module, &pair.head_module] {
+        let sides = [
+            (&pair.spec_module, PairSide::Challenge),
+            (&pair.head_module, PairSide::Solution),
+        ];
+        for (module, side) in sides {
+            progress.begin(AcceptPhase::Exporting { pair: number, side });
             let left = deadline.saturating_duration_since(Instant::now());
-            match exports.export(module, &targets, left).await {
+            match progress
+                .during(exports.export(module, &targets, left))
+                .await
+            {
                 Ok(path) => exported.push(path),
                 Err(e) => {
                     failed = Some(export_failed(launcher, slot, module, e, options.timeout)?);
@@ -351,6 +368,7 @@ pub async fn judge(
                 exit_code: None,
                 output: String::new(),
                 kernels: Vec::new(),
+                phases: progress.pair_done(),
             });
             continue;
         }
@@ -370,8 +388,10 @@ pub async fn judge(
         let args = comparator_args(&config, (&exported[0], &exported[1]));
         let oom_before = launcher.oom_kills(slot);
         let left = deadline.saturating_duration_since(Instant::now());
-        let mut ran = (launcher.lake(slot, &args, dir, left).await)
+        progress.begin(AcceptPhase::Judging { pair: number });
+        let mut ran = (progress.during(launcher.lake(slot, &args, dir, left)).await)
             .map_err(|e| internal("running lake comparator", e))?;
+        let phases = progress.pair_done();
         if ran.code.is_none() {
             ran.output.push('\n');
             ran.output.push_str(&timed_out(options.timeout));
@@ -388,6 +408,7 @@ pub async fn judge(
             exit_code: ran.code,
             output: tail(&ran.output, OUTPUT_LINES),
             kernels,
+            phases,
         });
     }
     Ok(judgments)

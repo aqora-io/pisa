@@ -8,6 +8,7 @@ import type { ErrorKind } from "./openapi.ts";
 
 export type {
   AcceptPair,
+  AcceptPhase,
   AcceptRequest,
   AcceptResponse,
   Allow,
@@ -72,6 +73,7 @@ export type {
   Job,
   JobKind,
   JobOutcome,
+  JobProgress,
   JobStatus,
   KernelOutcome,
   KernelVerdict,
@@ -88,6 +90,8 @@ export type {
   OpenDocumentRequest,
   PairError,
   PairErrorKind,
+  PairPhase,
+  PairSide,
   Pos,
   ProbeAt,
   ProbeResult,

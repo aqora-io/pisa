@@ -99,9 +99,20 @@ that Compose and the chart set:
     the queue's notifications. Connect directly, or through PgBouncer in
     session mode: the tables are created under a session-level advisory
     lock, and notifications need a session of their own.
-  - A worker's claim on a job lasts `PISA_LEASE_SECS` (default 10) without a
-    heartbeat; a job whose worker died runs elsewhere once it lapses, up to
-    `PISA_MAX_RETRIES` more times. A request waiting on its answer gives
+  - A worker's claim on a job lasts `PISA_LEASE_SECS` (default 10; Compose
+    and the Helm chart's `worker.leaseSecs` set 30) without a heartbeat,
+    which renews it every third of that; a job whose worker died runs
+    elsewhere once it lapses, up to `PISA_MAX_RETRIES` more times. That is
+    the lease's trade-off: a dead worker's job waits up to the lease, 30 s
+    with Compose's, for another worker, while a shorter lease lets a stall
+    of a live worker, such as a host short of memory, hand its job to
+    another worker as it still runs it. A lapsed claim stays its worker's
+    until another attempt claims the job. A claim is its worker's name and
+    the time it claimed, so a worker that claims its own job again makes a
+    new attempt, and the old one can't answer. A run's acceptance stops as
+    soon as it sees that its claim moved, within a third of the lease, and
+    stores nothing; it stores its acceptance only with its answer, in one
+    transaction. A request waiting on its answer gives
     another worker `PISA_MAX_WAIT_SECS` (default 60) after the lapse, then
     answers 503. An [async](#async-requests) job instead waits until a
     worker that can run it, of its version and with Beam slots for a
@@ -234,6 +245,15 @@ and the rest of the API works.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that shows a running acceptance's progress:
+- The first process of this release adds `progress` to the `jobs` table.
+- A running acceptance's job has `progress`, and each of its pairs its
+  `phases` (see [Progress](#accept-progress)).
+- Compose and the Helm chart set `PISA_LEASE_SECS` to 30, from the default
+  10: a dead worker's job waits up to 30 s for another worker.
+- A worker of this release stores an acceptance only with its job's
+  answer, and stops a judgment whose claim moved to another attempt.
 
 To the release that accepts runs on pisa's own builds:
 - `POST /snapshots/accept` builds nothing: comparator judges exports of the
@@ -484,7 +504,7 @@ pnpm -C web generate
 | `DELETE /snapshots/{id}` | `?with_replacers=true` (default `false`) → `{removed: [...], deleted: [...]}`, the modules that went and the snapshots deleted, the asked one first; see [Retention](#retention) |
 | `POST /snapshots/{id}/verify` | `?timeout=` (seconds per module, default 60), `again?` → `{snapshot, checked, failure?}`; see [Verifying](#verifying) |
 | `GET /snapshots/export` | `?against=<id>` (repeated), `allow=<name>` (repeated) → the run as a Lake project, a tar.gz; with `profile=palomar`, `pair=<n>`, `challenge_module`, `solution_module`, one pair as a Palomar package; see [Accepting a run](#comparator) |
-| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, kernels?: [{name, verdict, reason?}], output, theorems, left_out?}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
+| `POST /snapshots/accept` | `{against, allow?, paranoid?, timeout?}` → `{id, created, against, allow?, paranoid, accepted, clean, heads, audit, truncated?, pairs: [{spec, head, spec_module, head_module, challenge_module, solution_module, config, accepted, error?: {kind, message}, exit_code?, kernels?: [{name, verdict, reason?}], output, theorems, left_out?, phases?: [{name, seconds, peak_memory_mb?}]}]}`; async with `Prefer: respond-async`; see [Accepting a run](#comparator) |
 | `GET /snapshots/accept/{id}` | → the stored result of `POST /snapshots/accept`, with `stale?` |
 | `GET /snapshots/accept` | `?spec=<id>` → `{acceptances}`: the stored results that judged the spec snapshot, newest first, at most 100, each with `stale?` |
 | `GET /runs/{name}` | `?version=` → `{name, root, heads, module?, snapshot_id?}`: the run, and what `import PisaRun.<name>` resolves to when its heads are on one module; see [Naming a run](#run-names) |
@@ -494,7 +514,7 @@ pnpm -C web generate
 | `POST /documents/{id}/goals` | `{at: [{line, column?}], revision?, mode?, timeout?}` → `{revision, at: [{pos, goals}], reopened, timing}` |
 | `POST /documents/{id}/probes` | `{at: {sorry} or {line, column?}, candidates, revision?, timeout?, budget?}` → `{revision, pos, results: [{ok, closed, goals, messages, error?}], reopened, timing}` |
 | `DELETE /documents/{id}` | → 204 |
-| `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status}`; see [Async requests](#async-requests) |
+| `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status, progress?: {phase: {name, pair?, side?}, kernel?, seconds, peak_memory_mb?}}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
 | `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
@@ -548,7 +568,9 @@ would have:
   time, or 503 `worker_lost` when the job was lost (see
   [When a worker is lost](#worker-lost)). While no worker is live, e.g. across a restart, the job waits for
   one to come back, up to a day.
-  Until then it answers 202 with `status` `queued` or `running`. It answers
+  Until then it answers 202 with `status` `queued` or `running`, and for a
+  run's acceptance `progress`, what its worker last said it was doing (see
+  [Progress](#accept-progress)). It answers
   within `wait` and five seconds even if the database does not: the last
   status it read, else a 503. A 404 or a 503 is the look's own, never the
   job's. Any server answers for any job.
@@ -1585,6 +1607,35 @@ builds with `lake build` and that comparator accepts it there.
   }
   ```
   and then run `lake comparator --config comparator/1.json`.
+- <a id="accept-progress"></a>**Progress.** While an acceptance runs, its
+  job's 202 at `GET /jobs/{id}` has `progress`, which the worker writes each
+  time it renews its claim, every third of `PISA_LEASE_SECS` (10 s with
+  Compose's 30): `{phase, kernel?, seconds, peak_memory_mb?}`. All of it is
+  pisa's own, never read from what comparator prints:
+  - `phase` is pisa's step: `{"name": "linking"}` while it links the
+    modules, `{"name": "exporting", "pair": n, "side": "challenge"}` or
+    `"solution"` while it exports one, and `{"name": "judging", "pair": n}`
+    while comparator runs, pairs counting from 1 in the order of `pairs`.
+  - `kernel` is the kernel comparator is running, named as in `kernels`,
+    which the worker finds by its executable (`leanchecker` is Lean
+    default) among the processes in the slot's cgroup.
+  - `seconds` is the time in the phase, with that kernel, and
+    `peak_memory_mb` the most memory the slot's cgroup held in it, page
+    cache included as its memory limit counts it: the worker starts
+    `memory.peak` again at each phase and each kernel, which needs Linux
+    6.12 or later.
+
+  A worker without cgroups gives neither `kernel` nor `peak_memory_mb`.
+  Each pair keeps its phases in `phases`, each `{name, seconds,
+  peak_memory_mb?}`: `exporting challenge`, `exporting solution`, `judging`
+  for comparator reading and comparing the exports outside its kernels, and
+  each kernel the worker saw by its name. The worker looks at the slot
+  about each second, so a kernel shorter than that may have no phase of its
+  own, and a peak right at a boundary may count in the next phase. If the
+  job's claim moves to another attempt meanwhile, as when a stall outlasts
+  the lease and another worker claims the job, the first worker stops
+  comparator as soon as it sees that, kills what is left in its slot, and
+  stores nothing: the run has the other attempt's acceptance only.
 - **Where the audit and comparator differ.** Each pair's `left_out` and
   `theorems` say what its configuration couldn't name. The full list:
   - *Private names* differ between two modules, so a configuration leaves out

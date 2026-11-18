@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_protocol::api::{
-    AcceptPair, AcceptResponse, AuditSnapshotsResponse, DEFAULT_REVIEW_LIMIT, Error, ErrorKind,
-    KernelOutcome, KernelVerdict, LeftOut, LeftOutReason, PairError, PairErrorKind,
+    AcceptPair, AcceptPhase, AcceptResponse, AuditSnapshotsResponse, DEFAULT_REVIEW_LIMIT, Error,
+    ErrorKind, KernelOutcome, KernelVerdict, LeftOut, LeftOutReason, PairError, PairErrorKind,
 };
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
@@ -34,15 +34,17 @@ use pisa_snapshots::RunPair;
 use pisa_snapshots::review::review;
 use serde_json::{Value, json};
 
-use crate::catalog::{ModuleMeta, record_fits};
-use crate::launcher::Ran;
-use crate::pool::Pool;
+use crate::catalog::{Acceptance, ModuleMeta, record_fits};
+use crate::launcher::{Launcher, Ran};
+use crate::pool::{Lease, Pool};
 use crate::snapshots::Snapshots;
 
 mod judge;
 mod palomar;
+mod progress;
 
 pub use judge::{JudgeOptions, Judgment, ModulesToJudge, PairToJudge, export_targets, judge};
+pub use progress::{Progress, ProgressSender};
 
 /// How many of comparator's last lines of output a pair keeps.
 const OUTPUT_LINES: usize = 40;
@@ -279,10 +281,62 @@ impl Drop for Judging {
     }
 }
 
+/// The slot a judgment runs on. Dropped before the judgment is
+/// [`done`](Self::done), as when its job's claim moves to another attempt,
+/// it kills what is left in the slot's cgroup and waits for it to go before
+/// the slot goes back to the pool, so that the next job finds it empty: the
+/// exporter and Lake are killed as their handles drop, and the kernels die
+/// with Lake, but not at once.
+struct JudgingSlot {
+    pool: Arc<Pool>,
+    lease: Option<Lease>,
+}
+
+impl JudgingSlot {
+    /// The judgment is done: the slot goes back as it is.
+    fn done(mut self) {
+        self.lease.take();
+    }
+}
+
+impl std::ops::Deref for JudgingSlot {
+    type Target = Lease;
+    fn deref(&self) -> &Lease {
+        self.lease.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for JudgingSlot {
+    fn deref_mut(&mut self) -> &mut Lease {
+        self.lease.as_mut().unwrap()
+    }
+}
+
+impl Drop for JudgingSlot {
+    fn drop(&mut self) {
+        let Some(lease) = self.lease.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        runtime.spawn(async move {
+            pool.launcher().kill(lease.id).await;
+            drop(lease);
+        });
+    }
+}
+
 /// Judges the run `job` names: audits it, and judges the pairs the audit
 /// compared with `lake comparator`, each in turn, on exports of the modules
-/// pisa built. Stores the result and returns it.
-pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptResponse, Error> {
+/// pisa built, saying what it is doing to `progress`. Returns the result,
+/// which [`acceptance`] makes the record of to store.
+pub async fn accept(
+    pool: &Arc<Pool>,
+    job: SnapshotAcceptJob,
+    progress: &ProgressSender,
+) -> Result<AcceptResponse, Error> {
     let project = pool.launcher().project();
     let snapshots = pool.snapshots();
     let run = judged_run(snapshots, &job.against, &job.allow).await?;
@@ -318,7 +372,11 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
             }
         }
     }
-    let closures = snapshots.link_verified(&ids, &judging.0).await?;
+    let mut progress = Progress::new(pool.launcher(), progress);
+    progress.begin(AcceptPhase::Linking);
+    let closures = (progress)
+        .during(snapshots.link_verified(&ids, &judging.0))
+        .await?;
     let modules = ModulesToJudge {
         root: judging.0.clone(),
         closures: (closures.into_iter())
@@ -337,7 +395,10 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
         paranoid: job.paranoid,
         timeout: Duration::from_secs(job.timeout_secs),
     };
-    let mut slot = pool.acquire("").await;
+    let mut slot = JudgingSlot {
+        pool: pool.clone(),
+        lease: Some(pool.acquire("").await),
+    };
     // The exporter and the kernels load the modules, so free the slot's
     // memory first.
     slot.retire_and_wait("evict").await;
@@ -348,9 +409,10 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
         project,
         &to_judge,
         &options,
+        &mut progress,
     )
     .await?;
-    drop(slot);
+    slot.done();
     drop(judging);
     let pairs: Vec<AcceptPair> = (run.pairs.into_iter().zip(to_judge).zip(judgments))
         .map(|((pair, judged_as), judged)| AcceptPair {
@@ -368,12 +430,10 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
             kernels: judged.kernels,
             theorems: pair.theorems,
             left_out: pair.left_out,
+            phases: judged.phases,
         })
         .collect();
     let clean = audit.clean == Some(true);
-    let specs = (job.against.iter())
-        .map(|a| snapshots.reader().parse(a))
-        .collect::<Result<Vec<_>, _>>()?;
     let hex = uuid::Uuid::new_v4().simple().to_string();
     let mut accepted = AcceptResponse {
         id: format!("{}~{hex}", snapshots.reader().version()),
@@ -393,11 +453,17 @@ pub async fn accept(pool: &Arc<Pool>, job: SnapshotAcceptJob) -> Result<AcceptRe
         truncated: Vec::new(),
     };
     fit(&mut accepted);
-    snapshots
-        .catalog()
-        .put_acceptance(&hex, &specs, &accepted)
-        .await?;
     Ok(accepted)
+}
+
+/// The record of `accepted`, to store with its job's result: under the hex
+/// of its id, of the spec entries it was judged against.
+pub fn acceptance(snapshots: &Snapshots, accepted: &AcceptResponse) -> Result<Acceptance, Error> {
+    let specs = (accepted.against.iter())
+        .map(|a| snapshots.reader().parse(a))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (_, hex) = accepted.id.rsplit_once('~').unwrap_or_default();
+    snapshots.catalog().new_acceptance(hex, &specs, accepted)
 }
 
 /// Fits `accepted` to a record's 6 MiB: its pairs' outputs go first, then
@@ -447,6 +513,32 @@ const KERNEL_BASE_MB: u64 = 3072;
 
 /// Lake's name for its own kernel, which runs last.
 const DEFAULT_KERNEL: &str = "Lean default";
+
+/// The executable Lake runs as [`DEFAULT_KERNEL`], in the toolchain's `bin`
+/// (`Check.lean:618`).
+const DEFAULT_KERNEL_EXE: &str = "leanchecker";
+
+/// The kernel a process running `exe` is, as Lake names it, by the name of
+/// its executable: one of [`KERNELS`], or [`DEFAULT_KERNEL_EXE`]; `None` for
+/// any other program.
+fn kernel_of(exe: &Path) -> Option<&'static str> {
+    let file = exe.file_name()?.to_str()?;
+    if file == DEFAULT_KERNEL_EXE {
+        return Some(DEFAULT_KERNEL);
+    }
+    let kernel = KERNELS
+        .iter()
+        .find(|(_, kernel_exe, _)| *kernel_exe == file);
+    kernel.map(|(name, ..)| *name)
+}
+
+/// The kernel running in `slot`, as [`kernel_of`] knows it among the
+/// processes in the slot's cgroup; `None` if none is, or the worker has no
+/// cgroups. Lake runs one kernel at a time.
+fn running_kernel(launcher: &Launcher, slot: usize) -> Option<&'static str> {
+    let exes = launcher.slot_executables(slot);
+    exes.iter().find_map(|exe| kernel_of(exe))
+}
 
 /// Whether a comparator configuration permits an axiom beyond the standard
 /// ones, which only a spec's assumptions add.
@@ -1230,6 +1322,7 @@ mod tests {
             kernels: Vec::new(),
             theorems: 1,
             left_out: Vec::new(),
+            phases: Vec::new(),
         };
         let accepted = |output: String| AcceptResponse {
             id: "v~a".into(),
@@ -1339,6 +1432,36 @@ mod tests {
         let names: Vec<&str> = KERNELS.iter().map(|k| k.0).collect();
         assert!(names.is_sorted(), "Lake runs them sorted: {names:?}");
         assert!(names.iter().all(|n| !n.contains("noda") || *n == "nanoda"));
+    }
+
+    /// A kernel is known by its executable's name, wherever the toolchain
+    /// is, as Lake runs it: Lean's own kernel is `leanchecker`, and Lean
+    /// paranoid `leanchecker-paranoid`. Nothing else is a kernel.
+    #[test]
+    fn a_kernel_is_known_by_its_executable() {
+        for bin in ["/tc/bin", "/elsewhere"] {
+            let bin = Path::new(bin);
+            for (name, exe, _) in KERNELS {
+                assert_eq!(kernel_of(&bin.join(exe)), Some(name), "{exe}");
+            }
+            assert_eq!(kernel_of(&bin.join("leanchecker")), Some(DEFAULT_KERNEL));
+        }
+        assert_eq!(
+            kernel_of(Path::new("/tc/bin/leanchecker-paranoid")),
+            Some("Lean paranoid")
+        );
+        for other in [
+            "/tc/bin/lake",
+            "/usr/bin/bwrap",
+            "/tc/bin/leanexport",
+            "/tc/bin/lean",
+            "/tc/bin/nanoda",
+            "/tc/bin/con-ron.sh",
+            "/tc/bin",
+            "",
+        ] {
+            assert_eq!(kernel_of(Path::new(other)), None, "{other}");
+        }
     }
 
     /// con-ron's and con-leche's workers are bounded by the slot's memory:

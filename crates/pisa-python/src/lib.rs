@@ -124,6 +124,7 @@ fn queued<T>(job: Job<T>) -> api::Job {
         id: job.id,
         kind: job.kind,
         status: JobStatus::Queued,
+        progress: None,
     }
 }
 

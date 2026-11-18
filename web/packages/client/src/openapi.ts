@@ -616,6 +616,12 @@ export interface components {
             /** @description The end of what comparator printed; empty when it didn't run. */
             output: string;
             /**
+             * @description Where the pair's time and memory went, in order: its two exports,
+             *     then comparator, split by the kernels pisa saw it run, looking about
+             *     each second. Empty when nothing was exported for it.
+             */
+            phases?: components["schemas"]["PairPhase"][];
+            /**
              * @description The module comparator judged as the solution: `head_module`, or as the
              *     export names it in an older acceptance.
              */
@@ -632,6 +638,22 @@ export interface components {
              * @description How many of the spec's theorems the configuration names.
              */
             theorems: number;
+        };
+        /** @description A step of a run's acceptance. */
+        AcceptPhase: {
+            /** @enum {string} */
+            name: "linking";
+        } | {
+            /** @enum {string} */
+            name: "exporting";
+            /** Format: int64 */
+            pair: number;
+            side: components["schemas"]["PairSide"];
+        } | {
+            /** @enum {string} */
+            name: "judging";
+            /** Format: int64 */
+            pair: number;
         };
         /**
          * @description `POST /snapshots/accept`: judges a run in one operation. It audits the run
@@ -2063,6 +2085,13 @@ export interface components {
              */
             id: string;
             kind: components["schemas"]["JobKind"];
+            /**
+             * @description What its worker last said it was doing, which a worker says as often
+             *     as it renews its claim, a third of `PISA_LEASE_SECS`: only a run's
+             *     acceptance says it. It stays while the claim has lapsed, and goes when
+             *     another worker takes the job, until that one says.
+             */
+            progress?: components["schemas"]["JobProgress"];
             status: components["schemas"]["JobStatus"];
         };
         /**
@@ -2080,6 +2109,32 @@ export interface components {
          *     with any other `http_status` than 200, the request's `ErrorResponse`.
          */
         JobOutcome: components["schemas"]["ErrorResponse"] | components["schemas"]["CheckResult"] | components["schemas"]["Session"] | components["schemas"]["ApplyTacticResponse"] | components["schemas"]["CreateSnapshotResponse"] | components["schemas"]["VerifySnapshotResponse"] | components["schemas"]["RebuildSnapshotsResponse"] | components["schemas"]["AcceptResponse"] | components["schemas"]["ResubmitSnapshotsResponse"];
+        /**
+         * @description What a running acceptance is doing: from pisa's own steps and the
+         *     processes in its slot, never from what comparator prints.
+         */
+        JobProgress: {
+            /**
+             * @description While judging, the kernel comparator is running, as a pair's
+             *     `kernels` name it: found by its executable among the processes in the
+             *     worker's slot. None while comparator reads and compares the exports,
+             *     between kernels, and on a worker without cgroups (`PISA_CGROUP_ROOT`).
+             */
+            kernel?: string;
+            /**
+             * Format: int64
+             * @description The most memory the slot has held in that time, in MiB, as its cgroup
+             *     counts it, page cache included, as its memory limit does. None while
+             *     linking, which is before the slot, and on a worker without cgroups.
+             */
+            peak_memory_mb?: number;
+            phase: components["schemas"]["AcceptPhase"];
+            /**
+             * Format: double
+             * @description How long it has been in this phase, with this kernel, in seconds.
+             */
+            seconds: number;
+        };
         /** @enum {string} */
         JobStatus: "queued" | "running" | "done" | "cancelled";
         /** @enum {string} */
@@ -2238,6 +2293,30 @@ export interface components {
         };
         /** @enum {string} */
         PairErrorKind: "refused" | "build_failed" | "export_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge" | "unsupported";
+        /** @description A step of judging a pair, and what it took. */
+        PairPhase: {
+            /**
+             * @description `exporting challenge` or `exporting solution`, pisa exporting the
+             *     spec snapshot's or the head's module; `judging`, comparator reading
+             *     and comparing the exports, outside its kernels; or a kernel
+             *     comparator ran, named as in `kernels`, found by its executable among
+             *     the processes in the worker's slot.
+             */
+            name: string;
+            /**
+             * Format: int64
+             * @description The most memory the slot held in it, in MiB, as its cgroup counts it,
+             *     page cache included. None on a worker without cgroups.
+             */
+            peak_memory_mb?: number;
+            /** Format: double */
+            seconds: number;
+        };
+        /**
+         * @description A side of a pair, as comparator names it.
+         * @enum {string}
+         */
+        PairSide: "challenge" | "solution";
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
          *     in Unicode code points, not UTF-16 units.
@@ -3152,6 +3231,7 @@ export interface components {
     pathItems: never;
 }
 export type AcceptPair = components['schemas']['AcceptPair'];
+export type AcceptPhase = components['schemas']['AcceptPhase'];
 export type AcceptRequest = components['schemas']['AcceptRequest'];
 export type AcceptResponse = components['schemas']['AcceptResponse'];
 export type Allow = components['schemas']['Allow'];
@@ -3217,6 +3297,7 @@ export type Inherited = components['schemas']['Inherited'];
 export type Job = components['schemas']['Job'];
 export type JobKind = components['schemas']['JobKind'];
 export type JobOutcome = components['schemas']['JobOutcome'];
+export type JobProgress = components['schemas']['JobProgress'];
 export type JobStatus = components['schemas']['JobStatus'];
 export type KernelOutcome = components['schemas']['KernelOutcome'];
 export type KernelVerdict = components['schemas']['KernelVerdict'];
@@ -3233,6 +3314,8 @@ export type NamedRun = components['schemas']['NamedRun'];
 export type OpenDocumentRequest = components['schemas']['OpenDocumentRequest'];
 export type PairError = components['schemas']['PairError'];
 export type PairErrorKind = components['schemas']['PairErrorKind'];
+export type PairPhase = components['schemas']['PairPhase'];
+export type PairSide = components['schemas']['PairSide'];
 export type Pos = components['schemas']['Pos'];
 export type ProbeAt = components['schemas']['ProbeAt'];
 export type ProbeResult = components['schemas']['ProbeResult'];

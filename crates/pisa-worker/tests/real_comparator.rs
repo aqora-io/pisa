@@ -251,6 +251,8 @@ impl Harness {
             paranoid,
             timeout: Duration::from_secs(300),
         };
+        let said = runs::ProgressSender::new(None);
+        let mut progress = runs::Progress::new(&self.launcher, &said);
         let judged = runs::judge(
             &self.launcher,
             SLOT,
@@ -258,6 +260,7 @@ impl Harness {
             Some(self.project.path()),
             pairs,
             &options,
+            &mut progress,
         )
         .await
         .unwrap();

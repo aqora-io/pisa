@@ -5,9 +5,9 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use common::Cluster;
+use common::{Cluster, job_answer, worker_config};
 use pisa_protocol::api::{AcceptResponse, KernelOutcome, LeftOut, LeftOutReason, PairErrorKind};
 use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotAcceptJob, SnapshotExportJob};
 use pisa_worker::queue::{NewJob, Poll};
@@ -1192,4 +1192,150 @@ async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
     .await;
     let none = get(&c, &format!("/snapshots/accept?spec={}", id(&other))).await;
     assert_eq!(none["acceptances"], json!([]));
+}
+
+/// Queues the acceptance of the run `spec` starts, without `paranoid`, with
+/// `Prefer: respond-async`; returns its job's `/jobs/{id}` URL.
+async fn submit_accept(c: &Cluster, spec: &str) -> String {
+    let r = c
+        .client
+        .post(c.url("/snapshots/accept"))
+        .header("prefer", "respond-async")
+        .json(&json!({"against": [spec], "paranoid": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let job: Value = r.json().await.unwrap();
+    c.url(&format!("/jobs/{}", job["id"].as_str().unwrap()))
+}
+
+/// `GET` at a job's `url`, waiting up to `wait` seconds: its status and
+/// body as they come.
+async fn look(c: &Cluster, url: &str, wait: u64) -> (u16, Value) {
+    let r = c.client.get(format!("{url}?wait={wait}")).send();
+    let r = r.await.unwrap();
+    (r.status().as_u16(), r.json().await.unwrap())
+}
+
+/// While an accept runs, its job says what it is doing, from pisa's own
+/// steps: which side of which pair it exports, then which pair comparator
+/// judges, and for how long. Each pair keeps its phases. The fake cluster
+/// has no cgroups: no kernel is seen running, and no memory measured.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_accept_shows_its_progress() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\n-- SLOW_EXPORT 1500\ntheorem u : 3 = 3 := sorry";
+    let s = create(&c, json!({"code": spec})).await;
+    let slow = "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl";
+    create(
+        &c,
+        json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let url = submit_accept(&c, &id(&s)).await;
+    let mut phases: Vec<Value> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let done = loop {
+        let (status, r) = look(&c, &url, 0).await;
+        if status == 200 {
+            break r;
+        }
+        assert_eq!(status, 202, "{r}");
+        if let Some(progress) = r.get("progress") {
+            assert!(progress["seconds"].as_f64().unwrap() >= 0.0, "{r}");
+            assert!(progress.get("kernel").is_none(), "{r}");
+            assert!(progress.get("peak_memory_mb").is_none(), "{r}");
+            if phases.last() != Some(&progress["phase"]) {
+                phases.push(progress["phase"].clone());
+            }
+        }
+        assert!(Instant::now() < deadline, "never done: {phases:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let challenge = json!({"name": "exporting", "pair": 1, "side": "challenge"});
+    let judging = json!({"name": "judging", "pair": 1});
+    let at = |phase: &Value| phases.iter().position(|p| p == phase);
+    assert!(
+        at(&challenge).is_some() && at(&challenge) < at(&judging),
+        "{phases:?}"
+    );
+    let (status, r) = job_answer(200, done);
+    assert_eq!(status, 200, "{r}");
+    let r: AcceptResponse = serde_json::from_value(r).unwrap();
+    assert!(r.accepted, "{r:?}");
+    let phases = &r.pairs[0].phases;
+    let names: Vec<&str> = phases.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["exporting challenge", "exporting solution", "judging"]
+    );
+    assert!(phases[0].seconds >= 1.4, "{phases:?}");
+    assert!(phases[2].seconds >= 4.5, "{phases:?}");
+    assert!(phases.iter().all(|p| p.peak_memory_mb.is_none()));
+}
+
+/// A worker whose claim on an accept moves to another attempt, as when a
+/// stall outlasts its lease and another worker claims the job, stops
+/// comparator as soon as it sees that, and stores nothing: the run has one
+/// acceptance, the other worker's. Here the first worker's claim loop, and
+/// its heartbeat with it, are gone while its job runs on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_claim_stops_the_comparator_and_stores_no_acceptance() {
+    let mut c = Cluster::start(&[("a", "v", 1)]).await;
+    let s = create(
+        &c,
+        json!({"code": "import Foo\n\ntheorem u : 3 = 3 := sorry"}),
+    )
+    .await;
+    let slow = "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl";
+    create(
+        &c,
+        json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
+    )
+    .await;
+    let dir = c.dir.path().to_path_buf();
+    let judging = |worker: &str| dir.join(worker).join("judging");
+    let marked = |worker: &str, what: &str| -> usize {
+        let Ok(entries) = std::fs::read_dir(judging(worker)) else {
+            return 0;
+        };
+        let names = entries.map(|e| e.unwrap().file_name().into_string().unwrap());
+        names.filter(|n| n.starts_with(&format!("{what}."))).count()
+    };
+    let url = submit_accept(&c, &id(&s)).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while marked("a", "sleeping") == 0 {
+        assert!(Instant::now() < deadline, "comparator never started on a");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    c.add_worker(worker_config("b", "v", 1));
+    c.kill_worker(0).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let done = loop {
+        let (status, r) = look(&c, &url, 30).await;
+        if status == 200 {
+            break r;
+        }
+        assert!(Instant::now() < deadline, "never done: {r}");
+    };
+    let (status, r) = job_answer(200, done);
+    assert_eq!(status, 200, "{r}");
+    let r: AcceptResponse = serde_json::from_value(r).unwrap();
+    assert!(r.accepted, "{r:?}");
+    // b's comparator started after a's, and slept to its end.
+    assert_eq!(marked("b", "slept"), 1);
+    assert_eq!(marked("a", "slept"), 0, "a's comparator ran to its end");
+    // a's judgment is gone with it.
+    let left: Vec<_> = std::fs::read_dir(judging("a"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    let listed = get(&c, &format!("/snapshots/accept?spec={}", id(&s))).await;
+    let ids: Vec<&Value> = (listed["acceptances"].as_array().unwrap().iter())
+        .map(|a| &a["id"])
+        .collect();
+    assert_eq!(ids, [&json!(r.id)], "a stored an acceptance too");
 }

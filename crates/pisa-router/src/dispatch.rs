@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::{DbError, Notice};
 use pisa_db::queue::{ExpiredOutcome, LIVE, NewJob, Poll, Queue, Stage};
-use pisa_protocol::api::{JobKind, JobStatus};
+use pisa_protocol::api::{JobKind, JobProgress, JobStatus};
 use pisa_protocol::wire::{self, Job, JobResult};
 
 use crate::jobs::POLL_MARGIN;
@@ -51,8 +51,8 @@ pub struct Looked {
 
 #[derive(Debug, Clone)]
 pub enum Looking {
-    /// `Queued` or `Running`.
-    Pending(JobStatus),
+    /// `Queued` or `Running`, with what its worker last said it was doing.
+    Pending(JobStatus, Option<JobProgress>),
     /// What its request would have got.
     Done(Box<Result<JobResult, DispatchError>>),
     /// Its answer is gone: all that is left says how it ended.
@@ -157,6 +157,8 @@ const HELD: &str = "(run by a server)";
 pub struct Held {
     pub token: String,
     id: i64,
+    /// When the server claimed it.
+    claimed_micros: i64,
     queue: Queue,
     holder: String,
     renewing: tokio::task::JoinHandle<()>,
@@ -168,7 +170,9 @@ impl Held {
         self.renewing.abort();
         let result = serde_json::to_value(result)
             .map_err(|e| DispatchError::Unavailable(format!("encoding the answer: {e}")))?;
-        self.queue.complete(&self.holder, self.id, &result).await?;
+        (self.queue)
+            .complete(&self.holder, self.id, self.claimed_micros, &result)
+            .await?;
         Ok(())
     }
 }
@@ -304,16 +308,11 @@ impl Dispatcher {
         };
         let (id, token) = self.queue.enqueue_async(&new, &kind_name(kind)).await?;
         let lease = self.cfg.held_lease;
-        if self
-            .queue
-            .claim(&self.holder, &[id], lease)
-            .await?
-            .is_empty()
-        {
+        let Some(claimed) = self.queue.claim(&self.holder, &[id], lease).await?.pop() else {
             return Err(DispatchError::Unavailable(
                 "the job couldn't be claimed as it was queued".into(),
             ));
-        }
+        };
         let (queue, holder) = (self.queue.clone(), self.holder.clone());
         let renewing = tokio::spawn(async move {
             loop {
@@ -326,6 +325,7 @@ impl Dispatcher {
         Ok(Held {
             token,
             id,
+            claimed_micros: claimed.claimed_micros,
             queue: self.queue.clone(),
             holder: self.holder.clone(),
             renewing,
@@ -411,10 +411,7 @@ impl Dispatcher {
         match tokio::time::timeout(bound, self.look_for(token, wait, &mut last)).await {
             Ok(looked) => looked,
             Err(_) => match last {
-                Some((kind, status)) => Ok(Some(Looked {
-                    kind,
-                    state: Looking::Pending(status),
-                })),
+                Some((kind, state)) => Ok(Some(Looked { kind, state })),
                 None => Err(DispatchError::Unavailable(format!(
                     "the job queue did not answer within {} s",
                     bound.as_secs()
@@ -424,12 +421,12 @@ impl Dispatcher {
     }
 
     /// [`Dispatcher::look`] without its bound, which keeps in `last` the kind
-    /// and status of each pending job it reads.
+    /// and state of each pending job it reads.
     async fn look_for(
         &self,
         token: &str,
         wait: Duration,
-        last: &mut Option<(JobKind, JobStatus)>,
+        last: &mut Option<(JobKind, Looking)>,
     ) -> Result<Option<Looked>, DispatchError> {
         let deadline = tokio::time::Instant::now() + wait;
         let poll_every = self.queue.db().poll_interval();
@@ -440,6 +437,8 @@ impl Dispatcher {
             };
             let kind = kind_of(&status.kind)?;
             let mut sleep = poll_every;
+            // What a worker of this release says; from another, nothing.
+            let progress = (status.progress).and_then(|p| serde_json::from_value(p).ok());
             let state = match status.stage {
                 Stage::Done(result) => Looking::Done(Box::new(Ok(decode(result)))),
                 Stage::GaveUp { attempts: 0, .. } => {
@@ -469,16 +468,16 @@ impl Dispatcher {
                     http_status,
                     finished_micros,
                 }),
-                Stage::Running => Looking::Pending(JobStatus::Running),
+                Stage::Running => Looking::Pending(JobStatus::Running, progress),
                 Stage::Queued { give_up_at } => {
                     // Then the next look closes it.
                     let left = (give_up_at - now_micros()).max(0) as u64;
                     sleep = sleep.min(Duration::from_micros(left));
-                    Looking::Pending(JobStatus::Queued)
+                    Looking::Pending(JobStatus::Queued, progress)
                 }
             };
-            if let Looking::Pending(pending) = &state {
-                *last = Some((kind, *pending));
+            if let Looking::Pending(..) = &state {
+                *last = Some((kind, state.clone()));
             }
             let now = tokio::time::Instant::now();
             if matches!(state, Looking::Done(_) | Looking::Expired(_)) || now >= deadline {
@@ -626,7 +625,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(700)).await;
         assert!(matches!(
             looked(token.clone()).await,
-            Looking::Pending(JobStatus::Running)
+            Looking::Pending(JobStatus::Running, None)
         ));
         held.finish(&JobResult::Failed {
             error: "done".into(),

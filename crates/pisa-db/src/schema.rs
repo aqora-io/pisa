@@ -211,6 +211,7 @@ diesel::table! {
         kind -> Nullable<Text>,
         document -> Nullable<Text>,
         labels -> Text,
+        progress -> Nullable<Jsonb>,
     }
 }
 

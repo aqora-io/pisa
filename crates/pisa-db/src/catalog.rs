@@ -308,6 +308,17 @@ pub struct SnapshotDecls {
     pub failed: Option<ExportFailure>,
 }
 
+/// A run's acceptance as it is stored, from [`Catalog::new_acceptance`].
+#[derive(Debug, Clone)]
+pub struct Acceptance {
+    pub(crate) version: String,
+    pub(crate) id: String,
+    pub(crate) specs: Vec<String>,
+    pub(crate) result: Value,
+    /// The scope's labels it was made in.
+    pub(crate) labels: String,
+}
+
 /// A failure to make a module's export again in format `format`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportFailure {
@@ -1057,17 +1068,29 @@ impl Catalog {
         )
     }
 
-    /// Stores `result`, what `POST /snapshots/accept` answered, as
-    /// acceptance `id`, a new random id, of the spec entries `specs`.
+    /// `result`, what `POST /snapshots/accept` answered, as acceptance `id`,
+    /// a new random id, of the spec entries `specs`, in the current scope:
+    /// to store with [`put_acceptance`](Self::put_acceptance), or with its
+    /// job's result ([`Queue::complete_accepted`](crate::queue::Queue::complete_accepted)).
     /// Refused like a record that is too large.
-    pub async fn put_acceptance(
+    pub fn new_acceptance(
         &self,
         id: &str,
         specs: &[String],
         result: &impl Serialize,
-    ) -> Result<(), Error> {
-        let result = to_record(result).map_err(Error::from)?;
-        dispatch!(&self.db, put_acceptance(&self.version, id, specs, &result))
+    ) -> Result<Acceptance, Error> {
+        Ok(Acceptance {
+            version: self.version.clone(),
+            id: id.to_string(),
+            specs: specs.to_vec(),
+            result: to_record(result).map_err(Error::from)?,
+            labels: crate::scope::stamp(),
+        })
+    }
+
+    /// Stores `acceptance`.
+    pub async fn put_acceptance(&self, acceptance: &Acceptance) -> Result<(), Error> {
+        dispatch!(&self.db, put_acceptance(acceptance))
     }
 
     /// The stored results of spec entry `spec`'s acceptances, newest first,
@@ -2859,7 +2882,8 @@ mod tests {
             let result =
                 serde_json::json!({"accepted": true, "pairs": [{"spec": "s", "head": "h"}]});
             let specs = ["s".to_string(), "t".into()];
-            catalog.put_acceptance("a1", &specs, &result).await.unwrap();
+            let a1 = catalog.new_acceptance("a1", &specs, &result).unwrap();
+            catalog.put_acceptance(&a1).await.unwrap();
             assert_eq!(
                 catalog.acceptance("a1").await.unwrap(),
                 Some(result.clone())
@@ -2867,10 +2891,8 @@ mod tests {
             assert_eq!(catalog.acceptance("a2").await.unwrap(), None);
             // By spec, newest first.
             let later = serde_json::json!({"accepted": false});
-            catalog
-                .put_acceptance("a2", &specs[..1], &later)
-                .await
-                .unwrap();
+            let a2 = catalog.new_acceptance("a2", &specs[..1], &later).unwrap();
+            catalog.put_acceptance(&a2).await.unwrap();
             assert_eq!(
                 catalog.acceptances_of("s", 10).await.unwrap(),
                 [later, result.clone()]

@@ -15,7 +15,7 @@ use pisa_protocol::snapshot;
 use serde_json::Value;
 
 use crate::catalog::{
-    Amendment, EntryMeta, Refutation, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleRecord, ModuleSummary,
+    Acceptance, Amendment, EntryMeta, Refutation, EntryRow, Fail, LinkRow, Logged, Module, ModuleBody, ModuleMeta, ModuleRecord, ModuleSummary,
     NewEntry, SnapshotDecls, allow_column, closure_order, entry_from_row, now_micros, splice,
     name_taken, status_of, status_text, to_record, unknown_entry, unknown_module,
 };
@@ -1639,43 +1639,43 @@ pub(crate) async fn changes(
         .collect())
 }
 
-pub(crate) async fn put_acceptance(
-    db: &Handle,
-    v: &str,
-    id: &str,
-    specs: &[String],
-    result: &Value,
-) -> Result<(), Error> {
+pub(crate) async fn put_acceptance(db: &Handle, acceptance: &Acceptance) -> Result<(), Error> {
     retry(|| async {
         let mut c = conn(db).await?;
         let conn = &mut *c;
-        let created = now_micros() as i64;
         tx!(conn, {
-            diesel::insert_into(acceptances::table)
-                .values((
-                    acceptances::version.eq(v),
-                    acceptances::id.eq(id),
-                    acceptances::created_micros.eq(created),
-                    acceptances::result.eq(result),
-                    acceptances::labels.eq(crate::scope::stamp()),
-                ))
-                .execute(conn)
-                .await?;
-            for spec in specs.iter().collect::<BTreeSet<_>>() {
-                diesel::insert_into(acceptance_specs::table)
-                    .values((
-                        acceptance_specs::version.eq(v),
-                        acceptance_specs::spec.eq(spec),
-                        acceptance_specs::acceptance.eq(id),
-                        acceptance_specs::created_micros.eq(created),
-                    ))
-                    .execute(conn)
-                    .await?;
-            }
+            insert_acceptance(conn, acceptance).await?;
             Ok(())
         })
     })
     .await?;
+    Ok(())
+}
+
+/// Inserts `acceptance`, now, in the transaction `conn` is in.
+pub(crate) async fn insert_acceptance(conn: &mut Conn, a: &Acceptance) -> Result<(), DbError> {
+    let created = now_micros() as i64;
+    diesel::insert_into(acceptances::table)
+        .values((
+            acceptances::version.eq(&a.version),
+            acceptances::id.eq(&a.id),
+            acceptances::created_micros.eq(created),
+            acceptances::result.eq(&a.result),
+            acceptances::labels.eq(&a.labels),
+        ))
+        .execute(conn)
+        .await?;
+    for spec in a.specs.iter().collect::<BTreeSet<_>>() {
+        diesel::insert_into(acceptance_specs::table)
+            .values((
+                acceptance_specs::version.eq(&a.version),
+                acceptance_specs::spec.eq(spec),
+                acceptance_specs::acceptance.eq(&a.id),
+                acceptance_specs::created_micros.eq(created),
+            ))
+            .execute(conn)
+            .await?;
+    }
     Ok(())
 }
 

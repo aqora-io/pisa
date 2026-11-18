@@ -49,6 +49,13 @@
             "description": "The end of what comparator printed; empty when it didn't run.",
             "type": "string"
           },
+          "phases": {
+            "description": "Where the pair's time and memory went, in order: its two exports,\nthen comparator, split by the kernels pisa saw it run, looking about\neach second. Empty when nothing was exported for it.",
+            "items": {
+              "$ref": "#/components/schemas/PairPhase"
+            },
+            "type": "array"
+          },
           "solution_module": {
             "description": "The module comparator judged as the solution: `head_module`, or as the\nexport names it in an older acceptance.",
             "type": "string"
@@ -77,6 +84,72 @@
           "theorems"
         ],
         "type": "object"
+      },
+      "AcceptPhase": {
+        "description": "A step of a run's acceptance.",
+        "oneOf": [
+          {
+            "description": "Linking the modules the pairs need into the judgment's directory,\neach file checked against its record.",
+            "properties": {
+              "name": {
+                "enum": [
+                  "linking"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Exporting one side of pair `pair` with `leanexport`. Pairs count from\n1, in the order of the acceptance's `pairs`, as their\n`comparator/<pair>.json` do.",
+            "properties": {
+              "name": {
+                "enum": [
+                  "exporting"
+                ],
+                "type": "string"
+              },
+              "pair": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "side": {
+                "$ref": "#/components/schemas/PairSide"
+              }
+            },
+            "required": [
+              "pair",
+              "side",
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Comparator judging pair `pair` on its exports.",
+            "properties": {
+              "name": {
+                "enum": [
+                  "judging"
+                ],
+                "type": "string"
+              },
+              "pair": {
+                "format": "int64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "pair",
+              "name"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "AcceptRequest": {
         "description": "`POST /snapshots/accept`: judges a run in one operation. It audits the run\nagainst its spec, as `GET /snapshots/audit` does, and runs\n`lake comparator`, which shares no code with the audit, on exactly the\npairs the audit compared, each spec snapshot against each head it\nreaches. Comparator judges the modules pisa built and kernel-checked when\nthe snapshots were created, exported with Lean's bundled `leanexport`, and\nbuilds nothing. The result is stored: `GET /snapshots/accept/{id}` reads\nit again.",
@@ -2220,6 +2293,10 @@
           "kind": {
             "$ref": "#/components/schemas/JobKind"
           },
+          "progress": {
+            "$ref": "#/components/schemas/JobProgress",
+            "description": "What its worker last said it was doing, which a worker says as often\nas it renews its claim, a third of `PISA_LEASE_SECS`: only a run's\nacceptance says it. It stays while the claim has lapsed, and goes when\nanother worker takes the job, until that one says."
+          },
           "status": {
             "$ref": "#/components/schemas/JobStatus"
           }
@@ -2277,6 +2354,34 @@
             "$ref": "#/components/schemas/ResubmitSnapshotsResponse"
           }
         ]
+      },
+      "JobProgress": {
+        "description": "What a running acceptance is doing: from pisa's own steps and the\nprocesses in its slot, never from what comparator prints.",
+        "properties": {
+          "kernel": {
+            "description": "While judging, the kernel comparator is running, as a pair's\n`kernels` name it: found by its executable among the processes in the\nworker's slot. None while comparator reads and compares the exports,\nbetween kernels, and on a worker without cgroups (`PISA_CGROUP_ROOT`).",
+            "type": "string"
+          },
+          "peak_memory_mb": {
+            "description": "The most memory the slot has held in that time, in MiB, as its cgroup\ncounts it, page cache included, as its memory limit does. None while\nlinking, which is before the slot, and on a worker without cgroups.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/AcceptPhase"
+          },
+          "seconds": {
+            "description": "How long it has been in this phase, with this kernel, in seconds.",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "phase",
+          "seconds"
+        ],
+        "type": "object"
       },
       "JobStatus": {
         "enum": [
@@ -2555,6 +2660,38 @@
           "cannot_run",
           "nothing_to_judge",
           "unsupported"
+        ],
+        "type": "string"
+      },
+      "PairPhase": {
+        "description": "A step of judging a pair, and what it took.",
+        "properties": {
+          "name": {
+            "description": "`exporting challenge` or `exporting solution`, pisa exporting the\nspec snapshot's or the head's module; `judging`, comparator reading\nand comparing the exports, outside its kernels; or a kernel\ncomparator ran, named as in `kernels`, found by its executable among\nthe processes in the worker's slot.",
+            "type": "string"
+          },
+          "peak_memory_mb": {
+            "description": "The most memory the slot held in it, in MiB, as its cgroup counts it,\npage cache included. None on a worker without cgroups.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "seconds": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "seconds"
+        ],
+        "type": "object"
+      },
+      "PairSide": {
+        "description": "A side of a pair, as comparator names it.",
+        "enum": [
+          "challenge",
+          "solution"
         ],
         "type": "string"
       },

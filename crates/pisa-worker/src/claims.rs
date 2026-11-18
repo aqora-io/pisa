@@ -18,7 +18,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::Notice;
 use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue, Registration};
-use pisa_protocol::wire::{self, JobResult};
+use pisa_db::scope::Scope;
+use pisa_protocol::api::JobProgress;
+use pisa_protocol::wire::{self, Job, JobResult};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, Notify, watch};
 
@@ -27,7 +29,7 @@ use crate::documents::Documents;
 use crate::host;
 use crate::pool::Pool;
 use crate::sessions::Sessions;
-use crate::{prewarm, run_job};
+use crate::{prewarm, run_job, runs};
 
 /// How long another worker gets first refusal of a job it is a better home
 /// for. Long enough for it to hear of the job and claim it; short enough
@@ -157,6 +159,13 @@ pub fn pick_documents(
     picked
 }
 
+/// How often a worker renews its claims, and an accept sees that its claim
+/// holds: a third of the lease, so that two renewals may go astray before it
+/// lapses.
+fn heartbeat_every(lease: Duration) -> Duration {
+    lease / 3
+}
+
 fn now_micros() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -250,24 +259,73 @@ impl Shared {
     /// Runs one claimed job, on `document` if it is a job on one, and writes
     /// its result.
     async fn run_one(self: Arc<Self>, claimed: Claimed, document: Option<String>) {
+        self.answer(claimed, document.is_some()).await;
+        if let Some(document) = &document {
+            self.on_documents.lock().unwrap().remove(document);
+        }
+        self.running.fetch_sub(1, Ordering::AcqRel);
+        self.finished.notify_one();
+    }
+
+    /// Runs `claimed`, a job on a document if `on_document`, and writes its
+    /// result if its claim holds. An accept stops as soon as its claim moves
+    /// to another attempt ([`Shared::watch`]), and writes nothing; its
+    /// acceptance is stored with its result.
+    async fn answer(&self, claimed: Claimed, on_document: bool) {
         let documents = self.documents.as_deref();
         let started = Instant::now();
         let queue = round6((now_micros() - claimed.enqueued_micros).max(0) as f64 / 1e6);
-        let mut result = match wire::unscoped(claimed.job) {
-            // In the scope of the request that queued it.
-            Ok((job, scope)) => {
-                let running = run_job(&self.pool, &self.sessions, documents, job);
-                pisa_db::scope::within(scope, running).await
-            }
-            Err(e) => {
-                tracing::warn!(id = claimed.id, "a job did not decode: {e}");
-                JobResult::Failed {
-                    error: format!(
+        let (id, at) = (claimed.id, claimed.claimed_micros);
+        let (job, scope) = match wire::unscoped(claimed.job) {
+            Ok((job, scope)) => (Ok(job), scope),
+            Err(e) => (Err(e), Scope::default()),
+        };
+        // In the scope of the request that queued it.
+        let ran = pisa_db::scope::within(scope, async {
+            let job = match job {
+                Ok(job) => job,
+                Err(e) => {
+                    tracing::warn!(id, "a job did not decode: {e}");
+                    let error = format!(
                         "the worker could not read the job, which may come from a server of \
                          another release: {e}"
-                    ),
+                    );
+                    return Some((JobResult::Failed { error }, None));
                 }
-            }
+            };
+            let accept = matches!(job, Job::SnapshotAccept(_));
+            let (progress, said) = watch::channel(None);
+            let running = run_job(&self.pool, &self.sessions, documents, job, &progress);
+            let mut result = match accept {
+                true => tokio::select! {
+                    result = running => result,
+                    () = self.watch(id, at, said) => return None,
+                },
+                false => running.await,
+            };
+            let acceptance = match &result {
+                JobResult::SnapshotAccepted(Ok(accepted)) => {
+                    Some(runs::acceptance(self.pool.snapshots(), accepted))
+                }
+                _ => None,
+            };
+            let acceptance = match acceptance {
+                Some(Ok(acceptance)) => Some(acceptance),
+                Some(Err(e)) => {
+                    result = JobResult::SnapshotAccepted(Err(e));
+                    None
+                }
+                None => None,
+            };
+            Some((result, acceptance))
+        })
+        .await;
+        let Some((mut result, acceptance)) = ran else {
+            tracing::warn!(
+                id,
+                "the job's claim moved to another attempt: stopped it, and wrote nothing"
+            );
+            return;
         };
         if let Some(timing) = result.timing_mut() {
             timing.queue = queue;
@@ -276,7 +334,7 @@ impl Shared {
         // A header the job warmed, or a document it opened, is published
         // first, so that the client's next request can find this worker.
         self.publish_warm().await;
-        if document.is_some() {
+        if on_document {
             self.publish_open().await;
         }
         let result = serde_json::to_value(&result).unwrap_or_else(
@@ -284,28 +342,59 @@ impl Shared {
         );
         let mut backoff = Duration::from_millis(100);
         for attempt in 1.. {
-            match self.queue.complete(&self.me, claimed.id, &result).await {
+            let completed = match &acceptance {
+                Some(acceptance) => {
+                    (self.queue)
+                        .complete_accepted(&self.me, id, at, &result, acceptance)
+                        .await
+                }
+                None => self.queue.complete(&self.me, id, at, &result).await,
+            };
+            match completed {
                 Ok(true) => break,
                 Ok(false) => {
-                    tracing::warn!(id = claimed.id, "the job's claim lapsed; result dropped");
+                    tracing::warn!(id, "the job's claim isn't this attempt's; result dropped");
                     break;
                 }
                 Err(e) if attempt < 6 => {
-                    tracing::warn!(id = claimed.id, "writing the result failed: {e}");
+                    tracing::warn!(id, "writing the result failed: {e}");
                     tokio::time::sleep(backoff).await;
                     backoff *= 2;
                 }
                 Err(e) => {
-                    tracing::error!(id = claimed.id, "the result is lost: {e}");
+                    tracing::error!(id, "the result is lost: {e}");
                     break;
                 }
             }
         }
-        if let Some(document) = &document {
-            self.on_documents.lock().unwrap().remove(document);
+    }
+
+    /// Returns once the claim on job `id` that this worker made at
+    /// `claimed_micros` has moved to another attempt, which a lapsed lease
+    /// alone doesn't do. Until then it writes what the job last said it was
+    /// doing, `progress`, as often as the heartbeat renews the claims.
+    async fn watch(
+        &self,
+        id: i64,
+        claimed_micros: i64,
+        progress: watch::Receiver<Option<JobProgress>>,
+    ) {
+        loop {
+            tokio::time::sleep(heartbeat_every(self.lease)).await;
+            let said = (progress.borrow().as_ref()).and_then(|p| serde_json::to_value(p).ok());
+            let held = match said {
+                Some(said) => {
+                    let set = self.queue.set_progress(id, &self.me, claimed_micros, &said);
+                    set.await
+                }
+                None => self.queue.claim_held(id, &self.me, claimed_micros).await,
+            };
+            match held {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => tracing::warn!(id, "reading the job's claim failed: {e}"),
+            }
         }
-        self.running.fetch_sub(1, Ordering::AcqRel);
-        self.finished.notify_one();
     }
 }
 
@@ -399,7 +488,7 @@ impl Shared {
             let mut warm = self.warm.clone();
             let lease = self.lease;
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(lease / 3);
+                let mut tick = tokio::time::interval(heartbeat_every(lease));
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {

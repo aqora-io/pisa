@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use pisa_protocol::api::DependencyState;
 
-use crate::catalog::{Fail, now_micros};
+use crate::catalog::{Acceptance, Fail, now_micros};
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
     ASYNC_RETENTION, Candidate, Claimed, Counts, DAY_KINDS, ExpiredOutcome, LIVE, LOST_CEILING,
@@ -133,6 +133,19 @@ macro_rules! unclaimable {
                     .ge(jobs::max_attempts)
                     .or(waited!(lapsed, $now)),
             ))
+    };
+}
+
+/// Job `$id`, while `$worker` holds the claim on it that it made at
+/// `$claimed`: no attempt has claimed it since, and it isn't done. Its lease
+/// doesn't matter.
+macro_rules! held {
+    ($id:expr, $worker:expr, $claimed:expr) => {
+        jobs::table
+            .find($id)
+            .filter(jobs::worker.eq($worker))
+            .filter(jobs::claimed_micros.eq($claimed))
+            .filter(jobs::result.is_null())
     };
 }
 
@@ -289,8 +302,8 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
     .await
 }
 
-/// An async job's row: its id and kind, its result, its claim, and whether
-/// it is [`unclaimable!`].
+/// An async job's row: its id and kind, its result, its claim, whether it
+/// is [`unclaimable!`], and its progress.
 type Row = (
     i64,
     Option<String>,
@@ -302,6 +315,7 @@ type Row = (
     i64,
     i64,
     Option<bool>,
+    Option<Value>,
 );
 
 /// Whether the job of `token`, or its tombstone if its row is gone, is in
@@ -421,16 +435,33 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                     jobs::enqueued_micros,
                     jobs::max_wait_micros,
                     unclaimable!(now),
+                    jobs::progress,
                 ))
                 .first::<Row>(&mut *c)
                 .await
                 .optional()?;
             let Some(row) = row else {
                 let gone = tombstone(&mut c, q, token).await?;
-                return Ok(gone.map(|(kind, stage)| Status { id: 0, kind, stage }));
+                return Ok(gone.map(|(kind, stage)| Status {
+                    id: 0,
+                    kind,
+                    stage,
+                    progress: None,
+                }));
             };
-            let (id, kind, result, worker, lease, attempts, max_attempts, enqueued, max_wait, lost) =
-                row;
+            let (
+                id,
+                kind,
+                result,
+                worker,
+                lease,
+                attempts,
+                max_attempts,
+                enqueued,
+                max_wait,
+                lost,
+                progress,
+            ) = row;
             let open = (worker, lease, attempts, max_attempts, enqueued, max_wait);
             let stage = match result {
                 Some(Value::Null) => Stage::GaveUp {
@@ -469,7 +500,12 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                 },
             };
             let kind = kind.unwrap_or_default();
-            return Ok(Some(Status { id, kind, stage }));
+            return Ok(Some(Status {
+                id,
+                kind,
+                stage,
+                progress,
+            }));
         }
         // It kept changing as it was read: run it again.
         Err(DbError::Conflict)
@@ -980,6 +1016,8 @@ pub(crate) async fn claim(
             jobs::claimed_micros.eq(now),
             jobs::lease_micros.eq(now + micros(lease)),
             jobs::attempts.eq(jobs::attempts + 1),
+            // Each attempt says its own.
+            jobs::progress.eq(None::<Value>),
         ))
         .returning((jobs::id, jobs::job, jobs::enqueued_micros))
         .get_results::<(i64, Value, i64)>(&mut *conn(db).await?)
@@ -990,6 +1028,7 @@ pub(crate) async fn claim(
                 id,
                 job,
                 enqueued_micros,
+                claimed_micros: now,
             })
             .collect())
     })
@@ -1000,23 +1039,82 @@ pub(crate) async fn complete(
     db: &Handle,
     worker: &str,
     id: i64,
+    claimed_micros: i64,
     result: &Value,
 ) -> Result<bool, DbError> {
     let now = now();
     retry(|| async {
         let mut c = conn(db).await?;
-        let n = diesel::update(
-            jobs::table
-                .find(id)
-                .filter(jobs::worker.eq(worker))
-                .filter(jobs::result.is_null()),
-        )
-        .set((jobs::result.eq(result), jobs::done_micros.eq(now)))
-        .execute(&mut *c)
-        .await?;
+        let n = diesel::update(held!(id, worker, claimed_micros))
+            .set((jobs::result.eq(result), jobs::done_micros.eq(now)))
+            .execute(&mut *c)
+            .await?;
         if n == 1 {
             wake(db, &mut c, Notice::Done(id)).await;
         }
+        Ok(n == 1)
+    })
+    .await
+}
+
+pub(crate) async fn complete_accepted(
+    db: &Handle,
+    worker: &str,
+    id: i64,
+    claimed_micros: i64,
+    result: &Value,
+    acceptance: &Acceptance,
+) -> Result<bool, DbError> {
+    let now = now();
+    let done = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let n = diesel::update(held!(id, worker, claimed_micros))
+                .set((jobs::result.eq(result), jobs::done_micros.eq(now)))
+                .execute(conn)
+                .await?;
+            if n == 1 {
+                insert_acceptance(conn, acceptance).await?;
+            }
+            Ok(n == 1)
+        })
+        .map_err(db_error)
+    })
+    .await?;
+    // Once committed: the notice is only a wake-up, and what it wakes reads.
+    if done {
+        match conn(db).await {
+            Ok(mut c) => wake(db, &mut c, Notice::Done(id)).await,
+            Err(e) => tracing::warn!("sending a queue notification failed: {e}"),
+        }
+    }
+    Ok(done)
+}
+
+pub(crate) async fn claim_held(
+    db: &Handle,
+    id: i64,
+    worker: &str,
+    claimed_micros: i64,
+) -> Result<bool, DbError> {
+    Ok(diesel::select(exists(held!(id, worker, claimed_micros)))
+        .get_result::<bool>(&mut *conn(db).await?)
+        .await?)
+}
+
+pub(crate) async fn set_progress(
+    db: &Handle,
+    id: i64,
+    worker: &str,
+    claimed_micros: i64,
+    progress: &Value,
+) -> Result<bool, DbError> {
+    retry(|| async {
+        let n = diesel::update(held!(id, worker, claimed_micros))
+            .set(jobs::progress.eq(progress))
+            .execute(&mut *conn(db).await?)
+            .await?;
         Ok(n == 1)
     })
     .await
