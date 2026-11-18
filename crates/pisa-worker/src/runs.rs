@@ -395,13 +395,19 @@ pub async fn accept(
         paranoid: job.paranoid,
         timeout: Duration::from_secs(job.timeout_secs),
     };
-    let mut slot = JudgingSlot {
-        pool: pool.clone(),
-        lease: Some(pool.acquire("").await),
-    };
-    // The exporter and the kernels load the modules, so free the slot's
-    // memory first.
-    slot.retire_and_wait("evict").await;
+    progress.begin(AcceptPhase::Waiting);
+    let slot = (progress)
+        .during(async {
+            let mut slot = JudgingSlot {
+                pool: pool.clone(),
+                lease: Some(pool.acquire("").await),
+            };
+            // The exporter and the kernels load the modules, so free the
+            // slot's memory first.
+            slot.retire_and_wait("evict").await;
+            slot
+        })
+        .await;
     let judgments = judge(
         pool.launcher(),
         slot.id,
@@ -720,14 +726,22 @@ fn kernel_sections(output: &str) -> HashMap<&str, (Said, Option<String>)> {
 /// accepted pair's, with the kernels a spec axiom leaves out as they are
 /// there. The code in comparator's final `error:` line, which is the first
 /// failing kernel's, says what happened to that kernel (`oom`, if the
-/// memory limit killed something): a kernel after it is `failed` if Lake
+/// memory limit killed something), if comparator exited 1 (`code`), as
+/// [`classify`] reads it: a kernel after it is `failed` if Lake
 /// printed that it rejected the solution, since Lake doesn't report its code.
 /// The rest is as Lake printed it, with the kernel's first line as its
 /// `reason` if it didn't accept. It is all for the reader and never settles
 /// a pair, as the solution's own output and a declaration's name could
 /// imitate it.
-fn failed_kernels(output: &str, paranoid: bool, left_out: bool, oom: bool) -> Vec<KernelVerdict> {
-    let failure = exit_failure(output, &run_kernels(paranoid, left_out));
+fn failed_kernels(
+    output: &str,
+    code: Option<i32>,
+    paranoid: bool,
+    left_out: bool,
+    oom: bool,
+) -> Vec<KernelVerdict> {
+    let failure =
+        exit_failure(output, &run_kernels(paranoid, left_out)).filter(|_| code == Some(1));
     let sections = kernel_sections(output);
     if sections.is_empty() && failure.is_none() {
         return Vec::new();
@@ -773,7 +787,8 @@ fn with_cap(mut error: PairError, cap: Option<(&'static str, u64)>) -> PairError
 /// start, and 1 for any error: its last error line tells them apart, and
 /// when a kernel failed, the code it names (see [`exit_outcome`]), if the
 /// kernel is one of `kernels`, those pisa configured for the pair. That can
-/// only label a failure, never excuse one.
+/// only label a failure, never excuse one. A signal that killed it is a
+/// timeout only if it was its time limit's.
 fn classify(ran: &Ran, oom: bool, kernels: &[&str]) -> Option<PairError> {
     if ran.code == Some(0) {
         return None;
@@ -798,7 +813,11 @@ fn classify(ran: &Ran, oom: bool, kernels: &[&str]) -> Option<PairError> {
             PairErrorKind::OutOfMemory,
             "comparator exceeded the worker's memory limit".to_string(),
         ),
-        None => (PairErrorKind::Timeout, ran.output.clone()),
+        None if ran.timed_out => (PairErrorKind::Timeout, ran.output.clone()),
+        None => (
+            PairErrorKind::CannotRun,
+            "comparator was killed by a signal".to_string(),
+        ),
         Some(1) => {
             let kind = match error {
                 Some(e) if e.starts_with("Error while interacting with") => {
@@ -1348,10 +1367,12 @@ mod tests {
     }
 
     /// What comparator printed, as Lake 4.36.0-rc2's `CLI/Check.lean`,
-    /// `Check/Compare.lean` and `Check/Axioms.lean` print it.
+    /// `Check/Compare.lean` and `Check/Axioms.lean` print it, and how it
+    /// exited: with no `code`, its time limit killed it.
     fn ran(code: Option<i32>, output: &str) -> Ran {
         Ran {
             code,
+            timed_out: code.is_none(),
             output: output.into(),
         }
     }
@@ -1530,7 +1551,7 @@ mod tests {
         let named = |v: &[(&str, KernelOutcome)]| -> Vec<(String, KernelOutcome)> {
             v.iter().map(|(n, o)| (n.to_string(), *o)).collect()
         };
-        let k = failed_kernels(DECLINED, true, false, false);
+        let k = failed_kernels(DECLINED, Some(1), true, false, false);
         assert_eq!(
             said(&k),
             named(&[
@@ -1542,7 +1563,7 @@ mod tests {
         );
         let out = "Running nanoda kernel on solution\nError while interacting with nanoda kernel\n\
                    Running Lean default kernel on solution\nLean default kernel accepts the solution\n";
-        let k = failed_kernels(out, true, true, false);
+        let k = failed_kernels(out, Some(1), true, true, false);
         assert_eq!(
             said(&k),
             named(&[
@@ -1553,9 +1574,22 @@ mod tests {
             ])
         );
         assert_eq!(
-            failed_kernels("error: Child exited with 1\n", true, true, false),
+            failed_kernels("error: Child exited with 1\n", Some(1), true, true, false),
             []
         );
+    }
+
+    /// A kernel's code is read only from a comparator that exited 1, as
+    /// `classify` reads it: one that was killed, or exited otherwise, has no
+    /// kernel's code, whatever its output says.
+    #[test]
+    fn failed_kernels_read_a_code_only_from_an_exit_of_1() {
+        let out = con_ron_failed("", 1);
+        let con_ron = |code| failed_kernels(&out, code, true, false, false)[2].verdict;
+        assert_eq!(con_ron(Some(1)), KernelOutcome::Rejected);
+        for code in [None, Some(2), Some(3)] {
+            assert_eq!(con_ron(code), KernelOutcome::Failed, "{code:?}");
+        }
     }
 
     /// What Lake prints of `kernels`, each as `(name, its own output, whether
@@ -1598,7 +1632,7 @@ mod tests {
         let judged = |output: &str, oom: bool, left_out: bool| {
             let ran = ran(Some(1), output);
             let names = run_kernels(true, left_out);
-            let kernels = failed_kernels(output, true, left_out, oom);
+            let kernels = failed_kernels(output, Some(1), true, left_out, oom);
             (classify(&ran, oom, &names), kernels)
         };
         let con_ron = |kernels: &[KernelVerdict]| {
@@ -1677,7 +1711,7 @@ mod tests {
             "error: con-ron exited with 137\n",
         );
         let outcomes = |oom| -> Vec<(String, KernelOutcome)> {
-            let kernels = failed_kernels(&out, true, false, oom);
+            let kernels = failed_kernels(&out, Some(1), true, false, oom);
             kernels.into_iter().map(|k| (k.name, k.verdict)).collect()
         };
         let named = |v: &[(&str, KernelOutcome)]| -> Vec<(String, KernelOutcome)> {
@@ -1698,7 +1732,7 @@ mod tests {
             &[("nanoda", "", true), ("Lean default", "", true)],
             "error: nanoda exited with 1\n",
         );
-        let kernels = failed_kernels(&rejected, true, false, false);
+        let kernels = failed_kernels(&rejected, Some(1), true, false, false);
         let got: Vec<_> = kernels.iter().map(|k| k.verdict).collect();
         assert_eq!(got, [Rejected, Failed]);
     }
@@ -1708,7 +1742,7 @@ mod tests {
     #[test]
     fn a_kernels_own_line_is_its_reason() {
         let own = "\ncon-ron: declined: non-standard axiom [at axiom lit]\nsecond line";
-        let kernels = failed_kernels(&con_ron_failed(own, 2), true, false, false);
+        let kernels = failed_kernels(&con_ron_failed(own, 2), Some(1), true, false, false);
         let reasons: Vec<(&str, Option<&str>)> = kernels
             .iter()
             .map(|k| (k.name.as_str(), k.reason.as_deref()))
@@ -1728,11 +1762,11 @@ mod tests {
             ]
         );
         // A killed kernel said nothing.
-        let kernels = failed_kernels(&con_ron_failed("", 137), true, false, true);
+        let kernels = failed_kernels(&con_ron_failed("", 137), Some(1), true, false, true);
         assert_eq!(kernels[2].reason, None);
         // A long line is cut, with a mark, at 200 characters.
         let long = format!("con-ron: {}", "x".repeat(500));
-        let kernels = failed_kernels(&con_ron_failed(&long, 1), true, false, false);
+        let kernels = failed_kernels(&con_ron_failed(&long, 1), Some(1), true, false, false);
         let reason = kernels[2].reason.as_deref().unwrap();
         assert_eq!(reason.chars().count(), 201);
         assert!(reason.starts_with("con-ron: xxx") && reason.ends_with('\u{2026}'));
@@ -1741,7 +1775,7 @@ mod tests {
             &[("nanoda", "nanoda: bad", true), ("Lean default", "", true)],
             "error: nanoda exited with 1\n",
         );
-        let kernels = failed_kernels(&two, true, false, false);
+        let kernels = failed_kernels(&two, Some(1), true, false, false);
         assert_eq!(kernels[0].reason.as_deref(), Some("nanoda: bad"));
         assert_eq!(kernels[1].reason, None);
     }
@@ -1756,7 +1790,7 @@ mod tests {
                 .map(|n| (n, "", n == "nanoda"))
                 .collect();
             let out = printed(&ran, "error: nanoda exited with 1\n");
-            let failed = failed_kernels(&out, true, left_out, false);
+            let failed = failed_kernels(&out, Some(1), true, left_out, false);
             let accepted = accepted_kernels(true, left_out);
             let names =
                 |k: &[KernelVerdict]| -> Vec<String> { k.iter().map(|k| k.name.clone()).collect() };
@@ -1870,6 +1904,26 @@ mod tests {
         assert_eq!(
             kind(&ran(Some(1), killed), true),
             Some(PairErrorKind::OutOfMemory)
+        );
+    }
+
+    /// A `lake` that a signal killed, which wasn't its time limit's, as when
+    /// it crashes, couldn't run: it didn't time out. Or it ran out of memory,
+    /// if the memory limit killed something meanwhile.
+    #[test]
+    fn a_signal_that_isnt_the_time_limit_is_no_timeout() {
+        let killed = Ran {
+            code: None,
+            timed_out: false,
+            output: "fake-lake comparator\nRunning Lean default kernel on solution\n".into(),
+        };
+        let e = classify(&killed, false, &PARANOID).unwrap();
+        assert_eq!(e.kind, PairErrorKind::CannotRun);
+        assert_eq!(e.message, "comparator was killed by a signal");
+        assert_eq!(kind(&killed, true), Some(PairErrorKind::OutOfMemory));
+        assert_eq!(
+            kind(&ran(None, "slow"), false),
+            Some(PairErrorKind::Timeout)
         );
     }
 

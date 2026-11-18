@@ -481,8 +481,8 @@ class AcceptPair(TypedDict):
     config: str
     accepted: bool
     error: NotRequired[PairError]
-    # None when the pair ran out of time, a module's export failed, or
-    # comparator didn't run.
+    # None when the pair ran out of time, a signal killed comparator, a
+    # module's export failed, or comparator didn't run.
     exit_code: NotRequired[int]
     # The end of what comparator printed.
     output: str
@@ -498,9 +498,11 @@ class AcceptPair(TypedDict):
     phases: NotRequired[list[PairPhase]]
 
 class PairPhase(TypedDict):
-    # "exporting challenge", "exporting solution", "judging" (comparator
-    # outside its kernels), or a kernel's name as in `kernels`.
+    # "exporting challenge", "exporting solution", "judging" (comparator,
+    # with any kernel too short for the worker's look each second to see),
+    # or a kernel's name as in `kernels`.
     name: str
+    # A kernel's, and the "judging" around it, good to about a second.
     seconds: float
     # The most memory the slot held in it, in MiB; absent without cgroups.
     peak_memory_mb: NotRequired[int]
@@ -663,9 +665,9 @@ JobKind = Literal[
 JobStatus = Literal["queued", "running", "done", "cancelled"]
 
 class AcceptPhase(TypedDict):
-    # "linking", "exporting" (with `pair` and `side`) or "judging" (with
-    # `pair`); pairs count from 1.
-    name: Literal["linking", "exporting", "judging"]
+    # "linking", "waiting" (for a slot), "exporting" (with `pair` and
+    # `side`) or "judging" (with `pair`); pairs count from 1.
+    name: Literal["linking", "waiting", "exporting", "judging"]
     pair: NotRequired[int]
     side: NotRequired[Literal["challenge", "solution"]]
 

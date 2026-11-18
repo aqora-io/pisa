@@ -90,8 +90,10 @@ impl Compiled {
 /// What a process run to its end printed, and how it exited.
 #[derive(Debug)]
 pub struct Ran {
-    /// None when its time limit killed it.
+    /// None when a signal killed it: its time limit, if `timed_out`.
     pub code: Option<i32>,
+    /// Whether its time limit killed it.
+    pub timed_out: bool,
     /// Its standard output, then its standard error.
     pub output: String,
 }
@@ -770,7 +772,7 @@ impl Launcher {
     }
 
     /// Runs `lake` with `args` in `dir`, in `slot`'s cgroup but outside the
-    /// sandbox, for at most `timeout`, after which its code is `None`:
+    /// sandbox, for at most `timeout`, after which it is killed, `timed_out`:
     /// `lake comparator` sandboxes what it runs itself. Its stdout and stderr
     /// share one pipe, so that the output keeps the order they were written
     /// in.
@@ -805,18 +807,22 @@ impl Launcher {
         let output = read_all(Some(tokio::net::unix::pipe::Receiver::from_owned_fd(
             reader.into(),
         )?));
-        let code = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(status) => status?.code(),
+        let (code, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => (status?.code(), false),
             Err(_) => {
                 let _ = child.kill().await;
-                None
+                (None, true)
             }
         };
         // A process Lake started may outlive it and keep the pipes open, so
         // take what was read by then.
         let output = String::from_utf8_lossy(&output.finish().await).into_owned();
         self.wait_idle(slot).await;
-        Ok(Ran { code, output })
+        Ok(Ran {
+            code,
+            timed_out,
+            output,
+        })
     }
 
     /// Waits (up to two seconds) until no process is left in the slot's
@@ -1139,6 +1145,46 @@ mod tests {
             !roots.iter().any(|r| r == launcher.snapshot_root()),
             "{roots:?}"
         );
+    }
+
+    /// A `lake` its time limit killed is told from one a signal of its own
+    /// killed, which has no code either.
+    #[tokio::test]
+    async fn lake_says_whether_its_time_limit_killed_it() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let lake = dir.path().join("lake");
+        std::fs::write(
+            &lake,
+            "#!/bin/sh\ncase $1 in\n  crash) kill -SEGV $$ ;;\n  slow) sleep 10 ;;\nesac\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&lake).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&lake, perms).unwrap();
+        let work = dir.path().join("work");
+        let args = [
+            "pisa-worker",
+            "--database-url",
+            "x",
+            "--lake",
+            lake.to_str().unwrap(),
+            "--work-dir",
+            work.to_str().unwrap(),
+        ];
+        let cfg = crate::config::WorkerConfig::try_parse_from(args).unwrap();
+        let launcher = super::Launcher::new(&cfg, "w", "v").await.unwrap();
+        let run = |what: &'static str, timeout: Duration| {
+            let launcher = &launcher;
+            let dir = dir.path();
+            async move { launcher.lake(0, &[what], dir, timeout).await.unwrap() }
+        };
+        let crashed = run("crash", Duration::from_secs(10)).await;
+        assert_eq!((crashed.code, crashed.timed_out), (None, false));
+        let slow = run("slow", Duration::from_millis(200)).await;
+        assert_eq!((slow.code, slow.timed_out), (None, true));
+        let done = run("done", Duration::from_secs(10)).await;
+        assert_eq!((done.code, done.timed_out), (Some(0), false));
     }
 
     #[test]

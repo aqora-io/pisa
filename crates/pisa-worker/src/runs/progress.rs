@@ -86,20 +86,33 @@ impl<'a> Progress<'a> {
         }
     }
 
-    /// Brings the phase up to date: while judging, a kernel that started or
-    /// ended starts a phase of its own.
+    /// Brings the phase up to date, with the kernel running in the slot.
     fn look(&mut self) {
+        let judging = matches!(
+            self.current,
+            Some(Current {
+                phase: AcceptPhase::Judging { .. },
+                ..
+            })
+        );
+        let kernel = match (judging, self.slot) {
+            (true, Some(slot)) => running_kernel(self.launcher, slot),
+            _ => None,
+        };
+        self.saw(kernel);
+    }
+
+    /// Brings the phase up to date, `kernel` being the kernel running: while
+    /// judging, a kernel that started or ended starts a phase of its own.
+    fn saw(&mut self, kernel: Option<&'static str>) {
         let Some(current) = &self.current else {
             return;
         };
-        if let (AcceptPhase::Judging { .. }, Some(slot)) = (current.phase, self.slot) {
-            let kernel = running_kernel(self.launcher, slot);
-            if kernel != current.kernel {
-                let phase = current.phase;
-                self.end();
-                self.start(phase, kernel);
-                return;
-            }
+        if matches!(current.phase, AcceptPhase::Judging { .. }) && kernel != current.kernel {
+            let phase = current.phase;
+            self.end();
+            self.start(phase, kernel);
+            return;
         }
         self.say();
     }
@@ -150,11 +163,11 @@ impl<'a> Progress<'a> {
 }
 
 /// A pair's phase's name, as [`PairPhase::name`] says it: `phase`, or the
-/// `kernel` comparator was running in it. `None` for linking, which is no
-/// pair's.
+/// `kernel` comparator was running in it. `None` for linking and waiting,
+/// which are no pair's.
 fn phase_name(phase: AcceptPhase, kernel: Option<&'static str>) -> Option<&'static str> {
     Some(match (phase, kernel) {
-        (AcceptPhase::Linking, _) => return None,
+        (AcceptPhase::Linking | AcceptPhase::Waiting, _) => return None,
         (AcceptPhase::Exporting { side, .. }, _) => match side {
             PairSide::Challenge => "exporting challenge",
             PairSide::Solution => "exporting solution",
@@ -173,6 +186,7 @@ mod tests {
         let exporting = |side| AcceptPhase::Exporting { pair: 1, side };
         let judging = AcceptPhase::Judging { pair: 2 };
         assert_eq!(phase_name(AcceptPhase::Linking, None), None);
+        assert_eq!(phase_name(AcceptPhase::Waiting, None), None);
         assert_eq!(
             phase_name(exporting(PairSide::Challenge), None),
             Some("exporting challenge")
@@ -183,5 +197,57 @@ mod tests {
         );
         assert_eq!(phase_name(judging, None), Some("judging"));
         assert_eq!(phase_name(judging, Some("con-ron")), Some("con-ron"));
+    }
+
+    /// An accept says each step as it starts, a slot's wait among them, and
+    /// a kernel seen while judging is a phase of its own: the pair keeps its
+    /// exports, comparator's time outside the kernels seen and each kernel.
+    #[tokio::test]
+    async fn an_accept_says_each_step_and_a_pair_keeps_its_own() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().to_str().unwrap();
+        let args = ["pisa-worker", "--database-url", "x", "--work-dir", work];
+        let cfg = crate::config::WorkerConfig::try_parse_from(args).unwrap();
+        let launcher = Launcher::new(&cfg, "w", "v").await.unwrap();
+        let sender = ProgressSender::new(None);
+        let said = || {
+            let said = sender.borrow();
+            let said = said.as_ref().unwrap();
+            (said.phase, said.kernel.clone())
+        };
+        let mut progress = Progress::new(&launcher, &sender);
+        progress.begin(AcceptPhase::Linking);
+        assert_eq!(said(), (AcceptPhase::Linking, None));
+        progress.begin(AcceptPhase::Waiting);
+        assert_eq!(said(), (AcceptPhase::Waiting, None));
+        progress.on_slot(0);
+        let exporting = |side| AcceptPhase::Exporting { pair: 1, side };
+        progress.begin(exporting(PairSide::Challenge));
+        assert_eq!(said(), (exporting(PairSide::Challenge), None));
+        progress.begin(exporting(PairSide::Solution));
+        let judging = AcceptPhase::Judging { pair: 1 };
+        progress.begin(judging);
+        assert_eq!(said(), (judging, None));
+        progress.saw(Some("con-ron"));
+        assert_eq!(said(), (judging, Some("con-ron".into())));
+        progress.saw(Some("con-ron"));
+        progress.saw(Some("nanoda"));
+        assert_eq!(said(), (judging, Some("nanoda".into())));
+        progress.saw(None);
+        assert_eq!(said(), (judging, None));
+        let names: Vec<String> = progress.pair_done().into_iter().map(|p| p.name).collect();
+        let wanted = [
+            "exporting challenge",
+            "exporting solution",
+            "judging",
+            "con-ron",
+            "nanoda",
+            "judging",
+        ];
+        assert_eq!(names, wanted);
+        // The next pair starts with none of them.
+        progress.begin(AcceptPhase::Judging { pair: 2 });
+        assert_eq!(progress.pair_done().len(), 1);
     }
 }

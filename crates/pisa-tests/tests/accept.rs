@@ -442,6 +442,27 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
     // What comparator printed before then is kept.
     assert!(output.contains("fake-lake comparator"), "{output}");
 
+    // A comparator a signal killed before its time limit, as when it
+    // crashes, couldn't run: it didn't run out of time.
+    let crashed = create(
+        &c,
+        json!({"code": "import Foo\n\n-- LAKE_ABORT\ntheorem w : 5 = 5 := rfl"}),
+    )
+    .await;
+    let r = accept(&c, &[&id(&crashed)], &[], false, 60).await;
+    let pair = &r.pairs[0];
+    let error = pair.error.as_ref().unwrap();
+    assert_eq!(
+        (error.kind, error.message.as_str(), pair.exit_code),
+        (
+            PairErrorKind::CannotRun,
+            "comparator was killed by a signal",
+            None
+        ),
+        "{r:?}"
+    );
+    assert!(!pair.output.contains("more than"), "{}", pair.output);
+
     // The time limit covers the exports too.
     let s = create(
         &c,

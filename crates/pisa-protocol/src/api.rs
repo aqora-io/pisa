@@ -288,7 +288,8 @@ pub struct JobProgress {
     pub seconds: f64,
     /// The most memory the slot has held in that time, in MiB, as its cgroup
     /// counts it, page cache included, as its memory limit does. None while
-    /// linking, which is before the slot, and on a worker without cgroups.
+    /// linking and waiting, which are before the slot, and on a worker
+    /// without cgroups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peak_memory_mb: Option<u64>,
 }
@@ -300,6 +301,9 @@ pub enum AcceptPhase {
     /// Linking the modules the pairs need into the judgment's directory,
     /// each file checked against its record.
     Linking,
+    /// Waiting for a slot of the worker to judge on, and for the slot's
+    /// memory to be freed.
+    Waiting,
     /// Exporting one side of pair `pair` with `leanexport`. Pairs count from
     /// 1, in the order of the acceptance's `pairs`, as their
     /// `comparator/<pair>.json` do.
@@ -2176,8 +2180,8 @@ pub struct AcceptPair {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<PairError>,
     /// Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when the
-    /// pair ran past `timeout`, a module's export failed, or comparator
-    /// didn't run.
+    /// pair ran past `timeout`, a signal killed comparator, a module's export
+    /// failed, or comparator didn't run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     /// The end of what comparator printed; empty when it didn't run.
@@ -2208,10 +2212,15 @@ pub struct AcceptPair {
 pub struct PairPhase {
     /// `exporting challenge` or `exporting solution`, pisa exporting the
     /// spec snapshot's or the head's module; `judging`, comparator reading
-    /// and comparing the exports, outside its kernels; or a kernel
-    /// comparator ran, named as in `kernels`, found by its executable among
-    /// the processes in the worker's slot.
+    /// and comparing the exports, and running any kernel the worker didn't
+    /// see: it looks at the slot about each second, so a shorter kernel may
+    /// fall between two looks; or a kernel comparator ran that the worker
+    /// saw, named as in `kernels`, found by its executable among the
+    /// processes in the worker's slot.
     pub name: String,
+    /// How long it took, in seconds. A kernel's starts and ends at the
+    /// worker's looks at the slot, so its time, and that of the `judging`
+    /// around it, is good to about a second.
     pub seconds: f64,
     /// The most memory the slot held in it, in MiB, as its cgroup counts it,
     /// page cache included. None on a worker without cgroups.
@@ -2291,7 +2300,8 @@ pub enum PairErrorKind {
     /// Comparator couldn't start or run its checks: a missing `bwrap`, a
     /// configuration it couldn't read, a kernel it couldn't run or that
     /// exited with a code that is no verdict (3, or a kill the memory limit
-    /// didn't cause).
+    /// didn't cause), or a signal that killed comparator itself, which
+    /// wasn't its time limit's or the memory limit's.
     CannotRun,
     /// The spec names no theorem comparator can judge, so it didn't run.
     NothingToJudge,

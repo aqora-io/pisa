@@ -10,6 +10,8 @@
 //!   `SLEEP` takes 5 s, leaving a file `sleeping.<pid>` beside the judgment's
 //!   directory as it starts and `slept.<pid>` once it has slept, for tests
 //!   to tell a comparator that was stopped from one that ran to its end;
+//! - a solution that says `LAKE_ABORT` has it abort, killed by a signal, as
+//!   a Lake that crashes is;
 //! - a definition name that isn't a `def` in both modules is refused, as
 //!   comparator refuses one that isn't a definition;
 //! - a module that says `-- CANNOT_RUN` keeps it from starting (exit 2);
@@ -184,6 +186,9 @@ fn main() {
         if !solution.contains(&def) {
             fail(&format!("Solution constant is not a definition: '{name}'"));
         }
+    }
+    if solution.contains("LAKE_ABORT") {
+        std::process::abort();
     }
     if solution.contains("SLEEP") {
         let mark = |what: &str| std::fs::write(format!("../{what}.{}", std::process::id()), "");

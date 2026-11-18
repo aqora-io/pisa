@@ -93,7 +93,8 @@ pub struct PairToJudge {
 pub struct Judgment {
     /// Why it wasn't accepted; `None` if it was.
     pub error: Option<PairError>,
-    /// Comparator's exit code; `None` if it didn't run, or ran out of time.
+    /// Comparator's exit code; `None` if it didn't run, ran out of time, or
+    /// a signal killed it.
     pub exit_code: Option<i32>,
     /// The end of what comparator printed.
     pub output: String,
@@ -392,7 +393,7 @@ pub async fn judge(
         let mut ran = (progress.during(launcher.lake(slot, &args, dir, left)).await)
             .map_err(|e| internal("running lake comparator", e))?;
         let phases = progress.pair_done();
-        if ran.code.is_none() {
+        if ran.timed_out {
             ran.output.push('\n');
             ran.output.push_str(&timed_out(options.timeout));
         }
@@ -400,7 +401,7 @@ pub async fn judge(
         // From the whole output, before it is cut to its end.
         let kernels = match ran.code {
             Some(0) => accepted_kernels(options.paranoid, left_out),
-            _ => failed_kernels(&ran.output, options.paranoid, left_out, oom),
+            code => failed_kernels(&ran.output, code, options.paranoid, left_out, oom),
         };
         judgments.push(Judgment {
             error: classify(&ran, oom, &run_kernels(options.paranoid, left_out))

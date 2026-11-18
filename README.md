@@ -1522,14 +1522,15 @@ builds with `lake build` and that comparator accepts it there.
   409 `conflict` at once, naming the settle to send first: comparator would
   judge records that read `sorry`. Nothing is stored.
   Each pair has comparator's `exit_code` (0 accepted, 1 refused or failed, 2
-  couldn't start, none past `timeout` or when it didn't run) and the end of
-  its `output`. A pair
+  couldn't start, none past `timeout`, when a signal killed it or when it
+  didn't run) and the end of its `output`. A pair
   not accepted says why in `error.kind`: `refused`, comparator's verdict;
   `export_failed`, pisa couldn't export a module from its build, so
   comparator didn't run; `timeout`;
   `out_of_memory`, the worker's memory limit killed comparator or a kernel;
-  `cannot_run`, comparator couldn't start or run its checks, or a kernel
-  couldn't run or exited with a code that is no verdict;
+  `cannot_run`, comparator couldn't start or run its checks, a kernel
+  couldn't run or exited with a code that is no verdict, or a signal that
+  wasn't the time limit's or the memory limit's killed comparator;
   `unsupported`, comparator's last error line says con-leche or con-ron,
   which pisa ran, exited with 2: they don't support a non-standard axiom;
   or `nothing_to_judge`, a spec that names no theorem comparator can judge,
@@ -1613,9 +1614,11 @@ builds with `lake build` and that comparator accepts it there.
   Compose's 30): `{phase, kernel?, seconds, peak_memory_mb?}`. All of it is
   pisa's own, never read from what comparator prints:
   - `phase` is pisa's step: `{"name": "linking"}` while it links the
-    modules, `{"name": "exporting", "pair": n, "side": "challenge"}` or
-    `"solution"` while it exports one, and `{"name": "judging", "pair": n}`
-    while comparator runs, pairs counting from 1 in the order of `pairs`.
+    modules, `{"name": "waiting"}` while it waits for a slot and for the
+    slot's memory to be freed, `{"name": "exporting", "pair": n, "side":
+    "challenge"}` or `"solution"` while it exports one, and
+    `{"name": "judging", "pair": n}` while comparator runs, pairs counting
+    from 1 in the order of `pairs`.
   - `kernel` is the kernel comparator is running, named as in `kernels`,
     which the worker finds by its executable (`leanchecker` is Lean
     default) among the processes in the slot's cgroup.
@@ -1623,19 +1626,22 @@ builds with `lake build` and that comparator accepts it there.
     `peak_memory_mb` the most memory the slot's cgroup held in it, page
     cache included as its memory limit counts it: the worker starts
     `memory.peak` again at each phase and each kernel, which needs Linux
-    6.12 or later.
+    6.12 or later. Linking and waiting, before the slot, have no
+    `peak_memory_mb`.
 
   A worker without cgroups gives neither `kernel` nor `peak_memory_mb`.
   Each pair keeps its phases in `phases`, each `{name, seconds,
   peak_memory_mb?}`: `exporting challenge`, `exporting solution`, `judging`
-  for comparator reading and comparing the exports outside its kernels, and
-  each kernel the worker saw by its name. The worker looks at the slot
-  about each second, so a kernel shorter than that may have no phase of its
-  own, and a peak right at a boundary may count in the next phase. If the
-  job's claim moves to another attempt meanwhile, as when a stall outlasts
-  the lease and another worker claims the job, the first worker stops
-  comparator as soon as it sees that, kills what is left in its slot, and
-  stores nothing: the run has the other attempt's acceptance only.
+  for comparator reading and comparing the exports and running any kernel
+  the worker didn't see, and each kernel the worker saw by its name. The
+  worker looks at the slot about each second, so a kernel shorter than that
+  may have no phase of its own and count in `judging`, a kernel's `seconds`
+  are good to about a second, and a peak right at a boundary may count in
+  the next phase. If the job's claim moves to another attempt meanwhile, as
+  when a stall outlasts the lease and another worker claims the job, the
+  first worker stops comparator as soon as it sees that, kills what is left
+  in its slot, and stores nothing: the run has the other attempt's
+  acceptance only.
 - **Where the audit and comparator differ.** Each pair's `left_out` and
   `theorems` say what its configuration couldn't name. The full list:
   - *Private names* differ between two modules, so a configuration leaves out

@@ -593,8 +593,8 @@ export interface components {
             /**
              * Format: int32
              * @description Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when the
-             *     pair ran past `timeout`, a module's export failed, or comparator
-             *     didn't run.
+             *     pair ran past `timeout`, a signal killed comparator, a module's export
+             *     failed, or comparator didn't run.
              */
             exit_code?: number;
             /** @description The head. */
@@ -643,6 +643,9 @@ export interface components {
         AcceptPhase: {
             /** @enum {string} */
             name: "linking";
+        } | {
+            /** @enum {string} */
+            name: "waiting";
         } | {
             /** @enum {string} */
             name: "exporting";
@@ -2125,7 +2128,8 @@ export interface components {
              * Format: int64
              * @description The most memory the slot has held in that time, in MiB, as its cgroup
              *     counts it, page cache included, as its memory limit does. None while
-             *     linking, which is before the slot, and on a worker without cgroups.
+             *     linking and waiting, which are before the slot, and on a worker
+             *     without cgroups.
              */
             peak_memory_mb?: number;
             phase: components["schemas"]["AcceptPhase"];
@@ -2298,9 +2302,11 @@ export interface components {
             /**
              * @description `exporting challenge` or `exporting solution`, pisa exporting the
              *     spec snapshot's or the head's module; `judging`, comparator reading
-             *     and comparing the exports, outside its kernels; or a kernel
-             *     comparator ran, named as in `kernels`, found by its executable among
-             *     the processes in the worker's slot.
+             *     and comparing the exports, and running any kernel the worker didn't
+             *     see: it looks at the slot about each second, so a shorter kernel may
+             *     fall between two looks; or a kernel comparator ran that the worker
+             *     saw, named as in `kernels`, found by its executable among the
+             *     processes in the worker's slot.
              */
             name: string;
             /**
@@ -2309,7 +2315,12 @@ export interface components {
              *     page cache included. None on a worker without cgroups.
              */
             peak_memory_mb?: number;
-            /** Format: double */
+            /**
+             * Format: double
+             * @description How long it took, in seconds. A kernel's starts and ends at the
+             *     worker's looks at the slot, so its time, and that of the `judging`
+             *     around it, is good to about a second.
+             */
             seconds: number;
         };
         /**

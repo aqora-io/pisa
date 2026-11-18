@@ -19,7 +19,7 @@
             "description": "Why it isn't accepted, if it isn't."
           },
           "exit_code": {
-            "description": "Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when the\npair ran past `timeout`, a module's export failed, or comparator\ndidn't run.",
+            "description": "Comparator's: 0 accepted, 1 rejected, 2 couldn't start. None when the\npair ran past `timeout`, a signal killed comparator, a module's export\nfailed, or comparator didn't run.",
             "format": "int32",
             "type": "integer"
           },
@@ -94,6 +94,21 @@
               "name": {
                 "enum": [
                   "linking"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Waiting for a slot of the worker to judge on, and for the slot's\nmemory to be freed.",
+            "properties": {
+              "name": {
+                "enum": [
+                  "waiting"
                 ],
                 "type": "string"
               }
@@ -2363,7 +2378,7 @@
             "type": "string"
           },
           "peak_memory_mb": {
-            "description": "The most memory the slot has held in that time, in MiB, as its cgroup\ncounts it, page cache included, as its memory limit does. None while\nlinking, which is before the slot, and on a worker without cgroups.",
+            "description": "The most memory the slot has held in that time, in MiB, as its cgroup\ncounts it, page cache included, as its memory limit does. None while\nlinking and waiting, which are before the slot, and on a worker\nwithout cgroups.",
             "format": "int64",
             "minimum": 0,
             "type": "integer"
@@ -2667,7 +2682,7 @@
         "description": "A step of judging a pair, and what it took.",
         "properties": {
           "name": {
-            "description": "`exporting challenge` or `exporting solution`, pisa exporting the\nspec snapshot's or the head's module; `judging`, comparator reading\nand comparing the exports, outside its kernels; or a kernel\ncomparator ran, named as in `kernels`, found by its executable among\nthe processes in the worker's slot.",
+            "description": "`exporting challenge` or `exporting solution`, pisa exporting the\nspec snapshot's or the head's module; `judging`, comparator reading\nand comparing the exports, and running any kernel the worker didn't\nsee: it looks at the slot about each second, so a shorter kernel may\nfall between two looks; or a kernel comparator ran that the worker\nsaw, named as in `kernels`, found by its executable among the\nprocesses in the worker's slot.",
             "type": "string"
           },
           "peak_memory_mb": {
@@ -2677,6 +2692,7 @@
             "type": "integer"
           },
           "seconds": {
+            "description": "How long it took, in seconds. A kernel's starts and ends at the\nworker's looks at the slot, so its time, and that of the `judging`\naround it, is good to about a second.",
             "format": "double",
             "type": "number"
           }
