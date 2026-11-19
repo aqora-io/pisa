@@ -482,9 +482,11 @@ describe("PisaClient", () => {
     const { client, sent } = recording(() => json({ version: "v1", results: [{ hits: [] }] }));
     expect(await client.search({ description: "x" })).toEqual({ hits: [] });
     await client.resolve(["x"], { version: "w" });
+    await client.resolve(["y"], { snapshots: "all" });
     expect(sent.map((s) => [s.url, s.body])).toEqual([
       ["/api/search", { queries: [{ description: "x" }], version: "v1" }],
       ["/api/resolve", { names: ["x"], version: "w" }],
+      ["/api/resolve", { names: ["y"], snapshots: "all", version: "v1" }],
     ]);
   });
 

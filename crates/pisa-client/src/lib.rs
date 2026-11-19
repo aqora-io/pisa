@@ -1883,14 +1883,31 @@ impl Client {
     }
 
     /// Says whether each name exists, following deprecations and suggesting
-    /// close names for those that don't.
+    /// close names for those that don't. Only the bundle's names: see
+    /// [`Client::resolve_with`] for snapshots' too.
     pub async fn resolve<I, S>(&self, names: I) -> Result<Vec<Resolution>, Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.resolve_with(names, SnapshotScope::None).await
+    }
+
+    /// As [`Client::resolve`], also counting the declarations of the snapshot
+    /// modules `snapshots` reaches within the client's scope, as a query's
+    /// `snapshots` does.
+    pub async fn resolve_with<I, S>(
+        &self,
+        names: I,
+        snapshots: SnapshotScope,
+    ) -> Result<Vec<Resolution>, Error>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         let req = ResolveRequest {
             names: names.into_iter().map(Into::into).collect(),
+            snapshots,
             version: self.version.clone(),
         };
         let resp: ResolveResponse = self.post("resolve", &req, Repeat::Safe).await?;

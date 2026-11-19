@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use pisa_protocol::search::{Hit, Query, Resolution};
+use pisa_protocol::search::{Hit, Query, Resolution, SnapshotScope};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -275,7 +275,7 @@ pub async fn run(
     names.dedup();
     let mut found = HashMap::new();
     for chunk in names.chunks(BATCH) {
-        for r in engine.resolve(chunk).await? {
+        for r in engine.resolve(chunk, &SnapshotScope::None).await? {
             found.insert(r.name.clone(), r);
         }
     }

@@ -1134,9 +1134,20 @@ impl Base {
         self.call(py, async move { inner.search_batch(queries).await })
     }
 
-    fn resolve<'py>(&self, py: Python<'py>, names: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (names, *, snapshots = None))]
+    fn resolve<'py>(
+        &self,
+        py: Python<'py>,
+        names: Vec<String>,
+        snapshots: Option<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        self.call(py, async move { inner.resolve(names).await })
+        let snapshots = match snapshots {
+            Some(s) => serde_json::from_value(from_py(&s)?)
+                .map_err(|e| PyValueError::new_err(format!("invalid snapshots: {e}")))?,
+            None => Default::default(),
+        };
+        self.call(py, async move { inner.resolve_with(names, snapshots).await })
     }
 
     #[pyo3(signature = (name, *, module = None))]

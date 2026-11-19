@@ -223,7 +223,7 @@ export interface paths {
         put?: never;
         /**
          * Check names exist
-         * @description Whether each name exists, with close names for one that doesn't.
+         * @description Whether each name exists, with close names for one that doesn't: the bundle's names, and with `snapshots` those of the snapshots it reaches in the scope, as a query's `snapshots` does.
          */
         post: operations["resolve"];
         delete?: never;
@@ -2755,6 +2755,12 @@ export interface components {
         ResolveRequest: {
             /** @description At most 64. */
             names: string[];
+            /**
+             * @description Snapshot modules whose declarations count too, as a query's
+             *     `snapshots` says, within the request's scope: by default none, so a
+             *     name only a snapshot declares is missing.
+             */
+            snapshots?: components["schemas"]["SnapshotScope"];
             /**
              * @description A version, or an alias of one: the index's, or its snapshots'. Any
              *     other fails with `not_found`.

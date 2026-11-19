@@ -249,6 +249,11 @@ fn is_zero(n: &u32) -> bool {
 pub struct ResolveRequest {
     /// At most 64.
     pub names: Vec<String>,
+    /// Snapshot modules whose declarations count too, as a query's
+    /// `snapshots` says, within the request's scope: by default none, so a
+    /// name only a snapshot declares is missing.
+    #[serde(default, skip_serializing_if = "SnapshotScope::is_none")]
+    pub snapshots: SnapshotScope,
     /// A version, or an alias of one: the index's, or its snapshots'. Any
     /// other fails with `not_found`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

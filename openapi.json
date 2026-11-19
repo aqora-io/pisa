@@ -3367,6 +3367,10 @@
             },
             "type": "array"
           },
+          "snapshots": {
+            "$ref": "#/components/schemas/SnapshotScope",
+            "description": "Snapshot modules whose declarations count too, as a query's\n`snapshots` says, within the request's scope: by default none, so a\nname only a snapshot declares is missing."
+          },
           "version": {
             "description": "A version, or an alias of one: the index's, or its snapshots'. Any\nother fails with `not_found`.",
             "type": "string"
@@ -5764,7 +5768,7 @@
     },
     "/resolve": {
       "post": {
-        "description": "Whether each name exists, with close names for one that doesn't.",
+        "description": "Whether each name exists, with close names for one that doesn't: the bundle's names, and with `snapshots` those of the snapshots it reaches in the scope, as a query's `snapshots` does.",
         "operationId": "resolve",
         "parameters": [
           {

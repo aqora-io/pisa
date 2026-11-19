@@ -180,3 +180,11 @@ def test_snapshot_scopes(url):
         assert e.value.status == 400
     with pytest.raises(ValueError, match="invalid snapshots"):
         client.search(description="trace", snapshots="some")
+    # Resolving takes the same scopes, and is refused the same way.
+    assert client.resolve(["Matrix.trace"], snapshots="none")[0]["exists"]
+    for scope in ["all", {"labels": {"run": "1"}}]:
+        with pytest.raises(PisaError, match="doesn't search snapshots") as e:
+            client.resolve(["Matrix.trace"], snapshots=scope)
+        assert e.value.status == 400
+    with pytest.raises(ValueError, match="invalid snapshots"):
+        client.resolve(["Matrix.trace"], snapshots="some")

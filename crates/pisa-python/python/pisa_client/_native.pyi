@@ -1281,9 +1281,13 @@ class Client:
         answers, not errors."""
     def search_batch(self, queries: list[Query]) -> list[QueryResult]:
         """Run up to 64 queries in one request; results keep their order."""
-    def resolve(self, names: list[str]) -> list[Resolution]:
+    def resolve(
+        self, names: list[str], *, snapshots: SnapshotScope | None = None
+    ) -> list[Resolution]:
         """Whether each name exists, with its replacement if deprecated and
-        close names if it doesn't exist."""
+        close names if it doesn't exist. Only the bundle's names unless
+        `snapshots` is "all" or {"labels": {...}}: then also the names of
+        those snapshot modules in the client's scope, as in `search`."""
     def get_declaration(self, name: str, *, module: str | None = None) -> DeclarationDetail:
         """One declaration with its description, dependencies and users: the
         one in snapshot module `module`, as a snapshot hit's `module` names
@@ -1822,9 +1826,13 @@ class AsyncClient:
         answers, not errors."""
     def search_batch(self, queries: list[Query]) -> Future[list[QueryResult]]:
         """Run up to 64 queries in one request; results keep their order."""
-    def resolve(self, names: list[str]) -> Future[list[Resolution]]:
+    def resolve(
+        self, names: list[str], *, snapshots: SnapshotScope | None = None
+    ) -> Future[list[Resolution]]:
         """Whether each name exists, with its replacement if deprecated and
-        close names if it doesn't exist."""
+        close names if it doesn't exist. Only the bundle's names unless
+        `snapshots` is "all" or {"labels": {...}}: then also the names of
+        those snapshot modules in the client's scope, as in `search`."""
     def get_declaration(self, name: str, *, module: str | None = None) -> Future[DeclarationDetail]:
         """One declaration with its description, dependencies and users: the
         one in snapshot module `module`, as a snapshot hit's `module` names

@@ -614,6 +614,43 @@ async fn snapshots_are_searched_by_scope() {
     s.done(e).await;
 }
 
+/// Resolving a name finds a snapshot declaration only when asked to search
+/// snapshots, and within the scope asked for, as search does: a name that
+/// exists only in a snapshot is otherwise missing, with library suggestions.
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_names_resolve_by_scope() {
+    let Some(mut s) = setup().await else { return };
+    create(&s.catalog, "a1", doubling(), &[("run", "1")]).await;
+    let e = s.engine().await;
+    s.index(&e, false);
+    let names = ["double_eq".to_string(), "doubel_eq".to_string()];
+    until_true(async || {
+        e.resolve(&names, &SnapshotScope::All).await.unwrap()[0].exists
+    })
+    .await;
+
+    let r = e.resolve(&names, &SnapshotScope::All).await.unwrap();
+    assert_eq!(
+        r[0].imports.as_deref(),
+        Some("import Mathlib\nimport PisaSnap.sa1"),
+        "{r:?}"
+    );
+    assert!(!r[1].exists, "{r:?}");
+    assert_eq!(r[1].suggestions[0].name, "double_eq", "{r:?}");
+    let r = e.resolve(&names, &labels(&[("run", "1")])).await.unwrap();
+    assert!(r[0].exists, "{r:?}");
+
+    for scope in [SnapshotScope::None, labels(&[("run", "2")])] {
+        let r = e.resolve(&names, &scope).await.unwrap();
+        assert!(!r[0].exists, "{scope:?}: {r:?}");
+        assert!(
+            r[1].suggestions.iter().all(|s| s.name != "double_eq"),
+            "{scope:?}: {r:?}"
+        );
+    }
+    s.done(e).await;
+}
+
 /// A hit has its own declaration's status: a proved theorem next to a
 /// `sorry` reads `proved`.
 #[tokio::test(flavor = "multi_thread")]

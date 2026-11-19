@@ -942,9 +942,20 @@ impl Engine {
     /// Whether each name exists, with its replacement if deprecated, and
     /// otherwise the closest existing names: same name in other case, same
     /// last component, or shared trigrams, ranked by edit distance, then
-    /// prominence.
-    pub async fn resolve(&self, names: &[String]) -> anyhow::Result<Vec<Resolution>> {
-        let base = is("source", "base");
+    /// prominence. Names are the bundle's, and also those of the snapshot
+    /// modules `snapshots` reaches, within the request's scope, as a
+    /// search's are.
+    pub async fn resolve(
+        &self,
+        names: &[String],
+        snapshots: &SnapshotScope,
+    ) -> Result<Vec<Resolution>, SearchError> {
+        let q = Query {
+            snapshots: in_request_scope(snapshots),
+            ..Default::default()
+        };
+        let modules = self.scopes(std::slice::from_ref(&q)).await?;
+        let base = self.filter(&q, modules[0].as_deref());
         let fields = json!([
             "name",
             "kind",

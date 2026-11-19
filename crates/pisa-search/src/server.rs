@@ -14,7 +14,7 @@ use pisa_db::description_flags::DescriptionFlags;
 use pisa_protocol::api::{ApiErrors, Error, ErrorKind, ErrorResponse};
 use pisa_protocol::search::{
     FlagDescriptionRequest, FlagDescriptionResponse, GetDeclarationResponse, ResolveRequest,
-    ResolveResponse, SearchHealth, SearchRequest, SearchResponse,
+    ResolveResponse, SearchHealth, SearchRequest, SearchResponse, SnapshotScope,
 };
 use pisa_protocol::version::Versions;
 use serde::Deserialize;
@@ -436,7 +436,9 @@ async fn search_handler(
 #[utoipa::path(
     post, path = "/resolve", operation_id = "resolve", tag = "search",
     summary = "Check names exist",
-    description = "Whether each name exists, with close names for one that doesn't.",
+    description = "Whether each name exists, with close names for one that doesn't: the \
+        bundle's names, and with `snapshots` those of the snapshots it reaches in the scope, \
+        as a query's `snapshots` does.",
     request_body = ResolveRequest,
     responses((status = 200, description = "A resolution per name, in order", body = ResolveResponse), ApiErrors),
 )]
@@ -447,7 +449,18 @@ async fn resolve(
     let engine = search.engine()?;
     search.check_version(engine, req.version.as_deref())?;
     check_batch(req.names.len())?;
-    let results = engine.resolve(&req.names).await.map_err(unavailable)?;
+    let mut filters = pisa_protocol::search::Query {
+        snapshots: req.snapshots.clone(),
+        ..Default::default()
+    };
+    engine
+        .check_filters(&mut filters)
+        .map_err(|e| ApiError::new(ErrorKind::BadRequest, e))?;
+    let results = match engine.resolve(&req.names, &req.snapshots).await {
+        Ok(results) => results,
+        Err(SearchError::BadRequest(m)) => return Err(ApiError::new(ErrorKind::BadRequest, m)),
+        Err(SearchError::Unavailable(e)) => return Err(unavailable(e)),
+    };
     let version = engine.env_id().to_string();
     Ok(Json(ResolveResponse { version, results }))
 }
@@ -493,7 +506,7 @@ async fn get_declaration(
 
 /// A 404 for `name`, with the closest existing name.
 async fn unknown_declaration(engine: &Engine, name: &str) -> ApiError {
-    let r = match engine.resolve(&[name.to_string()]).await {
+    let r = match engine.resolve(&[name.to_string()], &SnapshotScope::None).await {
         Ok(r) => r,
         Err(e) => return unavailable(e),
     };

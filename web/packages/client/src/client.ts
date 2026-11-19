@@ -50,6 +50,7 @@ import type {
   Snapshot,
   SnapshotDetail,
   SnapshotId,
+  SnapshotScope,
   StateId,
   UpdateSnapshotRequest,
   VerifySnapshotResponse,
@@ -152,6 +153,14 @@ export interface DeleteSnapshotOptions extends RequestOptions {
    *  others, and splice nothing: a whole branch of a run goes. What the
    *  snapshot replaced is a head again if nothing else replaces it. */
   withReplacers?: boolean;
+}
+
+/** What `resolve` takes: its version, and the snapshots whose names count. */
+export interface ResolveOptions extends VersionOptions {
+  /** Snapshot modules whose declarations count too, within the scope, as a
+   *  query's `snapshots` says; by default none, so a name only a snapshot
+   *  declares is missing. */
+  snapshots?: SnapshotScope;
 }
 
 export interface GetDeclarationOptions extends VersionOptions {
@@ -845,8 +854,9 @@ export class PisaClient {
   }
 
   /** Whether each name exists, and close names for those that don't. */
-  async resolve(names: string[], options: VersionOptions = {}): Promise<Resolution[]> {
-    const r = await this.call<ResolveResponse>("POST", ["resolve"], { names, ...this.versionOf(options) }, options);
+  async resolve(names: string[], options: ResolveOptions = {}): Promise<Resolution[]> {
+    const body = { names, ...(options.snapshots === undefined ? {} : { snapshots: options.snapshots }), ...this.versionOf(options) };
+    const r = await this.call<ResolveResponse>("POST", ["resolve"], body, options);
     return r.results;
   }
 

@@ -2612,7 +2612,7 @@ pisa-search validate-descriptions --corpus search/corpus --informal search/store
 | Endpoint | Request → response |
 | --- | --- |
 | `POST /search` | `{queries: [{text?, description?, latex?, pattern?, goal?, name?, consts?, libraries?, kinds?, limit?, include_sorried?, snapshots?, format?}], version?}` → `{version, results: [{hits, text?, warnings?, hints?, dense_pending?}]}`, at most 64 queries |
-| `POST /resolve` | `{names, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}` |
+| `POST /resolve` | `{names, snapshots?, version?}` → `{version, results: [{name, exists, deprecated_to?, imports?, suggestions}]}`; `snapshots` as a query's, default `"none"` |
 | `GET /declarations/{name}` | `?module=&version=` → `{version, declaration}`: signature, value, description, flags, dependencies and users; with a snapshot hit's `module`, that snapshot's declaration, else the bundle's |
 | `POST /declarations/{name}/flags` | `?module=&version=`, `{reason}` → `{version, description_flags}`: flags the declaration's description as wrong, e.g. for leaving out a hypothesis; a 404 for a declaration without one |
 
@@ -2697,7 +2697,10 @@ the bundle's in every lane, unless `PISA_SEARCH_NO_SNAPSHOTS` is set:
   first, at most 10. `status` is the declaration's own, so a proved lemma
   next to a `sorry` is `proved`, and `verified` is the module's. Names can
   repeat across snapshots, and each is a hit of its own. `/resolve` covers the
-  bundle only, and so does `/declarations/{name}` without `module`.
+  bundle only unless it is sent `snapshots` too, as a query is: then a name
+  of a snapshot it reaches in the scope exists, with `imports` the header
+  that loads its module, and suggestions come from those snapshots as well.
+  `/declarations/{name}` without `module` covers the bundle only.
 - **The leader.** One server at a time, holding a lease in the database
   (30 s, renewed every 10 s), indexes snapshots: it writes each module's
   declarations to Qdrant, and each snapshot to `pisa-<env_id>-entries`, which

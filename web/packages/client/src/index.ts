@@ -18,6 +18,7 @@ export {
   type JobOptions,
   type JobPoll,
   type RebuildOptions,
+  type ResolveOptions,
   type ResubmitOptions,
   type SettleOptions,
   type VerifyOptions,
