@@ -1749,6 +1749,23 @@ builds with `lake build` and that comparator accepts it there.
   [rebuilds](#rebuilding) without `retire`. It names each spec's run (see
   [Naming a run](#run-names)), so that agents can import a lemma's run by
   name.
+- **Definitions.** A spec's targets usually state facts about definitions
+  of its own, such as a paper's objects. Put those definitions in a base
+  snapshot of their own, with no `sorry`, and have each spec import it: a
+  replacement must declare the spec module's own declarations itself (see
+  [Reusing a proof](#reusing-a-proof)), so a helper snapshot that needs a
+  definition declared in the spec can't be imported next to the
+  replacement, which declares it again. With the definitions below the spec,
+  helpers import the base, never the spec, and the replacement imports the
+  base and the helpers and re-declares only the targets. Specs that build on
+  another's definitions import its base too, and a target proved from
+  another spec's target imports that spec's run (see *Lemmas* below):
+
+  ```text
+  defs.A (definitions, proved)  ←  spec.A (targets, sorry)  ←  head of spec.A
+        ↑                                                       ↑ imports
+        └──────────────  helpers (lemmas, as named runs)  ──────┘
+  ```
 - **Agents.** Each gets its target's spec id and labels every snapshot with
   the run's labels. Scratch work goes to `/check` (see
   [Snapshots](#snapshots)), which keeps no snapshot. To submit, an agent
@@ -1772,7 +1789,9 @@ builds with `lake build` and that comparator accepts it there.
   proving needs no rebuild when that proof lands: the audit reads the target
   through the lemma's run (see [Through links](#through-links)), and the
   leader [settles](#settling) the run once, before accepting. Agents go on
-  meanwhile on the heads they hold.
+  meanwhile on the heads they hold. Until then such a target is `sorry`; its
+  `own_status` says whether its own proof is finished, and `inherits` names
+  the lemma it waits for (see [Statuses](#statuses)).
 - **Re-checks.** When something below the run changes, such as a base
   edited, the leader [rebuilds](#rebuilding) without `retire` while agents
   work. Agents meet the copies as `conflict`s and move onto them. A rebuild
