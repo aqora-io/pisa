@@ -118,6 +118,82 @@ async fn a_refusal_says_what_changed_and_how() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_refused_type_that_prints_alike_is_shown_with_every_argument() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let old = entry(&create(&c, json!({"code": SKELETON})).await).to_string();
+    // Prints as the spec's statement; differs where the printer hides it, as
+    // an instance found by another path does. The fake's types start at `:`.
+    let hidden =
+        "import Foo\n\n-- printed-as: theorem t : 1 = 1 := rfl\ntheorem t : 1 = (1 : Nat) := rfl";
+    let r = create(&c, json!({"code": hidden, "replaces": replacing(&old)})).await;
+    assert_eq!(
+        r["check"]["changes"],
+        json!([{"name": "t", "change": "type", "was": "t : 1 = 1", "now": "t : 1 = 1",
+                "was_explicit": ": 1 = 1", "now_explicit": ": 1 = (1 : Nat)"}]),
+        "{r}"
+    );
+    assert_eq!(
+        r["check"]["reasons"],
+        json!([
+            "statement: t has a different type; it prints alike, but with every argument \
+                shown it was `: 1 = 1` and is now `: 1 = (1 : Nat)`"
+        ])
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_against_a_spec_says_which_statements_it_changes() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let spec = "import Foo\n\ndef f : Nat := 1\ntheorem t : 1 = 1 := sorry";
+    let spec = entry(&create(&c, json!({"code": spec})).await).to_string();
+    // The same statements, with a helper and another value for `f`, which
+    // only the create judges, with the spec's holes and `allow`.
+    let kept =
+        "import Foo\n\ndef f : Nat := 2\ntheorem helper : 2 = 2 := rfl\ntheorem t : 1 = 1 := rfl";
+    let (status, r) = c
+        .post("/check", json!({"code": kept, "against": spec}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(r.get("changes").is_none(), "{r}");
+
+    let retyped = "import Foo\n\ntheorem t : 2 = 2 := rfl";
+    let (status, r) = c
+        .post("/check", json!({"code": retyped, "against": spec}))
+        .await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(
+        r["changes"],
+        json!([{"name": "t", "change": "type", "was": "t : 1 = 1"}]),
+        "{r}"
+    );
+    assert_eq!(
+        r["reasons"],
+        json!(["statement: t has a different type"]),
+        "{r}"
+    );
+
+    let version = spec.split_once('~').unwrap().0;
+    let unknown = format!("{version}~{}", "0".repeat(32));
+    let (status, r) = c
+        .post("/check", json!({"code": retyped, "against": unknown}))
+        .await;
+    assert_eq!(status, 404, "{r}");
+    let (status, r) = c
+        .post("/check", json!({"code": retyped, "against": "nonsense"}))
+        .await;
+    assert_eq!(status, 400, "{r}");
+    let (status, r) = c
+        .post(
+            "/check",
+            json!({"code": retyped, "against": spec, "version": "other"}),
+        )
+        .await;
+    assert_eq!(status, 400, "{r}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn allow_may_name_a_structure_whose_fields_change() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let skeleton = "import Foo\n\nstructure S where x : Nat\ntheorem t (s : S) : s = s := sorry";

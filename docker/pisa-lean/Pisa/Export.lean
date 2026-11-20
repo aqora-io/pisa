@@ -7,8 +7,10 @@ public import Lean.Linter.Deprecated
 /-!
 What the search service indexes of a snapshot module's declarations, and the
 audit's review list shows of them: for each, `{name, kind, signature,
-type_pp_full, type_refs, value_refs, docstring, deprecated_to, value,
-private}`.
+type_pp_full, type_explicit, type_refs, value_refs, docstring, deprecated_to,
+value, private}`. `type_explicit` is the type with every argument shown,
+instances too, cut at `chars` characters like `value`: where a replacement's
+type prints like the original's but differs, a refusal shows it.
 
 It skips what `search/exporter/PisaExport.lean` skips, internal and
 auto-generated names, but not private ones, which the review list shows and
@@ -52,6 +54,17 @@ def printed (ci : ConstantInfo) (kind : String) (chars : Nat) : MetaM Json := do
   let typeFull ← withOptions (fun o => o |>.setBool `pp.notation false
       |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
     return (← ppExpr ci.type).pretty 120
+  -- Every argument shown, instances too: where two types that print alike
+  -- differ, as when an instance is found by another path.
+  let typeExplicit ← withOptions (fun o => o |>.setBool `pp.explicit true
+      |>.setBool `pp.notation false |>.setBool `pp.fullNames true
+      |>.setBool `pp.universes true |>.setBool `pp.deepTerms true
+      |>.set `pp.maxSteps (100000 : Nat)) do
+    let text := (← ppExpr ci.type).pretty 120
+    if text.length > chars then
+      return String.ofList (text.toList.take chars) ++ " …"
+    else
+      return text
   let valueExpr? : Option Expr := match ci with
     | .defnInfo d => some d.value
     | .opaqueInfo d => some d.value
@@ -83,6 +96,7 @@ def printed (ci : ConstantInfo) (kind : String) (chars : Nat) : MetaM Json := do
     ("kind", toJson kind),
     ("signature", toJson signature),
     ("type_pp_full", toJson typeFull),
+    ("type_explicit", toJson typeExplicit),
     ("type_refs", toJson typeRefs),
     ("value_refs", toJson valueRefs),
     ("docstring", toJson doc),

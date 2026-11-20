@@ -232,6 +232,11 @@ pub struct SnapshotDecl {
     /// The type with full names and no notation.
     #[serde(default)]
     pub type_pp_full: String,
+    /// The type as `type_pp_full`, but with every argument shown, instances
+    /// and implicit ones too, and cut like `value`. None in records from
+    /// before the export printed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_explicit: Option<String>,
     #[serde(default)]
     pub type_refs: Vec<String>,
     #[serde(default)]
@@ -1294,6 +1299,7 @@ mod tests {
             kind: "theorem".into(),
             signature: format!("{name} : True"),
             type_pp_full: "True".into(),
+            type_explicit: None,
             type_refs: Vec::new(),
             value_refs: Vec::new(),
             docstring: None,

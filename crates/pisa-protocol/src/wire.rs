@@ -75,6 +75,10 @@ pub struct CheckJob {
     /// where messages on its header lines are placed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The snapshot whose statements the code's are compared with
+    /// ([`api::CheckRequest::against`]); the router found it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub against: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

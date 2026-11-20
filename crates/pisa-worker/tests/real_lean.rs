@@ -641,6 +641,32 @@ fn the_export_prints_a_definitions_value_without_notation() {
     assert_eq!(value("t"), None);
 }
 
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn types_that_print_alike_differ_in_the_export_with_every_argument_shown() {
+    let s = Snapshots::new();
+    let spec = s.build("theorem t (a b : Nat) : a + b = a + b := rfl\n");
+    // The same statement through another `Add Nat` instance, as another
+    // import can make Lean find.
+    let head = s.build(
+        "def myAdd : Add Nat := ⟨Nat.add⟩\n\n\
+         theorem t (a b : Nat) : @HAdd.hAdd Nat Nat Nat (@instHAdd Nat myAdd) a b = a + b := rfl\n",
+    );
+    let changes = statement_changes(&spec.verified, &head.verified);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].name, "t");
+    let exported = |b: &Built| b.export.iter().find(|d| d.name == "t").unwrap().clone();
+    let (was, now) = (exported(&spec), exported(&head));
+    assert_eq!(was.signature, now.signature);
+    let (was, now) = pisa_protocol::verify::explicit_difference(
+        was.type_explicit.as_deref().unwrap(),
+        now.type_explicit.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(was.contains("instAddNat"), "{was}");
+    assert!(now.contains("myAdd"), "{now}");
+}
+
 /// What the `pisa` tool printed: its `PISA_*` lines by marker, in order, and
 /// whether it exited 0.
 struct Tooled {

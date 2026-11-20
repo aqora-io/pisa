@@ -142,6 +142,7 @@ async fn client_asks_about_positions() {
     let options = CheckOptions {
         detail: vec![Detail::Terms],
         at: vec![Pos { line: 2, column: 9 }],
+        ..Default::default()
     };
     let r = client.check_with(code, &options).await.unwrap();
     let at = &r.at[0];
@@ -159,7 +160,7 @@ async fn client_asks_about_positions() {
 
     let terms_alone = CheckOptions {
         detail: vec![Detail::Terms],
-        at: Vec::new(),
+        ..Default::default()
     };
     match client.check_with(code, &terms_alone).await {
         Err(Error::Server { status, kind, .. }) => {

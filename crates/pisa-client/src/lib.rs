@@ -132,6 +132,11 @@ pub struct CheckOptions {
     /// expected it to have. Ask about them all in one check: each check
     /// elaborates the code again.
     pub at: Vec<Pos>,
+    /// A snapshot, e.g. the spec the code is meant to replace, whose
+    /// statements the code's must keep: a declaration of both with another
+    /// kind or type is in [`CheckResult::changes`] and `reasons`, and the
+    /// check isn't `ok`. [`Client::check_with`] only; a batch ignores it.
+    pub against: Option<String>,
 }
 
 /// Options for [`Client::create_snapshot_with`].
@@ -778,6 +783,7 @@ impl Client {
             timeout: self.timeout,
             detail: options.detail.clone(),
             at: options.at.clone(),
+            against: options.against.clone(),
         }
     }
 

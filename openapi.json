@@ -1018,6 +1018,10 @@
       "CheckRequest": {
         "description": "`POST /check`",
         "properties": {
+          "against": {
+            "description": "A snapshot, e.g. the spec the code is meant to replace, whose\nstatements the code's are compared with before any `snap`: each\ndeclaration both declare must be the same kind with the same type, as\na replacement must keep it. One that isn't is in `changes` and\n`reasons`, and `ok` is false. Declarations only one of them has, and\ndefinitions' values, aren't compared: a replacement's create judges\nthose, with the spec's holes and `allow`. It chooses the check's\nversion when the request names none.",
+            "type": "string"
+          },
           "at": {
             "description": "Up to 64 positions in the code to report on: [`CheckResult::at`].",
             "items": {
@@ -1423,8 +1427,15 @@
           "now": {
             "type": "string"
           },
+          "now_explicit": {
+            "type": "string"
+          },
           "was": {
             "description": "For a changed type or assumption, its signature before, and `now`\nafter, from the search exports of the modules, where they have them.\nThe exports are what the builds printed; the comparison is of the\ndeclarations' hashes.",
+            "type": "string"
+          },
+          "was_explicit": {
+            "description": "When `was` and `now` print alike, as when an instance is found by\nanother path, the type before around where it first differs, printed\nwith every argument shown, and `now_explicit` the type after. Only\nwhere both builds' exports have that text.",
             "type": "string"
           }
         },

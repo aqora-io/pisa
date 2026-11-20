@@ -722,7 +722,7 @@ impl Snapshots {
         needs: &[String],
         id: &str,
         decls: &[Declaration],
-        own: impl IntoIterator<Item = (String, String)>,
+        own: impl IntoIterator<Item = (String, Printed)>,
     ) -> Result<crate::catalog::Amendment, Error> {
         let swapped = self.reader.swapped(&a.amended, needs, id).await?;
         let changes = match compare(&a.amended, decls, &swapped) {

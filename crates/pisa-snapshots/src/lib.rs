@@ -22,7 +22,8 @@ use pisa_protocol::labels::{MAX_LABELS, MAX_LIMIT, check_labels, is_cursor, snap
 use pisa_protocol::search::{Description, Informal};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::{
-    Change, DeclarationChange, ProofStatus, grouped, normalised, parent_in, statement_changes,
+    Change, DeclarationChange, ProofStatus, explicit_difference, grouped, normalised, parent_in,
+    statement_changes,
 };
 use pisa_protocol::wire::SnapshotRebuildJob;
 

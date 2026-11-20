@@ -404,6 +404,14 @@ pub struct DeclarationChange {
     pub was: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now: Option<String>,
+    /// When `was` and `now` print alike, as when an instance is found by
+    /// another path, the type before around where it first differs, printed
+    /// with every argument shown, and `now_explicit` the type after. Only
+    /// where both builds' exports have that text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was_explicit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub now_explicit: Option<String>,
     /// For a change to what Lean makes from an inductive type, the
     /// declarations that changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -419,9 +427,50 @@ impl DeclarationChange {
             change,
             was: None,
             now: None,
+            was_explicit: None,
+            now_explicit: None,
             includes: Vec::new(),
         }
     }
+}
+
+/// Characters of context [`explicit_difference`] keeps before the first
+/// difference, and after the last.
+const DIFFERENCE_CONTEXT: usize = 40;
+
+/// Where texts `a` and `b` differ, if they do: each cut to its differing
+/// part with [`DIFFERENCE_CONTEXT`] characters around it, at most four times
+/// that in all, and `…` where it was cut.
+pub fn explicit_difference(a: &str, b: &str) -> Option<(String, String)> {
+    if a == b {
+        return None;
+    }
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    let prefix = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let shorter = a.len().min(b.len()) - prefix;
+    let suffix = a
+        .iter()
+        .rev()
+        .zip(b.iter().rev())
+        .take(shorter)
+        .take_while(|(x, y)| x == y)
+        .count();
+    let window = |text: &[char]| {
+        let start = prefix.saturating_sub(DIFFERENCE_CONTEXT);
+        let end = (text.len() - suffix + DIFFERENCE_CONTEXT)
+            .min(text.len())
+            .min(start + 4 * DIFFERENCE_CONTEXT);
+        let mut out = String::new();
+        if start > 0 {
+            out.push('…');
+        }
+        out.extend(&text[start..end]);
+        if end < text.len() {
+            out.push('…');
+        }
+        out
+    };
+    Some((window(&a), window(&b)))
 }
 
 impl std::fmt::Display for DeclarationChange {
@@ -451,6 +500,12 @@ impl std::fmt::Display for DeclarationChange {
         }
         if !self.includes.is_empty() {
             write!(f, " ({})", self.includes.join(", "))?;
+        }
+        if let (Some(was), Some(now)) = (&self.was_explicit, &self.now_explicit) {
+            write!(
+                f,
+                "; it prints alike, but with every argument shown it was `{was}` and is now `{now}`"
+            )?;
         }
         Ok(())
     }
@@ -772,6 +827,52 @@ mod tests {
                 &[assumed, original[1].clone()]
             )),
             ["statement: t is a different kind of declaration"]
+        );
+    }
+
+    #[test]
+    fn explicit_difference_cuts_both_texts_around_where_they_differ() {
+        assert_eq!(explicit_difference("2 = 2", "2 = 2"), None);
+        assert_eq!(
+            explicit_difference("@Eq Nat 2 2", "@Eq Nat 3 3"),
+            Some(("@Eq Nat 2 2".into(), "@Eq Nat 3 3".into()))
+        );
+        let common = "x".repeat(100);
+        let (was, now) = explicit_difference(
+            &format!("{common} instA {common}"),
+            &format!("{common} instBB {common}"),
+        )
+        .unwrap();
+        // The context counts from the first differing character, after the
+        // shared `inst`, and from the last one, before the shared ` `.
+        let (before, after) = (
+            "x".repeat(DIFFERENCE_CONTEXT - 5),
+            "x".repeat(DIFFERENCE_CONTEXT - 1),
+        );
+        assert_eq!(was, format!("…{before} instA {after}…"));
+        assert_eq!(now, format!("…{before} instBB {after}…"));
+        // One text extending the other: the extra part is the difference.
+        assert_eq!(
+            explicit_difference("f a", "f a b"),
+            Some(("f a".into(), "f a b".into()))
+        );
+        // A long differing part is cut too.
+        let (was, now) = explicit_difference(&"a".repeat(500), &"b".repeat(500)).unwrap();
+        assert_eq!(was.chars().count(), 4 * DIFFERENCE_CONTEXT + 1);
+        assert!(now.starts_with('b') && now.ends_with('…'), "{now}");
+    }
+
+    #[test]
+    fn a_change_that_prints_alike_says_how_it_differs() {
+        let mut c = DeclarationChange::new("t", Change::Type);
+        c.was = Some("t : P".into());
+        c.now = Some("t : P".into());
+        assert_eq!(c.to_string(), "statement: t has a different type");
+        (c.was_explicit, c.now_explicit) = (Some("@P instA".into()), Some("@P instB".into()));
+        assert_eq!(
+            c.to_string(),
+            "statement: t has a different type; it prints alike, but with every argument shown \
+             it was `@P instA` and is now `@P instB`"
         );
     }
 }

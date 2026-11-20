@@ -612,6 +612,16 @@ pub struct CheckRequest {
     /// Up to 64 positions in the code to report on: [`CheckResult::at`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<Pos>,
+    /// A snapshot, e.g. the spec the code is meant to replace, whose
+    /// statements the code's are compared with before any `snap`: each
+    /// declaration both declare must be the same kind with the same type, as
+    /// a replacement must keep it. One that isn't is in `changes` and
+    /// `reasons`, and `ok` is false. Declarations only one of them has, and
+    /// definitions' values, aren't compared: a replacement's create judges
+    /// those, with the spec's holes and `allow`. It chooses the check's
+    /// version when the request names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub against: Option<String>,
 }
 
 /// `POST /check/batch`

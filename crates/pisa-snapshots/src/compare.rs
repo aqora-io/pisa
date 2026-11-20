@@ -4,6 +4,24 @@
 
 use super::*;
 
+/// How a declaration printed in its build's export: what a refusal shows of
+/// it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Printed {
+    pub signature: String,
+    /// Its type with every argument shown, where the export has it.
+    pub explicit: Option<String>,
+}
+
+impl From<&pisa_db::catalog::SnapshotDecl> for Printed {
+    fn from(d: &pisa_db::catalog::SnapshotDecl) -> Self {
+        Printed {
+            signature: d.signature.clone(),
+            explicit: d.type_explicit.clone(),
+        }
+    }
+}
+
 /// The entry a create replaces, as it was found before the build.
 pub struct Replacing {
     /// The replaced snapshot, as the request names it.

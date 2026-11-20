@@ -85,6 +85,10 @@ class DeclarationChange(TypedDict):
     change: Change
     was: NotRequired[str]
     now: NotRequired[str]
+    # Where `was` and `now` print alike: the types around where they first
+    # differ, printed with every argument shown.
+    was_explicit: NotRequired[str]
+    now_explicit: NotRequired[str]
     includes: NotRequired[list[str]]
 
 class TacticInfo(TypedDict):
@@ -793,6 +797,7 @@ class Client:
         *,
         detail: list[Literal["tactics", "terms", "declarations"]] = [],
         at: list[tuple[int, int]] = [],
+        against: str | None = None,
     ) -> CheckResult:
         """Check one piece of code. `ok` is the verdict; a check that could not
         complete (timeout, policy, ...) has `error` set instead of raising.
@@ -806,7 +811,12 @@ class Client:
         goals. With `detail=["terms"]` too, each also has the term there and
         the type Lean expected it to have, which costs several times the
         check. Ask about every position in one check: each check elaborates
-        the code again."""
+        the code again.
+
+        `against` takes a snapshot id, e.g. of the spec the code is meant to
+        replace: a declaration both declare that is another kind or has
+        another type is in `changes` and `reasons`, and `ok` is false, as a
+        replacement would be refused."""
     def check_batch(
         self,
         codes: list[str],
@@ -1338,6 +1348,7 @@ class AsyncClient:
         *,
         detail: list[Literal["tactics", "terms", "declarations"]] = [],
         at: list[tuple[int, int]] = [],
+        against: str | None = None,
     ) -> Future[CheckResult]:
         """Check one piece of code. `ok` is the verdict; a check that could not
         complete (timeout, policy, ...) has `error` set instead of raising.
@@ -1351,7 +1362,12 @@ class AsyncClient:
         goals. With `detail=["terms"]` too, each also has the term there and
         the type Lean expected it to have, which costs several times the
         check. Ask about every position in one check: each check elaborates
-        the code again."""
+        the code again.
+
+        `against` takes a snapshot id, e.g. of the spec the code is meant to
+        replace: a declaration both declare that is another kind or has
+        another type is in `changes` and `reasons`, and `ok` is false, as a
+        replacement would be refused."""
     def check_batch(
         self,
         codes: list[str],

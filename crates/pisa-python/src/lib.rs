@@ -197,6 +197,7 @@ fn check_options(detail: Vec<String>, at: Vec<(u64, u64)>) -> PyResult<pisa_clie
             .into_iter()
             .map(|(line, column)| pisa_client::Pos { line, column })
             .collect(),
+        against: None,
     })
 }
 
@@ -336,16 +337,20 @@ impl Base {
         self.call(py, async move { inner.health().await })
     }
 
-    #[pyo3(signature = (code, *, detail = Vec::new(), at = Vec::new()))]
+    #[pyo3(signature = (code, *, detail = Vec::new(), at = Vec::new(), against = None))]
     fn check<'py>(
         &self,
         py: Python<'py>,
         code: String,
         detail: Vec<String>,
         at: Vec<(u64, u64)>,
+        against: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
-        let options = check_options(detail, at)?;
+        let options = pisa_client::CheckOptions {
+            against,
+            ..check_options(detail, at)?
+        };
         self.call(py, async move { inner.check_with(&code, &options).await })
     }
 

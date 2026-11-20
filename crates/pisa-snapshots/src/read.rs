@@ -375,14 +375,14 @@ impl Reader {
         Ok(swapped)
     }
 
-    /// The signatures the search exports of `modules` show, by name, of
-    /// the declarations that printed.
-    pub async fn exports_of(&self, modules: &[String]) -> HashMap<String, String> {
+    /// How the search exports of `modules` show the declarations that
+    /// printed, by name.
+    pub async fn exports_of(&self, modules: &[String]) -> HashMap<String, Printed> {
         let mut out = HashMap::new();
         for m in modules {
             if let Ok(Some(exported)) = self.catalog.decls(m).await {
-                let printed = exported.decls.into_iter().filter(|d| d.error.is_none());
-                out.extend(printed.map(|d| (d.name, d.signature)));
+                let printed = exported.decls.iter().filter(|d| d.error.is_none());
+                out.extend(printed.map(|d| (d.name.clone(), Printed::from(d))));
             }
         }
         out
@@ -391,23 +391,44 @@ impl Reader {
     /// Fills `was` and `now` of each change to a type or an assumption: the
     /// signature in the replaced module or the lost snapshot it is from, by
     /// their search exports, and in `now`, the new side's signatures by name.
+    /// Where the two print alike, `was_explicit` and `now_explicit` show where
+    /// their types differ with every argument shown, if both exports have that.
     pub async fn sign(
         &self,
         changes: &mut [DeclarationChange],
         replacing: &Replacing,
         swapped: &Swapped,
-        now: &HashMap<String, String>,
+        now: &HashMap<String, Printed>,
+    ) {
+        let mut old = vec![replacing.module.clone()];
+        old.extend(swapped.lost.iter().map(|(m, _)| m.clone()));
+        self.sign_from(changes, &old, now).await;
+    }
+
+    /// [`Self::sign`], with `was` from the exports of modules `old`.
+    pub async fn sign_from(
+        &self,
+        changes: &mut [DeclarationChange],
+        old: &[String],
+        now: &HashMap<String, Printed>,
     ) {
         let signed = |c: &DeclarationChange| matches!(c.change, Change::Type | Change::Assumption);
         if !changes.iter().any(signed) {
             return;
         }
-        let mut old = vec![replacing.module.clone()];
-        old.extend(swapped.lost.iter().map(|(m, _)| m.clone()));
-        let was = self.exports_of(&old).await;
+        let was = self.exports_of(old).await;
         for c in changes.iter_mut().filter(|c| signed(c)) {
-            c.was = was.get(&c.name).cloned();
-            c.now = now.get(&c.name).cloned();
+            let (was, now) = (was.get(&c.name), now.get(&c.name));
+            c.was = was.map(|p| p.signature.clone());
+            c.now = now.map(|p| p.signature.clone());
+            if c.was.is_some() && c.was == c.now {
+                let explicit = |p: Option<&Printed>| p.and_then(|p| p.explicit.clone());
+                if let (Some(a), Some(b)) = (explicit(was), explicit(now))
+                    && let Some((a, b)) = explicit_difference(&a, &b)
+                {
+                    (c.was_explicit, c.now_explicit) = (Some(a), Some(b));
+                }
+            }
         }
     }
 

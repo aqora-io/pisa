@@ -6,12 +6,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use pisa_protocol::api::{Detail, Error, ErrorKind, Timing};
+use pisa_protocol::api::{Detail, Error, ErrorKind, Replaces, Timing};
 use pisa_protocol::header::{header_to_code, split_header};
 use pisa_protocol::repl::{
     self, CommandResponse, Pos, ReplCommand, ReplResponse, Severity, at_positions, tactics,
 };
-use pisa_protocol::verify::Verification;
+use pisa_protocol::verify::{Change, Verification, statement_changes};
 use pisa_protocol::wire::{CheckJob, CheckOutcome};
 use pisa_repl::ReplFailure;
 use serde_json::Value;
@@ -21,6 +21,43 @@ use crate::pool::{HeaderFailure, Lease, Pool};
 
 /// Time allowed for the axiom report, which only walks the new declarations.
 const REPORT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Compares the statements the checked code shares with snapshot `id`, a
+/// check's `against`: each declaration of both that is another kind or has
+/// another type is one of the verification's `changes` and `reasons`, with
+/// the snapshot's signature as `was`, and the code isn't `ok`.
+pub async fn compare_against(pool: &Arc<Pool>, id: &str, outcome: &mut CheckOutcome) {
+    if outcome.verification.is_none() {
+        return;
+    }
+    let reader = pool.snapshots().reader();
+    let replaces = Replaces {
+        snapshot_id: id.to_string(),
+        allow: None,
+    };
+    let spec = match reader.replacing(&replaces).await {
+        Ok(spec) => spec,
+        Err(e) => {
+            outcome.error = Some(e);
+            return;
+        }
+    };
+    let Some(v) = outcome.verification.as_mut() else {
+        return;
+    };
+    let mut changes: Vec<_> = statement_changes(&spec.declarations, &v.declarations)
+        .into_iter()
+        .filter(|c| matches!(c.change, Change::Kind | Change::Type))
+        .collect();
+    if changes.is_empty() {
+        return;
+    }
+    let now = std::collections::HashMap::new();
+    reader.sign_from(&mut changes, &[spec.module], &now).await;
+    v.ok = false;
+    v.reasons.extend(changes.iter().map(ToString::to_string));
+    v.changes.extend(changes);
+}
 
 pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
     let split = split_header(&job.code);
@@ -350,6 +387,7 @@ mod tests {
             at: vec![api::Pos { line: 3, column: 2 }; at],
             runs: Vec::new(),
             source: None,
+            against: None,
         };
         // Positions are in the body's lines, below a header of 2.
         let traced = |detail: &[Detail], at| infotree(&job(detail, at), 2);

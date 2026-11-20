@@ -309,6 +309,7 @@ async fn worker_publishes_a_new_warm_header_before_the_result() {
             at: Vec::new(),
             runs: Vec::new(),
             source: None,
+            against: None,
         });
         run_raw(&queue, serde_json::to_value(job).unwrap()).await;
         let warm = &queue.registry("v", LIVE).await.unwrap()[0].warm;
@@ -343,6 +344,7 @@ async fn a_job_that_does_not_decode_fails_alone() {
         at: Vec::new(),
         runs: Vec::new(),
         source: None,
+        against: None,
     });
     let r = result(serde_json::to_value(job).unwrap()).await;
     assert!(

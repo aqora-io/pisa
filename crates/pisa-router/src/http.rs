@@ -464,17 +464,48 @@ async fn check(
     Body(req): Body<CheckRequest>,
 ) -> Result<Response, ApiError> {
     check_positions(&req.detail, &req.at)?;
-    let (code, runs, version) = match app.resolve_runs(req.version.as_deref(), &req.code).await {
+    // A check against a snapshot runs on its version, unless it names one.
+    let requested = match &req.against {
+        Some(id) => Some(against(&app, id, req.version.as_deref()).await?),
+        None => req.version.clone(),
+    };
+    let (code, runs, version) = match app.resolve_runs(requested.as_deref(), &req.code).await {
         Ok(None) => (
             req.code,
             Vec::new(),
-            app.versions.resolve(req.version.as_deref()),
+            app.versions.resolve(requested.as_deref()),
         ),
         Ok(Some(r)) => (req.code, r.runs, Some(r.version)),
         Err(e) => return Ok(Json(unresolved(e)).into_response()),
     };
-    let p = prepare_check(code, req.timeout, req.detail, req.at, version, runs);
+    let mut p = prepare_check(code, req.timeout, req.detail, req.at, version, runs);
+    if let Job::Check(job) = &mut p.job {
+        job.against = req.against;
+    }
     Ok(app.answer(prefer, JobKind::Check, p).await)
+}
+
+/// The version a check against snapshot `id` runs on, which must be the
+/// requested one if it names one: the snapshot's, which must exist.
+async fn against(app: &App, id: &str, requested: Option<&str>) -> Result<String, ApiError> {
+    let parsed = snapshots::parse_id(id)?;
+    if let Some(v) = requested.and_then(|v| app.versions.resolve(Some(v)))
+        && v != parsed.version
+    {
+        let message = format!(
+            "`against` is a snapshot of version {}; the check is for version {v}",
+            parsed.version
+        );
+        return Err(ApiError::new(ErrorKind::BadRequest, message));
+    }
+    let reader = app.snapshots.version(&parsed.version);
+    if reader.catalog().find_entry(&parsed.entry).await?.is_none() {
+        return Err(ApiError::new(
+            ErrorKind::NotFound,
+            format!("no snapshot {id}"),
+        ));
+    }
+    Ok(parsed.version)
 }
 
 #[utoipa::path(
@@ -592,6 +623,7 @@ fn prepare_check(
         at,
         runs,
         source,
+        against: None,
     });
     Prepared {
         job,

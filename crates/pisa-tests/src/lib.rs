@@ -206,16 +206,24 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// words of each that the code or a snapshot it imports declares. A theorem
 /// of `¬ X`, or `¬ (X)`, "negates" the statement `X`.
 /// The worker's declaration export for `code`: each `theorem`, `def` and
-/// `axiom`, with its statement as the signature, the words of its statement
-/// and of its value as the constants they use, and a `/-- … -/` on the line
-/// before as its docstring.
+/// `axiom`, with its statement as the signature and as the type with every
+/// argument shown, the words of its statement and of its value as the
+/// constants they use, and a `/-- … -/` on the line before as its docstring.
+/// A `-- printed-as: LINE` line before a declaration makes it print as `LINE`
+/// but for its type with every argument shown, as a type that prints like
+/// another can differ from it in an argument the printer hides.
 pub fn exports(code: &str) -> String {
     let mut decls = Vec::new();
     let mut doc = None;
+    let mut printed_as: Option<&str> = None;
     for line in code.lines() {
         let line = line.strip_prefix("public ").unwrap_or(line);
         if let Some(text) = line.strip_prefix("/--") {
             doc = Some(text.trim_end_matches("-/").trim().to_string());
+            continue;
+        }
+        if let Some(printed) = line.strip_prefix("-- printed-as: ") {
+            printed_as = Some(printed);
             continue;
         }
         let mut words = line.split_whitespace();
@@ -232,12 +240,14 @@ pub fn exports(code: &str) -> String {
             doc = None;
             continue;
         }
-        let (statement, value) = statement_and_value(line, name);
+        let (explicit, _) = statement_and_value(line, name);
+        let (statement, value) = statement_and_value(printed_as.take().unwrap_or(line), name);
         decls.push(json!({
             "name": name,
             "kind": kind,
             "signature": format!("{name} {statement}"),
             "type_pp_full": statement,
+            "type_explicit": explicit,
             "type_refs": names_in(&statement),
             "value_refs": names_in(&value),
             "docstring": doc.take(),

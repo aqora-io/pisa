@@ -356,6 +356,7 @@ fn snapshot_decl(name: &str, signature: &str, doc: &str) -> SnapshotDecl {
         kind: "theorem".into(),
         signature: signature.into(),
         type_pp_full: signature.into(),
+        type_explicit: None,
         type_refs: vec!["Nat".into(), "double".into()],
         value_refs: Vec::new(),
         docstring: Some(doc.into()),

@@ -252,8 +252,11 @@ pub(crate) async fn run_job(
 ) -> JobResult {
     match job {
         Job::Check(c) => {
-            let detail = c.detail.clone();
+            let (detail, against) = (c.detail.clone(), c.against.clone());
             let mut outcome = check::run_check(pool, c).await;
+            if let Some(id) = against {
+                check::compare_against(pool, &id, &mut outcome).await;
+            }
             if let Some(v) = &mut outcome.verification {
                 answered(&mut v.declarations, &detail, pool);
             }

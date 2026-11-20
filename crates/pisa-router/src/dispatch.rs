@@ -676,6 +676,7 @@ mod tests {
             at: Vec::new(),
             runs: Vec::new(),
             source: None,
+            against: None,
         });
         let edit = Job::DocumentEdit(DocumentEditJob {
             document: "d".into(),

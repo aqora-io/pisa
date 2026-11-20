@@ -1206,6 +1206,17 @@ export interface components {
         };
         /** @description `POST /check` */
         CheckRequest: {
+            /**
+             * @description A snapshot, e.g. the spec the code is meant to replace, whose
+             *     statements the code's are compared with before any `snap`: each
+             *     declaration both declare must be the same kind with the same type, as
+             *     a replacement must keep it. One that isn't is in `changes` and
+             *     `reasons`, and `ok` is false. Declarations only one of them has, and
+             *     definitions' values, aren't compared: a replacement's create judges
+             *     those, with the spec's holes and `allow`. It chooses the check's
+             *     version when the request names none.
+             */
+            against?: string;
             /** @description Up to 64 positions in the code to report on: [`CheckResult::at`]. */
             at?: components["schemas"]["Pos"][];
             code: string;
@@ -1594,6 +1605,7 @@ export interface components {
              */
             name: string;
             now?: string;
+            now_explicit?: string;
             /**
              * @description For a changed type or assumption, its signature before, and `now`
              *     after, from the search exports of the modules, where they have them.
@@ -1601,6 +1613,13 @@ export interface components {
              *     declarations' hashes.
              */
             was?: string;
+            /**
+             * @description When `was` and `now` print alike, as when an instance is found by
+             *     another path, the type before around where it first differs, printed
+             *     with every argument shown, and `now_explicit` the type after. Only
+             *     where both builds' exports have that text.
+             */
+            was_explicit?: string;
         };
         DeclarationDetail: {
             /** @description Declarations it uses, in its statement and its proof or body. */

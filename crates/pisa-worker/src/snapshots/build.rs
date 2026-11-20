@@ -342,7 +342,7 @@ impl Snapshots {
                         swapped.gained.iter().map(|(m, _)| m.clone()).collect();
                     let mut now = self.reader.exports_of(&gained).await;
                     let own = exported.iter().flatten().filter(|d| d.error.is_none());
-                    now.extend(own.map(|d| (d.name.clone(), d.signature.clone())));
+                    now.extend(own.map(|d| (d.name.clone(), Printed::from(d))));
                     self.reader.sign(&mut changes, r, swapped, &now).await;
                     verification.ok = false;
                     verification
@@ -376,7 +376,7 @@ impl Snapshots {
         let amends = match &rel.amending {
             Some(a) => {
                 let own = exported.iter().flatten().filter(|d| d.error.is_none());
-                let own = own.map(|d| (d.name.clone(), d.signature.clone()));
+                let own = own.map(|d| (d.name.clone(), Printed::from(d)));
                 let decls = &verification.declarations;
                 match self
                     .amendment(a, &spec_holes(job, rel), &needs, id, decls, own)
