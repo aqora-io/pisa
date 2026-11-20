@@ -736,6 +736,15 @@ class HostMemory(TypedDict):
     # Whether `memory_caps_mb` is more than `memory_mb`.
     overcommitted: bool
 
+class PoolHealth(TypedDict):
+    # The version the workers serve, which a request names to reach them.
+    version: str
+    workers: int
+    slots: int
+    beam_slots: int
+    # Those draining, which take no new jobs.
+    draining: int
+
 class Health(TypedDict):
     status: Literal["ok", "draining"]
     workers: int | None
@@ -747,6 +756,9 @@ class Health(TypedDict):
     revision: str
     # The commits the live workers were built from, each once, in order.
     worker_revisions: list[str] | None
+    # The live workers by the version they serve, a pool each, in order of
+    # version.
+    pools: list[PoolHealth] | None
     dependencies: Dependencies
     # The live workers' memory limits per host.
     hosts: list[HostMemory] | None

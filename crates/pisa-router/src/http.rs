@@ -322,10 +322,11 @@ impl App {
             (StatusCode::OK, HealthStatus::Ok)
         };
         let queue = self.dispatcher.queue();
-        let (counts, unlimited_workers, worker_revisions, sweeps_refused, store, hosts) = tokio::join!(
+        let (counts, unlimited_workers, worker_revisions, pools, sweeps_refused, store, hosts) = tokio::join!(
             bounded("the queue's state", self.dispatcher.workers()),
             read("the workers without limits", queue.unlimited_workers(LIVE)),
             read("the workers' revisions", queue.live_revisions(LIVE)),
+            read("the pools", queue.pools(LIVE)),
             bounded("the refused sweeps", self.sweeps_refused()),
             read("the store's state", queue.store_state(LIVE)),
             read("the hosts' memory", queue.hosts(LIVE)),
@@ -343,6 +344,7 @@ impl App {
             sweeps_refused,
             revision: pisa_protocol::revision::REVISION.to_string(),
             worker_revisions,
+            pools,
             dependencies: Dependencies {
                 database,
                 store: store.unwrap_or_default(),

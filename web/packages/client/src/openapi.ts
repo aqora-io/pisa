@@ -1962,6 +1962,12 @@ export interface components {
              */
             hosts: components["schemas"]["HostMemory"][] | null;
             /**
+             * @description The live workers by the version they serve, one pool each, in order
+             *     of version; `null` if the queue can't be read. A request reaches a
+             *     pool by naming its version, or gets the server's default.
+             */
+            pools: components["schemas"]["PoolHealth"][] | null;
+            /**
              * Format: int64
              * @description The jobs waiting on the queue for a worker, of every version; `null`
              *     if it can't be read.
@@ -2348,6 +2354,31 @@ export interface components {
          * @enum {string}
          */
         PairSide: "challenge" | "solution";
+        /** @description The live workers of one version, as `GET /health` lists them. */
+        PoolHealth: {
+            /**
+             * Format: int32
+             * @description Their Beam slots for documents, summed.
+             */
+            beam_slots: number;
+            /**
+             * Format: int32
+             * @description Those draining, which take no new jobs.
+             */
+            draining: number;
+            /**
+             * Format: int32
+             * @description Their slots for checks and snapshots, summed.
+             */
+            slots: number;
+            /** @description The version they serve, which a request names to reach them. */
+            version: string;
+            /**
+             * Format: int32
+             * @description The live workers.
+             */
+            workers: number;
+        };
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
          *     in Unicode code points, not UTF-16 units.
@@ -3353,6 +3384,7 @@ export type PairError = components['schemas']['PairError'];
 export type PairErrorKind = components['schemas']['PairErrorKind'];
 export type PairPhase = components['schemas']['PairPhase'];
 export type PairSide = components['schemas']['PairSide'];
+export type PoolHealth = components['schemas']['PoolHealth'];
 export type Pos = components['schemas']['Pos'];
 export type ProbeAt = components['schemas']['ProbeAt'];
 export type ProbeResult = components['schemas']['ProbeResult'];

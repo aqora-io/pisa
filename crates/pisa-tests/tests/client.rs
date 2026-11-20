@@ -111,6 +111,24 @@ async fn health_names_workers_without_limits_and_a_refused_sweep() {
     assert!(refused.since > 0);
 }
 
+/// Health lists the live workers by version, a pool each.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_lists_a_pool_per_version() {
+    let c = Cluster::start(&[("w0", "v", 2), ("w1", "v", 1), ("w2", "u", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap();
+    let pools = client.health().await.unwrap().pools.unwrap();
+    let pool = |version: &str, workers, slots| pisa_protocol::api::PoolHealth {
+        version: c.version(version),
+        workers,
+        slots,
+        beam_slots: 0,
+        draining: 0,
+    };
+    let mut expected = vec![pool("v", 2, 3), pool("u", 1, 1)];
+    expected.sort_by(|a, b| a.version.cmp(&b.version));
+    assert_eq!(pools, expected);
+}
+
 /// A 503 that isn't a draining server's health, such as a proxy's, is an
 /// error.
 #[tokio::test(flavor = "multi_thread")]

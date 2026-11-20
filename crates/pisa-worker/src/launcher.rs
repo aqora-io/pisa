@@ -363,10 +363,9 @@ impl Launcher {
             lean_export: cfg.lean_export.clone(),
             tool: cfg.tool.clone(),
             project: cfg.project.clone(),
-            project_source: cfg
-                .project_git
-                .clone()
-                .zip(cfg.project_rev.clone())
+            // An empty setting, as a container's environment can pass, is none.
+            project_source: (cfg.project_git.clone().filter(|g| !g.is_empty()))
+                .zip(cfg.project_rev.clone().filter(|r| !r.is_empty()))
                 .map(|(git, rev)| crate::runs::ProjectSource { git, rev }),
             env,
             base_path,

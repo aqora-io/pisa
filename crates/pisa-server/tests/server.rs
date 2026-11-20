@@ -97,6 +97,7 @@ async fn without_qdrant_there_is_no_search() {
             "sweeps_refused": [],
             "revision": "unknown",
             "worker_revisions": [],
+            "pools": [],
             "dependencies": {"database": "ok", "store": "unknown"},
             "hosts": [],
             "search": null
@@ -202,6 +203,7 @@ async fn health_answers_quickly_while_the_database_stalls() {
     );
     assert_eq!(health["workers"], Value::Null, "{health}");
     assert_eq!(health["worker_revisions"], Value::Null, "{health}");
+    assert_eq!(health["pools"], Value::Null, "{health}");
 }
 
 #[tokio::test]

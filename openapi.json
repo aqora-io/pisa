@@ -2077,6 +2077,16 @@
               "null"
             ]
           },
+          "pools": {
+            "description": "The live workers by the version they serve, one pool each, in order\nof version; `null` if the queue can't be read. A request reaches a\npool by naming its version, or gets the server's default.",
+            "items": {
+              "$ref": "#/components/schemas/PoolHealth"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "queued": {
             "description": "The jobs waiting on the queue for a worker, of every version; `null`\nif it can't be read.",
             "format": "int64",
@@ -2153,6 +2163,7 @@
           "sweeps_refused",
           "revision",
           "worker_revisions",
+          "pools",
           "dependencies",
           "hosts",
           "search"
@@ -2721,6 +2732,47 @@
           "solution"
         ],
         "type": "string"
+      },
+      "PoolHealth": {
+        "description": "The live workers of one version, as `GET /health` lists them.",
+        "properties": {
+          "beam_slots": {
+            "description": "Their Beam slots for documents, summed.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "draining": {
+            "description": "Those draining, which take no new jobs.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "slots": {
+            "description": "Their slots for checks and snapshots, summed.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "description": "The version they serve, which a request names to reach them.",
+            "type": "string"
+          },
+          "workers": {
+            "description": "The live workers.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "workers",
+          "slots",
+          "beam_slots",
+          "draining"
+        ],
+        "type": "object"
       },
       "Pos": {
         "description": "A position in the submitted code: lines count from 1, and columns from 0\nin Unicode code points, not UTF-16 units.",

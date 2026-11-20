@@ -970,6 +970,26 @@ pub(crate) async fn live_versions(
         .await?)
 }
 
+pub(crate) async fn pool_rows(
+    db: &Handle,
+    q: &str,
+    stale: Duration,
+) -> Result<Vec<crate::queue::PoolRow>, DbError> {
+    let now = now();
+    Ok(workers::table
+        .filter(workers::queue.eq(q))
+        .filter(workers::seen_micros.ge(now - micros(stale)))
+        .select((
+            workers::version,
+            workers::slots,
+            workers::beam_slots,
+            workers::draining,
+        ))
+        .order((workers::version, workers::name))
+        .load(&mut *conn(db).await?)
+        .await?)
+}
+
 pub(crate) async fn serving_documents(
     db: &Handle,
     q: &str,

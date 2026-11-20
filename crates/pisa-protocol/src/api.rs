@@ -445,6 +445,12 @@ pub struct Health {
     #[serde(default)]
     #[schema(required = true)]
     pub worker_revisions: Option<Vec<String>>,
+    /// The live workers by the version they serve, one pool each, in order
+    /// of version; `null` if the queue can't be read. A request reaches a
+    /// pool by naming its version, or gets the server's default.
+    #[serde(default)]
+    #[schema(required = true)]
+    pub pools: Option<Vec<PoolHealth>>,
     /// Whether the database and the module store are reachable.
     #[serde(default)]
     #[schema(required = true)]
@@ -460,6 +466,21 @@ pub struct Health {
     /// Search's state; `null` if the server doesn't search.
     #[schema(required = true)]
     pub search: Option<crate::search::SearchHealth>,
+}
+
+/// The live workers of one version, as `GET /health` lists them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PoolHealth {
+    /// The version they serve, which a request names to reach them.
+    pub version: String,
+    /// The live workers.
+    pub workers: u32,
+    /// Their slots for checks and snapshots, summed.
+    pub slots: u32,
+    /// Their Beam slots for documents, summed.
+    pub beam_slots: u32,
+    /// Those draining, which take no new jobs.
+    pub draining: u32,
 }
 
 /// The memory limits of the workers on one host.

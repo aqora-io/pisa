@@ -37,6 +37,14 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.revision=$REVISION
 ENTRYPOINT ["pisa-server"]
 
+# The Lake project the workers import from: docker/${PROJECT} by default, or
+# another, with `--build-context project=<dir>`. Make that a wrapper project
+# that requires the library, not the library's own checkout (README, *A pool
+# for another project*).
+FROM scratch AS project
+ARG PROJECT=lean-project
+COPY docker/${PROJECT} /
+
 FROM debian:trixie-slim AS lean
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap \
@@ -52,13 +60,13 @@ COPY docker/repl/infotree-at.patch /tmp/infotree-at.patch
 RUN git clone --depth 1 --branch ${REPL_REV} https://github.com/leanprover-community/repl /opt/repl \
     && cd /opt/repl && git apply /tmp/infotree-at.patch && lake build \
     && ln -s /opt/repl/.lake/build/bin/repl /usr/local/bin/repl
-ARG PROJECT=lean-project
-COPY docker/${PROJECT} /opt/project
+COPY --from=project / /opt/project
 WORKDIR /opt/project
 # Dependencies follow the committed lake-manifest.json; without one, resolve them.
-# Mathlib comes prebuilt from its cache; Physlib compiles from source (slow, once).
+# Mathlib, required directly or through another package, comes prebuilt from
+# its cache; Physlib compiles from source (slow, once).
 RUN if [ ! -f lake-manifest.json ]; then lake update; fi \
-    && if grep -q mathlib lakefile.toml; then lake exe cache get; fi \
+    && if grep -q '"name": "mathlib"' lake-manifest.json; then lake exe cache get; fi \
     && lake build
 # The library the axiom report runs from, and the `pisa` tool that
 # re-verifies snapshot modules through the kernel (imports only Lean core), on
@@ -81,7 +89,7 @@ RUN if [ -d /opt/project/.lake/packages ]; then \
         find /opt/project/.lake/packages -mindepth 2 -maxdepth 2 -name lakefile.toml \
             -exec sed -i -e '/^enableArtifactCache/d' -e '/^restoreAllArtifacts/d' {} +; \
     fi \
-    && if grep -q mathlib lakefile.toml; then lake build Mathlib; fi \
+    && if grep -q '"name": "mathlib"' lake-manifest.json; then lake build Mathlib; fi \
     && mkdir -p /run/user
 COPY --from=build /usr/local/bin/pisa-worker /usr/local/bin/
 ENV PISA_PROJECT=/opt/project PISA_REPL=/usr/local/bin/repl

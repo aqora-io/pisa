@@ -16,7 +16,7 @@
 
 use std::time::Duration;
 
-use pisa_protocol::api::{DependencyState, ErrorKind, HostMemory, JobKind};
+use pisa_protocol::api::{DependencyState, ErrorKind, HostMemory, JobKind, PoolHealth};
 use pisa_protocol::wire::JobResult;
 use serde_json::Value;
 
@@ -66,6 +66,32 @@ pub const LOST_CEILING: Duration = Duration::from_secs(24 * 3600);
 /// A worker's memory as it registered it: its name, boot id, the sum of its
 /// limits (`None` if it has an unlimited pool) and the memory of its host.
 pub(crate) type HostRow = (String, String, Option<i64>, i64);
+
+/// A worker as a pool counts it: its version, slots and Beam slots, and
+/// whether it is draining.
+pub(crate) type PoolRow = (String, i32, i32, bool);
+
+/// The pools the workers in `rows` (ordered by version) make up.
+fn group_pools(rows: Vec<PoolRow>) -> Vec<PoolHealth> {
+    let mut pools: Vec<PoolHealth> = Vec::new();
+    for (version, slots, beam_slots, draining) in rows {
+        if pools.last().is_none_or(|p| p.version != version) {
+            pools.push(PoolHealth {
+                version,
+                workers: 0,
+                slots: 0,
+                beam_slots: 0,
+                draining: 0,
+            });
+        }
+        let pool = pools.last_mut().unwrap();
+        pool.workers += 1;
+        pool.slots += slots.max(0) as u32;
+        pool.beam_slots += beam_slots.max(0) as u32;
+        pool.draining += u32::from(draining);
+    }
+    pools
+}
 
 /// The hosts the workers in `rows` (ordered by boot id) make up.
 fn group_hosts(rows: Vec<HostRow>) -> Vec<HostMemory> {
@@ -462,6 +488,13 @@ impl Queue {
     /// The versions of the workers seen within `stale`, in order.
     pub async fn live_versions(&self, stale: Duration) -> Result<Vec<String>, DbError> {
         dispatch!(&self.db, live_versions(&self.name, stale))
+    }
+
+    /// The workers seen within `stale`, one pool per version, in order of
+    /// version.
+    pub async fn pools(&self, stale: Duration) -> Result<Vec<PoolHealth>, DbError> {
+        let rows = dispatch!(&self.db, pool_rows(&self.name, stale))?;
+        Ok(group_pools(rows))
     }
 
     /// How many workers of `version` (of any, for `None`) seen within `stale`
