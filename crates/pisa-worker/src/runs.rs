@@ -25,6 +25,7 @@ use pisa_protocol::api::{
     AcceptPair, AcceptPhase, AcceptResponse, AuditSnapshotsResponse, DEFAULT_REVIEW_LIMIT, Error,
     ErrorKind, KernelOutcome, KernelVerdict, LeftOut, LeftOutReason, PairError, PairErrorKind,
 };
+use pisa_protocol::header::{import_parts, split_header};
 use pisa_protocol::snapshot;
 use pisa_protocol::verify::Declaration;
 use pisa_protocol::wire::{
@@ -55,17 +56,28 @@ const NAME: &str = "pisa_run";
 /// The axioms `#print axioms` counts a proof clean with.
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Quot.sound", "Classical.choice"];
 
+/// Where the worker's project's own code comes from: its git repository and
+/// the revision it is at (`PISA_PROJECT_GIT`, `PISA_PROJECT_REV`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSource {
+    pub git: String,
+    pub rev: String,
+}
+
 /// The run that spec snapshots `job.against` start, with `job.allow` naming
 /// what its heads may change besides the spec's holes, as a Lake project, or
 /// one of its pairs as a Palomar package. `project` is the worker's, whose
-/// toolchain and packages it takes.
+/// toolchain and packages it takes, and `source` where its own code comes
+/// from, which an export whose modules import the project's own libraries
+/// needs.
 pub async fn export(
     snapshots: &Snapshots,
     project: Option<&Path>,
+    source: Option<&ProjectSource>,
     job: &SnapshotExportJob,
 ) -> Result<ExportedRun, Error> {
     let judged = judged_run(snapshots, &job.against, &job.allow).await?;
-    let run = package(snapshots, project, judged).await?;
+    let run = package(snapshots, project, source, judged).await?;
     match &job.palomar {
         Some(palomar) => palomar::package(&run, palomar, &job.against, &job.allow),
         None => Ok(run),
@@ -185,6 +197,7 @@ async fn judged_run(
 async fn package(
     snapshots: &Snapshots,
     project: Option<&Path>,
+    source: Option<&ProjectSource>,
     judged: JudgedRun,
 ) -> Result<ExportedRun, Error> {
     let mut needed = BTreeSet::new();
@@ -246,7 +259,14 @@ async fn package(
         .collect();
     roots.sort();
     roots.dedup();
-    let project_files = project_files(project, &roots)?;
+    // The project's own libraries the modules import, which only the
+    // project itself provides.
+    let codes = needed
+        .iter()
+        .map(|m| judged.records[m.as_str()].code.as_str());
+    let own = project.map(own_libraries).unwrap_or_default();
+    let imported: BTreeSet<String> = imported_roots(codes).intersection(&own).cloned().collect();
+    let project_files = project_files(project, &roots, &imported, source)?;
     let toolchain = project_files
         .iter()
         .find(|f| f.path == "lean-toolchain")
@@ -845,9 +865,54 @@ fn file(path: &str, text: String) -> ExportedFile {
     }
 }
 
+/// The first component of every module `codes` import.
+fn imported_roots<'a>(codes: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    for code in codes {
+        for line in split_header(code).header.lines() {
+            let modules = import_parts(line).map(|(_, modules)| modules);
+            roots.extend(
+                modules
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m.split('.').next())
+                    .map(String::from),
+            );
+        }
+    }
+    roots
+}
+
+/// The libraries `project` builds itself, by the module roots of its build
+/// outputs: those a wrapper project like `docker/lean-project` builds no
+/// code imports, but a project that is itself a library's checkout builds
+/// the library.
+fn own_libraries(project: &Path) -> BTreeSet<String> {
+    let Ok(entries) = std::fs::read_dir(project.join(".lake/build/lib/lean")) else {
+        return BTreeSet::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            match name.strip_suffix(".olean") {
+                Some(module) => Some(module.to_string()),
+                None => e.path().is_dir().then_some(name),
+            }
+        })
+        .collect()
+}
+
 /// The Lake configuration: the project's toolchain and manifest, and a
-/// lakefile with its requirements.
-fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedFile>, Error> {
+/// lakefile with its requirements. When the modules import `imported`,
+/// libraries of the project itself, they require the project, from
+/// `source`, without which the export is refused.
+fn project_files(
+    project: Option<&Path>,
+    roots: &[&str],
+    imported: &BTreeSet<String>,
+    source: Option<&ProjectSource>,
+) -> Result<Vec<ExportedFile>, Error> {
     let Some(project) = project else {
         // As in tests, which build nothing.
         let manifest = json!({"version": "1.3.0", "packagesDir": ".lake/packages",
@@ -872,12 +937,46 @@ fn project_files(project: Option<&Path>, roots: &[&str]) -> Result<Vec<ExportedF
             format!("reading the project's lake-manifest.json: {e}"),
         )
     })?;
+    if !imported.is_empty() {
+        let libraries: Vec<&str> = imported.iter().map(String::as_str).collect();
+        let Some(source) = source else {
+            let message = format!(
+                "the run's modules import {}, which the worker's project builds itself, and the \
+                 export can't say where that code comes from: set PISA_PROJECT_GIT and \
+                 PISA_PROJECT_REV on the workers, or make the project a wrapper that requires \
+                 the library (README, *A pool for another project*)",
+                libraries.join(", ")
+            );
+            return Err(Error::new(ErrorKind::BadRequest, message));
+        };
+        let config = match project.join("lakefile.lean").exists() {
+            true => "lakefile.lean",
+            false => "lakefile.toml",
+        };
+        require_project(&mut manifest, source, config);
+    }
     manifest["name"] = NAME.into();
     Ok(vec![
         file("lean-toolchain", read("lean-toolchain")?),
         file("lakefile.toml", lakefile(&manifest, roots)),
         file("lake-manifest.json", pretty(&manifest)),
     ])
+}
+
+/// Adds the project itself to `manifest`'s packages, from `source`, under
+/// the project's package name, which it still has, configured by its file
+/// `config`.
+fn require_project(manifest: &mut Value, source: &ProjectSource, config: &str) {
+    let name = manifest["name"].as_str().unwrap_or("project").to_string();
+    let package = json!({
+        "type": "git", "name": name, "url": source.git, "rev": source.rev,
+        "inputRev": source.rev, "subDir": null, "scope": "", "inherited": false,
+        "manifestFile": "lake-manifest.json", "configFile": config,
+    });
+    match manifest["packages"].as_array_mut() {
+        Some(packages) => packages.insert(0, package),
+        None => manifest["packages"] = json!([package]),
+    }
 }
 
 fn pretty(value: &Value) -> String {
@@ -1973,9 +2072,96 @@ mod tests {
 
     #[test]
     fn without_a_project_the_lakefile_requires_nothing() {
-        let files = project_files(None, &["PisaSnap"]).unwrap();
+        let files = project_files(None, &["PisaSnap"], &BTreeSet::new(), None).unwrap();
         let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["lake-manifest.json", "lakefile.toml"]);
         assert!(!files[1].text.contains("[[require]]"), "{}", files[1].text);
+    }
+
+    /// A project named `name` that builds the libraries `own`, and requires
+    /// cslib.
+    fn project(name: &str, own: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        std::fs::write(
+            path.join("lean-toolchain"),
+            "leanprover/lean4:v4.36.0-rc2\n",
+        )
+        .unwrap();
+        std::fs::write(path.join("lakefile.toml"), format!("name = \"{name}\"\n")).unwrap();
+        let manifest = json!({"version": "1.3.0", "name": name, "packages": [
+            {"type": "git", "name": "cslib", "url": "https://example.com/cslib.git",
+             "rev": "98f9", "inputRev": "98f9", "inherited": false}]});
+        std::fs::write(path.join("lake-manifest.json"), manifest.to_string()).unwrap();
+        let lib = path.join(".lake/build/lib/lean");
+        for root in own {
+            std::fs::create_dir_all(lib.join(root)).unwrap();
+            std::fs::write(lib.join(format!("{root}.olean")), "").unwrap();
+        }
+        dir
+    }
+
+    const ON_THE_LIBRARY: &str =
+        "import Mathlib\nimport Lib.Classes.QMA\n\ntheorem t : True := trivial";
+
+    #[test]
+    fn an_export_requires_the_project_whose_own_library_its_modules_import() {
+        let dir = project("lib-frontier", &["Lib", "LibResults"]);
+        let own = own_libraries(dir.path());
+        assert_eq!(
+            own,
+            BTreeSet::from(["Lib".to_string(), "LibResults".to_string()])
+        );
+        let imported: BTreeSet<String> = imported_roots([ON_THE_LIBRARY].into_iter())
+            .intersection(&own)
+            .cloned()
+            .collect();
+        assert_eq!(imported, BTreeSet::from(["Lib".to_string()]));
+        let source = ProjectSource {
+            git: "https://example.com/lib-frontier.git".into(),
+            rev: "33c9".into(),
+        };
+        let files =
+            project_files(Some(dir.path()), &["PisaRun"], &imported, Some(&source)).unwrap();
+        let text = |path: &str| files.iter().find(|f| f.path == path).unwrap().text.clone();
+        let lakefile = text("lakefile.toml");
+        assert!(
+            lakefile.contains(
+                "[[require]]\nname = \"lib-frontier\"\ngit = \"https://example.com/lib-frontier.git\"\n\
+                 rev = \"33c9\"\n\n[[require]]\nname = \"cslib\""
+            ),
+            "{lakefile}"
+        );
+        let manifest: Value = serde_json::from_str(&text("lake-manifest.json")).unwrap();
+        assert_eq!(manifest["name"], NAME);
+        assert_eq!(manifest["packages"][0]["name"], "lib-frontier");
+        assert_eq!(manifest["packages"][0]["rev"], "33c9");
+
+        // Without the project's source, the export says what is missing.
+        let e = project_files(Some(dir.path()), &["PisaRun"], &imported, None).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::BadRequest);
+        assert!(
+            e.message.contains("import Lib,") && e.message.contains("PISA_PROJECT_GIT"),
+            "{}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn a_wrapper_project_needs_no_source() {
+        // `docker/lean-project` builds `PisaProject`, which no code imports.
+        let dir = project("pisa_project", &["PisaProject"]);
+        let imported: BTreeSet<String> = imported_roots([ON_THE_LIBRARY].into_iter())
+            .intersection(&own_libraries(dir.path()))
+            .cloned()
+            .collect();
+        assert!(imported.is_empty());
+        let files = project_files(Some(dir.path()), &["PisaRun"], &imported, None).unwrap();
+        let lakefile = &files
+            .iter()
+            .find(|f| f.path == "lakefile.toml")
+            .unwrap()
+            .text;
+        assert!(!lakefile.contains("pisa_project\"\ngit"), "{lakefile}");
     }
 }

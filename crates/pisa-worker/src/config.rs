@@ -49,6 +49,16 @@ pub struct WorkerConfig {
     /// Lake project whose dependencies the REPL imports (run through `lake env`).
     #[arg(long, env = "PISA_PROJECT")]
     pub project: Option<PathBuf>,
+    /// The git repository the project's own code comes from, with
+    /// `--project-rev`, for a project that is itself a library code imports,
+    /// rather than a wrapper that requires one: an export of a run whose
+    /// modules import it requires the project from there, and without them
+    /// is refused.
+    #[arg(long, env = "PISA_PROJECT_GIT", requires = "project_rev")]
+    pub project_git: Option<String>,
+    /// The revision of `--project-git` the project is at.
+    #[arg(long, env = "PISA_PROJECT_REV", requires = "project_git")]
+    pub project_rev: Option<String>,
     /// Replace a Lean process after this many jobs. The REPL never frees environments.
     #[arg(long, env = "PISA_MAX_USES", default_value_t = 200)]
     pub max_uses: u64,
@@ -204,5 +214,34 @@ impl WorkerConfig {
                 .with_context(|| format!("reading the project at {}", project.display())),
             (None, None) => Ok("dev".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::WorkerConfig;
+
+    #[test]
+    fn the_projects_source_takes_both_its_repository_and_revision() {
+        let parse = |args: &[&str]| {
+            let base = ["pisa-worker", "--database-url", "sqlite::memory:"];
+            WorkerConfig::try_parse_from([&base[..], args].concat())
+        };
+        let both = parse(&[
+            "--project-git",
+            "https://example.com/l.git",
+            "--project-rev",
+            "33c9",
+        ]);
+        let both = both.unwrap();
+        assert_eq!(
+            both.project_git.as_deref(),
+            Some("https://example.com/l.git")
+        );
+        assert_eq!(both.project_rev.as_deref(), Some("33c9"));
+        assert!(parse(&["--project-git", "https://example.com/l.git"]).is_err());
+        assert!(parse(&["--project-rev", "33c9"]).is_err());
     }
 }

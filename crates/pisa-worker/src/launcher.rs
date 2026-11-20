@@ -24,6 +24,8 @@ pub struct Launcher {
     lean_export: Option<PathBuf>,
     tool: PathBuf,
     project: Option<PathBuf>,
+    /// Where the project's own code comes from, if it is configured.
+    project_source: Option<crate::runs::ProjectSource>,
     /// The environment `lake env` sets up for the project (LEAN_PATH and friends),
     /// captured once so each spawn skips Lake.
     env: Option<Vec<(OsString, OsString)>>,
@@ -361,6 +363,11 @@ impl Launcher {
             lean_export: cfg.lean_export.clone(),
             tool: cfg.tool.clone(),
             project: cfg.project.clone(),
+            project_source: cfg
+                .project_git
+                .clone()
+                .zip(cfg.project_rev.clone())
+                .map(|(git, rev)| crate::runs::ProjectSource { git, rev }),
             env,
             base_path,
             lean_path,
@@ -396,6 +403,11 @@ impl Launcher {
     /// The Lake project the REPL imports from, if there is one.
     pub fn project(&self) -> Option<&Path> {
         self.project.as_deref()
+    }
+
+    /// Where the project's own code comes from, if it is configured.
+    pub fn project_source(&self) -> Option<&crate::runs::ProjectSource> {
+        self.project_source.as_ref()
     }
 
     /// Where acceptance judges runs, each judgment in a private directory of

@@ -306,8 +306,9 @@ pub(crate) async fn run_job(
             JobResult::SnapshotAccepted(runs::accept(pool, j, progress).await.map(Box::new))
         }
         Job::SnapshotExport(j) => {
-            let project = pool.launcher().project();
-            JobResult::SnapshotExport(runs::export(pool.snapshots(), project, &j).await)
+            let launcher = pool.launcher();
+            let (project, source) = (launcher.project(), launcher.project_source());
+            JobResult::SnapshotExport(runs::export(pool.snapshots(), project, source, &j).await)
         }
         job @ (Job::DocumentOpen(_)
         | Job::DocumentEdit(_)

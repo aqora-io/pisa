@@ -68,6 +68,8 @@ pub fn worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
         tool: PathBuf::from(env!("CARGO_BIN_EXE_fake-pisa")),
         lean_lib: PathBuf::from("pisa-lean"),
         project: None,
+        project_git: None,
+        project_rev: None,
         max_uses: 100,
         max_rss_mb: 0,
         import_timeout_secs: 10,
