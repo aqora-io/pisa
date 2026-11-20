@@ -150,6 +150,36 @@ on the same Lean version. The image applies `docker/repl/infotree-at.patch` to
 the REPL, which adds `infotreeAt` (see [goals](#positions)): it must apply to
 the new `REPL_REV` too.
 
+<a id="another-project"></a>
+**A pool for another project.** A worker serves one Lake project, and its
+version is that project's (`<toolchain>-<hash of its lakefile, manifest and
+top-level files>`), so another library, or another Mathlib, is another pool
+of workers on the same servers, database and store:
+- **The project.** A wrapper, like `docker/lean-project`: a `lakefile.toml`
+  that requires the library at a commit, its `lake-manifest.json` and
+  `lean-toolchain`, and a library file importing the modules agents will
+  import, which the image builds. Not the library's own checkout: an
+  [export](#comparator) requires the project's packages, and a checkout's own
+  code isn't one. For a checkout, set `PISA_PROJECT_GIT` and
+  `PISA_PROJECT_REV` on its workers to where its code comes from, or exports
+  of runs that import it are refused.
+- **The image.** `docker build -f docker/Dockerfile --target worker
+  --build-context project=<dir> --build-arg LEAN_TOOLCHAIN=<its toolchain>
+  --build-arg REPL_REV=<the same Lean> -t pisa-worker:<name> .` takes the
+  project from `<dir>` in place of `docker/${PROJECT}`. Mathlib, if the
+  manifest has it, comes from its cache; the rest compiles once. Workers
+  replay the builds read-only, so build what agents import.
+- **Running it.** A Compose service for it extends `worker` with that image
+  (Compose resolves `extends: file:` against the project directory). Its
+  workers register their version: `/health` lists each pool's in `pools`,
+  and requests reach it by naming that `version`, or by
+  [`PISA_ALIASES`](#versions) and `PISA_DEFAULT_VERSION`. Snapshot ids carry
+  their version, so requests about a snapshot need none.
+- **What it lacks.** Search indexes one version (see [Limits](#limits)), so
+  agents on the new pool find names with `#check`, `#print` and `exact?`.
+  [Acceptance](#comparator) replays what each pair imports, so a large
+  library costs minutes per pair.
+
 ## Kubernetes
 
 `deploy/helm/pisa` is a Helm chart containing:
@@ -245,6 +275,26 @@ and the rest of the API works.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that shows where a refused type differs:
+- A build's export prints each type a third way, `type_explicit`, with every
+  argument shown. A refusal of a type that prints alike shows both sides'
+  (`was_explicit`, `now_explicit`, see [Replacing](#replacing)) only when
+  both modules were built by this release: a spec created before has none,
+  so create it again to get them.
+- `POST /check` takes `against` (see [Checking against a spec](#check)). A
+  worker of the release before ignores it, so while both run, a check
+  against a spec may come back without the comparison.
+- `/health` adds `pools`, the live workers per version.
+- An export whose modules import a library the worker's project builds
+  itself requires the project from `PISA_PROJECT_GIT` at `PISA_PROJECT_REV`,
+  and without them is refused, where the release before left the library
+  out. Workers of a wrapper project, as Compose builds them, are unaffected.
+- `docker/Dockerfile` takes the project from a stage named `project`, which
+  `--build-context project=<dir>` replaces (see
+  [A pool for another project](#another-project)); `PROJECT` still picks one
+  of `docker/`. Mathlib's cache is fetched whenever the manifest has
+  Mathlib, also through another package.
 
 To the release that shows a running acceptance's progress:
 - The first process of this release adds `progress` to the `jobs` table.
@@ -490,7 +540,7 @@ pnpm -C web generate
 
 | Endpoint | Request → response |
 | --- | --- |
-| `POST /check` | `{code, version?, timeout?, detail?, at?}` → check result |
+| `POST /check` | `{code, version?, timeout?, detail?, at?, against?}` → check result |
 | `POST /check/batch` | `{items: [{code}], version?, timeout?, detail?, at?}`, up to 128 items, 32 queued at a time → `{results: [...]}`, in order |
 | `POST /sessions` | `{code, version?, timeout?}` with `sorry`s → `{id, states: [{id, goals, pos, end_pos}], messages, runs?, timing}`; see [Tactic sessions](#sessions) and [Naming a run](#run-names) |
 | `POST /states/{id}/tactic` | `{tactic, timeout?}` → `{state: {id, goals}, complete, messages, timing}`; earlier states stay valid, and a failing tactic is a 422 |
@@ -519,7 +569,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status, progress?: {phase: {name, pair?, side?}, kernel?, seconds, peak_memory_mb?}}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, pools, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the live workers by the version they serve, a pool each (`[{version, workers, slots, beam_slots, draining}]`, `null` if the queue can't be read; see [A pool for another project](#another-project)), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -611,10 +661,11 @@ A check result is `{ok, time, timing, error?, messages, sorries, reasons, change
   (see [goals](#positions)), 0 when it asks for neither.
 - `messages` are Lean's, each `{severity, pos, end_pos?, text}`.
 - `reasons` says why `ok` is false, e.g. `axiom: t uses sorryAx`.
-- `changes` lists, for a [replacement](#replacing) or a session's final
-  check, the declarations that don't keep the statements they must, each also
-  one of `reasons`: `{name, module?, change, was?, now?, includes?}`, see
-  *Refused* under [Replacing](#replacing).
+- `changes` lists, for a [replacement](#replacing), a session's final
+  check or a check `against` a snapshot, the declarations that don't keep the
+  statements they must, each also one of `reasons`: `{name, module?, change,
+  was?, now?, was_explicit?, now_explicit?, includes?}`, see *Refused* under
+  [Replacing](#replacing).
 - `declarations` lists each new declaration as `{name, kind, status,
   axioms}`, its axioms being those it uses besides the allowed ones (see
   [Statuses](#statuses)). With `detail: ["declarations"]` each has every
@@ -629,6 +680,17 @@ A check result is `{ok, time, timing, error?, messages, sorries, reasons, change
   [goals](#positions)): that it failed or ran past `timeout`, so the result
   is a plain check's, or that it took over three times as long as the check,
   and a second or more longer.
+
+<a id="check"></a>
+**Checking against a spec.** `against` names a snapshot, usually the spec
+the code is meant to [replace](#replacing), and the check compares the
+statements the code shares with it: each declaration both declare must be the
+same kind with the same type. One that isn't is in `changes` and `reasons`,
+with the snapshot's signature as `was`, and `ok` is false, so a file that a
+replacement would refuse says so before any create. Declarations only one of
+them has aren't compared, nor definitions' values, which a create judges with
+the spec's holes and `allow`. The check runs on the snapshot's version unless
+it names one, which must be that version; an unknown snapshot is a 404.
 
 With `detail: ["tactics"]`, a check result also has `tactics`, the goals at
 every step of the proof. Each entry is one run of a tactic, in the order Lean
@@ -797,6 +859,7 @@ proofs one tactic at a time, as a tree of states:
 - Only workers with Beam slots serve sessions. Without one, `/sessions` and
   `/states/{id}/tactic` answer 503 `unavailable`.
 
+<a id="versions"></a>
 `version` selects a worker pool, by label (such as `v4.35.0-1a2b3c4d`) or by
 an alias set with `PISA_ALIASES`. Session, state, snapshot and document ids
 carry their version, so the requests that take one take no `version`. `timeout` is Lean's
@@ -1034,7 +1097,12 @@ POST /snapshots {"code": "…theorem t : 1 = 1 := rfl", "replaces": {"snapshot_i
     spec's own declarations: see [Reusing a proof](#reusing-a-proof);
   - `was` and `now` are its signature before and after, for a changed type or
     assumption, from the modules' search exports. Those are what the builds
-    printed; the comparison reads the declarations' hashes;
+    printed; the comparison reads the declarations' hashes. Where the two
+    print alike, as when an instance is found by another path (see
+    [Canonical form](#canonical-form)), `was_explicit` and `now_explicit`
+    are the types printed with every argument shown, instances too, cut
+    around where they first differ, and the reason says so. Exports have that
+    text from this release on; a module built before has none;
   - what Lean makes for an inductive type (its constructors, recursor,
     `casesOn`, `injEq`, projections and the like) is one change, to that
     type, whose `includes` lists them: `derived` unless the type itself
@@ -1477,7 +1545,11 @@ builds with `lake build` and that comparator accepts it there.
     as `challenge_module` and `solution_module`;
   - the worker project's `lean-toolchain` and `lake-manifest.json`, and a
     `lakefile.toml` that requires what the project requires and builds the
-    modules with `autoImplicit` off, as pisa builds them;
+    modules with `autoImplicit` off, as pisa builds them. When the modules
+    import a library the project builds itself, because the project is that
+    library's own checkout, it requires the project too, from the workers'
+    `PISA_PROJECT_GIT` at `PISA_PROJECT_REV`; without them such an export is
+    refused (see [A pool for another project](#another-project));
   - a configuration in `comparator/` for each spec snapshot and head the
     audit reaches, listed in the export's `README.md`.
 - **A configuration.** The spec snapshot's module is the challenge and the
@@ -1766,9 +1838,18 @@ builds with `lake build` and that comparator accepts it there.
         ↑                                                       ↑ imports
         └──────────────  helpers (lemmas, as named runs)  ──────┘
   ```
+- **Imports.** Give a spec the imports its proofs will have. A replacement
+  that imports helpers built with `import Mathlib` sees all of Mathlib's
+  instances, and a statement of the spec's whose instances Lean then finds by
+  another path has another type: the replacement is refused although each
+  file checks (see [Canonical form](#canonical-form)). So a spec whose
+  helpers will import Mathlib imports it too, or helpers keep to the spec's
+  imports.
 - **Agents.** Each gets its target's spec id and labels every snapshot with
   the run's labels. Scratch work goes to `/check` (see
-  [Snapshots](#snapshots)), which keeps no snapshot. To submit, an agent
+  [Snapshots](#snapshots)), which keeps no snapshot; a check with `against`
+  the spec says whether the code keeps the spec's statements before it is
+  submitted (see [Checking against a spec](#check)). To submit, an agent
   creates its code with `replaces` the snapshot it last submitted for the
   target, or the spec snapshot at first. It imports another target's run as
   `import PisaRun.<name>`, which builds on that run's head. [Search](#snapshot-search) shows
@@ -1792,6 +1873,13 @@ builds with `lake build` and that comparator accepts it there.
   meanwhile on the heads they hold. Until then such a target is `sorry`; its
   `own_status` says whether its own proof is finished, and `inherits` names
   the lemma it waits for (see [Statuses](#statuses)).
+- **One target, several agents.** A target too large for one agent splits
+  through an interface: a helper run, published first, that only defines the
+  pieces' statements as `Prop`s (`def PartA : Prop := …`). Each agent proves
+  its piece, `theorem partA : PartA`, in a run of its own that imports the
+  interface, and one proves the target from `PartA → PartB → …`. The
+  interface is a definition base like any other: agents import it and leave
+  it alone, and a change to it is a new head that the others move onto.
 - **Re-checks.** When something below the run changes, such as a base
   edited, the leader [rebuilds](#rebuilding) without `retire` while agents
   work. Agents meet the copies as `conflict`s and move onto them. A rebuild
@@ -2895,7 +2983,7 @@ status; one it can't describe, such as one left with a metavariable, is a
 reason (`error: axiom report: describing x: a metavariable`), as is a report
 that fails outright (`error: axiom report unavailable: …`, with what Lean
 said). A snapshot's module and the kernel re-check describe every declaration
-or nothing. The canonical form reads code as the
+or nothing. <a id="canonical-form"></a>The canonical form reads code as the
 kernel does, so that what doesn't change a statement doesn't change its text:
 - Binder names don't count, and binder kinds (`(n)`, `{n}`, `[inst]`) do.
   A declaration's universe parameters count by position, so renaming one,
@@ -2921,7 +3009,11 @@ kernel does, so that what doesn't change a statement doesn't change its text:
   body isn't exposed).
 
 What it doesn't see through is refused, as a changed statement would be:
-- an instance found by another path after new instances or imports;
+- an instance found by another path after new instances or imports, such as
+  a helper's `import Mathlib` that the spec doesn't have: the refusal's
+  `was_explicit` and `now_explicit` show the instance arguments (see
+  [Replacing](#replacing)), and a spec avoids it by importing what its proofs
+  will (see [Running agents on snapshots](#agent-runs));
 - a proof by a lemma stated in another but equal form, such as one of
   `b ≥ a` where `a ≤ b` is wanted, which reads as a proof of `b ≥ a`;
 - a statement that uses an `import all`-ed private of a snapshot the code no
@@ -2957,3 +3049,10 @@ it. `/check` and
   that step takes as long as the tactics before it, and the reopening.
 - Not built yet: auth and per-tenant fairness, `/jobs` async batches, and
   human workspaces (stage 4).
+- A check that runs past its time limit reports no declarations, and doesn't
+  say which one Lean was elaborating: bisect with smaller checks.
+- An acceptance judges its run's pairs one after another, on one worker
+  slot, and each of the six kernels replays every constant a pair's theorems
+  reach, the library's included: on a large library, minutes per pair.
+- Search serves one version, `PISA_SEARCH_ENV_ID`; on another pool,
+  `search`, `resolve` and `/declarations` answer `not_found`.
