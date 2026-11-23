@@ -364,11 +364,19 @@ fn check_version(
         return Ok(());
     };
     let version = versions.resolve(Some(requested));
+    let covers = match snapshots {
+        Some(s) if s != index => format!("{index}, and the snapshots of {s}"),
+        _ => index.to_string(),
+    };
     match version.as_deref() {
         Some(v) if v == index || Some(v) == snapshots => Ok(()),
         _ => Err(ApiError::new(
             ErrorKind::NotFound,
-            format!("no index for version {requested}"),
+            format!(
+                "no index for version {requested}: search covers {covers}. GET /health lists \
+                 each pool with its toolchain and packages; on another, #check, #print and \
+                 exact? find names"
+            ),
         )),
     }
 }
@@ -615,7 +623,14 @@ mod tests {
         for other in ["other", "pool"] {
             let ApiError(e) = check(Some(other)).unwrap_err();
             assert_eq!(e.kind, ErrorKind::NotFound);
-            assert_eq!(e.message, format!("no index for version {other}"));
+            assert!(
+                e.message.starts_with(&format!(
+                    "no index for version {other}: search covers index, and the snapshots of \
+                     snapshots. GET /health"
+                )),
+                "{}",
+                e.message
+            );
         }
         // Without snapshots, only the index's.
         assert!(check_version(&versions, "index", None, Some("snapshots")).is_err());

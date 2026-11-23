@@ -8,7 +8,10 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use pisa_db::catalog::{Catalog, EntryMeta, Module, ModuleMeta, ModuleSummary, unknown_module};
+use pisa_db::catalog::{
+    Catalog, EXPLICIT_FORMAT, EntryMeta, Module, ModuleMeta, ModuleSummary, VALUE_CHARS,
+    unknown_module,
+};
 use pisa_db::db::Db;
 use pisa_protocol::api::{
     Allow, Amendment, AuditAssumption, AuditComparison, AuditFork, AuditLink,

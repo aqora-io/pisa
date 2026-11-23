@@ -123,6 +123,9 @@ async fn health_lists_a_pool_per_version() {
         slots,
         beam_slots: 0,
         draining: 0,
+        // The cluster's workers have no project.
+        toolchain: String::new(),
+        packages: Vec::new(),
     };
     let mut expected = vec![pool("v", 2, 3), pool("u", 1, 1)];
     expected.sort_by(|a, b| a.version.cmp(&b.version));

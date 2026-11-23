@@ -667,6 +667,32 @@ fn types_that_print_alike_differ_in_the_export_with_every_argument_shown() {
     assert!(now.contains("myAdd"), "{now}");
 }
 
+#[test]
+#[ignore = "needs elan Lean 4.36.0-rc2"]
+fn a_binder_of_another_type_differs_in_the_export() {
+    let s = Snapshots::new();
+    let spec =
+        s.build("theorem t : @Eq (Nat → Nat) (fun (x : Nat) => x) (fun (x : Nat) => x) := rfl\n");
+    // Its binder's type is an `abbrev` of the spec's, which no argument
+    // shows: `Eq` is given its type.
+    let head = s.build(
+        "abbrev N := Nat\n\n\
+         theorem t : @Eq (Nat → Nat) (fun (x : N) => x) (fun (x : Nat) => x) := rfl\n",
+    );
+    let changes = statement_changes(&spec.verified, &head.verified);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    let exported = |b: &Built| b.export.iter().find(|d| d.name == "t").unwrap().clone();
+    let (was, now) = (exported(&spec), exported(&head));
+    assert_eq!(was.signature, now.signature);
+    let (was, now) = pisa_protocol::verify::explicit_difference(
+        was.type_explicit.as_deref().unwrap(),
+        now.type_explicit.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(was.contains("(x : Nat)"), "{was}");
+    assert!(now.contains("(x : N)"), "{now}");
+}
+
 /// What the `pisa` tool printed: its `PISA_*` lines by marker, in order, and
 /// whether it exited 0.
 struct Tooled {

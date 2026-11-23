@@ -1583,6 +1583,13 @@ export interface components {
         DeclarationChange: {
             change: components["schemas"]["Change"];
             /**
+             * Format: int32
+             * @description When `was` and `now` print alike, and with every argument shown too
+             *     as far as the exports print them, which is this many characters: the
+             *     types differ further on.
+             */
+            explicit_alike_chars?: number;
+            /**
              * @description For a missing declaration, the snapshot module the new code builds on
              *     that declares an identical one, with the same kind, type and value.
              *     An import can't stand in for the spec's own declarations: keep them
@@ -2367,10 +2374,21 @@ export interface components {
              */
             draining: number;
             /**
+             * @description The Lake packages their project's `lake-manifest.json` pins, what it
+             *     requires through them included: what code on this pool can import.
+             *     Empty if they didn't say.
+             */
+            packages: components["schemas"]["PoolPackage"][];
+            /**
              * Format: int32
              * @description Their slots for checks and snapshots, summed.
              */
             slots: number;
+            /**
+             * @description The Lean toolchain their project pins, e.g.
+             *     `leanprover/lean4:v4.36.0-rc2`; empty if they didn't say.
+             */
+            toolchain: string;
             /** @description The version they serve, which a request names to reach them. */
             version: string;
             /**
@@ -2378,6 +2396,17 @@ export interface components {
              * @description The live workers.
              */
             workers: number;
+        };
+        /** @description A Lake package a pool's project pins. */
+        PoolPackage: {
+            /** @description The branch or tag the project asked for, e.g. `v4.36.0-rc2`. */
+            input_rev?: string;
+            /** @description Its name, e.g. `mathlib`. */
+            name: string;
+            /** @description The commit, for a git package; empty for a local one. */
+            rev?: string;
+            /** @description Where Lake fetched it from, for a git package. */
+            url?: string;
         };
         /**
          * @description A position in the submitted code: lines count from 1, and columns from 0
@@ -3385,6 +3414,7 @@ export type PairErrorKind = components['schemas']['PairErrorKind'];
 export type PairPhase = components['schemas']['PairPhase'];
 export type PairSide = components['schemas']['PairSide'];
 export type PoolHealth = components['schemas']['PoolHealth'];
+export type PoolPackage = components['schemas']['PoolPackage'];
 export type Pos = components['schemas']['Pos'];
 export type ProbeAt = components['schemas']['ProbeAt'];
 export type ProbeResult = components['schemas']['ProbeResult'];

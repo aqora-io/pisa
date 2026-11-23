@@ -412,6 +412,11 @@ pub struct DeclarationChange {
     pub was_explicit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub now_explicit: Option<String>,
+    /// When `was` and `now` print alike, and with every argument shown too
+    /// as far as the exports print them, which is this many characters: the
+    /// types differ further on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explicit_alike_chars: Option<u32>,
     /// For a change to what Lean makes from an inductive type, the
     /// declarations that changed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -429,6 +434,7 @@ impl DeclarationChange {
             now: None,
             was_explicit: None,
             now_explicit: None,
+            explicit_alike_chars: None,
             includes: Vec::new(),
         }
     }
@@ -505,6 +511,13 @@ impl std::fmt::Display for DeclarationChange {
             write!(
                 f,
                 "; it prints alike, but with every argument shown it was `{was}` and is now `{now}`"
+            )?;
+        }
+        if let Some(chars) = self.explicit_alike_chars {
+            write!(
+                f,
+                "; it prints alike, with every argument shown too for the first {chars} characters, \
+                 which is as far as the exports print it: the types differ after that"
             )?;
         }
         Ok(())
@@ -873,6 +886,14 @@ mod tests {
             c.to_string(),
             "statement: t has a different type; it prints alike, but with every argument shown \
              it was `@P instA` and is now `@P instB`"
+        );
+        (c.was_explicit, c.now_explicit) = (None, None);
+        c.explicit_alike_chars = Some(4000);
+        assert_eq!(
+            c.to_string(),
+            "statement: t has a different type; it prints alike, with every argument shown too \
+             for the first 4000 characters, which is as far as the exports print it: the types \
+             differ after that"
         );
     }
 }

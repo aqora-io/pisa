@@ -233,8 +233,8 @@ pub struct SnapshotDecl {
     #[serde(default)]
     pub type_pp_full: String,
     /// The type as `type_pp_full`, but with every argument shown, instances
-    /// and implicit ones too, and cut like `value`. None in records from
-    /// before the export printed it.
+    /// and implicit ones too, and binders with their types, and cut like
+    /// `value`. None in records from before the export printed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_explicit: Option<String>,
     #[serde(default)]
@@ -289,9 +289,16 @@ fn proved() -> ProofStatus {
 
 /// The format of the exports builds make now: a module-system module's
 /// export has its non-public declarations too, and one that didn't print is
-/// kept with its error. Older exports of module-system modules are made
-/// again ([`Catalog::stale_exports_after`]).
-pub const EXPORT_FORMAT: u32 = 2;
+/// kept with its error; since 3 ([`EXPLICIT_FORMAT`]), `type_explicit` shows
+/// binders with their types. Older exports
+/// of module-system modules are made again
+/// ([`Catalog::stale_exports_after`]).
+pub const EXPORT_FORMAT: u32 = 3;
+
+/// The first export format whose `type_explicit` is comparable with
+/// today's: an older one printed less, so the two would differ where the
+/// types don't.
+pub const EXPLICIT_FORMAT: u32 = 3;
 
 fn is_zero(n: &u32) -> bool {
     *n == 0

@@ -1405,6 +1405,12 @@
           "change": {
             "$ref": "#/components/schemas/Change"
           },
+          "explicit_alike_chars": {
+            "description": "When `was` and `now` print alike, and with every argument shown too\nas far as the exports print them, which is this many characters: the\ntypes differ further on.",
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "imported_from": {
             "description": "For a missing declaration, the snapshot module the new code builds on\nthat declares an identical one, with the same kind, type and value.\nAn import can't stand in for the spec's own declarations: keep them\nin the module and import only helpers (README, *Reusing a proof*).",
             "type": "string"
@@ -2748,11 +2754,22 @@
             "minimum": 0,
             "type": "integer"
           },
+          "packages": {
+            "description": "The Lake packages their project's `lake-manifest.json` pins, what it\nrequires through them included: what code on this pool can import.\nEmpty if they didn't say.",
+            "items": {
+              "$ref": "#/components/schemas/PoolPackage"
+            },
+            "type": "array"
+          },
           "slots": {
             "description": "Their slots for checks and snapshots, summed.",
             "format": "int32",
             "minimum": 0,
             "type": "integer"
+          },
+          "toolchain": {
+            "description": "The Lean toolchain their project pins, e.g.\n`leanprover/lean4:v4.36.0-rc2`; empty if they didn't say.",
+            "type": "string"
           },
           "version": {
             "description": "The version they serve, which a request names to reach them.",
@@ -2770,7 +2787,34 @@
           "workers",
           "slots",
           "beam_slots",
-          "draining"
+          "draining",
+          "toolchain",
+          "packages"
+        ],
+        "type": "object"
+      },
+      "PoolPackage": {
+        "description": "A Lake package a pool's project pins.",
+        "properties": {
+          "input_rev": {
+            "description": "The branch or tag the project asked for, e.g. `v4.36.0-rc2`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Its name, e.g. `mathlib`.",
+            "type": "string"
+          },
+          "rev": {
+            "description": "The commit, for a git package; empty for a local one.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Where Lake fetched it from, for a git package.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },

@@ -88,6 +88,18 @@ impl Reader {
         let Some((name, modules)) = clash(declared) else {
             return Ok(None);
         };
+        // The same declaration in both, as when one file's code is copied
+        // into each.
+        let declaration = |m: &String| {
+            let record = records.get(m)?;
+            record.result.declarations.iter().find(|d| d.name == name)
+        };
+        let alike = match (declaration(&modules[0]), declaration(&modules[1])) {
+            (Some(a), Some(b)) => {
+                (&a.kind, &a.type_hash, &a.value_hash) == (&b.kind, &b.type_hash, &b.value_hash)
+            }
+            _ => false,
+        };
         let entries = self.catalog.entries_on(&modules, &[]).await?;
         let named: Vec<String> = modules
             .iter()
@@ -119,6 +131,11 @@ impl Reader {
                 ". They are versions of one run: import its head {} instead",
                 heads.join(" or ")
             ));
+        } else if alike {
+            message.push_str(
+                ". Both declare it alike, as when one file's code is copied into each: make that \
+                 code a snapshot or named run of its own, and import it rather than copy it",
+            );
         }
         Ok(Some(Error::new(ErrorKind::BadRequest, message)))
     }
@@ -381,8 +398,16 @@ impl Reader {
         let mut out = HashMap::new();
         for m in modules {
             if let Ok(Some(exported)) = self.catalog.decls(m).await {
+                // An older format's text printed less than today's builds.
+                let comparable = exported.format >= EXPLICIT_FORMAT;
                 let printed = exported.decls.iter().filter(|d| d.error.is_none());
-                out.extend(printed.map(|d| (d.name.clone(), Printed::from(d))));
+                out.extend(printed.map(|d| {
+                    let mut p = Printed::from(d);
+                    if !comparable {
+                        p.explicit = None;
+                    }
+                    (d.name.clone(), p)
+                }));
             }
         }
         out
@@ -423,10 +448,16 @@ impl Reader {
             c.now = now.map(|p| p.signature.clone());
             if c.was.is_some() && c.was == c.now {
                 let explicit = |p: Option<&Printed>| p.and_then(|p| p.explicit.clone());
-                if let (Some(a), Some(b)) = (explicit(was), explicit(now))
-                    && let Some((a, b)) = explicit_difference(&a, &b)
-                {
-                    (c.was_explicit, c.now_explicit) = (Some(a), Some(b));
+                if let (Some(a), Some(b)) = (explicit(was), explicit(now)) {
+                    match explicit_difference(&a, &b) {
+                        Some((a, b)) => (c.was_explicit, c.now_explicit) = (Some(a), Some(b)),
+                        // Both cut where the export stops printing: the
+                        // difference is further on.
+                        None if a.chars().count() > VALUE_CHARS => {
+                            c.explicit_alike_chars = Some(VALUE_CHARS as u32);
+                        }
+                        None => {}
+                    }
                 }
             }
         }

@@ -55,10 +55,13 @@ def printed (ci : ConstantInfo) (kind : String) (chars : Nat) : MetaM Json := do
       |>.setBool `pp.fullNames true |>.setBool `pp.deepTerms true) do
     return (← ppExpr ci.type).pretty 120
   -- Every argument shown, instances too: where two types that print alike
-  -- differ, as when an instance is found by another path.
+  -- differ, as when an instance is found by another path. Binders have their
+  -- types, which an argument doesn't always show, as for `fun (x : N) => x`
+  -- where `N` is an `abbrev` of the type `Eq` is given.
   let typeExplicit ← withOptions (fun o => o |>.setBool `pp.explicit true
       |>.setBool `pp.notation false |>.setBool `pp.fullNames true
       |>.setBool `pp.universes true |>.setBool `pp.deepTerms true
+      |>.setBool `pp.funBinderTypes true |>.setBool `pp.letVarTypes true
       |>.set `pp.maxSteps (100000 : Nat)) do
     let text := (← ppExpr ci.type).pretty 120
     if text.length > chars then

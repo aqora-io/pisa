@@ -355,6 +355,14 @@ impl Launcher {
                  out-of-memory kill reads as a crash"
             );
         }
+        // Comparator's kernels would each fail here, which pisa can only
+        // tell from a kernel's rejection by what bwrap printed.
+        if let Err(why) = probe_comparator_sandbox().await {
+            tracing::warn!(
+                "bwrap can't make comparator's sandbox, so acceptances can't run here \
+                 (it needs unprivileged user namespaces and its own /proc): {why}"
+            );
+        }
         Ok(Launcher {
             repl: std::path::absolute(&cfg.repl).unwrap_or_else(|_| cfg.repl.clone()),
             // Usually a bare `lean`, found on the project environment's PATH.
@@ -378,6 +386,15 @@ impl Launcher {
             prefix: tokio::sync::OnceCell::new(),
             cgroups,
         })
+    }
+
+    /// The toolchain the project pins and the packages its manifest pins,
+    /// which the worker registers for `/health`; empty without a project.
+    pub fn project_pins(&self) -> (String, Vec<pisa_protocol::api::PoolPackage>) {
+        match &self.project {
+            Some(project) => pisa_protocol::version::project_pins(project),
+            None => (String::new(), Vec::new()),
+        }
     }
 
     /// The setting that limits the slot's memory (`PISA_MEMORY_MAX_MB`, or
@@ -922,6 +939,51 @@ struct Place<'a> {
     /// Bound read-only after the sandbox's fresh `/tmp`, which may cover
     /// them: the snapshot cache, or the modules of a judgment.
     read_only: &'a [&'a Path],
+}
+
+/// The sandbox `lake comparator` runs each kernel in, as Lake's
+/// `Lake/CLI/Check.lean` builds it, around `true`. When bwrap can't make it,
+/// it exits 1, which Lake reports as the kernel rejecting the solution.
+const COMPARATOR_SANDBOX: [&str; 20] = [
+    "--ro-bind",
+    "/",
+    "/",
+    "--tmpfs",
+    "/home",
+    "--tmpfs",
+    "/root",
+    "--tmpfs",
+    "/run/user",
+    "--tmpfs",
+    "/tmp",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+    "--clearenv",
+    "--unshare-all",
+    "--die-with-parent",
+    "--new-session",
+    "true",
+];
+
+/// Runs `bwrap` from `PATH`, which `lake comparator` runs too, with
+/// [`COMPARATOR_SANDBOX`]: `Err` with what it said if it fails.
+async fn probe_comparator_sandbox() -> Result<(), String> {
+    let out = Command::new("bwrap")
+        .args(COMPARATOR_SANDBOX)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|e| format!("running bwrap: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Err(match stderr.lines().find(|l| !l.trim().is_empty()) {
+        Some(line) => line.trim().to_string(),
+        None => format!("bwrap exited with {}", out.status),
+    })
 }
 
 /// No network, no view of other processes, a read-only filesystem except

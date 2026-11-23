@@ -16,7 +16,9 @@
 
 use std::time::Duration;
 
-use pisa_protocol::api::{DependencyState, ErrorKind, HostMemory, JobKind, PoolHealth};
+use pisa_protocol::api::{
+    DependencyState, ErrorKind, HostMemory, JobKind, PoolHealth, PoolPackage,
+};
 use pisa_protocol::wire::JobResult;
 use serde_json::Value;
 
@@ -67,14 +69,14 @@ pub const LOST_CEILING: Duration = Duration::from_secs(24 * 3600);
 /// limits (`None` if it has an unlimited pool) and the memory of its host.
 pub(crate) type HostRow = (String, String, Option<i64>, i64);
 
-/// A worker as a pool counts it: its version, slots and Beam slots, and
-/// whether it is draining.
-pub(crate) type PoolRow = (String, i32, i32, bool);
+/// A worker as a pool counts it: its version, slots and Beam slots, whether
+/// it is draining, and its toolchain and packages (as JSON).
+pub(crate) type PoolRow = (String, i32, i32, bool, String, String);
 
 /// The pools the workers in `rows` (ordered by version) make up.
 fn group_pools(rows: Vec<PoolRow>) -> Vec<PoolHealth> {
     let mut pools: Vec<PoolHealth> = Vec::new();
-    for (version, slots, beam_slots, draining) in rows {
+    for (version, slots, beam_slots, draining, toolchain, packages) in rows {
         if pools.last().is_none_or(|p| p.version != version) {
             pools.push(PoolHealth {
                 version,
@@ -82,9 +84,17 @@ fn group_pools(rows: Vec<PoolRow>) -> Vec<PoolHealth> {
                 slots: 0,
                 beam_slots: 0,
                 draining: 0,
+                toolchain: String::new(),
+                packages: Vec::new(),
             });
         }
         let pool = pools.last_mut().unwrap();
+        // Its workers share them, as its version hashes them; one from
+        // before workers said them has none.
+        if pool.toolchain.is_empty() && !toolchain.is_empty() {
+            pool.toolchain = toolchain;
+            pool.packages = serde_json::from_str(&packages).unwrap_or_default();
+        }
         pool.workers += 1;
         pool.slots += slots.max(0) as u32;
         pool.beam_slots += beam_slots.max(0) as u32;
@@ -157,6 +167,10 @@ pub struct Registration {
     pub host_memory_mb: u64,
     /// The boot id of its machine; empty if it couldn't tell.
     pub boot_id: String,
+    /// The Lean toolchain its project pins; empty without one.
+    pub toolchain: String,
+    /// The Lake packages its project's manifest pins.
+    pub packages: Vec<PoolPackage>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,10 +188,11 @@ pub struct NewJob {
     pub document: Option<String>,
     pub job: Value,
     /// How long it may wait for a worker, from now or from a lapsed claim.
-    /// An async job counts it only while a worker that can run it is live,
-    /// up to [`LOST_CEILING`], or, if none has claimed it, while no worker
+    /// An async job no worker has claimed counts it only while no worker
     /// that can run it has a row, live or stopped within
-    /// [`STALE_RETENTION`]: it is of a version no worker runs.
+    /// [`STALE_RETENTION`]: it is of a version no worker runs; else it waits,
+    /// as for a busy pool, up to [`LOST_CEILING`]. A lapsed one counts it
+    /// only while a worker that can run it is live.
     pub max_wait: Duration,
     /// How many workers may claim it before it is lost.
     pub max_attempts: u32,
@@ -214,11 +229,11 @@ pub struct Status {
 #[derive(Debug, Clone)]
 pub enum Stage {
     /// Waiting for a worker. If none claims it, it is given up at
-    /// `give_up_at` (microseconds) at the earliest. Past its max wait, while
-    /// no worker that can run it has been live that long, it waits on, and
-    /// `give_up_at` is [`LOST_CEILING`] after it was queued; one no worker
-    /// has claimed waits on only while a worker that can run it has a row,
-    /// live or stopped within [`STALE_RETENTION`].
+    /// `give_up_at` (microseconds) at the earliest. Past its max wait, it
+    /// waits on, and `give_up_at` is [`LOST_CEILING`] after it was queued:
+    /// one no worker has claimed while a worker that can run it has a row,
+    /// live, busy or stopped within [`STALE_RETENTION`], and a lapsed one
+    /// while no worker that can run it has been live that long.
     Queued { give_up_at: i64 },
     /// A worker holds a live claim on it.
     Running,
@@ -732,6 +747,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pool_lists_its_toolchain_and_packages() {
+        for q in queues().await {
+            let cslib = PoolPackage {
+                name: "cslib".into(),
+                rev: "abc".into(),
+                ..PoolPackage::default()
+            };
+            let pinned = |worker: &str| Registration {
+                toolchain: "leanprover/lean4:v4.35.0".into(),
+                packages: vec![cslib.clone()],
+                ..reg(worker, "v", 1, 0, false)
+            };
+            // One from before workers said them, which sorts first.
+            q.register(&reg("a", "v", 1, 0, false)).await.unwrap();
+            q.register(&pinned("b")).await.unwrap();
+            q.register(&reg("c", "u", 1, 0, false)).await.unwrap();
+            let pools = q.pools(LEASE).await.unwrap();
+            let said: Vec<_> = pools
+                .iter()
+                .map(|p| {
+                    (
+                        p.version.as_str(),
+                        p.workers,
+                        p.toolchain.as_str(),
+                        &p.packages[..],
+                    )
+                })
+                .collect();
+            assert_eq!(
+                said,
+                [
+                    ("u", 1, "", &[][..]),
+                    ("v", 2, "leanprover/lean4:v4.35.0", &[cslib.clone()][..])
+                ]
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn hosts_sum_the_caps_of_workers_on_one_boot() {
         for q in queues().await {
             let on = |worker: &str, boot: &str, caps: Option<u64>, memory: u64| Registration {
@@ -1110,28 +1164,35 @@ mod tests {
         }
     }
 
+    /// An async job no worker has claimed waits while a worker that could
+    /// run it has a row, as a busy pool's turn comes; one of a version no
+    /// worker runs is given up at its max wait, and closed.
     #[tokio::test]
-    async fn an_async_job_nobody_claims_in_time_is_closed_given_up() {
+    async fn an_async_job_waits_for_a_busy_worker_but_not_for_a_missing_one() {
         for q in queues().await {
-            // Its version's worker, quiet since it registered.
             let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let mut new = job(Some("v"), 1);
             new.max_wait = Duration::from_millis(10);
             let (id, token) = q.enqueue_async(&new, "check").await.unwrap();
+            new.version = Some("u".into());
+            let (other, missing) = q.enqueue_async(&new, "check").await.unwrap();
             tokio::time::sleep(Duration::from_millis(20)).await;
-            // With no worker live, it waits for one.
-            let stage = q.status(&token).await.unwrap().unwrap().stage;
-            assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
-            // The worker is live for its max wait, and doesn't take it.
+            // Its worker is live past its max wait without taking it, as
+            // when its slots are busy.
             q.heartbeat("w", since, LEASE).await.unwrap();
             for _ in 0..2 {
                 let stage = q.status(&token).await.unwrap().unwrap().stage;
+                assert!(matches!(stage, Stage::Queued { .. }), "{stage:?}");
+            }
+            assert_eq!(q.claim("w", &[id], LEASE).await.unwrap().len(), 1);
+            // No worker runs `u`.
+            for _ in 0..2 {
+                let stage = q.status(&missing).await.unwrap().unwrap().stage;
                 assert!(matches!(stage, Stage::GaveUp { attempts: 0, .. }));
             }
             // Closed: nobody can claim or complete it, and it isn't queued.
-            assert!(q.claim("w", &[id], LEASE).await.unwrap().is_empty());
-            assert!(!q.complete("w", id, 0, &json!(1)).await.unwrap());
-            assert_eq!(q.counts(LIVE).await.unwrap().queued, [0, 0]);
+            assert!(q.claim("x", &[other], LEASE).await.unwrap().is_empty());
+            assert!(!q.complete("x", other, 0, &json!(1)).await.unwrap());
         }
     }
 
@@ -1495,7 +1556,7 @@ mod tests {
     #[tokio::test]
     async fn the_sweep_keeps_async_outcomes_an_hour() {
         for q in queues().await {
-            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
             let sync = q.enqueue(&job(Some("v"), 1)).await.unwrap();
             let (id, done) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
             let at = q.claim("w", &[sync, id], LEASE).await.unwrap()[0].claimed_micros;
@@ -1504,10 +1565,11 @@ mod tests {
             let mut unclaimed = job(Some("v"), 1);
             unclaimed.max_wait = Duration::from_millis(1);
             let sync_unclaimed = q.enqueue(&unclaimed).await.unwrap();
-            let (_, given_up) = q.enqueue_async(&unclaimed, "check").await.unwrap();
-            // `w` is live past `given_up`'s max wait, and doesn't take it.
+            // Of a version no worker runs, past its max wait.
+            let mut missing = unclaimed.clone();
+            missing.version = Some("u".into());
+            let (_, given_up) = q.enqueue_async(&missing, "check").await.unwrap();
             tokio::time::sleep(Duration::from_millis(5)).await;
-            q.heartbeat("w", since, LEASE).await.unwrap();
             let later = |minutes: u64| {
                 (crate::catalog::now_micros()
                     + Duration::from_secs(60 * minutes).as_micros() as u64) as i64
@@ -1609,12 +1671,11 @@ mod tests {
     #[tokio::test]
     async fn a_job_given_up_leaves_a_tombstone() {
         for q in queues().await {
-            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
-            let mut new = job(Some("v"), 1);
+            // Of a version no worker runs, past its max wait.
+            let mut new = job(Some("u"), 1);
             new.max_wait = Duration::from_millis(1);
             let (_, token) = q.enqueue_async(&new, "check").await.unwrap();
             tokio::time::sleep(Duration::from_millis(5)).await;
-            q.heartbeat("w", since, LEASE).await.unwrap();
             let stage = q.status(&token).await.unwrap().unwrap().stage;
             assert!(
                 matches!(stage, Stage::GaveUp { attempts: 0, .. }),

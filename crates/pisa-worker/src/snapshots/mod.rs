@@ -54,7 +54,6 @@ use sha2::{Digest, Sha256};
 
 use crate::catalog::{
     Catalog, EntryMeta, Module, ModuleFile, ModuleMeta, NewEntry, SnapshotDecls, record_fits,
-    unknown_module,
 };
 use crate::check::{header_error, policy_error, policy_messages};
 use crate::db::Db;

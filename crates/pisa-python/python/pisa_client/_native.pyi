@@ -89,6 +89,9 @@ class DeclarationChange(TypedDict):
     # differ, printed with every argument shown.
     was_explicit: NotRequired[str]
     now_explicit: NotRequired[str]
+    # Where they print alike with every argument shown too, as far as the
+    # exports print them: that many characters.
+    explicit_alike_chars: NotRequired[int]
     includes: NotRequired[list[str]]
 
 class TacticInfo(TypedDict):
@@ -736,6 +739,16 @@ class HostMemory(TypedDict):
     # Whether `memory_caps_mb` is more than `memory_mb`.
     overcommitted: bool
 
+class PoolPackage(TypedDict):
+    # A Lake package a pool's project pins, e.g. `mathlib`.
+    name: str
+    # Where Lake fetched it from, for a git package.
+    url: NotRequired[str]
+    # The commit; empty for a local package.
+    rev: str
+    # The branch or tag the project asked for, e.g. `v4.36.0-rc2`.
+    input_rev: NotRequired[str]
+
 class PoolHealth(TypedDict):
     # The version the workers serve, which a request names to reach them.
     version: str
@@ -744,6 +757,10 @@ class PoolHealth(TypedDict):
     beam_slots: int
     # Those draining, which take no new jobs.
     draining: int
+    # The Lean toolchain their project pins; empty if they didn't say.
+    toolchain: str
+    # The Lake packages their project pins: what code there can import.
+    packages: list[PoolPackage]
 
 class Health(TypedDict):
     status: Literal["ok", "draining"]

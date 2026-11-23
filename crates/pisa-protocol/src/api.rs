@@ -481,6 +481,29 @@ pub struct PoolHealth {
     pub beam_slots: u32,
     /// Those draining, which take no new jobs.
     pub draining: u32,
+    /// The Lean toolchain their project pins, e.g.
+    /// `leanprover/lean4:v4.36.0-rc2`; empty if they didn't say.
+    pub toolchain: String,
+    /// The Lake packages their project's `lake-manifest.json` pins, what it
+    /// requires through them included: what code on this pool can import.
+    /// Empty if they didn't say.
+    pub packages: Vec<PoolPackage>,
+}
+
+/// A Lake package a pool's project pins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PoolPackage {
+    /// Its name, e.g. `mathlib`.
+    pub name: String,
+    /// Where Lake fetched it from, for a git package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The commit, for a git package; empty for a local one.
+    #[serde(default)]
+    pub rev: String,
+    /// The branch or tag the project asked for, e.g. `v4.36.0-rc2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_rev: Option<String>,
 }
 
 /// The memory limits of the workers on one host.

@@ -697,14 +697,24 @@ fn exit_failure<'a>(output: &'a str, kernels: &[&str]) -> Option<(&'a str, i32)>
 /// What a kernel that exited with `code` was: a kill by the memory limit
 /// (`oom`, for a code of 128 or more) is out of memory, and any other
 /// failure but a rejection (1) and con-leche's and con-ron's decline (2) is
-/// that it couldn't run.
-fn exit_outcome(name: &str, code: i32, oom: bool) -> (KernelOutcome, PairErrorKind) {
+/// that it couldn't run. A 1 after bwrap said it couldn't make the kernel's
+/// sandbox (`sandbox`, see [`sandbox_failed`]) is bwrap's, not the kernel's.
+fn exit_outcome(name: &str, code: i32, oom: bool, sandbox: bool) -> (KernelOutcome, PairErrorKind) {
     match code {
-        1 => (KernelOutcome::Rejected, PairErrorKind::Refused),
+        1 if !sandbox => (KernelOutcome::Rejected, PairErrorKind::Refused),
         2 if DECLINING.contains(&name) => (KernelOutcome::Unsupported, PairErrorKind::Unsupported),
         128.. if oom => (KernelOutcome::OutOfMemory, PairErrorKind::OutOfMemory),
         _ => (KernelOutcome::CannotRun, PairErrorKind::CannotRun),
     }
+}
+
+/// Whether the first line Lake printed of kernel `name` in its `sections`
+/// is bwrap's own: bwrap exits 1 when it can't make the sandbox comparator
+/// runs the kernel in, as a kernel that rejects the solution does. Like the
+/// rest of the output, it can only label a failure.
+fn sandbox_failed(sections: &HashMap<&str, (Said, Option<String>)>, name: &str) -> bool {
+    let first = sections.get(name).and_then(|(_, first)| first.as_deref());
+    first.is_some_and(|line| line.starts_with("bwrap: "))
 }
 
 /// What Lake printed of each kernel it ran: from its `Running` line to its
@@ -775,7 +785,9 @@ fn failed_kernels(
             }
             let section = sections.get(k.name.as_str());
             let verdict = match (failure, section) {
-                (Some((name, code)), _) if name == k.name => exit_outcome(name, code, oom).0,
+                (Some((name, code)), _) if name == k.name => {
+                    exit_outcome(name, code, oom, sandbox_failed(&sections, name)).0
+                }
                 (_, Some((Said::Accepts, _))) => KernelOutcome::Accepted,
                 (_, Some((Said::Rejected, _))) => KernelOutcome::Failed,
                 (_, Some((Said::Interacting, _))) => KernelOutcome::CannotRun,
@@ -822,11 +834,13 @@ fn classify(ran: &Ran, oom: bool, kernels: &[&str]) -> Option<PairError> {
     let message = || error.map_or_else(|| tail(&ran.output, 1), String::from);
     let failure = exit_failure(&ran.output, kernels).filter(|_| ran.code == Some(1));
     if let Some((name, code)) = failure {
-        let kind = exit_outcome(name, code, oom).1;
-        return Some(PairError {
-            kind,
-            message: format!("{name} exited with {code}"),
-        });
+        let sandbox = sandbox_failed(&kernel_sections(&ran.output), name);
+        let kind = exit_outcome(name, code, oom, sandbox).1;
+        let message = match sandbox {
+            true => format!("{name} exited with {code}: bwrap couldn't make its sandbox"),
+            false => format!("{name} exited with {code}"),
+        };
+        return Some(PairError { kind, message });
     }
     let (kind, message) = match ran.code {
         _ if oom => (
@@ -1998,6 +2012,31 @@ mod tests {
             Some(("PISA_MEMORY_MAX_MB", 1)),
         );
         assert_eq!(other.message, "slow");
+        // bwrap exits 1 when it can't make a kernel's sandbox, as a kernel
+        // that rejects the solution does: these are what it printed.
+        for line in [
+            "bwrap: No permissions to create a new namespace, likely because the kernel does \
+             not allow non-privileged user namespaces.",
+            "bwrap: Can't mount proc on /proc: Operation not permitted",
+        ] {
+            let out = format!(
+                "{built}Running Lean default kernel on solution\n{line}\n\
+                 error: Lean default exited with 1\nLean default kernel rejected the solution\n"
+            );
+            let e = classify(&ran(Some(1), &out), false, &PARANOID).unwrap();
+            assert_eq!(e.kind, PairErrorKind::CannotRun, "{line}");
+            assert_eq!(
+                e.message,
+                "Lean default exited with 1: bwrap couldn't make its sandbox"
+            );
+            let k = failed_kernels(&out, Some(1), false, false, false);
+            assert_eq!(k.len(), 1, "{k:?}");
+            assert_eq!(k[0].verdict, KernelOutcome::CannotRun);
+            assert!(
+                k[0].reason.as_deref().unwrap().starts_with("bwrap: "),
+                "{k:?}"
+            );
+        }
         // A build the memory limit killed exits like a failed one.
         let killed = "Resolving dependencies\nBuilding PisaSnap.sa\nerror: Child exited with 137\n";
         assert_eq!(

@@ -6,6 +6,21 @@ use super::*;
 /// How many of a closure's modules the cache fetches at once.
 const FETCHES: usize = 16;
 
+/// The error for module `id`, which the catalog keeps, when this worker's
+/// store has none of its files: a memory store has only what its own worker
+/// built since it started.
+fn missing_files(id: &str) -> Error {
+    Error::new(
+        ErrorKind::NotFound,
+        format!(
+            "the catalog has snapshot {}, but this worker's store has none of its files: a memory \
+             store (PISA_STORE=memory, the default) keeps them only in the worker that built it, \
+             until it stops, so workers that share snapshots need PISA_STORE=s3",
+            snapshot::module(id)
+        ),
+    )
+}
+
 pub(super) fn sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -138,9 +153,7 @@ impl Snapshots {
             let path = self.blob(module, &file.ext);
             let compressed = match self.store.get(&path).await {
                 Ok(r) => r.bytes().await.map_err(internal)?,
-                Err(object_store::Error::NotFound { .. }) => {
-                    return Err(unknown_module(&module.id));
-                }
+                Err(object_store::Error::NotFound { .. }) => return Err(missing_files(&module.id)),
                 Err(e) => return Err(internal(e)),
             };
             let bytes = zstd::decode_all(&compressed[..]).map_err(internal)?;

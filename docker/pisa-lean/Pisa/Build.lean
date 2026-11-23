@@ -78,7 +78,10 @@ def parse : List String → Args → Except String Args
 /-- The file's text as Lean's shell reads it: a first line `#lang lean4` is
 blanked, and any other language refused. -/
 def contents (file : FilePath) : IO String := do
-  let text ← String.fromUTF8Lossy <$> IO.FS.readBinFile file
+  -- Not `String.fromUTF8Lossy`, which Lean before 4.36 lacks: a pool's
+  -- project can pin an older toolchain. Code comes as JSON, so it is UTF-8.
+  let some text := String.fromUTF8? (← IO.FS.readBinFile file)
+    | throw <| .userError s!"{file} is not UTF-8"
   match text.splitOn "\n" with
   | first :: rest =>
     if first.startsWith "#lang" then

@@ -61,7 +61,9 @@ def run (modules : Array Name) : IO UInt32 := do
       if !chain.contains i.module && !seen.contains i.module then
         seen := seen.insert i.module
         outside := outside.push i
-  let base ← try importModules outside {} (trustLevel := 1024)
+  -- Leaked, as the process exits once the last module is described: freeing
+  -- a large import takes minutes after the verdicts.
+  let base ← try importModules outside {} (trustLevel := 1024) (leakEnv := true)
     catch e => return ← failed s!"importing what the modules import: {e}"
   -- A module imported from outside would come in unchecked.
   if let some m := modules.find? (base.header.moduleNames.contains ·) then
@@ -82,7 +84,11 @@ def run (modules : Array Name) : IO UInt32 := do
     -- an import or an earlier module, and skips this module's: its proof
     -- would be neither checked nor described.
     for n in data.constNames, ci in data.constants do
-      let some found := kenv.find? n | continue
+      -- It skips unsafe and partial constants and adds every other one, or
+      -- fails: one it didn't add would be neither checked nor described.
+      if ci.isUnsafe || ci.isPartial then continue
+      let some found := kenv.find? n
+        | return ← reject m s!"kernel re-check: it didn't add `{n}`"
       if found.value? (allowOpaque := true) != ci.value? (allowOpaque := true) then
         let other := match declaredBy[n]? with
           | some o => s!"`{o}`"

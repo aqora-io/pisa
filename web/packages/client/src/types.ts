@@ -93,6 +93,7 @@ export type {
   PairPhase,
   PairSide,
   PoolHealth,
+  PoolPackage,
   Pos,
   ProbeAt,
   ProbeResult,

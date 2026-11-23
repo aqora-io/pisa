@@ -449,6 +449,7 @@ impl Shared {
             );
         }
         let boot_id = host::boot_id().unwrap_or_default();
+        let (toolchain, packages) = self.pool.launcher().project_pins();
         let mut backoff = Duration::from_millis(100);
         let since = loop {
             match self
@@ -463,6 +464,8 @@ impl Shared {
                     memory_caps_mb,
                     host_memory_mb: host_memory_mb.unwrap_or(0),
                     boot_id: boot_id.clone(),
+                    toolchain: toolchain.clone(),
+                    packages: packages.clone(),
                 })
                 .await
             {

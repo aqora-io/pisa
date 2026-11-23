@@ -211,8 +211,11 @@ pub fn needs(code: &str) -> impl Iterator<Item = (usize, &str)> {
 /// constants they use, and a `/-- … -/` on the line before as its docstring.
 /// A `-- printed-as: LINE` line before a declaration makes it print as `LINE`
 /// but for its type with every argument shown, as a type that prints like
-/// another can differ from it in an argument the printer hides.
+/// another can differ from it in an argument the printer hides. That type is
+/// cut as Lean's export cuts it, at `VALUE_CHARS` characters and ` …`.
 pub fn exports(code: &str) -> String {
+    // The catalog's `VALUE_CHARS`, which this crate doesn't depend on.
+    const VALUE_CHARS: usize = 4000;
     let mut decls = Vec::new();
     let mut doc = None;
     let mut printed_as: Option<&str> = None;
@@ -241,6 +244,10 @@ pub fn exports(code: &str) -> String {
             continue;
         }
         let (explicit, _) = statement_and_value(line, name);
+        let explicit = match explicit.char_indices().nth(VALUE_CHARS) {
+            Some((end, _)) => format!("{} \u{2026}", &explicit[..end]),
+            None => explicit,
+        };
         let (statement, value) = statement_and_value(printed_as.take().unwrap_or(line), name);
         decls.push(json!({
             "name": name,

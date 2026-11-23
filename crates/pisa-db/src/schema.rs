@@ -247,6 +247,8 @@ diesel::table! {
         memory_caps_mb -> Nullable<BigInt>,
         host_memory_mb -> BigInt,
         boot_id -> Text,
+        toolchain -> Text,
+        packages -> Text,
     }
 }
 

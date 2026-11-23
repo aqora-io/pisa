@@ -58,31 +58,30 @@ macro_rules! can_run {
 /// `unclaimed`, counting from when it was enqueued, or `lapsed`, from when
 /// its last claim lapsed.
 ///
-/// A sync job waits its `max_wait`. An async one waits until a worker that
-/// [`can_run!`] it, and takes jobs, was seen live for its `max_wait` past
-/// then, without a break (see `workers.live_since_micros`), or until
-/// [`LOST_CEILING`] after it was enqueued. So it outlasts a restart of every
-/// worker that could run it, while its client, which isn't waiting on a
-/// request, looks again later.
-///
-/// An unclaimed async job is waited out at its `max_wait` also when no
-/// worker that could run it has a row, live or not: it is of a version no
-/// worker runs, rather than one restarting, since a worker's row is kept
-/// [`STALE_RETENTION`] after its last heartbeat, after a clean stop too.
-/// A lapsed one had a worker that could, so it waits.
+/// A sync job waits its `max_wait`. An async one waits at most until
+/// [`LOST_CEILING`] after it was enqueued, its client looking again later
+/// rather than waiting on a request:
+/// - Unclaimed, it waits while any worker that [`can_run!`] it has a row,
+///   live, busy or restarting, as its turn comes once a slot is free. It is
+///   waited out at its `max_wait` when none has: it is of a version no
+///   worker runs, rather than one restarting, since a worker's row is kept
+///   [`STALE_RETENTION`] after its last heartbeat, after a clean stop too.
+/// - Lapsed, it waits until a worker that could run it, and takes jobs, was
+///   seen live for its `max_wait` past then, without a break (see
+///   `workers.live_since_micros`), so it outlasts a restart of every worker
+///   that could run it.
 macro_rules! waited {
-    (unclaimed, $now:expr) => {
-        waited!(@ jobs::enqueued_micros, $now, or not(exists(
+    (unclaimed, $now:expr) => {{
+        let due = jobs::enqueued_micros.nullable() + jobs::max_wait_micros.nullable();
+        let unrun = not(exists(
             workers::table
                 .filter(workers::queue.eq(jobs::queue))
                 .filter(can_run!()),
-        )))
-    };
-    (lapsed, $now:expr) => {
-        waited!(@ jobs::lease_micros, $now)
-    };
-    (@ $since:expr, $now:expr $(, or $otherwise:expr)?) => {{
-        let due = $since.nullable() + jobs::max_wait_micros.nullable();
+        ));
+        waited!(@ due, $now, unrun)
+    }};
+    (lapsed, $now:expr) => {{
+        let due = jobs::lease_micros.nullable() + jobs::max_wait_micros.nullable();
         // The max wait from when a worker came live.
         let worker_due = workers::live_since_micros + jobs::max_wait_micros;
         // A worker that could run it and takes jobs, which heartbeat after
@@ -96,13 +95,18 @@ macro_rules! waited {
                 .filter(worker_due.le($now))
                 .filter(due.le(workers::seen_micros.nullable())),
         );
+        waited!(@ due, $now, live)
+    }};
+    // `$due` is when a sync job is waited out, and an async one too if
+    // `$async_out` then holds.
+    (@ $due:expr, $now:expr, $async_out:expr) => {{
         let ceiling = (jobs::enqueued_micros + micros(LOST_CEILING)).le($now);
         jobs::token
             .is_null()
-            .and(due.le($now))
+            .and($due.le($now))
             .or(jobs::token
                 .is_not_null()
-                .and(ceiling.or(due.le($now).and(live $(.or($otherwise))?))))
+                .and(ceiling.or($due.le($now).and($async_out))))
     }};
 }
 
@@ -816,6 +820,7 @@ async fn bury_answered(c: &mut Conn, q: &str, now: i64) -> Result<usize, DbError
 
 pub(crate) async fn register(db: &Handle, q: &str, r: &Registration) -> Result<i64, DbError> {
     let now = now();
+    let packages = serde_json::to_string(&r.packages).unwrap_or_else(|_| "[]".into());
     retry(|| async {
         let mut c = conn(db).await?;
         let row = || {
@@ -828,6 +833,8 @@ pub(crate) async fn register(db: &Handle, q: &str, r: &Registration) -> Result<i
                 workers::memory_caps_mb.eq(r.memory_caps_mb.map(|m| m as i64)),
                 workers::host_memory_mb.eq(r.host_memory_mb as i64),
                 workers::boot_id.eq(&r.boot_id),
+                workers::toolchain.eq(&r.toolchain),
+                workers::packages.eq(packages.as_str()),
                 workers::store_reachable.eq(None::<bool>),
                 workers::store_checked_micros.eq(None::<i64>),
                 workers::warm.eq(Value::Array(Vec::new())),
@@ -984,6 +991,8 @@ pub(crate) async fn pool_rows(
             workers::slots,
             workers::beam_slots,
             workers::draining,
+            workers::toolchain,
+            workers::packages,
         ))
         .order((workers::version, workers::name))
         .load(&mut *conn(db).await?)

@@ -7,6 +7,8 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+use crate::api::PoolPackage;
+
 /// How a request's version resolves: the default for a request that names
 /// none, and aliases, e.g. `physlib` for `v4.35.0-1a2b3c4d`.
 #[derive(Debug, Clone, Default)]
@@ -51,6 +53,45 @@ pub fn project_version(project: &Path) -> std::io::Result<String> {
     Ok(format!("{tag}-{}", hex::encode(&hasher.finalize()[..4])))
 }
 
+/// The toolchain `project` pins (its `lean-toolchain`, e.g.
+/// `leanprover/lean4:v4.36.0-rc2`) and the packages its `lake-manifest.json`
+/// pins: each empty if its file is missing or unreadable.
+pub fn project_pins(project: &Path) -> (String, Vec<PoolPackage>) {
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        #[serde(default)]
+        packages: Vec<Package>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Package {
+        name: String,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        rev: String,
+        #[serde(default, rename = "inputRev")]
+        input_rev: Option<String>,
+    }
+    let toolchain = std::fs::read_to_string(project.join("lean-toolchain"))
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default();
+    let manifest = std::fs::read(project.join("lake-manifest.json")).ok();
+    let packages = manifest
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+        .map(|m| m.packages)
+        .unwrap_or_default();
+    let packages = packages
+        .into_iter()
+        .map(|p| PoolPackage {
+            name: p.name,
+            url: p.url,
+            rev: p.rev,
+            input_rev: p.input_rev,
+        })
+        .collect();
+    (toolchain, packages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,6 +116,37 @@ mod tests {
         );
         std::fs::write(dir.join("notes.md"), "not Lean").unwrap();
         assert_eq!(project_version(&dir).unwrap(), with_root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn pins_are_the_toolchain_and_the_manifests_packages() {
+        let dir = std::env::temp_dir().join(format!("pisa-pins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(project_pins(&dir), (String::new(), Vec::new()));
+        std::fs::write(dir.join("lean-toolchain"), "leanprover/lean4:v4.35.0\n").unwrap();
+        let manifest = r#"{"version": "1.1.0", "packages": [
+            {"type": "git", "name": "cslib", "url": "https://github.com/leanprover/cslib",
+             "rev": "abc", "inputRev": "main", "inherited": false},
+            {"type": "path", "name": "local", "dir": "./local", "inherited": false}]}"#;
+        std::fs::write(dir.join("lake-manifest.json"), manifest).unwrap();
+        let (toolchain, packages) = project_pins(&dir);
+        assert_eq!(toolchain, "leanprover/lean4:v4.35.0");
+        assert_eq!(
+            packages,
+            [
+                PoolPackage {
+                    name: "cslib".into(),
+                    url: Some("https://github.com/leanprover/cslib".into()),
+                    rev: "abc".into(),
+                    input_rev: Some("main".into()),
+                },
+                PoolPackage {
+                    name: "local".into(),
+                    ..PoolPackage::default()
+                },
+            ]
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

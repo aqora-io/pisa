@@ -142,6 +142,31 @@ async fn a_refused_type_that_prints_alike_is_shown_with_every_argument() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_type_alike_as_far_as_the_export_prints_says_the_difference_is_further() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let long = vec!["1 = 1"; 1000].join(" ∧ ");
+    let spec = format!("import Foo\n\ntheorem t : {long} := sorry");
+    let old = entry(&create(&c, json!({"code": spec})).await).to_string();
+    // Differs only past the characters the export prints of the type with
+    // every argument shown.
+    let hidden = format!(
+        "import Foo\n\n-- printed-as: theorem t : {long} := rfl\ntheorem t : {long} ∧ True := rfl"
+    );
+    let r = create(&c, json!({"code": hidden, "replaces": replacing(&old)})).await;
+    let change = &r["check"]["changes"][0];
+    assert_eq!(change["change"], "type", "{r}");
+    assert_eq!(change["explicit_alike_chars"], 4000, "{r}");
+    assert!(change.get("was_explicit").is_none(), "{r}");
+    assert!(
+        r["check"]["reasons"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("for the first 4000 characters, which is as far as the exports print it: the types differ after that"),
+        "{r}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_check_against_a_spec_says_which_statements_it_changes() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = "import Foo\n\ndef f : Nat := 1\ntheorem t : 1 = 1 := sorry";
@@ -1019,6 +1044,47 @@ async fn a_check_a_document_or_a_session_on_a_clashing_header_is_refused() {
     let one = on(&proof, "theorem u : 1 = 1 := t");
     let (_, checked) = c.post("/check", json!({"code": one})).await;
     assert!(checked["error"].is_null(), "{checked}");
+}
+
+/// Two snapshots that each copied one file's code declare its names alike,
+/// and the refusal says to import that code instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clash_on_copied_code_says_to_import_it() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let copied = "def helper : Nat := 1";
+    let a = create(
+        &c,
+        json!({"code": format!("import Foo\n\n{copied}\ntheorem a : 1 = 1 := rfl")}),
+    )
+    .await;
+    let b = create(
+        &c,
+        json!({"code": format!("import Foo\n\n{copied}\ntheorem b : 1 = 1 := rfl")}),
+    )
+    .await;
+    let other = create(&c, json!({"code": "import Foo\n\ndef helper : Nat := 2"})).await;
+    let message = |r: &Value| r["error"]["message"].as_str().unwrap().to_string();
+    let both = format!(
+        "import {}\nimport {}\n\ntheorem t : 1 = 1 := rfl",
+        module(&a),
+        module(&b)
+    );
+    let (_, r) = c.post("/check", json!({"code": both})).await;
+    assert_eq!(r["error"]["kind"], "bad_request", "{r}");
+    assert!(message(&r).contains("each declare helper"), "{r}");
+    assert!(
+        message(&r).contains("and import it rather than copy it"),
+        "{r}"
+    );
+    // Declared otherwise, it is no copy.
+    let both = format!(
+        "import {}\nimport {}\n\ntheorem t : 1 = 1 := rfl",
+        module(&a),
+        module(&other)
+    );
+    let (_, r) = c.post("/check", json!({"code": both})).await;
+    assert!(message(&r).contains("each declare helper"), "{r}");
+    assert!(!message(&r).contains("copied"), "{r}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

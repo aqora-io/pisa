@@ -119,11 +119,12 @@ that Compose and the chart set:
     document, has been live that long since the lapse, so it outlasts a
     restart of every such worker, or of the whole host; it is given up 24
     hours after it was queued at the latest. An async job no worker has
-    claimed yet waits the same way, from when it was queued, unless no
-    worker that can run it is on record (a worker is from when it registers
-    until an hour after it was last seen, even once it stopped cleanly, so
-    a reboot doesn't clear it): then it gets a 429 after
-    `PISA_MAX_WAIT_SECS`.
+    claimed yet waits, up to those 24 hours, while a worker that can run it
+    is on record, live, busy or restarting (a worker is from when it
+    registers until an hour after it was last seen, even once it stopped
+    cleanly, so a reboot doesn't clear it): its turn comes when a slot is
+    free, however long the jobs ahead of it take. With none on record it
+    gets a 429 after `PISA_MAX_WAIT_SECS`.
   - The tests use in-memory SQLite, and also the PostgreSQL that
     `PISA_TEST_DATABASE_URL` names when it is set. Each test has versions of
     its own there, so tests can share one database.
@@ -168,15 +169,22 @@ of workers on the same servers, database and store:
   --build-arg REPL_REV=<the same Lean> -t pisa-worker:<name> .` takes the
   project from `<dir>` in place of `docker/${PROJECT}`. Mathlib, if the
   manifest has it, comes from its cache; the rest compiles once. Workers
-  replay the builds read-only, so build what agents import.
+  replay the builds read-only, so build what agents import. Pisa's own Lean
+  tool (`docker/pisa-lean`) is built on the project's toolchain, which has
+  to be Lean 4.34.1 or later: the kernel re-check uses
+  `Lean.Kernel.Environment.replay`.
 - **Running it.** A Compose service for it extends `worker` with that image
   (Compose resolves `extends: file:` against the project directory). Its
   workers register their version: `/health` lists each pool's in `pools`,
+  with the toolchain and the Lake packages its project pins, so an agent
+  can pick the pool that has a library,
   and requests reach it by naming that `version`, or by
   [`PISA_ALIASES`](#versions) and `PISA_DEFAULT_VERSION`. Snapshot ids carry
   their version, so requests about a snapshot need none.
 - **What it lacks.** Search indexes one version (see [Limits](#limits)), so
-  agents on the new pool find names with `#check`, `#print` and `exact?`.
+  agents on the new pool find names with `#check`, `#print` and `exact?`;
+  a search that names another version answers `not_found`, saying which
+  version search covers and that `/health` lists the pools.
   [Acceptance](#comparator) replays what each pair imports, so a large
   library costs minutes per pair.
 
@@ -569,7 +577,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status, progress?: {phase: {name, pair?, side?}, kernel?, seconds, peak_memory_mb?}}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
-| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, pools, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the live workers by the version they serve, a pool each (`[{version, workers, slots, beam_slots, draining}]`, `null` if the queue can't be read; see [A pool for another project](#another-project)), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
+| `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, pools, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the live workers by the version they serve, a pool each (`[{version, workers, slots, beam_slots, draining, toolchain, packages: [{name, url?, rev, input_rev?}]}]`, with the toolchain and the Lake packages its project pins, empty for workers from before they said, `null` if the queue can't be read; see [A pool for another project](#another-project)), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
 Browsers may call the API from other origins only when the server allows
 them: `PISA_CORS_ORIGINS` (`--cors-origin`, the chart's `server.corsOrigins`)
@@ -617,10 +625,12 @@ would have:
 - `GET /jobs/{id}?wait=30` waits up to `wait` seconds (at most 60) and, once
   the job is done, answers 200 `{id, kind, status: "done", http_status,
   body}`: the status and the answer the request would have had, errors
-  included, e.g. an `http_status` of 429 when no live worker took it in
-  time, or 503 `worker_lost` when the job was lost (see
-  [When a worker is lost](#worker-lost)). While no worker is live, e.g. across a restart, the job waits for
-  one to come back, up to a day.
+  included, e.g. an `http_status` of 429 when no worker of its version is
+  on record, or 503 `worker_lost` when the job was lost (see
+  [When a worker is lost](#worker-lost)). While every worker that could
+  run it is busy, or none is live, e.g. across a restart, the job waits for
+  a slot, up to a day: a sync request on a busy pool gets a 429 after
+  `PISA_MAX_WAIT_SECS`, so send long builds and acceptances async.
   Until then it answers 202 with `status` `queued` or `running`, and for a
   run's acceptance `progress`, what its worker last said it was doing (see
   [Progress](#accept-progress)). It answers
@@ -2149,6 +2159,13 @@ POST /snapshots/settle {"against": ["…~9c0e…", "…~5d1f…"], "dry_run": tr
 a parent's declarations, instances, `@[simp]` lemmas and notation, but not its
 `private` declarations, `open`s, `variable`s, `set_option`s or unclosed
 sections. Re-open what a chunk needs.
+
+**Several files.** A request is one module, so send a project's files one at
+a time, imports first, each as a snapshot or a [named run](#run-names) that
+the files using it import. Pasting them into one request instead makes them
+one file: one's `private` names, `open`s and scoped notation reach the next,
+and two snapshots that each paste a file's code declare its names twice, so
+no code can import both.
 
 **Module-system code.** A chunk can be a module-system file (`module`,
 `public import`, `@[expose]`):
