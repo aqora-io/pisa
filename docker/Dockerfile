@@ -4,7 +4,7 @@
 #   docker build -f docker/Dockerfile --target worker .
 #   docker build -f docker/Dockerfile --target corpus --output search/corpus .
 # Set PROJECT=lean-core for a small image without Mathlib, for quick tests
-# (not for `corpus`, which exports Mathlib and Physlib).
+# (not for `corpus`, which exports Mathlib, Physlib and CSLib).
 # Add --build-arg REVISION=<commit> to name the commit: the binaries report it
 # (`/health`), and the image carries it as its revision label.
 
@@ -50,12 +50,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 ENV ELAN_HOME=/opt/elan PATH=/opt/elan/bin:$PATH
-ARG LEAN_TOOLCHAIN=leanprover/lean4:v4.36.0-rc2
+ARG LEAN_TOOLCHAIN=leanprover/lean4:v4.36.0
 RUN curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
     | sh -s -- -y --no-modify-path --default-toolchain ${LEAN_TOOLCHAIN}
 # The REPL must be built with exactly the project's toolchain. The patch adds
 # `infotreeAt`, which prints the info tree only at given positions.
-ARG REPL_REV=v4.36.0-rc2
+ARG REPL_REV=v4.36.0
 COPY docker/repl/infotree-at.patch /tmp/infotree-at.patch
 RUN git clone --depth 1 --branch ${REPL_REV} https://github.com/leanprover-community/repl /opt/repl \
     && cd /opt/repl && git apply /tmp/infotree-at.patch && lake build \
@@ -64,7 +64,7 @@ COPY --from=project / /opt/project
 WORKDIR /opt/project
 # Dependencies follow the committed lake-manifest.json; without one, resolve them.
 # Mathlib, required directly or through another package, comes prebuilt from
-# its cache; Physlib compiles from source (slow, once).
+# its cache; Physlib and CSLib compile from source (slow, once).
 RUN if [ ! -f lake-manifest.json ]; then lake update; fi \
     && if grep -q '"name": "mathlib"' lake-manifest.json; then lake exe cache get; fi \
     && lake build
@@ -104,20 +104,21 @@ LABEL org.opencontainers.image.revision=$REVISION
 ENTRYPOINT ["tini", "--", "pisa-worker"]
 
 # Exports every declaration of the project (about 30 minutes) and ingests it.
-# Mathlib, Physlib, QuantumInfo and PhyslibAlpha import together, so they are
-# exported from one environment; the declarations of the last two record the
-# header that loads them besides the default imports.
+# Mathlib, Physlib, QuantumInfo, PhyslibAlpha and Cslib import together, so
+# they are exported from one environment; the declarations of the last three
+# record the header that loads them besides the default imports.
 FROM lean AS search-export
 COPY search/exporter /opt/exporter
 COPY --from=build-server /usr/local/bin/pisa-search /usr/local/bin/
 RUN lake env lean --run /opt/exporter/PisaExport.lean --env all \
-        Mathlib Physlib QuantumInfo PhyslibAlpha > /tmp/decls.ndjson \
-    && lake env lean --run /opt/exporter/ToAdditive.lean Mathlib Physlib QuantumInfo PhyslibAlpha \
-        > /tmp/additive.ndjson \
+        Mathlib Physlib QuantumInfo PhyslibAlpha Cslib > /tmp/decls.ndjson \
+    && lake env lean --run /opt/exporter/ToAdditive.lean \
+        Mathlib Physlib QuantumInfo PhyslibAlpha Cslib > /tmp/additive.ndjson \
     && pisa-search ingest --export /tmp/decls.ndjson --export /tmp/additive.ndjson \
         --project /opt/project --out /corpus \
         --library-imports "QuantumInfo=Mathlib,Physlib,QuantumInfo" \
-        --library-imports "PhyslibAlpha=Mathlib,Physlib,PhyslibAlpha"
+        --library-imports "PhyslibAlpha=Mathlib,Physlib,PhyslibAlpha" \
+        --library-imports "Cslib=Mathlib,Cslib"
 
 FROM scratch AS corpus
 COPY --from=search-export /corpus /

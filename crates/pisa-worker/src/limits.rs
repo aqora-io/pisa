@@ -1,5 +1,7 @@
-//! Lean's runtime limits, which Beam reports as a failed tool call.
+//! Lean's runtime limits, which Beam reports as a failed run (as a failed
+//! tool call before Lean 4.36.0).
 
+use pisa_beam::RunResult;
 use pisa_protocol::api::{Error, ErrorKind, LeanLimit};
 
 /// Lean's default `maxRecDepth`.
@@ -35,6 +37,18 @@ pub fn lean_limit(code: &str, message: &str, code_text: &str) -> Option<Error> {
         phase,
         message,
     ))
+}
+
+/// The error for a failed `run` whose error is Lean reaching its recursion
+/// or heartbeat limit, as [`lean_limit`]; the tactic's error nests Lean's.
+pub fn limit_in(run: &RunResult, code_text: &str) -> Option<Error> {
+    if run.success {
+        return None;
+    }
+    run.messages
+        .iter()
+        .filter(|m| m.severity == "error")
+        .find_map(|m| lean_limit("", &m.text, code_text))
 }
 
 fn limited(
@@ -163,5 +177,41 @@ mod tests {
     #[test]
     fn a_worker_exit_stays_unavailable() {
         assert!(lean_limit("workerExited", RECURSION, "").is_none());
+    }
+
+    fn run(success: bool, messages: &[(&str, &str)]) -> RunResult {
+        let messages: Vec<_> = messages
+            .iter()
+            .map(|(severity, text)| serde_json::json!({"severity": severity, "text": text}))
+            .collect();
+        serde_json::from_value(serde_json::json!({"success": success, "messages": messages}))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_failed_run_names_the_limit_its_error_nests() {
+        let nested = format!("Tactic `simp` failed with a nested error:\n{RECURSION}");
+        let failed = run(
+            false,
+            &[
+                ("warning", "Possibly looping simp theorem"),
+                ("error", &nested),
+            ],
+        );
+        let error = limit_in(&failed, "simp").unwrap();
+        assert_eq!(error.message, nested);
+        assert_eq!(limit(error).0, ErrorKind::RecursionLimit);
+        let slow = run(false, &[("error", HEARTBEAT)]);
+        assert_eq!(
+            limit(limit_in(&slow, "").unwrap()).0,
+            ErrorKind::HeartbeatLimit
+        );
+    }
+
+    #[test]
+    fn other_runs_have_no_limit() {
+        assert!(limit_in(&run(false, &[("error", "unknown constant")]), "").is_none());
+        assert!(limit_in(&run(false, &[("warning", RECURSION)]), "").is_none());
+        assert!(limit_in(&run(true, &[("error", RECURSION)]), "").is_none());
     }
 }

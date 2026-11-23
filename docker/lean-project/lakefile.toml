@@ -1,17 +1,23 @@
-# The project every worker serves: Physlib, and Mathlib through it.
-# Bump all revs together with lean-toolchain and REPL_REV in worker.Dockerfile.
+# The project every worker serves: Mathlib, Physlib and CSLib.
+# Bump all revs together with lean-toolchain, and LEAN_TOOLCHAIN and REPL_REV
+# in docker/Dockerfile.
 name = "pisa_project"
 defaultTargets = ["PisaProject"]
 
 [[require]]
 name = "mathlib"
 git = "https://github.com/leanprover-community/mathlib4.git"
-rev = "v4.36.0-rc2"
+rev = "v4.36.0"
 
 [[require]]
 name = "Physlib"
-git = "https://github.com/aqora-io/physlib.git"
-rev = "lean-v4.36.0-rc2"
+git = "https://github.com/leanprover-community/physlib.git"
+rev = "v4.36.0"
+
+[[require]]
+name = "cslib"
+git = "https://github.com/leanprover/cslib.git"
+rev = "v4.36.0"
 
 # Importing this builds everything a request may import.
 [[lean_lib]]

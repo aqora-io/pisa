@@ -156,24 +156,25 @@ def valueOf (env : Environment) (ci : ConstantInfo) : MetaM (Option String) := d
   let compiled := value.getUsedConstants.any fun c =>
     c == ``WellFounded.fix || c matches .str _ "brecOn" || c matches .str _ "binductionOn"
   if compiled then return none
-  try
-    lambdaBoundedTelescope value (signatureArity ci.type) fun _ body => do
+  tryCatchRuntimeEx
+    (lambdaBoundedTelescope value (signatureArity ci.type) fun _ body => do
       let mut core := body
       while core.isLet do core := core.letBody!
       let inhabitant := core.getAppFn.isConstOf ``Inhabited.default ||
         core.getAppFn.isConstOf ``Classical.ofNonempty
       if ci matches .opaqueInfo _ && inhabitant then return none
       let s := (← ppExpr body).pretty 120
-      return some (if s.length > valueCap then (s.take valueCap).toString ++ " …" else s)
-  catch _ => return none
+      return some (if s.length > valueCap then (s.take valueCap).toString ++ " …" else s))
+    fun _ => return none
 
 def names (ns : Array Name) : Json := toJson (ns.map toString)
 
-/-- The record for one declaration, or `none` if Lean fails on it. -/
+/-- The record for one declaration, or `none` if Lean fails on it, its
+recursion and heartbeat limits included (which `try` doesn't catch). -/
 def exportDecl (env : Environment) (envLabel : String) (modules : Std.HashMap Name Name)
     (kept : Std.HashSet Name)
-    (sorried : Std.HashMap Name Bool) (n : Name) (ci : ConstantInfo) : MetaM (Option Json) := do
-  try
+    (sorried : Std.HashMap Name Bool) (n : Name) (ci : ConstantInfo) : MetaM (Option Json) :=
+  tryCatchRuntimeEx (do
     let signature ← withOptions (fun o => o |>.setBool `pp.deepTerms true
         |>.set `pp.deepTerms.threshold (10000 : Nat) |>.set `pp.maxSteps (100000 : Nat)) do
       return fmt (← PrettyPrinter.ppSignature n)
@@ -189,11 +190,11 @@ def exportDecl (env : Environment) (envLabel : String) (modules : Std.HashMap Na
     let ranges ← findDeclarationRanges? n
     let deprecated := Linter.deprecatedAttr.getParam? env n
     let conclKeys ← if ci matches .thmInfo _ then
-        try
+        tryCatchRuntimeEx (do
           let (_, _, concl) ← forallMetaTelescopeReducing ci.type
           let keys ← DiscrTree.mkPath concl
-          pure (keys.map fun k => (format k).pretty)
-        catch _ => pure #[]
+          pure (keys.map fun k => (format k).pretty))
+          fun _ => pure #[]
       else pure #[]
     let value ← valueOf env ci
     let informal := isInformal ci
@@ -225,10 +226,10 @@ def exportDecl (env : Environment) (envLabel : String) (modules : Std.HashMap Na
       ("uses_sorry", toJson (sorried.getD n false)),
       ("informal", toJson informal),
       ("informal_deps", names informalDeps),
-      ("concl_keys", toJson conclKeys)]
-  catch e =>
-    IO.eprintln s!"skipping {n}: {← e.toMessageData.toString}"
-    return none
+      ("concl_keys", toJson conclKeys)])
+    fun e => do
+      IO.eprintln s!"skipping {n}: {← e.toMessageData.toString}"
+      return none
 
 unsafe def main (args : List String) : IO UInt32 := do
   let rec parse : List String → String × Bool × List Name → String × Bool × List Name

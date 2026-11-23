@@ -1479,7 +1479,7 @@ mod tests {
         assert_eq!((large.pairs[0].output.as_str(), large.accepted), ("", true));
     }
 
-    /// What comparator printed, as Lake 4.36.0-rc2's `CLI/Check.lean`,
+    /// What comparator printed, as Lake 4.36.0's `CLI/Check.lean`,
     /// `Check/Compare.lean` and `Check/Axioms.lean` print it, and how it
     /// exited: with no `code`, its time limit killed it.
     fn ran(code: Option<i32>, output: &str) -> Ran {

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::db::DbError;
-use crate::limits::lean_limit;
+use crate::limits::{lean_limit, limit_in};
 use crate::records::StateRow;
 use crate::sessions::SessionMeta;
 
@@ -223,7 +223,9 @@ impl Documents {
             }
         };
         if !r.success {
-            return Err(Error::new(ErrorKind::Lean, errors(&r)));
+            return Err(
+                limit_in(&r, &j.tactic).unwrap_or_else(|| Error::new(ErrorKind::Lean, errors(&r)))
+            );
         }
         let child = child_id(state, &j.tactic);
         let next = StateRow {

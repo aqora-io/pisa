@@ -40,7 +40,7 @@ fn cannot_run(message: &str) -> ! {
 }
 
 /// The constants the kernel builds in, which Lake exports from both sides
-/// after the theorems and axioms, as Lake 4.36.0-rc2's `CLI/Check.lean`
+/// after the theorems and axioms, as Lake 4.36.0's `CLI/Check.lean`
 /// lists them (`primitiveTargets`).
 const PRIMITIVES: [&str; 26] = [
     "Nat.add",

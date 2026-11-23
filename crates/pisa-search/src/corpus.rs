@@ -368,6 +368,7 @@ pub fn source_prefixes(lake_manifest: &str) -> anyhow::Result<BTreeMap<String, S
             "mathlib" => vec!["Mathlib"],
             "batteries" => vec!["Batteries"],
             "Physlib" => vec!["Physlib", "QuantumInfo", "PhyslibAlpha"],
+            "cslib" => vec!["Cslib"],
             other => vec![other],
         };
         for root in roots {
@@ -573,7 +574,8 @@ pub mod tests {
         )
         .unwrap();
         let lake = r#"{"packages":[{"name":"mathlib","url":"https://github.com/leanprover-community/mathlib4.git","rev":"abc"},
-                       {"name":"Physlib","url":"https://github.com/leanprover-community/physlib.git","rev":"def"}]}"#;
+                       {"name":"Physlib","url":"https://github.com/leanprover-community/physlib.git","rev":"def"},
+                       {"name":"cslib","url":"https://github.com/leanprover/cslib.git","rev":"ghi"}]}"#;
         let lake_path = dir.path().join("lake-manifest.json");
         std::fs::write(&lake_path, lake).unwrap();
         let corpus = ingest(
@@ -608,6 +610,11 @@ pub mod tests {
         assert_eq!(
             corpus.manifest.sources["PhyslibAlpha"],
             "https://github.com/leanprover-community/physlib/blob/def/"
+        );
+        // CSLib's package is `cslib`, and its library `Cslib`.
+        assert_eq!(
+            corpus.manifest.sources.get("Cslib").map(String::as_str),
+            Some("https://github.com/leanprover/cslib/blob/ghi/")
         );
 
         let out = dir.path().join("corpus");

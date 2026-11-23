@@ -45,7 +45,7 @@ imports it instead of re-checking it.
 | `pisa-client` | Async Rust client for the HTTP API |
 | `pisa-python` | Python bindings for `pisa-client` (PyO3 + maturin), imported as `pisa_client` |
 | `pisa-tests` | `fake-repl`, `fake-pisa` and `fake-lean` (stand-ins for the REPL, the `pisa` tool and `lean`, without Lean) and in-process integration tests |
-| `pisa-search` | Declaration search over Mathlib and Physlib: corpus, descriptions, index, HTTP API, and the CLI that builds and loads bundles (see [Search](#search)) |
+| `pisa-search` | Declaration search over Mathlib, Physlib and CSLib: corpus, descriptions, index, HTTP API, and the CLI that builds and loads bundles (see [Search](#search)) |
 
 `web/` is a pnpm workspace with the TypeScript client, the React hooks and a
 playground (see [Clients](#clients)).
@@ -53,7 +53,7 @@ playground (see [Clients](#clients)).
 ## Running
 
 ```sh
-docker compose up --build              # Lean v4.36.0-rc2 + Mathlib + Physlib (first build compiles Physlib)
+docker compose up --build              # Lean v4.36.0 + Mathlib + Physlib + CSLib (first build compiles Physlib and CSLib)
 PROJECT=lean-core docker compose up --build   # no Mathlib, for quick checks
 python3 scripts/e2e.py [--mathlib] [--search] [--beam]   # end-to-end checks against the running stack
 cargo test --workspace                 # fast tests with fake-repl, no Lean needed
@@ -1798,8 +1798,8 @@ builds with `lake build` and that comparator accepts it there.
     Lean's (`Init`, `Lean`, `Std`, `Lake`), Mathlib's nor of a package
     Mathlib builds on (`Batteries`, `Aesop`, `Qq`, `ProofWidgets`,
     `Plausible`, `ImportGraph`, `LeanSearchClient`, `Cli`). That is an
-    allowlist: the worker's Physlib, `QuantumInfo` and `PhyslibAlpha`, and
-    whatever the worker's project adds, are refused.
+    allowlist: the worker's Physlib, `QuantumInfo`, `PhyslibAlpha` and
+    `Cslib`, and whatever else the worker's project adds, are refused.
 
   New headers and names change what Lean builds: build the package, judge
   it with comparator, and cross-check it in pisa before publishing it.
@@ -2549,7 +2549,7 @@ until they are regenerated after the spec changes.
 
 ## Search
 
-Search finds Mathlib and Physlib declarations from a description,
+Search finds Mathlib, Physlib and CSLib declarations from a description,
 LaTeX, a Lean pattern or goal, or a partial or misspelled name. It is meant for
 agents that know what they need but not what it is called. Its index is built
 from the same pinned project as the workers, and every response carries that
@@ -2644,7 +2644,7 @@ directories, each with `NOTICE`:
 # Serve a published index (the repository is private, so gh must be logged in).
 # Swap bundle for store or corpus to fetch the others.
 gh release list -R aqora-io/pisa
-gh release download index-v4.36.0-rc2-1e541805 -R aqora-io/pisa -p bundle.tar.zst -O - \
+gh release download index-v4.36.0-54500a67 -R aqora-io/pisa -p bundle.tar.zst -O - \
   | tar -I zstd -x -C search
 docker compose --profile search-load run --rm search-load   # into Qdrant, once
 PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
@@ -2691,7 +2691,7 @@ pisa-search carry --from search/work/corpus-previous --corpus search/corpus --in
 pisa-search import-lsv2 --corpus search/corpus --file search/lsv2.jsonl --informal search/store
 # Describe everything else with Claude (needs ANTHROPIC_API_KEY), and embed every
 # declaration as its description lands (needs SCW_SECRET_KEY). Try --sample 500 first.
-LIBS=Mathlib,Physlib,PhyslibAlpha,Batteries,Init,Std,QuantumInfo
+LIBS=Mathlib,Physlib,PhyslibAlpha,Batteries,Init,Std,QuantumInfo,Cslib
 EMBEDDER="openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"
 pisa-search embed --corpus search/corpus --informal search/store --libraries $LIBS \
   --embedder "$EMBEDDER" --label qwen3-embedding-8b@scaleway --batch 32 --concurrency 32 \
@@ -2936,12 +2936,14 @@ is the model, or `null` if no snapshot code is sent to one (also when
   a full-run estimate, check pass rates and samples to review.
 
 **Imports.** Most of the index loads with `import Mathlib` and `import Physlib`.
-Mathlib, Physlib, QuantumInfo (density matrices, entropies, channels) and
-PhyslibAlpha (Physlib's lightly reviewed, often AI-written contributions) import
-together, so the index is exported from one environment. A QuantumInfo or
-PhyslibAlpha hit carries the header that loads it, one import a line, in
-`flags.imports` (`import Mathlib`, `import Physlib`, `import QuantumInfo`) and
-in its `text`, and `/resolve` gives it for a name and each suggestion.
+Mathlib, Physlib, QuantumInfo (density matrices, entropies, channels),
+PhyslibAlpha (Physlib's lightly reviewed, often AI-written contributions) and
+CSLib (automata, computability, semantics, algorithms) import together, so the
+index is exported from one environment. A QuantumInfo, PhyslibAlpha or CSLib
+hit carries the header that loads it, one import a line, in `flags.imports`
+(`import Mathlib`, `import Physlib`, `import QuantumInfo`; `import Mathlib`,
+`import Cslib` for CSLib) and in its `text`, and `/resolve` gives it for a name
+and each suggestion.
 PhyslibAlpha is searched by default; `libraries` narrows a search to the
 reviewed ones. An index exported before this, from three environments, has
 `import Physlib; import QuantumInfo` there, until it is exported again.

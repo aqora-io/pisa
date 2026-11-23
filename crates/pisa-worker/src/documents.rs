@@ -41,7 +41,7 @@ use crate::check::{policy_error, round6};
 use crate::config::WorkerConfig;
 use crate::db::Db;
 use crate::launcher::Launcher;
-use crate::limits::lean_limit;
+use crate::limits::{lean_limit, limit_in};
 use crate::policy::header_command;
 use crate::pool::Pool;
 use crate::records::{DocumentRow, Records};
@@ -848,7 +848,11 @@ impl Documents {
             results.push(match run {
                 Ok(r) => {
                     self.answered(open.slot);
-                    open.map.probe_result(candidate, r, lsp)
+                    let code = format!("{}\n{candidate}", open.map.text());
+                    match limit_in(&r, &code) {
+                        Some(limit) => refused(limit),
+                        None => open.map.probe_result(candidate, r, lsp),
+                    }
                 }
                 Err(BeamError::Timeout) => {
                     self.timed_out(open.slot, &open.beam).await;

@@ -28,7 +28,7 @@ use crate::snapshots::link_or_copy;
 const KEPT_EXPORTS: usize = 64;
 
 /// The constants the kernel builds in, which Lake exports from both sides
-/// of a pair, as Lake 4.36.0-rc2 lists them (`primitiveTargets`,
+/// of a pair, as Lake 4.36.0 lists them (`primitiveTargets`,
 /// `src/lean/lake/Lake/CLI/Check.lean:474-507`).
 const PRIMITIVE_TARGETS: [&str; 26] = [
     "Nat.add",

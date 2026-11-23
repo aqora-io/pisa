@@ -7,7 +7,7 @@ React, see `@aqora/pisa-react`.
 ```ts
 import { PisaClient, isLeanError, proofText } from "@aqora/pisa-client";
 
-const pisa = new PisaClient({ url: "http://localhost:8000", version: "v4.36.0-rc2-1e541805" });
+const pisa = new PisaClient({ url: "http://localhost:8000", version: "v4.36.0-54500a67" });
 
 const result = await pisa.check("import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num");
 result.ok; // the verdict; a check that couldn't complete has `error` set

@@ -51,7 +51,7 @@ theorem double_add (a b : Nat) : double (a + b) = double a + double b := by
 ";
 
 #[tokio::test]
-#[ignore = "needs elan Lean 4.36.0-rc2"]
+#[ignore = "needs elan Lean 4.36.0"]
 async fn tactics_chain_from_a_sorry_and_the_file_saves() {
     let tmp = tempfile::tempdir().unwrap();
     let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
@@ -118,7 +118,7 @@ async fn tactics_chain_from_a_sorry_and_the_file_saves() {
 }
 
 #[tokio::test]
-#[ignore = "needs elan Lean 4.36.0-rc2 and the Pisa library built"]
+#[ignore = "needs elan Lean 4.36.0 and the Pisa library built"]
 async fn the_axiom_report_runs_as_a_command_probe() {
     let pisa =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docker/pisa-lean/.lake/build/lib/lean");
@@ -238,11 +238,12 @@ async fn goals_tell_a_finished_proof_from_no_proof() {
     assert!(goals(at(4, 2), Mode::After).await.unwrap().is_empty());
 }
 
-/// A looping `simp` fails as a Beam tool error, which the worker reads as
-/// Lean's recursion limit, and the next probe runs.
+/// A looping `simp` is a failed run whose error nests Lean's recursion
+/// limit, which the worker reads as that limit, and the next probe runs.
+/// (Before Lean 4.36.0, Beam answered it as a tool error.)
 #[tokio::test]
 #[ignore = "needs elan and the Pisa library's toolchain"]
-async fn a_looping_simp_is_a_tool_error_with_leans_message() {
+async fn a_looping_simp_is_a_failed_run_with_leans_message() {
     let tmp = tempfile::tempdir().unwrap();
     let ws = Workspace::bare(tmp.path(), &toolchain(), "Docs").unwrap();
     let text = "example (a b n : Nat) : (a + b) % n = 0 := by\n  sorry\n";
@@ -255,13 +256,13 @@ async fn a_looping_simp_is_a_tool_error_with_leans_message() {
     let looped = beam
         .run_at(doc, sync.version, at, "simp only [Nat.add_mod]", T)
         .await;
-    let Err(pisa_beam::BeamError::Tool { code, message, .. }) = looped else {
-        panic!("not a tool error: {looped:?}");
-    };
-    println!("Beam's code: {code}");
+    let looped = looped.unwrap();
+    assert!(!looped.success);
     assert!(
-        message.contains("maximum recursion depth has been reached"),
-        "{message}"
+        looped.messages.iter().any(|m| m.severity == "error"
+            && m.text.contains("maximum recursion depth has been reached")),
+        "{:?}",
+        looped.messages
     );
     let next = beam.run_at(doc, sync.version, at, "skip", T).await.unwrap();
     assert!(next.success, "{:?}", next.messages);

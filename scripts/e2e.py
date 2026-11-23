@@ -3,7 +3,7 @@
 
     PROJECT=lean-core docker compose up -d --build
     python3 scripts/e2e.py            # core checks
-    python3 scripts/e2e.py --mathlib  # also Mathlib and Physlib (full image)
+    python3 scripts/e2e.py --mathlib  # also Mathlib, Physlib and CSLib (full image)
     python3 scripts/e2e.py --search   # also snapshot search (PISA_SEARCH_QDRANT
                                       # set and compose --profile search)
     python3 scripts/e2e.py --beam     # also open documents
@@ -962,8 +962,10 @@ def mathlib():
     assert r["ok"], r
     r = check("import Mathlib\nimport PhyslibAlpha\n#check ClassicalFieldTheory.Local.Lagrangian")
     assert r["ok"], r
-    # So the search index is exported from all four together.
-    r = check("import Mathlib\nimport Physlib\nimport QuantumInfo\nimport PhyslibAlpha\n#check MState")
+    r = check("import Mathlib\nimport Cslib\n#check Cslib.LTS")
+    assert r["ok"], r
+    # So the search index is exported from all five together.
+    r = check("import Mathlib\nimport Physlib\nimport QuantumInfo\nimport PhyslibAlpha\nimport Cslib\n#check MState")
     assert r["ok"], r
     r = check("import Physlib\n\n#check SpaceTime")
     assert r["messages"][0]["pos"]["line"] == 3, r
@@ -973,7 +975,7 @@ def mathlib():
     assert "error" not in s, s
     done = post(f"/states/{s['states'][0]['id']}/tactic", {"tactic": "positivity"})
     assert done["complete"], done
-    step("Mathlib and Physlib")
+    step("Mathlib, Physlib and CSLib")
 
 
 if __name__ == "__main__":

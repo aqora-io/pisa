@@ -50,6 +50,13 @@ async fn client_covers_checks_and_sessions() {
         .await
         .unwrap_err();
     assert_eq!(err.kind(), Some(ErrorKind::Lean));
+    // Lean's limits have kinds of their own, though Beam answers them as a
+    // failed run.
+    let err = client
+        .apply_tactic(&step.state.id, "RECURSION")
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), Some(ErrorKind::RecursionLimit));
     let verdict = client
         .check_session(&s.id, "theorem t : 1 = 1 := by rfl")
         .await

@@ -58,7 +58,7 @@ worker:
   image:
     # Built from docker/Dockerfile (target worker), with
     # `--build-arg REVISION=<commit>` as the server's. The default project
-    # bundles Lean v4.36.0-rc2 with Mathlib and Physlib.
+    # bundles Lean v4.36.0 with Mathlib, Physlib and CSLib.
     repository: pisa-worker
     tag: lean-project
     pullPolicy: IfNotPresent
@@ -159,7 +159,7 @@ keda:
 # works.
 search:
   enabled: false
-  # The env_id of the bundle loaded into Qdrant, e.g. v4.36.0-rc2-1e541805. Required.
+  # The env_id of the bundle loaded into Qdrant, e.g. v4.36.0-54500a67. Required.
   envId: ""
   # Embeds queries and snapshot declarations; it must serve the model that
   # embedded the bundle. See `pisa-search embed`.
