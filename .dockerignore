@@ -1,10 +1,18 @@
-target
-.git
-.jj
-search/corpus
-search/bundle
-search/store
-search/work
-search/lsv2.jsonl
+# The images are built from what is listed here and nothing else, so the
+# rest of the checkout (keys in .envrc, search data, node_modules) never
+# reaches a build.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!docker
+!search/symbols.toml
+!search/glossary
+!search/exporter
+# Within those, never what a build or a test left behind.
+**/target
 **/.lake
-environments
+**/__pycache__
+**/.venv
+**/.pytest_cache
+**/*.so

@@ -1,12 +1,11 @@
-//! Stage 4: environment snapshots, compiled by fake-lean and imported by
-//! fake-repl. A `needs NAME` line fails unless `NAME` is declared, so it shows
-//! what an import provides.
+//! Snapshots, compiled by fake-lean and imported by fake-repl. A `needs NAME`
+//! line fails unless `NAME` is declared, so it shows what an import provides.
 
 mod common;
 
 use std::time::{Duration, Instant};
 
-use common::Cluster;
+use common::{Cluster, bwrap_works};
 use object_store::ObjectStoreExt;
 use object_store::path::Path;
 use pisa_protocol::api::ProofStatus;
@@ -641,13 +640,6 @@ async fn delete_all(c: &Cluster, snapshots: &[&Value]) {
         delete(c, snapshot).await;
     }
     assert_eq!(stored(c).await, (vec![], vec![]));
-}
-
-fn bwrap_works() -> bool {
-    std::process::Command::new("bwrap")
-        .args(["--unshare-all", "--ro-bind", "/", "/", "true"])
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 #[tokio::test(flavor = "multi_thread")]

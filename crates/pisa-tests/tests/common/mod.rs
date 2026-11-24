@@ -318,7 +318,6 @@ pub fn url_of(server: &Running, path: &str) -> String {
 /// What `GET /jobs/{id}` answered, `status` and `body`, as the job's request
 /// would have: a done job's envelope opened to its `http_status` and `body`;
 /// anything else, a 202 or the look's own error, as it is.
-#[allow(dead_code)]
 pub fn job_answer(status: u16, body: Value) -> (u16, Value) {
     if status != 200 {
         return (status, body);
@@ -327,4 +326,27 @@ pub fn job_answer(status: u16, body: Value) -> (u16, Value) {
     let http_status = (body["http_status"].as_u64())
         .unwrap_or_else(|| panic!("a done job without http_status: {body}"));
     (http_status as u16, body["body"].clone())
+}
+
+/// Creates a snapshot from `body`, which the server answers with a 200,
+/// kept or refused.
+pub async fn create(c: &Cluster, body: Value) -> Value {
+    let (status, r) = c.post("/snapshots", body).await;
+    assert_eq!(status, 200, "{r}");
+    r
+}
+
+/// [`create`], which keeps the snapshot.
+pub async fn create_kept(c: &Cluster, body: Value) -> Value {
+    let r = create(c, body).await;
+    assert!(r["snapshot"]["id"].is_string(), "{r}");
+    r
+}
+
+/// Whether bubblewrap can make its namespaces here, as sandboxed workers need.
+pub fn bwrap_works() -> bool {
+    std::process::Command::new("bwrap")
+        .args(["--unshare-all", "--ro-bind", "/", "/", "true"])
+        .status()
+        .is_ok_and(|s| s.success())
 }

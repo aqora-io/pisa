@@ -6,19 +6,13 @@
 
 mod common;
 
-use common::Cluster;
+use common::{Cluster, create};
 use pisa_protocol::api::Replacement;
 use pisa_worker::catalog::Catalog;
 use serde_json::{Value, json};
 
 const SKELETON: &str = "import Foo\n\ntheorem t : 1 = 1 := sorry";
 const PROOF: &str = "import Foo\n\ntheorem t : 1 = 1 := rfl";
-
-async fn create(c: &Cluster, body: Value) -> Value {
-    let (status, r) = c.post("/snapshots", body).await;
-    assert_eq!(status, 200, "{r}");
-    r
-}
 
 fn entry(r: &Value) -> &str {
     r["snapshot"]["id"]

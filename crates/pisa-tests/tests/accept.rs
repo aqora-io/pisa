@@ -7,18 +7,11 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use common::{Cluster, job_answer, worker_config};
+use common::{Cluster, create_kept, job_answer, worker_config};
 use pisa_protocol::api::{AcceptResponse, KernelOutcome, LeftOut, LeftOutReason, PairErrorKind};
 use pisa_protocol::wire::{ExportedRun, Job, JobResult, SnapshotAcceptJob, SnapshotExportJob};
 use pisa_worker::queue::{NewJob, Poll};
 use serde_json::{Value, json};
-
-async fn create(c: &Cluster, body: Value) -> Value {
-    let (status, r) = c.post("/snapshots", body).await;
-    assert_eq!(status, 200, "{r}");
-    assert!(r["snapshot"]["id"].is_string(), "{r}");
-    r
-}
 
 fn id(r: &Value) -> String {
     r["snapshot"]["id"].as_str().unwrap().to_string()
@@ -80,13 +73,13 @@ fn text<'a>(run: &'a ExportedRun, path: &str) -> &'a str {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let base = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let base = create_kept(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
     let spec = on(
         &base,
         "def cost : Nat := sorry\naxiom lit : g = g\ntheorem t : cost = cost := sorry",
     );
-    let s = create(&c, json!({"code": spec, "holes": ["cost"]})).await;
-    let helper = create(
+    let s = create_kept(&c, json!({"code": spec, "holes": ["cost"]})).await;
+    let helper = create_kept(
         &c,
         json!({"code": on(&base, "theorem help : 1 = 1 := rfl")}),
     )
@@ -95,7 +88,7 @@ async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
         &helper,
         "def cost : Nat := 3\naxiom lit : g = g\ntheorem t : cost = cost := rfl",
     );
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -157,16 +150,16 @@ async fn a_run_exports_its_modules_and_a_configuration_per_pair() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_named_run_exports_its_files_by_name() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let base = create(
+    let base = create_kept(
         &c,
         json!({"code": "import Foo\n\ndef g : Nat := 1", "name": "base"}),
     )
     .await;
     let spec = "import PisaRun.base\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
-    let s = create(&c, json!({"code": spec, "holes": ["cost"], "name": "main"})).await;
+    let s = create_kept(&c, json!({"code": spec, "holes": ["cost"], "name": "main"})).await;
     let filled = "import PisaRun.base\n\ndef cost : Nat := g\ntheorem t : cost = cost := rfl";
     let replaces = json!({"snapshot_id": id(&s)});
-    let p = create(&c, json!({"code": filled, "replaces": replaces})).await;
+    let p = create_kept(&c, json!({"code": filled, "replaces": replaces})).await;
 
     let run = export(&c, &[&id(&s)], &[]).await;
     let mut paths: Vec<&str> = run
@@ -220,7 +213,7 @@ async fn a_named_run_exports_its_files_by_name() {
     // Forked, the run's heads keep their hash names; its spec keeps its.
     let forked = format!("{filled}\n-- forked");
     let f = json!({"code": forked, "replaces": replaces, "fork": true});
-    let f = create(&c, f).await;
+    let f = create_kept(&c, f).await;
     let run = export(&c, &[&id(&s)], &[]).await;
     let mut solutions: Vec<&str> = (run.pairs.iter())
         .map(|p| p.solution_module.as_str())
@@ -267,7 +260,7 @@ async fn accept(
 #[tokio::test(flavor = "multi_thread")]
 async fn accept_judges_each_spec_snapshot_against_its_head() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
@@ -286,7 +279,7 @@ async fn accept_judges_each_spec_snapshot_against_its_head() {
     assert_eq!(error.kind, PairErrorKind::Refused);
     assert_eq!(error.message, "Illegal axiom detected: 'sorryAx'");
     assert!(!pair.output.contains("--paranoid"), "{}", pair.output);
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -335,13 +328,13 @@ fn exported(c: &Cluster, name: &str) -> Vec<(String, u64, Value)> {
 #[tokio::test(flavor = "multi_thread")]
 async fn acceptance_builds_nothing() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
     let head = "import Foo\n\ntheorem t : 2 = 2 := rfl";
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": head, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -376,13 +369,13 @@ async fn acceptance_builds_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_export_is_export_failed() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
     let head = "import Foo\n\n-- EXPORT_PANIC\ntheorem t : 2 = 2 := rfl";
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": head, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -406,14 +399,14 @@ async fn a_failed_export_is_export_failed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
     for proof in ["rfl", "by rfl"] {
         let code = format!("import Foo\n\ntheorem t : 2 = 2 := {proof}");
-        create(
+        create_kept(
             &c,
             json!({"code": code, "replaces": {"snapshot_id": id(&s)}, "fork": true}),
         )
@@ -425,7 +418,7 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
     assert_eq!(r.audit.forks[0].snapshot_id, id(&s));
     assert!(!r.accepted && !r.clean, "a fork isn't accepted");
 
-    let slow = create(
+    let slow = create_kept(
         &c,
         json!({"code": "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl"}),
     )
@@ -444,7 +437,7 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
 
     // A comparator a signal killed before its time limit, as when it
     // crashes, couldn't run: it didn't run out of time.
-    let crashed = create(
+    let crashed = create_kept(
         &c,
         json!({"code": "import Foo\n\n-- LAKE_ABORT\ntheorem w : 5 = 5 := rfl"}),
     )
@@ -464,13 +457,13 @@ async fn a_fork_or_a_pair_out_of_time_is_not_accepted() {
     assert!(!pair.output.contains("more than"), "{}", pair.output);
 
     // The time limit covers the exports too.
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem v : 4 = 4 := sorry"}),
     )
     .await;
     let slow = "import Foo\n\n-- SLOW_EXPORT 3000\ntheorem v : 4 = 4 := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -500,12 +493,12 @@ fn unpack(bytes: &[u8]) -> std::collections::BTreeMap<String, String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_api_exports_a_run_and_judges_it() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -585,13 +578,13 @@ async fn get_export(c: &Cluster, query: &str) -> reqwest::Response {
 async fn a_named_run_exports_as_a_palomar_package() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = "import Mathlib\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": spec, "holes": ["cost"], "name": "erdos.main"}),
     )
     .await;
     let filled = "import Mathlib\n\ndef cost : Nat := 3\ntheorem t : cost = cost := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -673,22 +666,22 @@ async fn a_named_run_exports_as_a_palomar_package() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_palomar_export_refuses_what_a_package_cant_hold() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
-    create(
+    create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
     .await;
-    let u = create(
+    let u = create_kept(
         &c,
         json!({"code": "import Mathlib\n\ntheorem u : 3 = 3 := sorry"}),
     )
     .await;
-    create(
+    create_kept(
         &c,
         json!({"code": "import Mathlib\nimport Physlib\n\ntheorem u : 3 = 3 := rfl",
                "replaces": {"snapshot_id": id(&u)}}),
@@ -785,14 +778,14 @@ async fn a_run_is_named_by_spec_snapshots_of_one_version() {
 async fn a_pair_not_accepted_says_why() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let kind = |r: &AcceptResponse| r.pairs[0].error.as_ref().map(|e| e.kind);
-    let spec = create(
+    let spec = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem t : 2 = 2 := sorry"}),
     )
     .await;
     for (marker, expected) in [("CANNOT_RUN", PairErrorKind::CannotRun)] {
         let code = format!("import Foo\n\n-- {marker}\ntheorem t : 2 = 2 := rfl");
-        let head = create(
+        let head = create_kept(
             &c,
             json!({"code": code, "replaces": {"snapshot_id": id(&spec)}}),
         )
@@ -811,7 +804,7 @@ async fn a_pair_not_accepted_says_why() {
     }
 
     // A spec of definitions only names no theorem.
-    let defs = create(&c, json!({"code": "import Foo\n\ndef d : Nat := 1"})).await;
+    let defs = create_kept(&c, json!({"code": "import Foo\n\ndef d : Nat := 1"})).await;
     let r = accept(&c, &[&id(&defs)], &[], false, 60).await;
     assert!(!r.accepted, "{r:?}");
     assert_eq!(kind(&r), Some(PairErrorKind::NothingToJudge));
@@ -827,13 +820,13 @@ async fn a_pair_not_accepted_says_why() {
 async fn a_spec_axiom_runs_the_kernels_that_support_it() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let judge = async |axiom: &str, marker: &str| {
-        let spec = create(
+        let spec = create_kept(
             &c,
             json!({"code": format!("import Foo\n\n{axiom}theorem t : 2 = 2 := sorry")}),
         )
         .await;
         let code = format!("import Foo\n\n-- {marker}\n{axiom}theorem t : 2 = 2 := rfl");
-        create(
+        create_kept(
             &c,
             json!({"code": code, "replaces": {"snapshot_id": id(&spec)}}),
         )
@@ -948,16 +941,16 @@ async fn a_spec_axiom_runs_the_kernels_that_support_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn what_comparator_cant_take_as_a_hole_is_left_out() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let base = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let base = create_kept(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
     let spec = on(
         &base,
         "structure S where\n  x : Nat\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry",
     );
-    let s = create(&c, json!({"code": spec, "holes": ["cost", "S"]})).await;
+    let s = create_kept(&c, json!({"code": spec, "holes": ["cost", "S"]})).await;
     // The head no longer builds on `g`'s snapshot.
     let filled = "import Foo\n\nstructure S where\n  x : Nat\ndef cost : Nat := 3\n\
                   theorem t : cost = cost := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -984,10 +977,10 @@ async fn what_comparator_cant_take_as_a_hole_is_left_out() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_axiom_the_head_dropped_is_left_out() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let base = create(&c, json!({"code": "import Foo\n\naxiom lit : 1 = 1"})).await;
-    let s = create(&c, json!({"code": on(&base, "theorem t : 2 = 2 := sorry")})).await;
+    let base = create_kept(&c, json!({"code": "import Foo\n\naxiom lit : 1 = 1"})).await;
+    let s = create_kept(&c, json!({"code": on(&base, "theorem t : 2 = 2 := sorry")})).await;
     let filled = "import Foo\n\ntheorem t : 2 = 2 := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": filled, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -1011,24 +1004,24 @@ async fn get(c: &Cluster, path: &str) -> Value {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unsettled_run_is_refused_at_once() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let spec_l = create(
+    let spec_l = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem lemma_l : 1 = 1 := sorry"}),
     )
     .await;
-    let spec_t = create(
+    let spec_t = create_kept(
         &c,
         json!({"code": on(&spec_l, "theorem top : 2 = 2 := sorry")}),
     )
     .await;
     let code = on(&spec_l, "theorem top : 2 = 2 := by have := lemma_l; rfl");
-    create(
+    create_kept(
         &c,
         json!({"code": code, "replaces": {"snapshot_id": id(&spec_t)}}),
     )
     .await;
     let lemma = "import Foo\n\ntheorem lemma_l : 1 = 1 := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": lemma, "replaces": {"snapshot_id": id(&spec_l)}}),
     )
@@ -1058,9 +1051,9 @@ async fn an_acceptance_is_stale_once_its_spec_is_amended_or_a_target_refuted() {
         let code = format!(
             "import Foo\n\ntheorem t : 1 = 2 := sorry\ntheorem e : 1 = 1 := sorry -- {change}"
         );
-        let s = create(&c, json!({"code": code})).await;
+        let s = create_kept(&c, json!({"code": code})).await;
         let head = code.replace("sorry", "rfl");
-        create(
+        create_kept(
             &c,
             json!({"code": head, "replaces": {"snapshot_id": id(&s)}}),
         )
@@ -1074,7 +1067,7 @@ async fn an_acceptance_is_stale_once_its_spec_is_amended_or_a_target_refuted() {
             _ => json!({"code": on(&s, "theorem r : ¬ (1 = 2) := by decide"),
                         "refutes": {"snapshot_id": id(&s), "target": "t"}}),
         };
-        create(&c, body).await;
+        create_kept(&c, body).await;
         assert_eq!(get(&c, &path).await["stale"], true, "{change}");
     }
 }
@@ -1084,13 +1077,13 @@ async fn an_acceptance_is_stale_once_its_spec_is_amended_or_a_target_refuted() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_head_deleted_during_comparator_doesnt_lose_the_acceptance() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem u : 3 = 3 := sorry"}),
     )
     .await;
     let slow = "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl";
-    let h = create(
+    let h = create_kept(
         &c,
         json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -1115,8 +1108,8 @@ async fn a_head_deleted_during_comparator_doesnt_lose_the_acceptance() {
 async fn a_head_deleted_while_the_spec_exports_is_judged_from_its_link() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let slow = "import Foo\n\n-- SLOW_EXPORT 3000\ntheorem u : 3 = 3 := sorry";
-    let s = create(&c, json!({"code": slow})).await;
-    let h = create(
+    let s = create_kept(&c, json!({"code": slow})).await;
+    let h = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem u : 3 = 3 := rfl", "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -1153,7 +1146,7 @@ async fn a_stale_file_in_a_slots_build_directory_is_not_installed() {
     std::fs::create_dir_all(&build).unwrap();
     let stale = format!("s{id_}.olean.private");
     std::fs::write(build.join(&stale), "planted").unwrap();
-    let r = create(&c, json!({"code": code})).await;
+    let r = create_kept(&c, json!({"code": code})).await;
     assert_eq!(module(&r), pisa_protocol::snapshot::module(&id_));
     let cached = work.join("snapshots").join(c.version("v")).join("PisaSnap");
     assert!(cached.join(format!("s{id_}.olean")).exists());
@@ -1174,10 +1167,10 @@ async fn a_stale_file_in_a_slots_build_directory_is_not_installed() {
 async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = cost := sorry";
-    let s = create(&c, json!({"code": spec, "holes": ["cost"]})).await;
+    let s = create_kept(&c, json!({"code": spec, "holes": ["cost"]})).await;
     let filled =
         |n: u32| format!("import Foo\n\ndef cost : Nat := {n}\ntheorem t : cost = cost := rfl");
-    let h = create(
+    let h = create_kept(
         &c,
         json!({"code": filled(3), "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -1199,7 +1192,7 @@ async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
         "{listed:?}"
     );
     // The run moves on.
-    create(
+    create_kept(
         &c,
         json!({"code": filled(4), "replaces": {"snapshot_id": id(&h)}}),
     )
@@ -1207,7 +1200,7 @@ async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
     let read = get(&c, &format!("/snapshots/accept/{}", first.id)).await;
     assert_eq!(read["stale"], true, "{read}");
     // A spec with none lists none.
-    let other = create(
+    let other = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem z : 1 = 1 := sorry"}),
     )
@@ -1248,9 +1241,9 @@ async fn look(c: &Cluster, url: &str, wait: u64) -> (u16, Value) {
 async fn a_running_accept_shows_its_progress() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let spec = "import Foo\n\n-- SLOW_EXPORT 1500\ntheorem u : 3 = 3 := sorry";
-    let s = create(&c, json!({"code": spec})).await;
+    let s = create_kept(&c, json!({"code": spec})).await;
     let slow = "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
     )
@@ -1305,13 +1298,13 @@ async fn a_running_accept_shows_its_progress() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_claim_stops_the_comparator_and_stores_no_acceptance() {
     let mut c = Cluster::start(&[("a", "v", 1)]).await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem u : 3 = 3 := sorry"}),
     )
     .await;
     let slow = "import Foo\n\n-- SLEEP\ntheorem u : 3 = 3 := rfl";
-    create(
+    create_kept(
         &c,
         json!({"code": slow, "replaces": {"snapshot_id": id(&s)}}),
     )

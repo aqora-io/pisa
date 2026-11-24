@@ -1,8 +1,8 @@
-//! Stage 2: verification policy and sandboxed workers.
+//! The verification policy, and sandboxed workers.
 
 mod common;
 
-use common::Cluster;
+use common::{Cluster, bwrap_works};
 use pisa_worker::config::Sandbox;
 use serde_json::{Value, json};
 
@@ -216,13 +216,6 @@ async fn policy_rejects_before_running() {
     )
     .await;
     assert_eq!(r["ok"], true, "{r}");
-}
-
-fn bwrap_works() -> bool {
-    std::process::Command::new("bwrap")
-        .args(["--unshare-all", "--ro-bind", "/", "/", "true"])
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 #[tokio::test(flavor = "multi_thread")]

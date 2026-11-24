@@ -1,4 +1,4 @@
-//! Stage 3: tactic sessions, on Lean Beam documents: here the fake Beam, on
+//! Tactic sessions, on Lean Beam documents: here the fake Beam, on
 //! which a `sorry`'s goal is `⊢ True`, `rfl` closes a goal, `fail` fails, and
 //! any other tactic leaves `<goal> after <tactic>`. The final check runs on
 //! the REPL, here fake-repl.

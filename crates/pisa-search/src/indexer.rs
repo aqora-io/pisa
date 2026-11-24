@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use pisa_db::catalog::{Catalog, Change, SnapshotDecl, SnapshotDecls};
@@ -150,11 +150,7 @@ fn store(e: pisa_protocol::api::Error) -> anyhow::Error {
     anyhow::anyhow!("{e}")
 }
 
-fn now_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_micros() as u64)
-}
+use pisa_protocol::now_micros;
 
 /// How long until `until`, if that is later than now.
 fn remaining(until: &Mutex<Option<Instant>>) -> Option<Duration> {

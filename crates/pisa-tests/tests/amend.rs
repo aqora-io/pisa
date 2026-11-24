@@ -5,17 +5,11 @@
 
 mod common;
 
-use common::Cluster;
+use common::{Cluster, create};
 use serde_json::{Value, json};
 
 const SPEC: &str = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = 1 := sorry";
 const AMENDED: &str = "import Foo\n\ndef cost : Nat := sorry\ntheorem t : cost = 2 := sorry\ntheorem u : True := sorry";
-
-async fn create(c: &Cluster, body: Value) -> Value {
-    let (status, r) = c.post("/snapshots", body).await;
-    assert_eq!(status, 200, "{r}");
-    r
-}
 
 fn id(r: &Value) -> String {
     r["snapshot"]["id"]

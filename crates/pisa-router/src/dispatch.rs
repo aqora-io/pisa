@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use pisa_db::db::{DbError, Notice};
 use pisa_db::queue::{ExpiredOutcome, LIVE, NewJob, Poll, Queue, Stage};
@@ -256,11 +256,9 @@ impl Drop for Waiting<'_> {
     }
 }
 
+/// [`pisa_protocol::now_micros`], as the queue's columns hold it.
 fn now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64
+    pisa_protocol::now_micros() as i64
 }
 
 impl Dispatcher {

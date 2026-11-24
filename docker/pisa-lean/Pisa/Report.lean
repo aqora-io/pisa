@@ -585,11 +585,6 @@ def describeEach (mod : Name) (names : Array Name) : CoreM (Array Json × Array 
       failed := failed.push (Json.mkObj [("name", toJson n), ("error", toJson (← e.toMessageData.toString))])
   return (out, failed)
 
-/-- Logs `PISA_DECLS <descriptions>`, which the worker reads. -/
-def log (mod : Name) (names : Array Name) : Elab.Command.CommandElabM Unit := do
-  let decls ← Elab.Command.liftCoreM (describeAll mod names)
-  logInfo (MessageData.ofFormat (.text ("PISA_DECLS " ++ (Json.arr decls).compress)))
-
 /-- The report on the declarations added after the imports, which may have
 errors: it describes what it can, and logs `PISA_REPORT_FAILED
 [{name, error}]` for the rest. -/

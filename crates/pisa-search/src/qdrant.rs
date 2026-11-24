@@ -205,19 +205,6 @@ impl Qdrant {
         Ok(())
     }
 
-    /// Sets payload keys on the points that match `filter`.
-    pub async fn set_payload(
-        &self,
-        collection: &str,
-        payload: Value,
-        filter: Value,
-    ) -> anyhow::Result<()> {
-        let path = format!("/collections/{collection}/points/payload?wait=true");
-        let body = json!({"payload": payload, "filter": filter});
-        let _: Value = self.call(reqwest::Method::POST, &path, Some(&body)).await?;
-        Ok(())
-    }
-
     /// Runs Query API requests in one batch; results in order.
     pub async fn query_batch(
         &self,

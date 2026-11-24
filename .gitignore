@@ -1,7 +1,15 @@
 /target
 __pycache__/
 *.so
+.venv/
+.pytest_cache/
+node_modules/
 .envrc
+.env*
+# Tools' own state.
+.jj/
+.claude/
+.superpowers/
 # Generated search data (see the README)
 /search/corpus
 /search/bundle

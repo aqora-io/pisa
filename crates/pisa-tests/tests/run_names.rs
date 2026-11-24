@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::Cluster;
+use common::{Cluster, create};
 use pisa_protocol::snapshot;
 use serde_json::{Value, json};
 
@@ -13,12 +13,6 @@ const LEMMA: &str = "import Foo\n\ntheorem lemma1 : 1 = 1 := sorry";
 const PROVED: &str = "import Foo\n\ntheorem lemma1 : 1 = 1 := rfl\ntheorem proved : 2 = 2 := rfl";
 const USES: &str =
     "import PisaRun.proj.lemma -- the lemma's run\n\nneeds lemma1\ntheorem t : 1 = 1 := lemma1";
-
-async fn create(c: &Cluster, body: Value) -> Value {
-    let (status, r) = c.post("/snapshots", body).await;
-    assert_eq!(status, 200, "{r}");
-    r
-}
 
 fn id(r: &Value) -> &str {
     r["snapshot"]["id"]

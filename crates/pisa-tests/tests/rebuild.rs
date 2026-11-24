@@ -6,17 +6,10 @@ mod common;
 
 use std::time::Duration;
 
-use common::Cluster;
+use common::{Cluster, create_kept};
 use pisa_client::{Client, CreateSnapshotOptions};
 use pisa_protocol::snapshot;
 use serde_json::{Value, json};
-
-async fn create(c: &Cluster, body: Value) -> Value {
-    let (status, r) = c.post("/snapshots", body).await;
-    assert_eq!(status, 200, "{r}");
-    assert!(r["snapshot"]["id"].is_string(), "{r}");
-    r
-}
 
 fn entry(r: &Value) -> &str {
     r["snapshot"]["id"].as_str().unwrap()
@@ -49,17 +42,17 @@ struct Library {
 
 async fn library(c: &Cluster) -> Library {
     let p1 = json!({"p": "1"});
-    let b = create(
+    let b = create_kept(
         c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry", "labels": p1}),
     )
     .await;
-    let c_ = create(
+    let c_ = create_kept(
         c,
         json!({"code": on(&b, "theorem c : 2 = 2 := rfl\nneeds b"), "labels": p1}),
     )
     .await;
-    let d = create(
+    let d = create_kept(
         c,
         json!({"code": on(&b, "theorem d : 3 = 3 := rfl"), "labels": p1}),
     )
@@ -69,8 +62,8 @@ async fn library(c: &Cluster) -> Library {
         module(&c_),
         module(&d)
     );
-    let e = create(c, json!({"code": merged, "labels": p1})).await;
-    let other = create(
+    let e = create_kept(c, json!({"code": merged, "labels": p1})).await;
+    let other = create_kept(
         c,
         json!({"code": on(&b, "theorem other : 5 = 5 := rfl"), "labels": {"p": "2"}}),
     )
@@ -130,7 +123,7 @@ async fn plan(c: &Cluster, body: Value) -> (u16, Value) {
 /// B with its `sorry` proved and a helper, replacing B.
 async fn proved(c: &Cluster, lib: &Library) -> Value {
     let code = "import Foo\n\ntheorem b : 1 = 1 := rfl\ntheorem b2 : 6 = 6 := rfl";
-    let r = create(
+    let r = create_kept(
         c,
         json!({"code": code, "replaces": {"snapshot_id": entry(&lib.b)}, "labels": {"p": "1"}}),
     )
@@ -249,7 +242,7 @@ async fn a_plan_takes_labels_and_a_replacement_beside_from() {
         body[field] = value;
         body
     };
-    let again = create(
+    let again = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
@@ -272,8 +265,8 @@ async fn a_plan_takes_labels_and_a_replacement_beside_from() {
 async fn from_and_to_must_share_a_version() {
     let c = Cluster::start(&[("w0", "va", 1), ("w1", "vb", 1)]).await;
     let code = "import Foo\n\ntheorem b : 1 = 1 := sorry";
-    let from = create(&c, json!({"code": code, "version": "va"})).await;
-    let to = create(&c, json!({"code": code, "version": "vb"})).await;
+    let from = create_kept(&c, json!({"code": code, "version": "va"})).await;
+    let to = create_kept(&c, json!({"code": code, "version": "vb"})).await;
     for dry_run in [true, false] {
         let body = json!({"from": entry(&from), "to": entry(&to), "labels": {"p": "1"}, "dry_run": dry_run});
         let (status, r) = plan(&c, body).await;
@@ -293,7 +286,7 @@ async fn from_and_to_must_share_a_version() {
 async fn a_to_that_changes_statements_needs_allow_changes() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let lib = library(&c).await;
-    let other = create(
+    let other = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
     )
@@ -337,19 +330,19 @@ async fn stored(c: &Cluster, module: &str) -> bool {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_module_between_is_rebuilt_as_a_support_module() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
-    let m = create(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
-    let n = create(
+    let m = create_kept(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
+    let n = create_kept(
         &c,
         json!({"code": on(&m, "theorem n : 3 = 3 := rfl"), "labels": {"p": "1"}}),
     )
     .await;
     let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
     )
@@ -420,30 +413,30 @@ async fn a_module_between_is_rebuilt_as_a_support_module() {
 async fn an_obsolete_helper_a_head_imports_is_a_support_module() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let p1 = json!({"p": "1"});
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
-    let h = create(
+    let h = create_kept(
         &c,
         json!({"code": on(&b, "theorem h : 2 = 2 := sorry"), "labels": p1}),
     )
     .await;
     // H2 replaces H, and carries no labels.
-    let h2 = create(
+    let h2 = create_kept(
         &c,
         json!({"code": on(&b, "theorem h : 2 = 2 := rfl"),
                "replaces": {"snapshot_id": entry(&h)}}),
     )
     .await;
     // P, a head of `p:1`, still imports H.
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": on(&h, "theorem p : 3 = 3 := rfl\nneeds h"), "labels": p1}),
     )
     .await;
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl",
                "replaces": {"snapshot_id": entry(&b)}}),
@@ -486,19 +479,19 @@ async fn an_obsolete_helper_a_head_imports_is_a_support_module() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_support_module_whose_dependents_failed_goes() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl"}),
     )
     .await;
-    let m = create(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
+    let m = create_kept(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
     // Q needs `b`, which `to` doesn't declare.
-    let q = create(
+    let q = create_kept(
         &c,
         json!({"code": on(&m, "theorem q : 3 = 3 := rfl\nneeds b"), "labels": {"p": "1"}}),
     )
     .await;
-    let to = create(
+    let to = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
     )
@@ -525,24 +518,24 @@ async fn a_support_module_whose_dependents_failed_goes() {
 /// all in `p:1`; and B′, which changes `f`, replacing B with `f` allowed.
 async fn redefined(c: &Cluster) -> (Value, Value) {
     let p1 = json!({"p": "1"});
-    let b = create(
+    let b = create_kept(
         c,
         json!({"code": "import Foo\n\ndef f : Nat := 1\ntheorem b : f = f := sorry", "labels": p1}),
     )
     .await;
-    let c_ = create(
+    let c_ = create_kept(
         c,
         json!({"code": on(&b, "def g : Nat := f\ntheorem c : 2 = 2 := rfl"), "labels": p1}),
     )
     .await;
-    create(
+    create_kept(
         c,
         json!({"code": on(&c_, "theorem e : g = g := rfl"), "labels": p1}),
     )
     .await;
     let fixed = "import Foo\n\ndef f : Nat := 2\ntheorem b : f = f := rfl";
     let replaces = json!({"snapshot_id": entry(&b), "allow": {"definitions": ["f"]}});
-    let b2 = create(
+    let b2 = create_kept(
         c,
         json!({"code": fixed, "replaces": replaces, "labels": p1}),
     )
@@ -566,7 +559,7 @@ async fn theorems_that_use_a_changed_definition_are_listed_through_the_dependent
     for item in p["plan"].as_array().unwrap() {
         let body = json!({"code": item["code"], "labels": item["labels"], "key": item["key"],
                           "replaces": item["replaces"]});
-        let r = create(&c, body).await;
+        let r = create_kept(&c, body).await;
         assert_eq!(r["snapshot"]["module"], item["new_module"], "{r}");
         found.push(r["replacement"]["affected"].clone());
     }
@@ -640,7 +633,7 @@ async fn a_failed_chunk_skips_only_what_builds_on_it() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let lib = library(&c).await;
     // No `b`, which C needs; D doesn't, and E builds on both.
-    let other = create(
+    let other = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem not_b : 1 = 1 := rfl"}),
     )
@@ -688,13 +681,13 @@ async fn a_rebuild_runs_under_a_named_allow() {
 /// B, both in `p:1`.
 async fn skeleton_and_proof(c: &Cluster, b: &Value) -> (Value, Value) {
     let p1 = json!({"p": "1"});
-    let s0 = create(
+    let s0 = create_kept(
         c,
         json!({"code": on(b, "theorem s : 2 = 2 := sorry"), "labels": p1}),
     )
     .await;
     let replaces = json!({"snapshot_id": entry(&s0)});
-    let p1_ = create(
+    let p1_ = create_kept(
         c,
         json!({"code": on(b, "theorem s : 2 = 2 := rfl"), "replaces": replaces, "labels": p1}),
     )
@@ -716,13 +709,13 @@ async fn replacers(c: &Cluster, id: &str) -> Vec<String> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_skeleton_and_its_proof_are_rebuilt_as_a_run() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
     let (s0, p1) = skeleton_and_proof(&c, &b).await;
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
     )
@@ -758,24 +751,24 @@ async fn a_skeleton_and_its_proof_are_rebuilt_as_a_run() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_proof_whose_skeleton_isnt_rebuilt_still_replaces_it() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let b = create(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let b = create_kept(&c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
     // S0 is another project's, so the plan doesn't rebuild it; its proof
     // P1, which changes `f`, is in `p:1`.
-    let s0 = create(
+    let s0 = create_kept(
         &c,
         json!({"code": on(&b, "def f : Nat := 0\ntheorem s : f = g := sorry"),
                "labels": {"p": "2"}}),
     )
     .await;
     let replaces = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f"]}});
-    let p1 = create(
+    let p1 = create_kept(
         &c,
         json!({"code": on(&b, "def f : Nat := 1\ntheorem s : f = g := rfl"),
                "replaces": replaces, "labels": {"p": "1"}}),
     )
     .await;
     let replaces = json!({"snapshot_id": entry(&b), "allow": {"definitions": ["g"]}});
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\ndef g : Nat := 0 + 1", "replaces": replaces}),
     )
@@ -797,15 +790,15 @@ async fn a_proof_whose_skeleton_isnt_rebuilt_still_replaces_it() {
 /// rebuilds P1 on B′, which declares `g` by `def_g` instead and doesn't
 /// replace B. Returns S0, P1 and the run.
 async fn rebuilt_on_another_g(c: &Cluster, def_g: &str) -> (Value, Value, Value) {
-    let b = create(c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
-    let s0 = create(c, json!({"code": on(&b, "theorem s : g = g := sorry")})).await;
-    let p1 = create(
+    let b = create_kept(c, json!({"code": "import Foo\n\ndef g : Nat := 1"})).await;
+    let s0 = create_kept(c, json!({"code": on(&b, "theorem s : g = g := sorry")})).await;
+    let p1 = create_kept(
         c,
         json!({"code": on(&b, "theorem s : g = g := rfl"),
                "replaces": {"snapshot_id": entry(&s0)}, "labels": {"p": "1"}}),
     )
     .await;
-    let b2 = create(c, json!({"code": format!("import Foo\n\n{def_g}")})).await;
+    let b2 = create_kept(c, json!({"code": format!("import Foo\n\n{def_g}")})).await;
     let r = rebuild(c, &b, &b2, json!({"allow_changes": true})).await;
     assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
     (s0, p1, r)
@@ -846,9 +839,9 @@ async fn an_allow_changes_rebuild_unlinks_a_run_whose_statements_change() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_allow_changes_rebuild_keeps_a_run_its_changes_cant_reach() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let a = create(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
-    let h = create(&c, json!({"code": "import Foo\n\ndef h : Nat := 1"})).await;
-    let s0 = create(
+    let a = create_kept(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
+    let h = create_kept(&c, json!({"code": "import Foo\n\ndef h : Nat := 1"})).await;
+    let s0 = create_kept(
         &c,
         json!({"code": on(&a, "def f : Nat := 0\ntheorem s : f = a := sorry")}),
     )
@@ -860,12 +853,12 @@ async fn an_allow_changes_rebuild_keeps_a_run_its_changes_cant_reach() {
         module(&h)
     );
     let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f"]}});
-    let p1 = create(
+    let p1 = create_kept(
         &c,
         json!({"code": code, "replaces": link, "labels": {"p": "1"}}),
     )
     .await;
-    let h2 = create(&c, json!({"code": "import Foo\n\ndef h : Int := 1"})).await;
+    let h2 = create_kept(&c, json!({"code": "import Foo\n\ndef h : Int := 1"})).await;
     let r = rebuild(&c, &h, &h2, json!({"allow_changes": true})).await;
     assert_eq!(
         r["changes"],
@@ -885,9 +878,9 @@ async fn an_allow_changes_rebuild_keeps_a_run_its_changes_cant_reach() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_proof_whose_helper_uses_a_changed_type_is_unlinked() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let a = create(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
-    let h = create(&c, json!({"code": "import Foo\n\ndef h : Nat := 1"})).await;
-    let s0 = create(
+    let a = create_kept(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
+    let h = create_kept(&c, json!({"code": "import Foo\n\ndef h : Nat := 1"})).await;
+    let s0 = create_kept(
         &c,
         json!({"code": on(&a, "def f : Nat := 0\ntheorem s : f = a := sorry")}),
     )
@@ -900,12 +893,12 @@ async fn a_proof_whose_helper_uses_a_changed_type_is_unlinked() {
         module(&h)
     );
     let link = json!({"snapshot_id": entry(&s0), "allow": {"definitions": ["f"]}});
-    let p1 = create(
+    let p1 = create_kept(
         &c,
         json!({"code": code, "replaces": link, "labels": {"p": "1"}}),
     )
     .await;
-    let h2 = create(&c, json!({"code": "import Foo\n\ndef h : Int := 1"})).await;
+    let h2 = create_kept(&c, json!({"code": "import Foo\n\ndef h : Int := 1"})).await;
     let r = rebuild(&c, &h, &h2, json!({"allow_changes": true})).await;
     assert_eq!(items(&r, "snapshot_id"), [&json!(entry(&p1))], "{r}");
     // `aux` would state something else, so P1′ can't replace P1.
@@ -919,12 +912,12 @@ async fn a_proof_whose_helper_uses_a_changed_type_is_unlinked() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_copy_is_compared_through_what_to_no_longer_builds_on() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let a = create(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
-    let a2 = create(&c, json!({"code": "import Foo\n\ndef a : Int := 1"})).await;
-    let b = create(&c, json!({"code": on(&a, "theorem b : 1 = 1 := rfl")})).await;
-    let b2 = create(&c, json!({"code": on(&a2, "theorem b : 1 = 1 := rfl")})).await;
+    let a = create_kept(&c, json!({"code": "import Foo\n\ndef a : Nat := 1"})).await;
+    let a2 = create_kept(&c, json!({"code": "import Foo\n\ndef a : Int := 1"})).await;
+    let b = create_kept(&c, json!({"code": on(&a, "theorem b : 1 = 1 := rfl")})).await;
+    let b2 = create_kept(&c, json!({"code": on(&a2, "theorem b : 1 = 1 := rfl")})).await;
     // P builds on A only through B, and states something about A's `a`.
-    let p = create(
+    let p = create_kept(
         &c,
         json!({"code": on(&b, "theorem p : a = a := rfl"), "labels": {"p": "1"}}),
     )
@@ -957,28 +950,28 @@ async fn a_resent_rebuild_replays_the_copy_that_replaced_its_original() {
 async fn a_copy_above_a_rebuilt_module_keeps_its_link() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let p1 = json!({"p": "1"});
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry", "labels": p1}),
     )
     .await;
     // A chain whose statements use what the one below declares.
-    let c_ = create(
+    let c_ = create_kept(
         &c,
         json!({"code": on(&b, "def c : Nat := 2"), "labels": p1}),
     )
     .await;
-    let d = create(
+    let d = create_kept(
         &c,
         json!({"code": on(&c_, "def d : Nat := c"), "labels": p1}),
     )
     .await;
-    let e = create(
+    let e = create_kept(
         &c,
         json!({"code": on(&d, "theorem e : d = d := rfl"), "labels": p1}),
     )
     .await;
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
     )
@@ -999,23 +992,23 @@ async fn a_copy_above_a_rebuilt_module_keeps_its_link() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_leaves_the_labels_is_reported() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
-    let s0 = create(
+    let s0 = create_kept(
         &c,
         json!({"code": on(&b, "theorem s : 2 = 2 := sorry"), "labels": {"p": "2"}}),
     )
     .await;
-    let p1 = create(
+    let p1 = create_kept(
         &c,
         json!({"code": on(&b, "theorem s : 2 = 2 := rfl"), "labels": {"p": "1"},
                "replaces": {"snapshot_id": entry(&s0)}}),
     )
     .await;
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
     )
@@ -1041,30 +1034,30 @@ async fn a_run_that_leaves_the_labels_is_reported() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rebuild_passes_over_a_run_whose_spec_was_amended() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
     let labels = json!({"p": "1"});
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": on(&b, "theorem s : 2 = 2 := sorry"), "labels": labels}),
     )
     .await;
-    let h = create(
+    let h = create_kept(
         &c,
         json!({"code": on(&b, "theorem s : 2 = 2 := rfl"), "labels": labels,
                "replaces": {"snapshot_id": entry(&s)}}),
     )
     .await;
-    let s2 = create(
+    let s2 = create_kept(
         &c,
         json!({"code": on(&b, "theorem s : 2 = 2 := sorry\ntheorem z : 3 = 3 := sorry"),
                "labels": labels, "amends": {"snapshot_id": entry(&s), "reason": "z too"}}),
     )
     .await;
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl", "replaces": {"snapshot_id": entry(&b)}}),
     )
@@ -1111,24 +1104,24 @@ async fn retire_keeps_from() {
 async fn an_item_that_loses_to_an_agent_fails_and_a_resend_heals() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let p1 = json!({"p": "1"});
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
     // Two levels: L, which is slow to build, and the skeleton X on it.
-    let l = create(
+    let l = create_kept(
         &c,
         json!({"code": on(&b, "theorem l : 2 = 2 := rfl\nSLEEP 800"), "labels": p1}),
     )
     .await;
-    let x = create(
+    let x = create_kept(
         &c,
         json!({"code": on(&l, "theorem x : 3 = 3 := sorry"), "labels": p1}),
     )
     .await;
     let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
     )
@@ -1144,7 +1137,7 @@ async fn an_item_that_loses_to_an_agent_fails_and_a_resend_heals() {
     });
     // While L's copy builds, an agent proves X on L.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let a = create(
+    let a = create_kept(
         &c,
         json!({"code": on(&l, "theorem x : 3 = 3 := rfl"), "labels": p1,
                "replaces": {"snapshot_id": entry(&x)}}),
@@ -1180,7 +1173,7 @@ async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
     let lib = library(&c).await;
     let b2 = proved(&c, &lib).await;
     // A slow chunk on top, so the job is still running when first read.
-    let slow = create(
+    let slow = create_kept(
         &c,
         json!({"code": on(&lib.e, "theorem slow : 6 = 6 := rfl\nSLEEP 800"), "labels": {"p": "1"}}),
     )
@@ -1244,17 +1237,17 @@ async fn a_rebuild_runs_as_a_job_that_any_server_reads() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_rebuild_onto_a_structure_with_another_field_allows_the_structure() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\nstructure S where x : Nat"}),
     )
     .await;
-    let s = create(
+    let s = create_kept(
         &c,
         json!({"code": on(&b, "theorem t (s : S) : s = s := rfl"), "labels": {"p": "1"}}),
     )
     .await;
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": "import Foo\n\nstructure S where x : Nat y : Nat",
                "replaces": {"snapshot_id": entry(&b), "allow": {"definitions": ["S"]}}}),
@@ -1280,12 +1273,12 @@ async fn a_rebuild_plans_past_a_thousand_items() {
     use pisa_worker::catalog::{Catalog, Module, ModuleMeta, NewEntry};
 
     let c = Cluster::start(&[("w0", "v", 1)]).await;
-    let from = create(
+    let from = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := rfl"}),
     )
     .await;
-    let to = create(
+    let to = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := by rfl"}),
     )
@@ -1347,17 +1340,17 @@ async fn a_snapshot_the_run_cant_delete_is_reported_and_a_resend_deletes_it() {
     let mut c = Cluster::start_with(router, &[], |w| w).await;
     let stop = c.add_drainable_worker(common::worker_config("w0", "v", 2));
     c.wait_for_workers(1).await;
-    let b = create(
+    let b = create_kept(
         &c,
         json!({"code": "import Foo\n\ntheorem b : 1 = 1 := sorry"}),
     )
     .await;
-    let m = create(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
+    let m = create_kept(&c, json!({"code": on(&b, "theorem m : 2 = 2 := rfl")})).await;
     // N′ builds long enough for its worker to be told to stop meanwhile.
     let code = on(&m, "theorem n : 3 = 3 := rfl\nSLEEP 800");
-    create(&c, json!({"code": code, "labels": {"p": "1"}})).await;
+    create_kept(&c, json!({"code": code, "labels": {"p": "1"}})).await;
     let code = "import Foo\n\ntheorem b : 1 = 1 := rfl";
-    let b2 = create(
+    let b2 = create_kept(
         &c,
         json!({"code": code, "replaces": {"snapshot_id": entry(&b)}}),
     )

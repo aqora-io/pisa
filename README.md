@@ -825,8 +825,7 @@ and its time is `timing.tracing`:
   under `all_goals` gets the goals of each of its runs: on a 110-line file
   with 81 branches, 12 s against the check's 6 s.
 - `tactics` need the whole tree, and with `terms` every term of the code too:
-  several times the check, and minutes for a 1,000-line chunk (see
-  `bench/infotree/2026-11-06/report.md`).
+  several times the check, and minutes for a 1,000-line chunk.
 - When the second run fails or runs past `timeout`, the result is the plain
   check's, without `tactics` or `at`. `warnings` says so, e.g. `goal
   reporting ran past 90s; diagnostics are from a plain check`. It also says

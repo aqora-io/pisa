@@ -1,8 +1,7 @@
 # Local development stack, shaped like production: Traefik on port 8000
 # (PISA_PORT to change it) in front of two servers, two workers, Garage (S3)
-# for pickled proof states and snapshot modules, and PostgreSQL for the job
-# queue between the servers and the workers and the session, state and
-# snapshot records.
+# for snapshot modules, and PostgreSQL for the job queue between the servers
+# and the workers and the document, session, state and snapshot records.
 #   docker compose up --build
 #   curl -s localhost:8000/check -H 'content-type: application/json' \
 #     -d '{"code":"import Mathlib\ntheorem t : 2 + 2 = 4 := by norm_num"}'
@@ -93,9 +92,8 @@ services:
       traefik.http.services.pisa.loadbalancer.healthcheck.path: /health
       traefik.http.services.pisa.loadbalancer.healthcheck.interval: 2s
     # Search's queries are embedded by the model that embedded the bundle: by
-    # default Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY). For a
-    # bundle embedded with the local 0.6B model, set
-    # PISA_SEARCH_EMBEDDER=http://tei:80 and add --profile search-local.
+    # default Qwen3-Embedding-8B on Scaleway (export SCW_SECRET_KEY);
+    # PISA_SEARCH_EMBEDDER names another embedding server.
     environment:
       PISA_DATABASE_URL: *database-url
       PISA_MAX_WAIT_SECS: 120
@@ -195,18 +193,8 @@ services:
     environment:
       RUST_LOG: info
 
-  # Qwen3-Embedding-0.6B on the CPU, for bundles embedded with it.
-  tei:
-    profiles: [search-local]
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
-    command: ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-client-batch-size", "64"]
-    ports: ["127.0.0.1:8090:80"]
-    volumes:
-      - tei-models:/data
-
 volumes:
   garage-meta:
   garage-data:
   postgres-data:
   qdrant-data:
-  tei-models:

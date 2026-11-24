@@ -1,4 +1,4 @@
-//! Stage 1: router + REPL workers, the check API, warm headers.
+//! Checks: the router and REPL workers, the check API, warm headers.
 
 mod common;
 

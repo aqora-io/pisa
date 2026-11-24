@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use pisa_db::db::Notice;
 use pisa_db::environments::Environments;
@@ -167,11 +167,9 @@ fn heartbeat_every(lease: Duration) -> Duration {
     lease / 3
 }
 
+/// [`pisa_protocol::now_micros`], as the queue's columns hold it.
 fn now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as i64
+    pisa_protocol::now_micros() as i64
 }
 
 pub struct Claims {

@@ -27,7 +27,7 @@
 //! creates with the same key conflict instead of both succeeding.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use pisa_protocol::api::{
     Allow, AmendedHoles, CheckResult, Error, ErrorKind, ProofStatus, Replacement, Replaces,
@@ -687,11 +687,7 @@ pub fn name_taken(v: &str, name: &str, root: &str) -> Error {
     )
 }
 
-pub(crate) fn now_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_micros() as u64)
-}
+pub(crate) use pisa_protocol::now_micros;
 
 /// `labels` with each key once, or `None` if they give a key two values,
 /// which no entry matches: an entry has one value per key.

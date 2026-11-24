@@ -21,3 +21,11 @@ pub mod snapshot;
 pub mod verify;
 pub mod version;
 pub mod wire;
+
+/// Microseconds since the Unix epoch, as the database and the queue keep
+/// times.
+pub fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_micros() as u64)
+}
