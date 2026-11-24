@@ -506,6 +506,39 @@ pub struct PoolPackage {
     pub input_rev: Option<String>,
 }
 
+/// `GET /environments`
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ListEnvironmentsResponse {
+    /// Every environment a worker has registered, by version.
+    pub environments: Vec<Environment>,
+}
+
+/// A version and the Lake project behind it, which stays listed after its
+/// workers are gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct Environment {
+    /// Its version: what a request names to reach its workers, and what ids
+    /// and check results carry.
+    pub version: String,
+    /// The Lean toolchain its project pins, e.g. `leanprover/lean4:v4.36.0`;
+    /// empty for workers without a project.
+    pub toolchain: String,
+    /// The Lake packages its project's `lake-manifest.json` pins, what it
+    /// requires through them included: what code on it can import.
+    pub packages: Vec<PoolPackage>,
+    /// Its project's files by name: `lean-toolchain`, the lakefile, the
+    /// manifest and the top-level `.lean` files, which import what it
+    /// builds. Written to a directory, they are the Lake project that a
+    /// worker image of this version is built from.
+    pub files: BTreeMap<String, String>,
+    /// When a worker first registered it, in seconds since the Unix epoch.
+    pub created: u64,
+    /// Its live workers, as `GET /health` lists them. Absent while it has
+    /// none: its pool is scaled to zero, or gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<PoolHealth>,
+}
+
 /// The memory limits of the workers on one host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HostMemory {
@@ -749,6 +782,11 @@ pub struct CheckResult {
     #[schema(required = true)]
     #[serde(default)]
     pub timing: Timing,
+    /// The version of the worker that ran it, which `GET /environments`
+    /// describes: the one the request named, or resolved to. Absent when no
+    /// worker ran it, and from a worker of a release before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     /// Why the check could not complete (timeout, crash, policy, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<Error>,

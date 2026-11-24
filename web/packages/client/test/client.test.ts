@@ -286,6 +286,12 @@ describe("PisaClient", () => {
     ]);
   });
 
+  it("lists the environments", async () => {
+    const { client, sent } = recording(() => json({ environments: [] }));
+    expect((await client.listEnvironments()).environments).toEqual([]);
+    expect(sent.map((s) => [s.method, s.url])).toEqual([["GET", "/api/environments"]]);
+  });
+
   it("sends an acceptance only the limits its call names", async () => {
     const sent: unknown[] = [];
     const client = new PisaClient({

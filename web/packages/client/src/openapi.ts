@@ -168,6 +168,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/environments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The environments workers serve, or have served
+         * @description Every version a worker has registered, with the Lake project behind it: its toolchain, the packages it pins and its files. An environment stays listed after its workers are gone, so what a snapshot's or a check's `version` ran on can be read, and built again; `pool` has its live workers, and is absent while it has none. A request reaches an environment by naming its `version`.
+         */
+        get: operations["listEnvironments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -1275,6 +1295,12 @@ export interface components {
              */
             timing: components["schemas"]["Timing"];
             /**
+             * @description The version of the worker that ran it, which `GET /environments`
+             *     describes: the one the request named, or resolved to. Absent when no
+             *     worker ran it, and from a worker of a release before this field.
+             */
+            version?: string;
+            /**
              * @description What went wrong with goal reporting: that it failed or ran past
              *     `timeout`, so the result is a plain check's, without `tactics` or
              *     `at`, or that it took over three times as long as the check, and a
@@ -1816,6 +1842,46 @@ export interface components {
             /** Format: int64 */
             timeout?: number;
         };
+        /**
+         * @description A version and the Lake project behind it, which stays listed after its
+         *     workers are gone.
+         */
+        Environment: {
+            /**
+             * Format: int64
+             * @description When a worker first registered it, in seconds since the Unix epoch.
+             */
+            created: number;
+            /**
+             * @description Its project's files by name: `lean-toolchain`, the lakefile, the
+             *     manifest and the top-level `.lean` files, which import what it
+             *     builds. Written to a directory, they are the Lake project that a
+             *     worker image of this version is built from.
+             */
+            files: {
+                [key: string]: string;
+            };
+            /**
+             * @description The Lake packages its project's `lake-manifest.json` pins, what it
+             *     requires through them included: what code on it can import.
+             */
+            packages: components["schemas"]["PoolPackage"][];
+            /**
+             * @description Its live workers, as `GET /health` lists them. Absent while it has
+             *     none: its pool is scaled to zero, or gone.
+             */
+            pool?: components["schemas"]["PoolHealth"];
+            /**
+             * @description The Lean toolchain its project pins, e.g. `leanprover/lean4:v4.36.0`;
+             *     empty for workers without a project.
+             */
+            toolchain: string;
+            /**
+             * @description Its version: what a request names to reach its workers, and what ids
+             *     and check results carry.
+             */
+            version: string;
+        };
         Error: {
             kind: components["schemas"]["ErrorKind"];
             /**
@@ -2249,6 +2315,11 @@ export interface components {
          */
         ListDependentsResponse: {
             snapshots: components["schemas"]["Snapshot"][];
+        };
+        /** @description `GET /environments` */
+        ListEnvironmentsResponse: {
+            /** @description Every environment a worker has registered, by version. */
+            environments: components["schemas"]["Environment"][];
         };
         /**
          * @description `GET /snapshots`: the version's snapshots, newest first, that have every
@@ -3374,6 +3445,7 @@ export type DocumentGoalsRequest = components['schemas']['DocumentGoalsRequest']
 export type DocumentProbes = components['schemas']['DocumentProbes'];
 export type DocumentProbesRequest = components['schemas']['DocumentProbesRequest'];
 export type EditDocumentRequest = components['schemas']['EditDocumentRequest'];
+export type Environment = components['schemas']['Environment'];
 export type Error = components['schemas']['Error'];
 export type ErrorKind = components['schemas']['ErrorKind'];
 export type ErrorResponse = components['schemas']['ErrorResponse'];
@@ -3404,6 +3476,7 @@ export type LeftOutReason = components['schemas']['LeftOutReason'];
 export type LinePos = components['schemas']['LinePos'];
 export type ListAcceptancesResponse = components['schemas']['ListAcceptancesResponse'];
 export type ListDependentsResponse = components['schemas']['ListDependentsResponse'];
+export type ListEnvironmentsResponse = components['schemas']['ListEnvironmentsResponse'];
 export type ListSnapshotsResponse = components['schemas']['ListSnapshotsResponse'];
 export type Message = components['schemas']['Message'];
 export type NameRunRequest = components['schemas']['NameRunRequest'];
@@ -4328,6 +4401,93 @@ export interface operations {
             };
             /** @description `conflict`: the document is at another revision */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listEnvironments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The environments, by version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListEnvironmentsResponse"];
+                };
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

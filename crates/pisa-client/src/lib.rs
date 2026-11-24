@@ -61,14 +61,14 @@ pub use pisa_protocol::api::{
     AuditSnapshotsResponse, AuditSummary, AuditSwap, AuditTarget, AuditThrough, AuditUnlinked,
     AuditUnproved, AuditUnsettled, Change, CheckResult, CreateSnapshotResponse, Declaration,
     DeclarationChange, DeleteSnapshotResponse, Detail, Document, DocumentGoals, DocumentProbes,
-    ErrorKind, Export, GoalsAt, GoalsMode, Health, HealthStatus, Inherited, JobKind, JobStatus,
-    LeftOut, LeftOutReason, LinePos, ListAcceptancesResponse, ListDependentsResponse,
-    ListSnapshotsResponse, Message, NameRunRequest, NamedRun, PairError, PairErrorKind, Pos,
-    ProbeAt, ProbeResult, ProofStatus, RebuildCreated, RebuildFailed, RebuildItem, RebuildReplaced,
-    RebuildSkipped, RebuildSnapshotsResponse, RebuildSuperseded, Refusal, Refutation, Refutes,
-    Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse, ReviewDeclaration,
-    ReviewOrigin, RunImport, Session, Severity, Snapshot, SnapshotDetail, Sorry, State, Superseded,
-    TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
+    Environment, ErrorKind, Export, GoalsAt, GoalsMode, Health, HealthStatus, Inherited, JobKind,
+    JobStatus, LeftOut, LeftOutReason, LinePos, ListAcceptancesResponse, ListDependentsResponse,
+    ListEnvironmentsResponse, ListSnapshotsResponse, Message, NameRunRequest, NamedRun, PairError,
+    PairErrorKind, Pos, ProbeAt, ProbeResult, ProofStatus, RebuildCreated, RebuildFailed,
+    RebuildItem, RebuildReplaced, RebuildSkipped, RebuildSnapshotsResponse, RebuildSuperseded,
+    Refusal, Refutation, Refutes, Replacement, Replaces, ResubmitItem, ResubmitSnapshotsResponse,
+    ReviewDeclaration, ReviewOrigin, RunImport, Session, Severity, Snapshot, SnapshotDetail, Sorry,
+    State, Superseded, TacticInfo, TermInfo, VerifyFailure, VerifySnapshotResponse,
 };
 pub use pisa_protocol::search::{
     DeclarationDetail, Description, Flags, Format, Hit, Query, QueryResult, Resolution,
@@ -1685,6 +1685,14 @@ impl Client {
     pub async fn list_acceptances(&self, spec: &str) -> Result<ListAcceptancesResponse, Error> {
         let mut url = self.endpoint.url("snapshots/accept")?;
         url.query_pairs_mut().append_pair("spec", spec);
+        self.endpoint.get(url).await
+    }
+
+    /// Every environment a worker has registered, by version: its toolchain,
+    /// the packages it pins, its project's files, and its live `pool`, absent
+    /// while it has none. A snapshot's or a check's `version` is one of them.
+    pub async fn list_environments(&self) -> Result<ListEnvironmentsResponse, Error> {
+        let url = self.endpoint.url("environments")?;
         self.endpoint.get(url).await
     }
 

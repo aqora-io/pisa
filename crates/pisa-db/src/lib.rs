@@ -6,6 +6,7 @@ mod backend;
 pub mod catalog;
 pub mod db;
 pub mod description_flags;
+pub mod environments;
 pub mod queue;
 pub mod records;
 mod schema;

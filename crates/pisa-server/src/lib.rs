@@ -117,7 +117,7 @@ pub fn openapi() -> Value {
             (name = "documents", description = "Goals and candidate tactics on code kept open on Lean Beam"),
             (name = "search", description = "Finding declarations"),
             (name = "jobs", description = "Answers to async requests, made with `Prefer: respond-async`"),
-            (name = "health", description = "Whether a server can take requests"),
+            (name = "health", description = "Whether a server can take requests, and the environments its workers serve"),
         ),
         servers((url = "/", description = "The server that serves this document")),
     )]
@@ -147,7 +147,7 @@ fn scoped(spec: &mut Value) {
         return;
     };
     for (path, item) in paths.iter_mut() {
-        if path == "/health" || path == "/openapi.json" {
+        if path == "/health" || path == "/openapi.json" || path == "/environments" {
             continue;
         }
         let Value::Object(methods) = item else {

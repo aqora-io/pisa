@@ -30,7 +30,7 @@ use serde::de::DeserializeOwned;
 
 use crate::dispatch::{DispatchError, Dispatcher, Prepared, Priority, Route};
 use crate::jobs::{self, Prefer};
-use crate::{documents, runs, sessions, snapshots};
+use crate::{documents, environments, runs, sessions, snapshots};
 
 pub struct App {
     pub dispatcher: Arc<Dispatcher>,
@@ -77,6 +77,7 @@ pub struct App {
         documents::close,
         jobs::get,
         jobs::cancel,
+        environments::list,
     )
 )]
 pub struct ApiDoc;
@@ -117,6 +118,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/documents/{id}/goals", post(documents::goals))
         .route("/documents/{id}/probes", post(documents::probe))
         .route("/jobs/{id}", get(jobs::get).delete(jobs::cancel))
+        .route("/environments", get(environments::list))
         .fallback(|| async { ApiError::new(ErrorKind::NotFound, "no such endpoint") })
         .with_state(app)
 }

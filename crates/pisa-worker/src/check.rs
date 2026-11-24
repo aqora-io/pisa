@@ -69,6 +69,7 @@ pub async fn run_check(pool: &Arc<Pool>, job: CheckJob) -> CheckOutcome {
         verification: None,
         runs: job.runs.clone(),
         warnings: Vec::new(),
+        version: None,
     };
 
     // Before waiting for a slot: refused code needs none.

@@ -1128,6 +1128,10 @@
             "$ref": "#/components/schemas/Timing",
             "description": "Where this request's time went. For a create's `check`, the stored\nbuild's."
           },
+          "version": {
+            "description": "The version of the worker that ran it, which `GET /environments`\ndescribes: the one the request named, or resolved to. Absent when no\nworker ran it, and from a worker of a release before this field.",
+            "type": "string"
+          },
           "warnings": {
             "description": "What went wrong with goal reporting: that it failed or ran past\n`timeout`, so the result is a plain check's, without `tactics` or\n`at`, or that it took over three times as long as the check, and a\nsecond or more longer.",
             "items": {
@@ -1818,6 +1822,54 @@
         "required": [
           "code",
           "revision"
+        ],
+        "type": "object"
+      },
+      "Environment": {
+        "description": "A version and the Lake project behind it, which stays listed after its\nworkers are gone.",
+        "properties": {
+          "created": {
+            "description": "When a worker first registered it, in seconds since the Unix epoch.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "files": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Its project's files by name: `lean-toolchain`, the lakefile, the\nmanifest and the top-level `.lean` files, which import what it\nbuilds. Written to a directory, they are the Lake project that a\nworker image of this version is built from.",
+            "propertyNames": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "packages": {
+            "description": "The Lake packages its project's `lake-manifest.json` pins, what it\nrequires through them included: what code on it can import.",
+            "items": {
+              "$ref": "#/components/schemas/PoolPackage"
+            },
+            "type": "array"
+          },
+          "pool": {
+            "$ref": "#/components/schemas/PoolHealth",
+            "description": "Its live workers, as `GET /health` lists them. Absent while it has\nnone: its pool is scaled to zero, or gone."
+          },
+          "toolchain": {
+            "description": "The Lean toolchain its project pins, e.g. `leanprover/lean4:v4.36.0`;\nempty for workers without a project.",
+            "type": "string"
+          },
+          "version": {
+            "description": "Its version: what a request names to reach its workers, and what ids\nand check results carry.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "toolchain",
+          "packages",
+          "files",
+          "created"
         ],
         "type": "object"
       },
@@ -2563,6 +2615,22 @@
         },
         "required": [
           "snapshots"
+        ],
+        "type": "object"
+      },
+      "ListEnvironmentsResponse": {
+        "description": "`GET /environments`",
+        "properties": {
+          "environments": {
+            "description": "Every environment a worker has registered, by version.",
+            "items": {
+              "$ref": "#/components/schemas/Environment"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "environments"
         ],
         "type": "object"
       },
@@ -5575,6 +5643,108 @@
         "summary": "Try candidate tactics at a position",
         "tags": [
           "documents"
+        ]
+      }
+    },
+    "/environments": {
+      "get": {
+        "description": "Every version a worker has registered, with the Lake project behind it: its toolchain, the packages it pins and its files. An environment stays listed after its workers are gone, so what a snapshot's or a check's `version` ran on can be read, and built again; `pool` has its live workers, and is absent while it has none. A request reaches an environment by naming its `version`.",
+        "operationId": "listEnvironments",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListEnvironmentsResponse"
+                }
+              }
+            },
+            "description": "The environments, by version"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "The environments workers serve, or have served",
+        "tags": [
+          "health"
         ]
       }
     },
@@ -9132,7 +9302,7 @@
       "name": "jobs"
     },
     {
-      "description": "Whether a server can take requests",
+      "description": "Whether a server can take requests, and the environments its workers serve",
       "name": "health"
     }
   ]

@@ -156,6 +156,9 @@ class CheckResult(TypedDict):
     time: float
     """Seconds Lean spent on the code. For a create, the stored build's."""
     timing: Timing
+    version: NotRequired[str]
+    """The version of the worker that ran it, which `list_environments`
+    describes. Absent when no worker ran it."""
     error: NotRequired[Error]
     messages: list[Message]
     sorries: list[Sorry]
@@ -762,6 +765,29 @@ class PoolHealth(TypedDict):
     # The Lake packages their project pins: what code there can import.
     packages: list[PoolPackage]
 
+class Environment(TypedDict):
+    """A version and the Lake project behind it, which stays listed after
+    its workers are gone."""
+    # What a request names to reach its workers, and what ids and check
+    # results carry.
+    version: str
+    # The Lean toolchain its project pins; empty for workers without one.
+    toolchain: str
+    # The Lake packages its project pins: what code on it can import.
+    packages: list[PoolPackage]
+    # Its project's files by name: `lean-toolchain`, the lakefile, the
+    # manifest and the top-level `.lean` files. In a directory, they are the
+    # Lake project a worker image of this version is built from.
+    files: dict[str, str]
+    # When a worker first registered it, in seconds since the Unix epoch.
+    created: int
+    # Its live workers; absent while it has none.
+    pool: NotRequired[PoolHealth]
+
+class ListEnvironmentsResponse(TypedDict):
+    """Every environment a worker has registered, by version."""
+    environments: list[Environment]
+
 class Health(TypedDict):
     status: Literal["ok", "draining"]
     workers: int | None
@@ -1147,6 +1173,11 @@ class Client:
         """The acceptances that judged spec snapshot `spec`, newest first, at
         most 100; each says `stale` once the run's heads have moved on, its
         spec is amended, or a target is refuted."""
+    def list_environments(self) -> ListEnvironmentsResponse:
+        """Every environment a worker has registered, by version: its
+        toolchain, the packages it pins, its project's files, and its live
+        `pool`, absent while it has none. A snapshot's or a check's
+        `version` is one of them."""
     def get_run(self, name: str) -> NamedRun:
         """The run named `name`: its root, its heads, and, when they are on
         one module, what `import PisaRun.<name>` resolves to now."""
@@ -1698,6 +1729,11 @@ class AsyncClient:
         """The acceptances that judged spec snapshot `spec`, newest first, at
         most 100; each says `stale` once the run's heads have moved on, its
         spec is amended, or a target is refuted."""
+    def list_environments(self) -> Future[ListEnvironmentsResponse]:
+        """Every environment a worker has registered, by version: its
+        toolchain, the packages it pins, its project's files, and its live
+        `pool`, absent while it has none. A snapshot's or a check's
+        `version` is one of them."""
     def get_run(self, name: str) -> Future[NamedRun]:
         """The run named `name`: its root, its heads, and, when they are on
         one module, what `import PisaRun.<name>` resolves to now."""

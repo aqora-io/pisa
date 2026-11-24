@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pisa_db::db::Notice;
+use pisa_db::environments::Environments;
 use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue, Registration};
 use pisa_db::scope::Scope;
 use pisa_protocol::api::JobProgress;
@@ -331,6 +332,7 @@ impl Shared {
             timing.queue = queue;
             timing.total = round6(started.elapsed().as_secs_f64());
         }
+        result.set_version(&self.version);
         // A header the job warmed, or a document it opened, is published
         // first, so that the client's next request can find this worker.
         self.publish_warm().await;
@@ -450,25 +452,32 @@ impl Shared {
         }
         let boot_id = host::boot_id().unwrap_or_default();
         let (toolchain, packages) = self.pool.launcher().project_pins();
+        let files = self.pool.launcher().project_files();
+        let environments = Environments::new(self.queue.db().clone());
         let mut backoff = Duration::from_millis(100);
         let since = loop {
-            match self
-                .queue
-                .register(&Registration {
-                    worker: self.me.clone(),
-                    version: self.version.clone(),
-                    slots: slots as u32,
-                    beam_slots: beam_slots as u32,
-                    unlimited,
-                    revision: pisa_protocol::revision::REVISION.to_string(),
-                    memory_caps_mb,
-                    host_memory_mb: host_memory_mb.unwrap_or(0),
-                    boot_id: boot_id.clone(),
-                    toolchain: toolchain.clone(),
-                    packages: packages.clone(),
-                })
-                .await
-            {
+            // The environment first: a version with a worker has its record.
+            let registered = async {
+                environments
+                    .record(&self.version, &toolchain, &packages, &files)
+                    .await?;
+                self.queue
+                    .register(&Registration {
+                        worker: self.me.clone(),
+                        version: self.version.clone(),
+                        slots: slots as u32,
+                        beam_slots: beam_slots as u32,
+                        unlimited,
+                        revision: pisa_protocol::revision::REVISION.to_string(),
+                        memory_caps_mb,
+                        host_memory_mb: host_memory_mb.unwrap_or(0),
+                        boot_id: boot_id.clone(),
+                        toolchain: toolchain.clone(),
+                        packages: packages.clone(),
+                    })
+                    .await
+            };
+            match registered.await {
                 Ok(since) => break since,
                 Err(e) => tracing::warn!("registering with the job queue failed: {e}"),
             }

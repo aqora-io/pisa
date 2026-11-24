@@ -20,6 +20,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub mod dispatch;
 pub mod documents;
+pub mod environments;
 pub mod http;
 pub mod jobs;
 mod rebuild;

@@ -2,7 +2,7 @@
 //! of the files that decide what gets built. Worker pools and search indexes
 //! use it, so a request names the exact environment it was meant for.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -35,10 +35,19 @@ pub fn project_version(project: &Path) -> std::io::Result<String> {
     let toolchain = toolchain.trim();
     let tag = toolchain.rsplit(':').next().unwrap_or(toolchain);
     let mut hasher = Sha256::new();
+    for (file, bytes) in hashed_files(project)? {
+        hasher.update(file.as_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(format!("{tag}-{}", hex::encode(&hasher.finalize()[..4])))
+}
+
+/// The files [`project_version`] hashes, in the order it hashes them.
+fn hashed_files(project: &Path) -> std::io::Result<Vec<(String, Vec<u8>)>> {
+    let mut files = Vec::new();
     for file in ["lake-manifest.json", "lakefile.toml", "lakefile.lean"] {
         if let Ok(bytes) = std::fs::read(project.join(file)) {
-            hasher.update(file.as_bytes());
-            hasher.update(&bytes);
+            files.push((file.to_string(), bytes));
         }
     }
     let mut sources: Vec<String> = std::fs::read_dir(project)?
@@ -47,10 +56,26 @@ pub fn project_version(project: &Path) -> std::io::Result<String> {
         .collect();
     sources.sort();
     for file in sources {
-        hasher.update(file.as_bytes());
-        hasher.update(std::fs::read(project.join(&file))?);
+        let bytes = std::fs::read(project.join(&file))?;
+        files.push((file, bytes));
     }
-    Ok(format!("{tag}-{}", hex::encode(&hasher.finalize()[..4])))
+    Ok(files)
+}
+
+/// The files that define `project`'s environment, by name: its
+/// `lean-toolchain` and those [`project_version`] hashes. Written to a
+/// directory, they are a Lake project of the same version. Empty if they
+/// can't be read.
+pub fn project_files(project: &Path) -> BTreeMap<String, String> {
+    let Ok(toolchain) = std::fs::read(project.join("lean-toolchain")) else {
+        return BTreeMap::new();
+    };
+    let mut files = hashed_files(project).unwrap_or_default();
+    files.push(("lean-toolchain".to_string(), toolchain));
+    files
+        .into_iter()
+        .map(|(name, bytes)| (name, String::from_utf8_lossy(&bytes).into_owned()))
+        .collect()
 }
 
 /// The toolchain `project` pins (its `lean-toolchain`, e.g.
@@ -116,6 +141,41 @@ mod tests {
         );
         std::fs::write(dir.join("notes.md"), "not Lean").unwrap();
         assert_eq!(project_version(&dir).unwrap(), with_root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn files_are_the_toolchain_and_what_the_label_hashes() {
+        let dir = std::env::temp_dir().join(format!("pisa-files-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Sub")).unwrap();
+        assert!(project_files(&dir).is_empty());
+        std::fs::write(dir.join("lean-toolchain"), "leanprover/lean4:v4.35.0\n").unwrap();
+        std::fs::write(dir.join("lake-manifest.json"), "{}").unwrap();
+        std::fs::write(dir.join("lakefile.toml"), "name = \"x\"").unwrap();
+        std::fs::write(dir.join("X.lean"), "import Mathlib\n").unwrap();
+        std::fs::write(dir.join("notes.md"), "not Lean").unwrap();
+        std::fs::write(dir.join("Sub/Y.lean"), "def y := 1").unwrap();
+        let files = project_files(&dir);
+        assert_eq!(
+            files.keys().collect::<Vec<_>>(),
+            [
+                "X.lean",
+                "lake-manifest.json",
+                "lakefile.toml",
+                "lean-toolchain"
+            ]
+        );
+        assert_eq!(files["X.lean"], "import Mathlib\n");
+        // Written out again, they are the same environment.
+        let copy = dir.join("copy");
+        std::fs::create_dir_all(&copy).unwrap();
+        for (name, text) in &files {
+            std::fs::write(copy.join(name), text).unwrap();
+        }
+        assert_eq!(
+            project_version(&copy).unwrap(),
+            project_version(&dir).unwrap()
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

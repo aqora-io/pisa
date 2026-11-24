@@ -414,6 +414,17 @@ impl JobResult {
             _ => None,
         }
     }
+
+    /// Says which version ran the check the answer carries, if it has one.
+    pub fn set_version(&mut self, version: &str) {
+        let ran = match self {
+            JobResult::Check(outcome) => &mut outcome.version,
+            JobResult::SessionChecked(checked) => &mut checked.outcome.version,
+            JobResult::SnapshotCreated(created) => &mut created.check.version,
+            _ => return,
+        };
+        *ran = Some(version.to_string());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -436,6 +447,9 @@ pub struct CheckOutcome {
     /// Said of the check besides its diagnostics, as the result's `warnings`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The worker's version, which it adds when it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// The JSON `job` is queued as, with the scope it runs in beside its `kind`
@@ -479,6 +493,7 @@ impl From<CheckOutcome> for api::CheckResult {
             ok: verified && o.error.is_none(),
             time: o.time,
             timing: o.timing,
+            version: o.version,
             error: o.error,
             messages,
             sorries,
@@ -594,6 +609,7 @@ mod tests {
             verification: None,
             runs: Vec::new(),
             warnings: vec!["slow".into()],
+            version: None,
         };
         let wire: CheckOutcome =
             serde_json::from_value(serde_json::to_value(&outcome).unwrap()).unwrap();
@@ -618,6 +634,7 @@ mod tests {
             verification: None,
             runs: Vec::new(),
             warnings: Vec::new(),
+            version: None,
         });
         result.timing_mut().unwrap().queue = 1.5;
         let JobResult::Check(outcome) = &result else {

@@ -118,6 +118,56 @@ async fn health_names_workers_without_limits_and_a_refused_sweep() {
     assert!(refused.since > 0);
 }
 
+/// A check says which version ran it, named or not, as does a create's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_says_which_version_ran_it() {
+    use serde_json::json;
+    let c = Cluster::start(&[("w0", "v", 1), ("w1", "u", 1)]).await;
+    let (status, named) = c
+        .post("/check", json!({"code": "#check Nat", "version": "u"}))
+        .await;
+    assert_eq!(status, 200, "{named}");
+    assert_eq!(named["version"], c.version("u"), "{named}");
+    // No version, and the cluster has no default: any pool runs it.
+    let (_, any) = c.post("/check", json!({"code": "#check Nat"})).await;
+    let ran = any["version"].as_str().expect("a version").to_string();
+    assert!([c.version("v"), c.version("u")].contains(&ran), "{any}");
+    let batch = json!({"items": [{"code": "#check Nat"}], "version": "v"});
+    let (_, batch) = c.post("/check/batch", batch).await;
+    assert_eq!(batch["results"][0]["version"], c.version("v"), "{batch}");
+    let (_, made) = c
+        .post("/snapshots", json!({"code": "def x := 1", "version": "u"}))
+        .await;
+    assert_eq!(made["check"]["version"], c.version("u"), "{made}");
+}
+
+/// An environment is listed from its first worker on, with its pool while it
+/// has a live one.
+#[tokio::test(flavor = "multi_thread")]
+async fn environments_outlive_their_pools() {
+    let mut c = Cluster::start(&[("w0", "v", 2), ("w1", "u", 1)]).await;
+    let client = Client::new(&c.url("/")).unwrap();
+    // A shared database lists other tests' too.
+    let (v, u) = (c.version("v"), c.version("u"));
+    let mine = || async {
+        let all = client.list_environments().await.unwrap().environments;
+        let find = |version: &str| all.iter().find(|e| e.version == version).cloned();
+        (find(&v).expect("v's"), find(&u).expect("u's"))
+    };
+    let (of_v, of_u) = mine().await;
+    let pool = of_v.pool.expect("v's pool");
+    assert_eq!((pool.version, pool.workers, pool.slots), (v.clone(), 1, 2));
+    assert_eq!(of_u.pool.map(|p| p.slots), Some(1));
+    assert!(of_v.created > 0);
+    // The cluster's workers have no project.
+    assert_eq!((of_v.toolchain.as_str(), of_v.files.len()), ("", 0));
+
+    c.kill_worker(1).await;
+    let (of_v, of_u) = mine().await;
+    assert!(of_v.pool.is_some());
+    assert_eq!(of_u.pool, None);
+}
+
 /// Health lists the live workers by version, a pool each.
 #[tokio::test(flavor = "multi_thread")]
 async fn health_lists_a_pool_per_version() {

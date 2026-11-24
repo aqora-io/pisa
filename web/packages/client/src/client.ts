@@ -28,6 +28,7 @@ import type {
   LinePos,
   ListAcceptancesResponse,
   ListDependentsResponse,
+  ListEnvironmentsResponse,
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ModuleName,
@@ -604,6 +605,13 @@ export class PisaClient {
   listAcceptances(spec: SnapshotId, options: RequestOptions = {}): Promise<ListAcceptancesResponse> {
     const query = new URLSearchParams({ spec });
     return this.call("GET", ["snapshots", "accept"], undefined, options, query);
+  }
+
+  /** Every environment a worker has registered, by version: its toolchain,
+   *  the packages it pins, its project's files, and its live `pool`, absent
+   *  while it has none. A snapshot's or a check's `version` is one of them. */
+  listEnvironments(options: RequestOptions = {}): Promise<ListEnvironmentsResponse> {
+    return this.call("GET", ["environments"], undefined, options);
   }
 
   private acceptRequest(

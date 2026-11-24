@@ -764,6 +764,11 @@ impl Base {
         self.call(py, async move { inner.list_acceptances(&spec).await })
     }
 
+    fn list_environments<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        self.call(py, async move { inner.list_environments().await })
+    }
+
     fn get_run<'py>(&self, py: Python<'py>, name: String) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         self.call(py, async move { inner.get_run(&name).await })

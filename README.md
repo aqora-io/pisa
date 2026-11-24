@@ -180,7 +180,9 @@ of workers on the same servers, database and store:
   can pick the pool that has a library,
   and requests reach it by naming that `version`, or by
   [`PISA_ALIASES`](#versions) and `PISA_DEFAULT_VERSION`. Snapshot ids carry
-  their version, so requests about a snapshot need none.
+  their version, so requests about a snapshot need none, and
+  [`GET /environments`](#environments) keeps the project of every version
+  served, live or not.
 - **What it lacks.** Search indexes one version (see [Limits](#limits)), so
   agents on the new pool find names with `#check`, `#print` and `exact?`;
   a search that names another version answers `not_found`, saying which
@@ -283,6 +285,16 @@ and the rest of the API works.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
+
+To the release that records environments:
+- The first process of this release adds the `environments` table. A worker
+  records its version's project there as it registers, so an environment is
+  listed by `GET /environments` (see [Environments](#environments)) once a
+  worker of this release has served it; one whose workers all stopped before
+  isn't.
+- A check's result adds `version`, the version of the worker that ran it.
+  A worker of the release before doesn't say, so while both run it may be
+  absent.
 
 To the release that shows where a refused type differs:
 - A build's export prints each type a third way, `type_explicit`, with every
@@ -577,6 +589,7 @@ pnpm -C web generate
 | `DELETE /documents/{id}` | → 204 |
 | `GET /jobs/{id}` | `?wait=` (seconds, at most 60) → once its job is done, `{id, kind, status: "done", http_status, body}`, the request's status and answer, else 202 `{id, kind, status, progress?: {phase: {name, pair?, side?}, kernel?, seconds, peak_memory_mb?}}`; see [Async requests](#async-requests) |
 | `DELETE /jobs/{id}` | → `{id, kind, status}`, `cancelled` if no worker had started it |
+| `GET /environments` | → `{environments: [{version, toolchain, packages: [{name, url?, rev, input_rev?}], files, created, pool?}]}`: every version a worker has registered, with its project's files by name and, while it has live workers, its pool as `/health` lists it; see [Environments](#environments) |
 | `GET /health` | Liveness: `{status, workers, queued, unlimited_workers, sweeps_refused, revision, worker_revisions, pools, dependencies, hosts, search}`, the live workers on the queue, the jobs waiting for one, those running Lean without memory or process limits by name, the versions whose sweeps of the store are refused (`[{version, reason, since}]`, see [Retention](#retention)), each `null` if it can't be read, the server's commit (`unknown` if its build didn't say), the distinct commits of the live workers (`null` if the queue can't be read), the live workers by the version they serve, a pool each (`[{version, workers, slots, beam_slots, draining, toolchain, packages: [{name, url?, rev, input_rev?}]}]`, with the toolchain and the Lake packages its project pins, empty for workers from before they said, `null` if the queue can't be read; see [A pool for another project](#another-project)), the memory limits of the live workers per host (`[{boot_id, workers, uncapped_workers, memory_caps_mb, memory_mb, overcommitted}]`, `null` if the queue can't be read), whether the `database` (answering within 2 seconds) and the module `store` (as the live workers last probed it, about every minute: `unreachable` if any can't reach it) are `ok`, `unreachable` or `unknown`, and search's state (`null` if the server doesn't search; its `describe_model` is the model that snapshot code is sent to, [`null` if none](#what-snapshot-search-sends)); 503 with `status: draining` once the server is stopping, and 200 otherwise, whatever a dependency's state |
 
 Browsers may call the API from other origins only when the server allows
@@ -654,8 +667,10 @@ would have:
 - `/check/batch`, and the snapshot reads and edits, answer at once whatever
   `Prefer` says: send a batch's items to `/check` instead.
 
-A check result is `{ok, time, timing, error?, messages, sorries, reasons, changes?, declarations, runs?, warnings?}`:
+A check result is `{ok, time, timing, version?, error?, messages, sorries, reasons, changes?, declarations, runs?, warnings?}`:
 - `ok` is the verdict.
+- `version` is the version of the worker that ran it (see
+  [Environments](#environments)), absent when none did.
 - `timing` says where the time went, in seconds: `{queue, load, execution, tracing, verification, total}`.
   Every operation that runs Lean has one, in the same shape, and a phase that
   doesn't apply is 0. `queue` is the wait for a worker, from queueing the
@@ -874,6 +889,28 @@ proofs one tactic at a time, as a tree of states:
 an alias set with `PISA_ALIASES`. Session, state, snapshot and document ids
 carry their version, so the requests that take one take no `version`. `timeout` is Lean's
 limit in seconds (default 60).
+
+<a id="environments"></a>
+**Environments.** A version names an environment: a Lean toolchain and the
+Lake project its workers build, whose label is `<toolchain>-<hash of the
+project's files>`. A check's result says which ran it in `version`, the
+one the request named, the server's default, or, with neither, whichever
+pool took it; it is absent only when no worker ran the check.
+`GET /environments` lists every version a worker has registered, by
+version:
+- `toolchain` and `packages` are what its project pins, as `/health`'s
+  pools have them.
+- `files` has the project's files by name: `lean-toolchain`, the lakefile,
+  the manifest and the top-level `.lean` files. Written to a directory they
+  are the project again, which builds a worker image of the same version
+  (see [A pool for another project](#another-project)).
+- `created` is when a worker first registered it.
+- `pool` has its live workers, and is absent while it has none.
+
+An environment stays listed after its workers are gone, as its snapshots
+stay, so what a snapshot's version was can be read after its pool is scaled
+to zero or removed. Workers started with a version of their own choosing
+(`PISA_VERSION`) list what the latest of them serves.
 
 **Errors** always look like `{"error": {"kind", "message"}}`.
 - **Checks report failures in-band.** A check that times out, crashes or is

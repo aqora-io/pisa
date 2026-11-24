@@ -133,6 +133,16 @@ diesel::table! {
 }
 
 diesel::table! {
+    environments (version) {
+        version -> Text,
+        toolchain -> Text,
+        packages -> Text,
+        files -> Text,
+        created_micros -> BigInt,
+    }
+}
+
+diesel::table! {
     catalogs (version) {
         version -> Text,
         id -> Text,

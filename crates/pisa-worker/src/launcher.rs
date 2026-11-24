@@ -1,6 +1,7 @@
 //! Starting REPL processes, optionally inside a bubblewrap sandbox and a
 //! per-slot cgroup.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -394,6 +395,15 @@ impl Launcher {
         match &self.project {
             Some(project) => pisa_protocol::version::project_pins(project),
             None => (String::new(), Vec::new()),
+        }
+    }
+
+    /// The project's files that define its environment, which the worker
+    /// records as it registers; none without a project.
+    pub fn project_files(&self) -> BTreeMap<String, String> {
+        match &self.project {
+            Some(project) => pisa_protocol::version::project_files(project),
+            None => BTreeMap::new(),
         }
     }
 

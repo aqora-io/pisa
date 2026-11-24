@@ -53,6 +53,7 @@ impl Sessions {
                 verification: None,
                 runs: Vec::new(),
                 warnings: Vec::new(),
+                version: None,
             },
             statement_reasons: Vec::new(),
             statement_changes: Vec::new(),

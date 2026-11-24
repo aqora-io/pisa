@@ -85,6 +85,15 @@ def health(url):
         return json.load(r)
 
 
+def test_a_check_names_its_environment(url):
+    client = Client(url)
+    assert client.check("#check Nat")["version"] == "v"
+    [env] = client.list_environments()["environments"]
+    # The cluster's worker has no project.
+    assert (env["version"], env["toolchain"], env["files"]) == ("v", "", {})
+    assert env["pool"]["workers"] == 1
+
+
 def test_health(url, db):
     assert Client(url).health()["status"] == "ok"
 
