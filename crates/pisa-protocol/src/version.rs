@@ -144,6 +144,25 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// `scripts/env.py` labels a project itself, to tag its image before a
+    /// worker of it runs.
+    #[test]
+    fn the_build_script_labels_a_project_as_its_workers_do() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for project in ["docker/lean-project", "docker/lean-core"] {
+            let project = root.join(project);
+            let script = std::process::Command::new("python3")
+                .arg(root.join("scripts/env.py"))
+                .arg("label")
+                .arg(&project)
+                .output()
+                .expect("running python3");
+            let printed = String::from_utf8_lossy(&script.stdout);
+            assert!(script.status.success(), "{script:?}");
+            assert_eq!(printed.trim(), project_version(&project).unwrap());
+        }
+    }
+
     #[test]
     fn files_are_the_toolchain_and_what_the_label_hashes() {
         let dir = std::env::temp_dir().join(format!("pisa-files-{}", std::process::id()));

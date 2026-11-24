@@ -45,7 +45,8 @@ router:
   # worker pod takes to start, so requests queued during a scale-up don't fail.
   maxWaitSecs: 300
   maxRetries: 2
-  # Version used when a request names none, and NAME=VERSION aliases.
+  # Version used when a request names none (by default `worker.version`),
+  # and NAME=VERSION aliases.
   defaultVersion: ""
   aliases: []
 
@@ -55,6 +56,13 @@ router:
 allowedAxioms: []
 
 worker:
+  # The version this pool's image serves, `<toolchain>-<hash>`, as
+  # scripts/env.py prints it and GET /environments lists it. Required with
+  # `pools`, and optional without: the pool then scales on its own version's
+  # jobs and those that name none, requests that name none go to it unless
+  # router.defaultVersion says otherwise, and a worker whose image serves
+  # another version doesn't start.
+  version: ""
   image:
     # Built from docker/Dockerfile (target worker), with
     # `--build-arg REVISION=<commit>` as the server's. The default project
@@ -96,6 +104,27 @@ worker:
   # overheadMemoryMb.
   resources: {}
   extraEnv: []
+
+# Worker pools for other environments, beside `worker`'s: other toolchains,
+# other libraries. Each is a Deployment and a ScaledObject of its own, on the
+# release's servers, database and store, and scales on the jobs of its
+# version alone. A pool takes `worker`'s settings, and overrides those it
+# names.
+pools: []
+  # - # Required: the version its image serves.
+  #   version: v4.35.0-1a2b3c4d
+  #   # What its Deployment's name ends in. By default the version, with
+  #   # dashes for dots.
+  #   name: lean-4-35
+  #   # Its image: `worker`'s repository, tagged with the version, unless set.
+  #   image: { tag: v4.35.0-1a2b3c4d }
+  #   # Its replicas, by default keda's. With 0 it runs no pod until a
+  #   # request names its version, which then waits for one to start: keep
+  #   # router.maxWaitSecs above that, the image's pull included.
+  #   minReplicas: 0
+  #   maxReplicas: 2
+  #   # And any of `worker`'s keys.
+  #   slots: 1
 
 # S3-compatible storage for snapshot modules. All workers of a release share
 # it.

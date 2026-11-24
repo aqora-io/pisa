@@ -12,6 +12,10 @@ pub struct WorkerConfig {
     /// Pool label. Defaults to the project's toolchain plus a hash of its lake-manifest.json.
     #[arg(long, env = "PISA_VERSION")]
     pub version: Option<String>,
+    /// The version this worker has to turn out to serve, e.g. the one its
+    /// pool is deployed and scaled as: with another, it doesn't start.
+    #[arg(long, env = "PISA_EXPECT_VERSION")]
+    pub expect_version: Option<String>,
     /// Number of Lean processes. Defaults to the CPU count minus one.
     #[arg(long, env = "PISA_SLOTS")]
     pub slots: Option<usize>,
@@ -208,11 +212,18 @@ impl WorkerConfig {
     }
 
     pub fn version(&self) -> anyhow::Result<String> {
-        match (&self.version, &self.project) {
-            (Some(v), _) => Ok(v.clone()),
+        let version = match (&self.version, &self.project) {
+            (Some(v), _) => v.clone(),
             (None, Some(project)) => pisa_protocol::version::project_version(project)
-                .with_context(|| format!("reading the project at {}", project.display())),
-            (None, None) => Ok("dev".into()),
+                .with_context(|| format!("reading the project at {}", project.display()))?,
+            (None, None) => "dev".into(),
+        };
+        match &self.expect_version {
+            Some(expected) if *expected != version => anyhow::bail!(
+                "this worker serves {version}, and was expected to serve {expected} \
+                 (PISA_EXPECT_VERSION): its pool names another version than its image's project has"
+            ),
+            _ => Ok(version),
         }
     }
 }
@@ -243,5 +254,22 @@ mod tests {
         assert_eq!(both.project_rev.as_deref(), Some("33c9"));
         assert!(parse(&["--project-git", "https://example.com/l.git"]).is_err());
         assert!(parse(&["--project-rev", "33c9"]).is_err());
+    }
+
+    #[test]
+    fn a_worker_of_another_version_than_expected_has_none() {
+        let parse = |args: &[&str]| {
+            let base = ["pisa-worker", "--database-url", "sqlite::memory:"];
+            WorkerConfig::try_parse_from([&base[..], args].concat()).unwrap()
+        };
+        let version = |args: &[&str]| parse(args).version().map_err(|e| e.to_string());
+        assert_eq!(version(&["--version", "v1"]), Ok("v1".to_string()));
+        let same = ["--version", "v1", "--expect-version", "v1"];
+        assert_eq!(version(&same), Ok("v1".to_string()));
+        let other = version(&["--version", "v1", "--expect-version", "v2"]).unwrap_err();
+        assert!(
+            other.contains("serves v1") && other.contains("v2"),
+            "{other}"
+        );
     }
 }

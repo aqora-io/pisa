@@ -1,23 +1,28 @@
 {{- $name := include "pisa.fullname" . }}
-{{- $w := .Values.worker }}
+{{- range $i, $pool := include "pisa.poolList" . | fromYamlArray }}
+{{- $w := include "pisa.pool" (dict "root" $ "pool" $pool) | fromYaml }}
+{{- $component := printf "worker%s" $w.suffix }}
+{{- if $i }}
+---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $name }}-worker
+  name: {{ $name }}-{{ $component }}
   labels:
-    {{- include "pisa.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
+    {{- include "pisa.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
 spec:
-  {{- if not .Values.keda.enabled }}
-  replicas: {{ .Values.keda.minReplicas }}
+  {{- if not $.Values.keda.enabled }}
+  replicas: {{ $w.minReplicas }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "pisa.selector" (dict "root" . "component" "worker") | nindent 6 }}
+      {{- include "pisa.selector" (dict "root" $ "component" $component) | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "pisa.selector" (dict "root" . "component" "worker") | nindent 8 }}
+        {{- include "pisa.selector" (dict "root" $ "component" $component) | nindent 8 }}
     spec:
       # SIGTERM starts a drain: no new jobs, finish the running ones, exit.
       terminationGracePeriodSeconds: {{ add $w.drainTimeoutSecs 30 }}
@@ -35,6 +40,10 @@ spec:
             - name: PISA_WORKER_ID
               valueFrom: { fieldRef: { fieldPath: metadata.name } }
             - { name: PISA_QUEUE, value: {{ include "pisa.queue" $ | quote }} }
+            {{- with $w.version }}
+            # A worker whose image serves another version doesn't start.
+            - { name: PISA_EXPECT_VERSION, value: {{ . | quote }} }
+            {{- end }}
             - { name: PISA_SLOTS, value: {{ $w.slots | quote }} }
             - { name: PISA_SANDBOX, value: {{ $w.sandbox | quote }} }
             {{- if $w.cgroups }}
@@ -53,9 +62,9 @@ spec:
             {{- end }}
             - { name: PISA_STORE, value: s3 }
             - name: PISA_DATABASE_URL
-              valueFrom: { secretKeyRef: { name: {{ required "metadata.database.urlSecret.name is required" .Values.metadata.database.urlSecret.name | quote }}, key: {{ .Values.metadata.database.urlSecret.key | quote }} } }
-            - { name: PISA_STATE_TTL_SECS, value: {{ .Values.store.stateTtlSecs | quote }} }
-            {{- with .Values.store.s3 }}
+              valueFrom: { secretKeyRef: { name: {{ required "metadata.database.urlSecret.name is required" $.Values.metadata.database.urlSecret.name | quote }}, key: {{ $.Values.metadata.database.urlSecret.key | quote }} } }
+            - { name: PISA_STATE_TTL_SECS, value: {{ $.Values.store.stateTtlSecs | quote }} }
+            {{- with $.Values.store.s3 }}
             - { name: AWS_BUCKET, value: {{ required "store.s3.bucket is required" .bucket | quote }} }
             {{- with .region }}
             - { name: AWS_REGION, value: {{ . | quote }} }
@@ -85,3 +94,4 @@ spec:
             limits:
               memory: "{{ add (mul $w.slots $w.memoryMaxMb) (mul $w.beamSlots $w.beamMemoryMaxMb) $w.overheadMemoryMb }}Mi"
             {{- end }}
+{{- end }}

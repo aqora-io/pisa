@@ -7,7 +7,8 @@ metadata:
   name: pisa-db
 stringData:
   password: pisa
-  url: postgres://pisa:pisa@postgres:5432/pisa
+  # By its full name: KEDA reads the queue from a namespace of its own.
+  url: postgres://pisa:pisa@postgres.default.svc.cluster.local:5432/pisa
 ---
 apiVersion: apps/v1
 kind: Deployment

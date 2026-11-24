@@ -154,8 +154,34 @@ the new `REPL_REV` too.
 <a id="another-project"></a>
 **A pool for another project.** A worker serves one Lake project, and its
 version is that project's (`<toolchain>-<hash of its lakefile, manifest and
-top-level files>`), so another library, or another Mathlib, is another pool
-of workers on the same servers, database and store:
+top-level files>`), so another toolchain, another library, or another
+Mathlib, is another pool of workers on the same servers, database and store:
+- **From a file.** `scripts/env.py build <file>` builds a pool's image from
+  a TOML file that says what the environment is, e.g.
+  `environments/lean-4-35.toml`:
+  ```toml
+  toolchain = "leanprover/lean4:v4.35.0"
+  imports = ["Mathlib"]   # the modules its workers build, which requests may import
+
+  [[require]]             # as in a lakefile.toml
+  name = "mathlib"
+  git = "https://github.com/leanprover-community/mathlib4.git"
+  rev = "v4.35.0"
+  ```
+  It writes the project beside the file, in a directory of its name
+  (`environments/lean-4-35/`), with the `lake-manifest.json` Lake resolves
+  for it, in Docker; builds the worker image on it, tagged
+  `pisa-worker:<version>` (`--repository` names it otherwise, and `--push`
+  pushes it); and prints `version=` and `image=`. `--project-only` stops
+  before the image. Commit the file and the directory: the manifest pins
+  what the version hashes, and is kept until the file changes, or
+  `--update` resolves it again. The toolchain is the one its requirements
+  are on, or the script says which that is. `repl` names the tag of
+  leanprover-community/repl to build, the toolchain's by default.
+  `scripts/env.py label <dir>` prints the version of a project that has its
+  manifest; one without, as `docker/lean-core`, gets a manifest in its
+  image, and its version is what its workers then say. The rest of this
+  list is what the script does, for doing it by hand.
 - **The project.** A wrapper, like `docker/lean-project`: a `lakefile.toml`
   that requires the library at a commit, its `lake-manifest.json` and
   `lean-toolchain`, and a library file importing the modules agents will
@@ -172,10 +198,14 @@ of workers on the same servers, database and store:
   replay the builds read-only, so build what agents import. Pisa's own Lean
   tool (`docker/pisa-lean`) is built on the project's toolchain, which has
   to be Lean 4.34.1 or later: the kernel re-check uses
-  `Lean.Kernel.Environment.replay`.
+  `Lean.Kernel.Environment.replay`. Lean Beam comes with the toolchain from
+  Lean 4.36: a pool on one before serves checks and snapshots, and no
+  documents or sessions, so give it no Beam slots (`PISA_BEAM_SLOTS=0`, the
+  chart's `beamSlots: 0`).
 - **Running it.** A Compose service for it extends `worker` with that image
-  (Compose resolves `extends: file:` against the project directory). Its
-  workers register their version: `/health` lists each pool's in `pools`,
+  (Compose resolves `extends: file:` against the project directory), and on
+  Kubernetes it is one of the chart's `pools` (see [Kubernetes](#kubernetes)).
+  Its workers register their version: `/health` lists each pool's in `pools`,
   with the toolchain and the Lake packages its project pins, so an agent
   can pick the pool that has a library,
   and requests reach it by naming that `version`, or by
@@ -243,6 +273,38 @@ running, which KEDA's `postgresql` trigger counts in the job queue every
 - The servers scale on their own: `server.replicas`, or `server.autoscaling`
   on CPU. Any replica serves any request, as the jobs are in the database.
 
+**Pools.** `worker` is the release's pool, and each entry of `pools` another,
+for [another environment](#another-project): a Deployment and a ScaledObject
+of its own, which scales on the jobs of its version alone.
+```yaml
+worker:
+  version: v4.36.0-54500a67   # required with pools: what its image serves
+pools:
+  - version: v4.35.0-1a2b3c4d # as scripts/env.py printed it
+    minReplicas: 0
+    maxReplicas: 2
+```
+- A pool has `worker`'s settings, and overrides those it names, `slots` or
+  `prewarm` say. Its image is `worker.image.repository` tagged with its
+  version, as the script tags it, unless `image` says otherwise, and its
+  Deployment `<release>-worker-<name>`, `name` being its version with dashes
+  for dots unless set.
+- `minReplicas` and `maxReplicas` are `keda`'s unless set. With 0 a pool
+  runs no pod while it has no job: a check or a snapshot request that names
+  its version starts one, and waits for it, the image's pull included, so
+  keep `router.maxWaitSecs` above that. A session or a document doesn't:
+  while no worker of the version serves documents it is a 503
+  `unavailable` at once, so send a check first, or keep a pool agents prove
+  on at one replica. [`GET /environments`](#environments) lists the pool's
+  version meanwhile, without a `pool`, once a worker of it has run.
+- With `worker.version` set, `worker`'s pool counts its version's jobs and
+  those of no version, and requests that name none go to it
+  (`router.defaultVersion` is it by default). Without it, and without
+  `pools`, it counts every job, as before.
+- A worker is told the version its pool names (`PISA_EXPECT_VERSION`), and
+  doesn't start if its image's project has another: a pool that scaled on
+  one version's jobs and ran them on another would never drain them.
+
 **Draining.** A worker that receives SIGTERM claims no more jobs, finishes the ones it has, and exits. Two settings bound this:
 - `worker.drainTimeoutSecs` is the longest it waits for running jobs.
 - The pod's grace period is that plus 30s.
@@ -280,13 +342,18 @@ with `pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --r
 and the rest of the API works.
 
 **Not covered by the chart:**
-- Separate pools per project version. The scaling query counts every job, so one release should serve one version.
+- Building a pool's image, which `scripts/env.py` does, and adding a pool without a `helm upgrade`.
 - Auth on the API.
 - A tighter security context: workers run privileged so bubblewrap and cgroup limits work.
 
 ## Upgrading
 
 To the release that records environments:
+- The chart has `pools`, a worker pool per environment, and
+  `worker.version` (see [Kubernetes](#kubernetes)). A release that sets
+  neither renders as before. `docker/Dockerfile`'s stage `lean` now builds on
+  a stage `elan`, and a target `manifest` resolves a project's dependencies
+  for `scripts/env.py`.
 - The first process of this release adds the `environments` table. A worker
   records its version's project there as it registers, so an environment is
   listed by `GET /environments` (see [Environments](#environments)) once a

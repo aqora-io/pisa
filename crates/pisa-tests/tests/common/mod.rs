@@ -60,6 +60,7 @@ pub fn worker_config(name: &str, version: &str, slots: usize) -> WorkerConfig {
     WorkerConfig {
         worker_id: Some(name.into()),
         version: Some(version.into()),
+        expect_version: None,
         slots: Some(slots),
         repl: PathBuf::from(env!("CARGO_BIN_EXE_fake-repl")),
         lean: PathBuf::from(env!("CARGO_BIN_EXE_fake-lean")),

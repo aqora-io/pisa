@@ -49,7 +49,7 @@ spec:
             - { name: PISA_DRAIN_TIMEOUT_SECS, value: {{ .Values.server.drainTimeoutSecs | quote }} }
             - { name: PISA_MAX_WAIT_SECS, value: {{ .Values.router.maxWaitSecs | quote }} }
             - { name: PISA_MAX_RETRIES, value: {{ .Values.router.maxRetries | quote }} }
-            {{- with .Values.router.defaultVersion }}
+            {{- with .Values.router.defaultVersion | default .Values.worker.version }}
             - { name: PISA_DEFAULT_VERSION, value: {{ . | quote }} }
             {{- end }}
             {{- with .Values.router.aliases }}

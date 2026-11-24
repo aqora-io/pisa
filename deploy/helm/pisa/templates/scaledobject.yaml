@@ -1,22 +1,33 @@
 {{- if .Values.keda.enabled }}
 {{- $name := include "pisa.fullname" . }}
+{{- range $pool := include "pisa.poolList" . | fromYamlArray }}
+{{- $w := include "pisa.pool" (dict "root" $ "pool" $pool) | fromYaml }}
+{{- /* A pool counts its version's jobs; `worker`'s also those of no version,
+which any worker runs. Without a version it counts every job. */ -}}
+{{- $jobs := "" }}
+{{- with $w.version }}
+{{- $jobs = printf " AND version = '%s'" (replace "'" "''" .) }}
+{{- if not $pool }}
+{{- $jobs = printf " AND (version = '%s' OR version IS NULL)" (replace "'" "''" .) }}
+{{- end }}
+{{- end }}
 # Scales workers on outstanding jobs (queued + running) in the database's job
 # queue, so that replicas = ceil(outstanding / jobsPerWorker).
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: {{ $name }}-worker
+  name: {{ $name }}-worker{{ $w.suffix }}
   labels:
-    {{- include "pisa.labels" . | nindent 4 }}
+    {{- include "pisa.labels" $ | nindent 4 }}
 spec:
   scaleTargetRef:
-    name: {{ $name }}-worker
-  minReplicaCount: {{ .Values.keda.minReplicas }}
-  maxReplicaCount: {{ .Values.keda.maxReplicas }}
-  pollingInterval: {{ .Values.keda.pollingInterval }}
-  {{- if eq (int .Values.keda.minReplicas) 0 }}
+    name: {{ $name }}-worker{{ $w.suffix }}
+  minReplicaCount: {{ $w.minReplicas }}
+  maxReplicaCount: {{ $w.maxReplicas }}
+  pollingInterval: {{ $.Values.keda.pollingInterval }}
+  {{- if eq (int $w.minReplicas) 0 }}
   # Only used when scaling to zero.
-  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  cooldownPeriod: {{ $.Values.keda.cooldownPeriod }}
   {{- end }}
   advanced:
     horizontalPodAutoscalerConfig:
@@ -24,17 +35,18 @@ spec:
         scaleDown:
           # Scale down only after demand has stayed low this long. Removed
           # workers drain, so this trades idle pods against cold imports.
-          stabilizationWindowSeconds: {{ .Values.keda.scaleDownStabilizationSecs }}
+          stabilizationWindowSeconds: {{ $.Values.keda.scaleDownStabilizationSecs }}
   triggers:
     - type: postgresql
       metadata:
         # Jobs not done yet: queued, running, or given up a moment ago.
-        query: {{ printf "SELECT count(*) FROM jobs WHERE queue = '%s' AND result IS NULL" (include "pisa.queue" .) | quote }}
-        targetQueryValue: {{ .Values.keda.jobsPerWorker | default .Values.worker.slots | quote }}
+        query: {{ printf "SELECT count(*) FROM jobs WHERE queue = '%s' AND result IS NULL%s" (include "pisa.queue" $) $jobs | quote }}
+        targetQueryValue: {{ $.Values.keda.jobsPerWorker | default $w.slots | quote }}
         activationTargetQueryValue: "0"
       authenticationRef:
         name: {{ $name }}-worker-database
 ---
+{{- end }}
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:

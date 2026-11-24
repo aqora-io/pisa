@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# Targets: `server`, `worker`, and `corpus` (the search corpus of the pinned
-# project, written out with --output). Build from the repository root:
+# Targets: `server`, `worker`, `corpus` (the search corpus of the pinned
+# project, written out with --output) and `manifest` (a project's resolved
+# lake-manifest.json, written out likewise, for scripts/env.py). Build from
+# the repository root:
 #   docker build -f docker/Dockerfile --target worker .
 #   docker build -f docker/Dockerfile --target corpus --output search/corpus .
 # Set PROJECT=lean-core for a small image without Mathlib, for quick tests
@@ -45,7 +47,7 @@ FROM scratch AS project
 ARG PROJECT=lean-project
 COPY docker/${PROJECT} /
 
-FROM debian:trixie-slim AS lean
+FROM debian:trixie-slim AS elan
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap \
     && rm -rf /var/lib/apt/lists/*
@@ -53,6 +55,18 @@ ENV ELAN_HOME=/opt/elan PATH=/opt/elan/bin:$PATH
 ARG LEAN_TOOLCHAIN=leanprover/lean4:v4.36.0
 RUN curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
     | sh -s -- -y --no-modify-path --default-toolchain ${LEAN_TOOLCHAIN}
+
+# Resolves the project's dependencies, building nothing: `manifest` is the
+# lake-manifest.json Lake writes, and the lean-toolchain it leaves, which it
+# moves to that of a dependency on a newer one.
+FROM elan AS resolve
+COPY --from=project / /opt/project
+RUN cd /opt/project && MATHLIB_NO_CACHE_ON_UPDATE=1 lake update
+
+FROM scratch AS manifest
+COPY --from=resolve /opt/project/lake-manifest.json /opt/project/lean-toolchain /
+
+FROM elan AS lean
 # The REPL must be built with exactly the project's toolchain. The patch adds
 # `infotreeAt`, which prints the info tree only at given positions.
 ARG REPL_REV=v4.36.0
