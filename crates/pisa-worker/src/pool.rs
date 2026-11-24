@@ -12,7 +12,7 @@ use pisa_protocol::repl::{CommandResponse, Message, Pos, ReplCommand, ReplRespon
 use pisa_repl::{Repl, ReplFailure};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
-use crate::launcher::{Compiled, ExportError, Launcher, VerifyRun};
+use crate::launcher::{Compiled, Launcher, VerifyRun};
 use crate::policy::{Policy, header_command};
 use crate::snapshots::Snapshots;
 
@@ -378,16 +378,6 @@ impl Lease {
         self.pool
             .launcher
             .verify(self.id, modules, imports, per_module)
-    }
-
-    /// Describes a built snapshot module again in this slot's sandbox and
-    /// cgroup; see [`Launcher::export`].
-    pub async fn export(
-        &self,
-        module: &str,
-        timeout: Duration,
-    ) -> Result<serde_json::Value, ExportError> {
-        self.pool.launcher.export(self.id, module, timeout).await
     }
 
     pub fn policy(&self) -> &Policy {

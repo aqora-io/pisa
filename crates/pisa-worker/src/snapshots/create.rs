@@ -46,7 +46,7 @@ impl Refuting {
             spec: self.spec.clone(),
             target: self.target.name.clone(),
             theorem,
-            target_hash: Some(self.target.type_hash.clone()),
+            target_hash: self.target.type_hash.clone(),
         }
     }
 }

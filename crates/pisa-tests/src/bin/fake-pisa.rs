@@ -22,10 +22,6 @@
 //! take that long. `BREAK_KERNEL` makes the verifier exit 1 with an error on
 //! stderr, and `FAIL_KERNEL` makes it report a failure of its own
 //! (`PISA_FAILED`), as when it can't describe the module.
-//!
-//! `pisa export --value-chars <n> M` prints the `PISA_EXPORT` its build
-//! printed, from the module's code in its fake olean on LEAN_PATH; a module
-//! that says `EXPORT_FAIL` makes it fail.
 
 use std::io::Write;
 
@@ -43,9 +39,8 @@ fn main() {
             build(&args[at + 1], args.last().unwrap());
         }
         Some("verify") => verify(&args[1..]),
-        Some("export") => export(args.last().unwrap()),
         _ => {
-            eprintln!("usage: pisa build … | pisa verify MODULE… | pisa export …");
+            eprintln!("usage: pisa build … | pisa verify MODULE…");
             std::process::exit(2);
         }
     }
@@ -88,18 +83,6 @@ fn verify(modules: &[String]) {
             return;
         }
     }
-}
-
-fn export(module: &str) {
-    let Some(code) = find_module(module).and_then(|f| std::fs::read_to_string(f).ok()) else {
-        eprintln!("fake-pisa: unknown module {module}");
-        std::process::exit(1);
-    };
-    if code.contains("EXPORT_FAIL") {
-        eprintln!("fake-pisa: the export fails as asked");
-        std::process::exit(1);
-    }
-    println!("PISA_EXPORT {}", exports(&as_reported(&code)));
 }
 
 fn build(olean: &str, file: &str) {

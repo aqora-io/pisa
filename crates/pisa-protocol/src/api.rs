@@ -482,11 +482,11 @@ pub struct PoolHealth {
     /// Those draining, which take no new jobs.
     pub draining: u32,
     /// The Lean toolchain their project pins, e.g.
-    /// `leanprover/lean4:v4.36.0-rc2`; empty if they didn't say.
+    /// `leanprover/lean4:v4.36.0`; empty for workers without a project.
     pub toolchain: String,
     /// The Lake packages their project's `lake-manifest.json` pins, what it
     /// requires through them included: what code on this pool can import.
-    /// Empty if they didn't say.
+    /// Empty for workers without a project.
     pub packages: Vec<PoolPackage>,
 }
 
@@ -784,7 +784,7 @@ pub struct CheckResult {
     pub timing: Timing,
     /// The version of the worker that ran it, which `GET /environments`
     /// describes: the one the request named, or resolved to. Absent when no
-    /// worker ran it, and from a worker of a release before this field.
+    /// worker ran it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// Why the check could not complete (timeout, crash, policy, ...).

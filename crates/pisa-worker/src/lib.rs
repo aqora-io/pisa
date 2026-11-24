@@ -151,32 +151,6 @@ pub async fn run_with_stores(
             }
         });
     }
-    {
-        let (pool, owner) = (pool.clone(), worker_id.clone());
-        tokio::spawn(async move {
-            // From the start, so that old snapshots are exported again, and
-            // checked for clashing imports, as soon as a worker of this
-            // release runs.
-            let mut tick = tokio::time::interval(SWEEP_EVERY);
-            loop {
-                tick.tick().await;
-                match pool.snapshots().reexport(&pool, &owner).await {
-                    Ok(0) => {}
-                    Ok(modules) => {
-                        tracing::info!(modules, "exported old module-system snapshots again")
-                    }
-                    Err(e) => tracing::warn!("exporting old snapshots again failed: {e}"),
-                }
-                match pool.snapshots().unverify_old_clashes(&owner).await {
-                    Ok(0) => {}
-                    Ok(modules) => {
-                        tracing::info!(modules, "cleared verified on modules whose imports clash")
-                    }
-                    Err(e) => tracing::warn!("checking verified modules for clashes failed: {e}"),
-                }
-            }
-        });
-    }
     let catalog = catalog::Catalog::new(db.clone(), version.clone());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(LOG_PRUNE_EVERY);
@@ -207,7 +181,6 @@ pub async fn run_with_stores(
             }
         });
     }
-    tokio::spawn(remove_pickles(store, version.clone()));
 
     let (drain_tx, drain_rx) = watch::channel(false);
     tokio::spawn(async move {
@@ -318,35 +291,6 @@ pub(crate) async fn run_job(
         Job::Unsupported => JobResult::Failed {
             error: "this worker does not support the job; it may be older than the server".into(),
         },
-    }
-}
-
-/// Deletes the pickled proof states an earlier release stored under
-/// `states/<version>/`: states are replayed on Lean Beam now.
-async fn remove_pickles(store: Arc<dyn ObjectStore>, version: String) {
-    use futures::StreamExt;
-    use object_store::ObjectStoreExt;
-    let prefix = object_store::path::Path::from(format!("states/{version}"));
-    let mut objects = store.list(Some(&prefix));
-    let mut removed = 0;
-    while let Some(meta) = objects.next().await {
-        let removing = match meta {
-            Ok(meta) => store.delete(&meta.location).await,
-            Err(e) => Err(e),
-        };
-        match removing {
-            Ok(()) => removed += 1,
-            Err(e) => {
-                tracing::warn!("removing the pickled proof states failed: {e}");
-                return;
-            }
-        }
-    }
-    if removed > 0 {
-        tracing::info!(
-            removed,
-            "removed the pickled proof states of an earlier release"
-        );
     }
 }
 

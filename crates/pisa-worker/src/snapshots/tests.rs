@@ -273,8 +273,8 @@ async fn a_sweep_leaves_another_catalogs_store_alone() {
     assert!(has_files(&s, &meta).await);
 }
 
-/// A store that names no catalog yet, as one an earlier release wrote,
-/// isn't swept until a worker's upload marks it. A worker marks it only if
+/// A store that names no catalog yet isn't swept until a worker's upload
+/// marks it. A worker marks it only if
 /// it knows every build the store holds, but for those new enough to be
 /// uploads whose records are on their way.
 #[tokio::test]

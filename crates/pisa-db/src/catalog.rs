@@ -234,7 +234,7 @@ pub struct SnapshotDecl {
     pub type_pp_full: String,
     /// The type as `type_pp_full`, but with every argument shown, instances
     /// and implicit ones too, and binders with their types, and cut like
-    /// `value`. None in records from before the export printed it.
+    /// `value`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub type_explicit: Option<String>,
     #[serde(default)]
@@ -247,7 +247,7 @@ pub struct SnapshotDecl {
     pub deprecated_to: Option<String>,
     /// A definition's value, as the build printed it with full names and no
     /// notation, cut at [`VALUE_CHARS`] characters. None for other
-    /// declarations, and in records from before the export printed it.
+    /// declarations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// A private declaration, which the review list shows and search leaves
@@ -287,22 +287,12 @@ fn proved() -> ProofStatus {
     ProofStatus::Proved
 }
 
-/// The format of the exports builds make now: a module-system module's
-/// export has its non-public declarations too, and one that didn't print is
-/// kept with its error; since 3 ([`EXPLICIT_FORMAT`]), `type_explicit` shows
-/// binders with their types. Older exports
-/// of module-system modules are made again
-/// ([`Catalog::stale_exports_after`]).
+/// The format of the exports builds make: a module-system module's export
+/// has its non-public declarations too, one that didn't print is kept with
+/// its error, and `type_explicit` shows binders with their types. Stored
+/// with each export, so that a release that changes it can tell which
+/// exports to make again.
 pub const EXPORT_FORMAT: u32 = 3;
-
-/// The first export format whose `type_explicit` is comparable with
-/// today's: an older one printed less, so the two would differ where the
-/// types don't.
-pub const EXPLICIT_FORMAT: u32 = 3;
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
-}
 
 /// A module's declarations for the search service, with the module's state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,13 +301,8 @@ pub struct SnapshotDecls {
     pub header: String,
     pub verified: bool,
     pub decls: Vec<SnapshotDecl>,
-    /// [`EXPORT_FORMAT`] when the export was made; 0 before formats.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// [`EXPORT_FORMAT`] when the export was made.
     pub format: u32,
-    /// Why making the export again in a newer format failed, which isn't
-    /// tried again until a newer one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed: Option<ExportFailure>,
 }
 
 /// A run's acceptance as it is stored, from [`Catalog::new_acceptance`].
@@ -331,13 +316,6 @@ pub struct Acceptance {
     pub(crate) labels: String,
 }
 
-/// A failure to make a module's export again in format `format`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExportFailure {
-    pub format: u32,
-    pub error: String,
-}
-
 impl SnapshotDecls {
     /// `decls` for the module `meta`, flagged from its check result, in
     /// today's format.
@@ -347,7 +325,6 @@ impl SnapshotDecls {
             verified: false,
             decls,
             format: EXPORT_FORMAT,
-            failed: None,
         };
         out.refresh(meta);
         out
@@ -423,9 +400,8 @@ pub struct Refutation {
     /// The refuting snapshot's theorem, which proves the negation of the
     /// target's statement.
     pub theorem: String,
-    /// The hash of the target's statement; none in records made before it
-    /// was kept.
-    pub target_hash: Option<String>,
+    /// The hash of the target's statement.
+    pub target_hash: String,
 }
 
 /// What a new entry is given.
@@ -1020,47 +996,6 @@ impl Catalog {
         )
     }
 
-    /// Up to `limit` modules, in order of id after the module `after`, with
-    /// their own builds, whose declarations for search are a module-system
-    /// module's export older than [`EXPORT_FORMAT`].
-    pub async fn stale_exports_after(
-        &self,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<(String, String)>, Error> {
-        dispatch!(
-            &self.db,
-            stale_exports_after(&self.version, after, limit.into())
-        )
-    }
-
-    /// Records on module `m`'s declarations for search, if its own build is
-    /// still `build` and it has them, that making them again in today's
-    /// format failed, for `error`, so that it isn't tried again; returns
-    /// whether it recorded it.
-    pub async fn mark_export_failed(
-        &self,
-        m: &str,
-        build: &str,
-        error: &str,
-    ) -> Result<bool, Error> {
-        dispatch!(&self.db, mark_export_failed(&self.version, m, build, error))
-    }
-
-    /// Stores `decls` as module `m`'s declarations for search, flagged from
-    /// its record, and logs the change, if the module's own build is still
-    /// `build`; returns whether it stored them. Declarations that can't be
-    /// stored (see [`record_fits`]) are a `bad_request`.
-    pub async fn replace_decls(
-        &self,
-        m: &str,
-        build: &str,
-        decls: &SnapshotDecls,
-    ) -> Result<bool, Error> {
-        to_record(decls)?;
-        dispatch!(&self.db, replace_decls(&self.version, m, build, decls))
-    }
-
     /// The [`Change`]s logged at `since_micros` or later, oldest first, at most
     /// `limit` of them, after the time and id `after` of one from a previous
     /// page.
@@ -1137,16 +1072,6 @@ impl Catalog {
         dispatch!(&self.db, identity(&self.version))
     }
 
-    /// Up to `limit` modules, in order of id after the module `after`, with
-    /// their own builds.
-    pub async fn modules_after(
-        &self,
-        after: Option<&str>,
-        limit: u32,
-    ) -> Result<Vec<(String, String)>, Error> {
-        dispatch!(&self.db, modules_after(&self.version, after, limit.into()))
-    }
-
     /// Clears `verified` on module `m`, if its own build is still `build`,
     /// and on every verified module that builds on it, adding why to each
     /// one's check reasons and logging each change. What builds on `m` is
@@ -1171,18 +1096,6 @@ impl Catalog {
             }
         }
         Ok(cleared)
-    }
-
-    /// Whether this version's modules verified before creates refused
-    /// clashing imports have been checked for them.
-    pub async fn clashes_checked(&self) -> Result<bool, Error> {
-        dispatch!(&self.db, clashes_checked(&self.version))
-    }
-
-    /// Records that they have.
-    pub async fn mark_clashes_checked(&self) -> Result<(), Error> {
-        self.identity().await?;
-        dispatch!(&self.db, mark_clashes_checked(&self.version))
     }
 
     /// Records what this version's sweep of the store's files came to: why
@@ -1478,99 +1391,6 @@ mod tests {
             assert_eq!(
                 catalog.module("x").await.unwrap().status,
                 ProofStatus::Sorry
-            );
-        }
-    }
-
-    /// `meta(id)` with a module-system header.
-    fn module_system(id: &str) -> ModuleMeta {
-        let mut m = meta(id);
-        m.header = "module\n\npublic import PisaSnap.sx".into();
-        m.result.declarations = vec![checked("a", &[], ProofStatus::Proved)];
-        m
-    }
-
-    #[tokio::test]
-    async fn the_exports_to_redo_are_module_system_ones_of_an_older_format() {
-        for catalog in catalogs().await {
-            for (id, system, format) in [
-                ("w", true, None),
-                ("x", true, Some(0)),
-                ("y", true, Some(EXPORT_FORMAT)),
-                ("z", false, Some(0)),
-                ("zz", true, Some(1)),
-            ] {
-                let m = if system { module_system(id) } else { meta(id) };
-                let decls = format.map(|format| SnapshotDecls {
-                    format,
-                    ..SnapshotDecls::new(&m, vec![decl("a")])
-                });
-                catalog
-                    .commit(id, &m, decls.as_ref(), no_labels())
-                    .await
-                    .unwrap();
-            }
-            let stale = catalog.stale_exports_after(None, 10).await.unwrap();
-            let pair = |id: &str| (id.to_string(), "b".to_string());
-            assert_eq!(stale, [pair("x"), pair("zz")]);
-            let page = catalog.stale_exports_after(None, 1).await.unwrap();
-            assert_eq!(page, [pair("x")]);
-            let next = catalog.stale_exports_after(Some("x"), 1).await.unwrap();
-            assert_eq!(next, [pair("zz")]);
-            // One that failed to be made again in today's format isn't
-            // tried again; one of another build is left alone.
-            assert!(!catalog.mark_export_failed("x", "c", "no").await.unwrap());
-            assert!(
-                catalog
-                    .mark_export_failed("x", "b", "it broke")
-                    .await
-                    .unwrap()
-            );
-            let stale = catalog.stale_exports_after(None, 10).await.unwrap();
-            assert_eq!(stale, [pair("zz")]);
-            let failed = catalog.decls("x").await.unwrap().unwrap().failed.unwrap();
-            assert_eq!(
-                (failed.format, failed.error.as_str()),
-                (EXPORT_FORMAT, "it broke")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn an_export_replaced_for_its_build_is_logged() {
-        for catalog in catalogs().await {
-            let m = module_system("x");
-            let old = SnapshotDecls {
-                format: 0,
-                ..SnapshotDecls::new(&m, vec![decl("a")])
-            };
-            catalog
-                .commit("x", &m, Some(&old), no_labels())
-                .await
-                .unwrap();
-            let before = catalog.changes(0, None, 100).await.unwrap().len();
-            let mut private = decl("_private.PisaSnap.sx.0.b");
-            private.private = true;
-            let mut m = m;
-            m.result
-                .declarations
-                .push(checked(&private.name, &[], ProofStatus::Proved));
-            let new = SnapshotDecls::new(&m, vec![decl("a"), private]);
-            assert!(catalog.replace_decls("x", "b", &new).await.unwrap());
-            let stored = catalog.decls("x").await.unwrap().unwrap();
-            // Flagged from the stored record's check, which has no `b`.
-            assert_eq!(stored.format, EXPORT_FORMAT);
-            let names: Vec<_> = stored.decls.iter().map(|d| d.name.as_str()).collect();
-            assert_eq!(names, ["a"]);
-            let changes = catalog.changes(0, None, 100).await.unwrap();
-            assert_eq!(changes.len(), before + 1);
-            assert_eq!(changes.last().unwrap().change.module.as_deref(), Some("x"));
-            // Another build's, or a module's that is gone, is not stored.
-            assert!(!catalog.replace_decls("x", "c", &old).await.unwrap());
-            assert!(!catalog.replace_decls("nope", "b", &old).await.unwrap());
-            assert_eq!(
-                catalog.decls("x").await.unwrap().unwrap().format,
-                EXPORT_FORMAT
             );
         }
     }
@@ -2593,13 +2413,6 @@ mod tests {
             for (id, m) in [("x", &x), ("y", &y), ("z", &z)] {
                 catalog.commit(id, m, None, no_labels()).await.unwrap();
             }
-            let all = catalog.modules_after(None, 10).await.unwrap();
-            let pair = |id: &str| (id.to_string(), "b".to_string());
-            assert_eq!(all, [pair("x"), pair("y"), pair("z")]);
-            assert_eq!(
-                catalog.modules_after(Some("x"), 10).await.unwrap(),
-                [pair("y"), pair("z")]
-            );
             let before = catalog.changes(0, None, 100).await.unwrap().len();
             // Another build's record is left alone.
             assert!(catalog.unverify("x", "c", "why").await.unwrap().is_empty());
@@ -2661,15 +2474,6 @@ mod tests {
             let marked = catalog.update_module("y", "b", |meta| meta.verified = true);
             assert!(marked.await.unwrap().is_some());
             assert!(catalog.module("y").await.unwrap().verified);
-        }
-    }
-
-    #[tokio::test]
-    async fn a_version_is_checked_for_clashes_once() {
-        for catalog in catalogs().await {
-            assert!(!catalog.clashes_checked().await.unwrap());
-            catalog.mark_clashes_checked().await.unwrap();
-            assert!(catalog.clashes_checked().await.unwrap());
         }
     }
 
@@ -2839,7 +2643,7 @@ mod tests {
                 spec: spec.clone(),
                 target: "t".into(),
                 theorem: "r".into(),
-                target_hash: Some("h".into()),
+                target_hash: "h".into(),
             };
             let refuting = |r: &Refutation| NewEntry {
                 refutes: Some(r.clone()),

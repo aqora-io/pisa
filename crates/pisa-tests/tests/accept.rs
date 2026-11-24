@@ -249,7 +249,6 @@ async fn accept(
         allow: allow.iter().map(|s| s.to_string()).collect(),
         paranoid,
         timeout_secs,
-        build_timeout_secs: 0,
     });
     match run(c, job).await {
         JobResult::SnapshotAccepted(Ok(r)) => *r,
@@ -1031,7 +1030,6 @@ async fn an_unsettled_run_is_refused_at_once() {
         allow: Vec::new(),
         paranoid: false,
         timeout_secs: 60,
-        build_timeout_secs: 0,
     });
     let JobResult::SnapshotAccepted(Err(e)) = run(&c, job).await else {
         panic!("an unsettled run was judged")

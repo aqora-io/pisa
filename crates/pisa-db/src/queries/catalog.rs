@@ -5,9 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use diesel::dsl::{exists, not};
-use diesel::{
-    BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, TextExpressionMethods,
-};
+use diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl};
 use diesel_async::RunQueryDsl;
 use pisa_protocol::api::{AmendedHoles, Error, ErrorKind, Replaces};
 use pisa_protocol::labels::check_labels;
@@ -1498,106 +1496,6 @@ pub(crate) async fn modules_with_decls_after(
     Ok(ids)
 }
 
-pub(crate) async fn stale_exports_after(
-    db: &Handle,
-    v: &str,
-    after: Option<&str>,
-    limit: i64,
-) -> Result<Vec<(String, String)>, Error> {
-    let module_system = modules::header
-        .eq("module")
-        .or(modules::header.like("module\n%"));
-    let mut query = modules::table
-        .filter(modules::version.eq(v))
-        .filter(modules::decls.is_not_null())
-        .filter(module_system)
-        .into_boxed();
-    query = older_export(query);
-    if let Some(after) = after {
-        query = query.filter(modules::id.gt(after));
-    }
-    let rows = query
-        .order(modules::id)
-        .limit(limit)
-        .select((modules::id, modules::build))
-        .load(&mut *conn(db).await?)
-        .await
-        .map_err(DbError::from)?;
-    Ok(rows)
-}
-
-pub(crate) async fn mark_export_failed(
-    db: &Handle,
-    v: &str,
-    m: &str,
-    build: &str,
-    error: &str,
-) -> Result<bool, Error> {
-    let marked = retry(|| async {
-        let mut c = conn(db).await?;
-        let conn = &mut *c;
-        tx!(conn, {
-            let Some(meta) = module_in(conn, v, m).await? else {
-                return Ok(false);
-            };
-            if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
-                return Ok(false);
-            }
-            let decls: Option<Value> = modules::table
-                .find((v, m))
-                .select(modules::decls)
-                .first(conn)
-                .await?;
-            let Some(decls) = decls else {
-                return Ok(false);
-            };
-            let mut decls: SnapshotDecls = serde_json::from_value(decls)?;
-            decls.failed = Some(crate::catalog::ExportFailure {
-                format: crate::catalog::EXPORT_FORMAT,
-                error: error.to_string(),
-            });
-            diesel::update(modules::table.find((v, m)))
-                .set(modules::decls.eq(Some(to_record(&decls)?)))
-                .execute(conn)
-                .await?;
-            Ok(true)
-        })
-    })
-    .await?;
-    Ok(marked)
-}
-
-pub(crate) async fn replace_decls(
-    db: &Handle,
-    v: &str,
-    m: &str,
-    build: &str,
-    decls: &SnapshotDecls,
-) -> Result<bool, Error> {
-    let stored = retry(|| async {
-        let mut c = conn(db).await?;
-        let conn = &mut *c;
-        tx!(conn, {
-            let Some(meta) = module_in(conn, v, m).await? else {
-                return Ok(false);
-            };
-            if meta.modules.last().map(|own| own.build.as_str()) != Some(build) {
-                return Ok(false);
-            }
-            let mut decls = decls.clone();
-            decls.refresh(&meta);
-            diesel::update(modules::table.find((v, m)))
-                .set(modules::decls.eq(Some(to_record(&decls)?)))
-                .execute(conn)
-                .await?;
-            log(conn, v, None, Some(m)).await?;
-            Ok(true)
-        })
-    })
-    .await?;
-    Ok(stored)
-}
-
 pub(crate) async fn changes(
     db: &Handle,
     v: &str,
@@ -1659,7 +1557,6 @@ pub(crate) async fn insert_acceptance(conn: &mut Conn, a: &Acceptance) -> Result
         .values((
             acceptances::version.eq(&a.version),
             acceptances::id.eq(&a.id),
-            acceptances::created_micros.eq(created),
             acceptances::result.eq(&a.result),
             acceptances::labels.eq(&a.labels),
         ))
@@ -1797,7 +1694,7 @@ pub(crate) async fn refutations_of(
             refutations::target_hash,
             refutations::labels,
         ))
-        .load::<(String, String, String, String, Option<String>, String)>(&mut *conn(db).await?)
+        .load::<(String, String, String, String, String, String)>(&mut *conn(db).await?)
         .await
         .map_err(DbError::from)?;
     Ok(rows
@@ -1836,7 +1733,6 @@ pub(crate) async fn identity(db: &Handle, v: &str) -> Result<String, Error> {
             .values((
                 catalogs::version.eq(v),
                 catalogs::id.eq(&made),
-                catalogs::created_micros.eq(now_micros() as i64),
             ))
             .on_conflict(catalogs::version)
             .do_nothing()
@@ -1886,28 +1782,6 @@ pub(crate) async fn record_sweep(db: &Handle, v: &str, refused: Option<&str>) ->
     Ok(())
 }
 
-pub(crate) async fn modules_after(
-    db: &Handle,
-    v: &str,
-    after: Option<&str>,
-    limit: i64,
-) -> Result<Vec<(String, String)>, Error> {
-    let mut query = modules::table
-        .filter(modules::version.eq(v))
-        .into_boxed();
-    if let Some(after) = after {
-        query = query.filter(modules::id.gt(after));
-    }
-    let rows = query
-        .order(modules::id)
-        .limit(limit)
-        .select((modules::id, modules::build))
-        .load(&mut *conn(db).await?)
-        .await
-        .map_err(DbError::from)?;
-    Ok(rows)
-}
-
 pub(crate) async fn unverify(
     db: &Handle,
     v: &str,
@@ -1951,29 +1825,6 @@ pub(crate) async fn unverify(
     })
     .await?;
     Ok(cleared)
-}
-
-pub(crate) async fn clashes_checked(db: &Handle, v: &str) -> Result<bool, Error> {
-    let checked = catalogs::table
-        .find(v)
-        .select(catalogs::clashes_checked_micros)
-        .first::<Option<i64>>(&mut *conn(db).await?)
-        .await
-        .optional()
-        .map_err(DbError::from)?;
-    Ok(checked.flatten().is_some())
-}
-
-pub(crate) async fn mark_clashes_checked(db: &Handle, v: &str) -> Result<(), Error> {
-    retry(|| async {
-        diesel::update(catalogs::table.find(v))
-            .set(catalogs::clashes_checked_micros.eq(Some(now_micros() as i64)))
-            .execute(&mut *conn(db).await?)
-            .await?;
-        Ok::<_, DbError>(())
-    })
-    .await?;
-    Ok(())
 }
 
 pub(crate) async fn sweep_refused(db: &Handle, v: &str) -> Result<Option<(String, u64)>, Error> {

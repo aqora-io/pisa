@@ -3,7 +3,7 @@
 //! `/jobs/{id}` then answers, for an hour after the job is done (a day for a
 //! snapshot's create and a run's acceptance), with the
 //! status and the answer the request would have had. Without the header the
-//! endpoint waits, as before.
+//! endpoint waits for the answer.
 
 use std::sync::Arc;
 use std::time::Duration;

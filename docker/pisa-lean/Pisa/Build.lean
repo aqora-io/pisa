@@ -134,25 +134,4 @@ def run (args : List String) : IO UInt32 := do
   emit "PISA_EXPORT" (Json.arr exports)
   return 0
 
-/-- `pisa export --value-chars <n> <module>`: prints the `PISA_EXPORT` that
-`pisa build` prints, for a module built already, whose record has an export
-from a build that exported less. It imports the module with every part of it
-and its extensions, as the build's elaboration loads its imports, and as the
-module itself, so that its private names print as they do in its build. -/
-def reexport (args : List String) : IO UInt32 := do
-  let (chars, m) ← match args with
-    | ["--value-chars", n, m] => match n.toNat? with
-      | some n => pure (n, m.toName)
-      | none => IO.eprintln s!"--value-chars takes a number, not {n}"; return 2
-    | _ => IO.eprintln "usage: pisa export --value-chars <n> <module>"; return 2
-  let env ← importModules #[{ module := m }] {} (trustLevel := 1024) (leakEnv := true)
-    (loadExts := true)
-  let env := env.setMainModule m
-  let own := (← readParts (← findOLean m)).back!.constNames
-  let ctx : Core.Context := {
-    fileName := "", fileMap := default, maxHeartbeats := Core.getMaxHeartbeats {} }
-  let (exports, _, _) ← (exportDecls own chars).toIO ctx { env }
-  emit "PISA_EXPORT" (Json.arr exports)
-  return 0
-
 end Pisa.Build

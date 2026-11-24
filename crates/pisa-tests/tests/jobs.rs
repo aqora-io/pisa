@@ -393,30 +393,6 @@ async fn a_lost_accept_is_safe_to_resend() {
     );
 }
 
-/// A worker of the release before builds the run it accepts, within the
-/// job's build budget, the 1800 s accepts had then: a worker of this release
-/// builds nothing, and ignores it.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_accept_gives_a_worker_of_the_release_before_its_build_budget() {
-    let c = Cluster::start_with(router_config(), &[], |w| w).await;
-    let against = format!("{}~0123456789abcdef0123456789abcdef", c.version("v"));
-    accepted(
-        &c,
-        "/snapshots/accept",
-        json!({"against": [against], "paranoid": false}),
-        "accept_run",
-    )
-    .await;
-    let candidates = c.queue.candidates(&c.version("v"), 10).await.unwrap();
-    let ids: Vec<i64> = candidates.iter().map(|j| j.id).collect();
-    let claimed = (c.queue.claim("old", &ids, Duration::from_secs(10)).await).unwrap();
-    assert_eq!(
-        claimed[0].job["build_timeout_secs"], 1800,
-        "{:?}",
-        claimed[0].job
-    );
-}
-
 /// Its worker is lost and no other is live for longer than its max wait, as
 /// across a reboot: it runs when a worker comes back, as a new one or under
 /// the lost one's name.

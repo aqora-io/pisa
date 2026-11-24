@@ -669,12 +669,10 @@ pub(crate) async fn report_store(
     worker: &str,
     reachable: bool,
 ) -> Result<(), DbError> {
-    let now = now();
     retry(|| async {
         diesel::update(workers::table.find((q, worker)))
             .set((
                 workers::store_reachable.eq(Some(reachable)),
-                workers::store_checked_micros.eq(Some(now)),
             ))
             .execute(&mut *conn(db).await?)
             .await?;
@@ -836,7 +834,6 @@ pub(crate) async fn register(db: &Handle, q: &str, r: &Registration) -> Result<i
                 workers::toolchain.eq(&r.toolchain),
                 workers::packages.eq(packages.as_str()),
                 workers::store_reachable.eq(None::<bool>),
-                workers::store_checked_micros.eq(None::<i64>),
                 workers::warm.eq(Value::Array(Vec::new())),
                 workers::documents_open.eq(0),
                 workers::draining.eq(false),

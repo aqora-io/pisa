@@ -1129,7 +1129,7 @@
             "description": "Where this request's time went. For a create's `check`, the stored\nbuild's."
           },
           "version": {
-            "description": "The version of the worker that ran it, which `GET /environments`\ndescribes: the one the request named, or resolved to. Absent when no\nworker ran it, and from a worker of a release before this field.",
+            "description": "The version of the worker that ran it, which `GET /environments`\ndescribes: the one the request named, or resolved to. Absent when no\nworker ran it.",
             "type": "string"
           },
           "warnings": {
@@ -1354,7 +1354,7 @@
             "type": "string"
           },
           "own_axioms": {
-            "description": "The axioms it gets other than through `inherits`: from its own proof,\nthe definitions it uses, Lean and Mathlib. Absent in records made\nbefore it was recorded, and in a check's report.",
+            "description": "The axioms it gets other than through `inherits`: from its own proof,\nthe definitions it uses, Lean and Mathlib. Absent in a check's report.",
             "items": {
               "type": "string"
             },
@@ -2823,7 +2823,7 @@
             "type": "integer"
           },
           "packages": {
-            "description": "The Lake packages their project's `lake-manifest.json` pins, what it\nrequires through them included: what code on this pool can import.\nEmpty if they didn't say.",
+            "description": "The Lake packages their project's `lake-manifest.json` pins, what it\nrequires through them included: what code on this pool can import.\nEmpty for workers without a project.",
             "items": {
               "$ref": "#/components/schemas/PoolPackage"
             },
@@ -2836,7 +2836,7 @@
             "type": "integer"
           },
           "toolchain": {
-            "description": "The Lean toolchain their project pins, e.g.\n`leanprover/lean4:v4.36.0-rc2`; empty if they didn't say.",
+            "description": "The Lean toolchain their project pins, e.g.\n`leanprover/lean4:v4.36.0`; empty for workers without a project.",
             "type": "string"
           },
           "version": {
@@ -8931,7 +8931,7 @@
     },
     "/snapshots/{id}/verify": {
       "post": {
-        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again, as a record made before what it now records (`own_axioms`, `inherits`) needs.",
+        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again.",
         "operationId": "verifySnapshot",
         "parameters": [
           {

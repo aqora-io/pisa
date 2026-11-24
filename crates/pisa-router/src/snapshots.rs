@@ -843,8 +843,6 @@ pub async fn accept(
         allow: req.allow,
         paranoid: req.paranoid,
         timeout_secs: req.timeout.unwrap_or(ACCEPT_TIMEOUT),
-        // A worker of the release before builds the run in this; this release's ignore it.
-        build_timeout_secs: 1800,
     });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::AcceptRun, p).await
@@ -1343,8 +1341,7 @@ fn default_verify_secs() -> u64 {
     summary = "Re-check a snapshot's module with the kernel",
     description = "Re-checks the module and the modules it imports, in one process that loads \
         their imports once; `failure` says which one failed and why. A module verified already \
-        is skipped unless `again`, which re-checks it and describes its record again, as a \
-        record made before what it now records (`own_axioms`, `inherits`) needs.",
+        is skipped unless `again`, which re-checks it and describes its record again.",
     params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), VerifyParams, PreferAsync),
     responses((status = 200, description = "Whether the module passed", body = VerifySnapshotResponse), Accepted, ApiErrors),
 )]

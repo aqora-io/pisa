@@ -64,15 +64,12 @@ pub(crate) mod pg {
 
     use diesel::pg::Pg;
     use diesel::sql_types::Text;
-    use diesel::{
-        PgAnyJsonExpressionMethods, PgExpressionMethods, PgJsonbExpressionMethods, QueryDsl,
-        QueryResult,
-    };
+    use diesel::{PgJsonbExpressionMethods, QueryDsl, QueryResult};
     use diesel_async::pooled_connection::deadpool::Object;
     use diesel_async::{AnsiTransactionManager, AsyncPgConnection, RunQueryDsl};
 
     use crate::db::{DbError, Notice, PgDb};
-    use crate::schema::{entries, modules};
+    use crate::schema::entries;
 
     type Handle = Arc<PgDb>;
     type Conn = AsyncPgConnection;
@@ -138,23 +135,6 @@ pub(crate) mod pg {
         query.filter(entries::labels.contains(serde_json::Value::Object(wanted)))
     }
 
-    /// Modules whose declarations for search have a `format` other than
-    /// today's, or none, and that didn't fail to be made again in it.
-    fn older_export<'a>(query: modules::BoxedQuery<'a, Pg>) -> modules::BoxedQuery<'a, Pg> {
-        let format = crate::catalog::EXPORT_FORMAT.to_string();
-        query
-            .filter(
-                modules::decls
-                    .retrieve_as_text("format")
-                    .is_distinct_from(format.clone()),
-            )
-            .filter(
-                modules::decls
-                    .retrieve_by_path_as_text(vec!["failed", "format"])
-                    .is_distinct_from(format),
-            )
-    }
-
     mod catalog {
         use super::*;
         include!("queries/catalog.rs");
@@ -185,17 +165,15 @@ pub(crate) mod pg {
 pub(crate) mod sqlite {
     use std::sync::Arc;
 
-    use diesel::sql_types::{BigInt, Jsonb, Nullable, Text};
+    use diesel::sql_types::{Jsonb, Nullable, Text};
     use diesel::sqlite::Sqlite;
-    use diesel::{
-        ExpressionMethods, QueryDsl, QueryResult, SqliteConnection, SqliteExpressionMethods,
-    };
+    use diesel::{ExpressionMethods, QueryDsl, QueryResult, SqliteConnection};
     use diesel_async::sync_connection_wrapper::SyncConnectionWrapper;
     use diesel_async::{AsyncConnection, TransactionManager};
     use tokio::sync::MutexGuard;
 
     use crate::db::{DbError, Notice, SqliteDb};
-    use crate::schema::{entries, modules};
+    use crate::schema::entries;
 
     type Handle = Arc<SqliteDb>;
     type Conn = SyncConnectionWrapper<SqliteConnection>;
@@ -267,19 +245,6 @@ pub(crate) mod sqlite {
             query = query.filter(json_extract(entries::labels, format!("$.\"{k}\"")).eq(v));
         }
         query
-    }
-
-    diesel::define_sql_function! {
-        #[sql_name = "json_extract"]
-        fn json_number(json: Nullable<Jsonb>, path: Text) -> Nullable<BigInt>;
-    }
-
-    /// As PostgreSQL's.
-    fn older_export<'a>(query: modules::BoxedQuery<'a, Sqlite>) -> modules::BoxedQuery<'a, Sqlite> {
-        let format = i64::from(crate::catalog::EXPORT_FORMAT);
-        query
-            .filter(json_number(modules::decls, "$.format").is_not(format))
-            .filter(json_number(modules::decls, "$.failed.format").is_not(format))
     }
 
     mod catalog {

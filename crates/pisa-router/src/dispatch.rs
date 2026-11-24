@@ -665,7 +665,6 @@ mod tests {
             allow: Vec::new(),
             paranoid: false,
             timeout_secs: 1,
-            build_timeout_secs: 0,
         });
         let check = Job::Check(CheckJob {
             code: String::new(),

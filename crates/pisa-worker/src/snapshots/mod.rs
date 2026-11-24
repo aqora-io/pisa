@@ -57,16 +57,14 @@ use crate::catalog::{
 };
 use crate::check::{header_error, policy_error, policy_messages};
 use crate::db::Db;
-use crate::launcher::{ExportError, Unfinished, Verdict};
+use crate::launcher::{Unfinished, Verdict};
 use crate::policy::{Policy, auto_implicit_hint, parse_declarations, parse_export, uses_macros};
 use crate::pool::{Lease, Pool};
 
 mod build;
 mod cache;
-mod clashes;
 mod create;
 mod delete;
-mod reexport;
 #[cfg(test)]
 mod tests;
 mod verify;

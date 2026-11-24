@@ -560,7 +560,7 @@ export interface paths {
         put?: never;
         /**
          * Re-check a snapshot's module with the kernel
-         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again, as a record made before what it now records (`own_axioms`, `inherits`) needs.
+         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again.
          */
         post: operations["verifySnapshot"];
         delete?: never;
@@ -1297,7 +1297,7 @@ export interface components {
             /**
              * @description The version of the worker that ran it, which `GET /environments`
              *     describes: the one the request named, or resolved to. Absent when no
-             *     worker ran it, and from a worker of a release before this field.
+             *     worker ran it.
              */
             version?: string;
             /**
@@ -1559,8 +1559,7 @@ export interface components {
             negates?: string;
             /**
              * @description The axioms it gets other than through `inherits`: from its own proof,
-             *     the definitions it uses, Lean and Mathlib. Absent in records made
-             *     before it was recorded, and in a check's report.
+             *     the definitions it uses, Lean and Mathlib. Absent in a check's report.
              */
             own_axioms?: string[];
             /**
@@ -2447,7 +2446,7 @@ export interface components {
             /**
              * @description The Lake packages their project's `lake-manifest.json` pins, what it
              *     requires through them included: what code on this pool can import.
-             *     Empty if they didn't say.
+             *     Empty for workers without a project.
              */
             packages: components["schemas"]["PoolPackage"][];
             /**
@@ -2457,7 +2456,7 @@ export interface components {
             slots: number;
             /**
              * @description The Lean toolchain their project pins, e.g.
-             *     `leanprover/lean4:v4.36.0-rc2`; empty if they didn't say.
+             *     `leanprover/lean4:v4.36.0`; empty for workers without a project.
              */
             toolchain: string;
             /** @description The version they serve, which a request names to reach them. */

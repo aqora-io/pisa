@@ -324,15 +324,7 @@ impl Indexer {
         let _describer = AbortOnDrop(tokio::spawn(Arc::clone(&self).describe_queue(rx)));
         loop {
             let since = now_micros().saturating_sub(LOOKBACK.as_micros() as u64);
-            let reconciled = async {
-                // Collections loaded before heads were indexed lack these.
-                let q = &self.engine.q;
-                q.index(&self.engine.entries, "head", "bool").await?;
-                q.index(&self.engine.collection, "has_heads", "bool")
-                    .await?;
-                self.reconcile().await
-            };
-            if let Err(e) = reconciled.await {
+            if let Err(e) = self.reconcile().await {
                 tracing::warn!("reconciling the snapshot index failed: {e}");
                 tokio::time::sleep(POLL_EVERY).await;
                 continue;

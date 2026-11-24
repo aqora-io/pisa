@@ -71,8 +71,7 @@ pub struct Declaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub negates: Option<String>,
     /// The axioms it gets other than through `inherits`: from its own proof,
-    /// the definitions it uses, Lean and Mathlib. Absent in records made
-    /// before it was recorded, and in a check's report.
+    /// the definitions it uses, Lean and Mathlib. Absent in a check's report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub own_axioms: Option<Vec<String>>,
     /// The theorems of other snapshot modules through which it gets axioms
@@ -102,8 +101,7 @@ impl Serialize for Declaration {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         // Only a summary has no type hash. In full, every field is written,
-        // empty or not, as stored records were before summaries: workers of
-        // earlier releases read them.
+        // empty or not.
         let full = !self.type_hash.is_empty();
         let mut m = s.serialize_map(None)?;
         m.serialize_entry("name", &self.name)?;
@@ -662,7 +660,7 @@ mod tests {
             (&summary["own_status"], &summary["inherits"]),
             (&serde_json::json!("proved"), &inherits)
         );
-        // A record from before has neither.
+        // A check's report has neither.
         let json = serde_json::to_value(decl("t", "T", None)).unwrap();
         assert!(json.get("own_axioms").is_none() && json.get("inherits").is_none());
         assert!(json.get("own_status").is_none());

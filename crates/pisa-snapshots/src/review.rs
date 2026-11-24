@@ -94,7 +94,6 @@ async fn all_reviews(
     let mut metas = Records::default();
     let mut exports: HashMap<String, HashMap<String, SnapshotDecl>> = HashMap::new();
     // Why a module's export couldn't be made again, for those whose couldn't.
-    let mut failed: HashMap<String, String> = HashMap::new();
     let mut snapshot_ids: HashMap<String, Option<String>> = HashMap::new();
     let mut out = Vec::new();
     for compared in comparisons {
@@ -118,11 +117,7 @@ async fn all_reviews(
             .collect();
         let mut read = catalog.decls_of(&unread).await?;
         for m in unread {
-            let read = read.remove(&m);
-            if let Some(f) = read.as_ref().and_then(|d| d.failed.as_ref()) {
-                failed.insert(m.clone(), f.error.clone());
-            }
-            let decls = read.map(|d| d.decls).unwrap_or_default();
+            let decls = read.remove(&m).map(|d| d.decls).unwrap_or_default();
             let by_name = decls.into_iter().map(|d| (d.name.clone(), d)).collect();
             exports.insert(m, by_name);
         }
@@ -257,20 +252,10 @@ async fn all_reviews(
                         .error
                         .as_ref()
                         .map(|error| format!("it didn't print: {error}")),
-                    None if !module_exported => Some(
-                        "its module has no export: built before exports, or its export \
-                         didn't fit"
-                            .into(),
-                    ),
-                    None => Some(match failed.get(m) {
-                        Some(error) => format!(
-                            "its module's export doesn't have it, and couldn't be made again: \
-                             {error}"
-                        ),
-                        None => "its module's export doesn't have it: built before private \
-                                 declarations were exported"
-                            .into(),
-                    }),
+                    None if !module_exported => {
+                        Some("its module has no export: its export didn't fit".into())
+                    }
+                    None => Some("its module's export doesn't have it".into()),
                 },
                 holes: match by_value {
                     true => d

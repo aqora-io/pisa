@@ -108,7 +108,7 @@ diesel::table! {
         spec -> Text,
         target -> Text,
         theorem -> Text,
-        target_hash -> Nullable<Text>,
+        target_hash -> Text,
         labels -> Text,
     }
 }
@@ -126,7 +126,6 @@ diesel::table! {
     acceptances (version, id) {
         version -> Text,
         id -> Text,
-        created_micros -> BigInt,
         result -> Jsonb,
         labels -> Text,
     }
@@ -146,10 +145,8 @@ diesel::table! {
     catalogs (version) {
         version -> Text,
         id -> Text,
-        created_micros -> BigInt,
         sweep_refused -> Nullable<Text>,
         sweep_refused_micros -> Nullable<BigInt>,
-        clashes_checked_micros -> Nullable<BigInt>,
     }
 }
 
@@ -252,7 +249,6 @@ diesel::table! {
         unlimited -> Bool,
         revision -> Text,
         store_reachable -> Nullable<Bool>,
-        store_checked_micros -> Nullable<BigInt>,
         live_since_micros -> BigInt,
         memory_caps_mb -> Nullable<BigInt>,
         host_memory_mb -> BigInt,

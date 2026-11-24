@@ -85,7 +85,6 @@ pub struct CheckJob {
 pub struct SessionStartJob {
     /// The session's document: 32 lowercase hex, its id within the job's
     /// version.
-    #[serde(default)]
     pub document: String,
     pub code: String,
     pub timeout_secs: u64,
@@ -216,11 +215,6 @@ pub struct SnapshotAcceptJob {
     pub paranoid: bool,
     /// For each pair: its exports and comparator.
     pub timeout_secs: u64,
-    /// Ignored, as acceptance builds nothing: sent so that a worker of the
-    /// release before, which builds the run, has the time it had to, while
-    /// servers and workers of both releases run together.
-    #[serde(default)]
-    pub build_timeout_secs: u64,
 }
 
 /// A run as a Lake project, for `lake comparator`: its files, and the pairs
@@ -248,15 +242,11 @@ pub struct ExportedPair {
     /// The head's id.
     pub head: String,
     /// Their modules, `PisaSnap.s…`.
-    #[serde(default)]
     pub spec_module: String,
-    #[serde(default)]
     pub head_module: String,
     /// What the project names them, which comparator judges: a named run's
     /// as `PisaSpec.<name>` and `PisaRun.<name>`, others as their modules.
-    #[serde(default)]
     pub challenge_module: String,
-    #[serde(default)]
     pub solution_module: String,
     /// Its comparator configuration's path in the project.
     pub config: String,
@@ -326,8 +316,7 @@ pub struct DocumentProbeJob {
     pub at: api::ProbeAt,
     pub candidates: Vec<String>,
     pub timeout_secs: u64,
-    /// For all the candidates; from a server before budgets, the default.
-    #[serde(default = "api::default_probe_budget")]
+    /// For all the candidates.
     pub budget_secs: u64,
 }
 
@@ -432,7 +421,6 @@ pub struct CheckOutcome {
     pub time: f64,
     /// Where the check's time went, but for `queue` and `total`, which the
     /// worker adds when it answers.
-    #[serde(default)]
     pub timing: api::Timing,
     #[serde(default)]
     pub error: Option<api::Error>,
@@ -528,7 +516,7 @@ mod tests {
         let code = |kind: &str| json!({"kind": kind, "code": "", "timeout_secs": 1});
         let jobs = [
             code("check"),
-            code("session_start"),
+            json!({"kind": "session_start", "document": "d", "code": "", "timeout_secs": 1}),
             json!({"kind": "session_tactic", "state": "s", "tactic": "rfl", "timeout_secs": 1}),
             json!({"kind": "session_check", "session": "s", "code": "", "timeout_secs": 1}),
             code("snapshot_create"),
@@ -550,7 +538,7 @@ mod tests {
             json!({"kind": "document_goals", "document": "d", "at": [], "timeout_secs": 1}),
             json!({
                 "kind": "document_probe", "document": "d", "at": {"sorry": 0},
-                "candidates": [], "timeout_secs": 1,
+                "candidates": [], "timeout_secs": 1, "budget_secs": 1,
             }),
             json!({"kind": "document_close", "document": "d"}),
             json!({"kind": "from_a_newer_server"}),
@@ -619,9 +607,6 @@ mod tests {
             (result.timing, result.warnings),
             (timing, vec!["slow".into()])
         );
-        // A job answered by a worker of an earlier release has none.
-        let old: CheckOutcome = serde_json::from_value(serde_json::json!({"time": 1.0})).unwrap();
-        assert_eq!(old.timing, api::Timing::default());
     }
 
     #[test]

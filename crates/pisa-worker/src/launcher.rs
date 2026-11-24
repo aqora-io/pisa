@@ -283,16 +283,6 @@ pub enum LeanExportError {
     Failed(String),
 }
 
-/// Why [`Launcher::export`] made no export.
-#[derive(Debug)]
-pub enum ExportError {
-    /// The worker couldn't run it or watch it run, as when the sandbox, the
-    /// cgroup or the process can't be set up: nothing about the module.
-    Worker(String),
-    /// It ran and failed, or took too long.
-    Export(String),
-}
-
 impl Launcher {
     pub async fn new(cfg: &WorkerConfig, worker_id: &str, version: &str) -> anyhow::Result<Self> {
         let env = match &cfg.project {
@@ -311,11 +301,8 @@ impl Launcher {
         // again from the store, so nothing stale survives a restart.
         let snapshot_root = work_dir.join("snapshots").join(version);
         let _ = std::fs::remove_dir_all(&snapshot_root);
-        // What judgments left, which none will finish now; see `runs`. And
-        // the runs that comparator built, before it judged exports, which
-        // no release reads any more.
+        // What judgments left, which none will finish now; see `runs`.
         let _ = std::fs::remove_dir_all(work_dir.join("judging"));
-        let _ = std::fs::remove_dir_all(work_dir.join("runs"));
         std::fs::create_dir_all(snapshot_root.join(pisa_protocol::snapshot::ROOT))
             .with_context(|| format!("creating {}", snapshot_root.display()))?;
         let base = env
@@ -605,49 +592,6 @@ impl Launcher {
             report,
             export,
         })
-    }
-
-    /// Has `pisa export` describe the built module `module` again, as
-    /// [`compile`](Self::compile) has `pisa build` describe a new one, set up
-    /// the same way, for at most `timeout`: its export (`PISA_EXPORT`), or
-    /// why there is none.
-    pub async fn export(
-        &self,
-        slot: usize,
-        module: &str,
-        timeout: Duration,
-    ) -> Result<serde_json::Value, ExportError> {
-        let worker = |e: std::io::Error| ExportError::Worker(e.to_string());
-        let chars = crate::catalog::VALUE_CHARS.to_string();
-        let args = ["export", "--value-chars", &chars, module];
-        let mut cmd = self
-            .command_on(slot, &self.tool, &args, &self.build_path)
-            .map_err(worker)?;
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let child = cmd.spawn().map_err(worker)?;
-        let output = tokio::time::timeout(timeout, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                ExportError::Export(format!("the export took more than {}s", timeout.as_secs()))
-            })?
-            .map_err(worker)?;
-        let (_, [_, _, export]) = Compiled::parse(&String::from_utf8_lossy(&output.stdout));
-        match export {
-            Some(export) if output.status.success() => Ok(export),
-            _ => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let tail =
-                    &stderr[stderr.floor_char_boundary(stderr.len().saturating_sub(STDERR_TAIL))..];
-                Err(ExportError::Export(format!(
-                    "the export failed ({}): {}",
-                    output.status,
-                    tail.trim()
-                )))
-            }
-        }
     }
 
     /// Starts `pisa verify` on `modules`, imports first, in the slot's
@@ -1134,40 +1078,6 @@ mod tests {
         assert_eq!(imports, Some(serde_json::json!(["Init"])));
         assert_eq!(report, Some(serde_json::json!([2])));
         assert_eq!(export, None);
-    }
-
-    /// An export the worker couldn't start says so, apart from one that ran
-    /// and failed, which says something of the module.
-    #[tokio::test]
-    async fn an_export_that_cant_start_is_told_from_one_that_fails() {
-        use clap::Parser;
-        let dir = tempfile::tempdir().unwrap();
-        let launcher = |tool: &str| {
-            let work = dir.path().to_str().unwrap().to_string();
-            let args = [
-                "pisa-worker",
-                "--database-url",
-                "x",
-                "--tool",
-                tool,
-                "--work-dir",
-                &work,
-            ];
-            let cfg = crate::config::WorkerConfig::try_parse_from(args).unwrap();
-            async move { super::Launcher::new(&cfg, "w", "v").await.unwrap() }
-        };
-        let missing = launcher("/nonexistent/pisa").await;
-        let e = missing
-            .export(0, "M", Duration::from_secs(10))
-            .await
-            .unwrap_err();
-        assert!(matches!(e, super::ExportError::Worker(_)), "{e:?}");
-        let failing = launcher("false").await;
-        let e = failing
-            .export(0, "M", Duration::from_secs(10))
-            .await
-            .unwrap_err();
-        assert!(matches!(e, super::ExportError::Export(_)), "{e:?}");
     }
 
     /// The exporter runs in the slot's sandbox with nothing of the worker's

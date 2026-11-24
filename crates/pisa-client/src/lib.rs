@@ -1159,9 +1159,7 @@ impl Client {
     }
 
     /// Like [`Client::verify_snapshot`], but re-checks the modules that are
-    /// verified already too, which describes their records again: what a
-    /// record made before `own_axioms` and `inherits` were recorded needs to
-    /// be read through links.
+    /// verified already too, and describes their records again.
     pub async fn verify_snapshot_again(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
         let mut url = self.verify_url(id)?;
         url.query_pairs_mut().append_pair("again", "true");

@@ -817,9 +817,9 @@ async fn plain_code_whose_re_check_runs_out_of_time_is_kept_unverified() {
     assert_eq!(verify(&c, &r).await["snapshot"]["verified"], true);
 }
 
-/// Kept code that isn't verified, as a create with `verify: false` or an
-/// earlier release leaves it, is re-checked by a create that doesn't opt
-/// out, with the fallback new code has.
+/// Kept code that isn't verified, as a create with `verify: false` leaves
+/// it, is re-checked by a create that doesn't opt out, with the fallback new
+/// code has.
 #[tokio::test(flavor = "multi_thread")]
 async fn kept_code_that_isnt_verified_is_re_checked_by_a_default_create() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;

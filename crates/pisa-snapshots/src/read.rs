@@ -267,11 +267,11 @@ impl Reader {
         };
         let mut found = Vec::new();
         for (e, r) in recorded {
-            let target = match (r.spec == spec, &r.target_hash) {
-                (true, _) => Some(r.target.clone()),
-                (false, Some(hash)) => declarations
+            let target = match r.spec == spec {
+                true => Some(r.target.clone()),
+                false => declarations
                     .iter()
-                    .find(|d| d.kind == "theorem" && !d.generated && d.type_hash == *hash)
+                    .find(|d| d.kind == "theorem" && !d.generated && d.type_hash == r.target_hash)
                     .filter(|d| {
                         let changed = &changed_since[&r.spec];
                         let all = declarations.iter().chain(&closure);
@@ -281,7 +281,6 @@ impl Reader {
                             && refutable(&declarations, &closure, &holes, &d.name).is_ok()
                     })
                     .map(|d| d.name.clone()),
-                (false, None) => None,
             };
             let Some(target) = target else { continue };
             let gone = self.catalog.find_entry(&e).await?.is_none();
@@ -398,16 +397,8 @@ impl Reader {
         let mut out = HashMap::new();
         for m in modules {
             if let Ok(Some(exported)) = self.catalog.decls(m).await {
-                // An older format's text printed less than today's builds.
-                let comparable = exported.format >= EXPLICIT_FORMAT;
                 let printed = exported.decls.iter().filter(|d| d.error.is_none());
-                out.extend(printed.map(|d| {
-                    let mut p = Printed::from(d);
-                    if !comparable {
-                        p.explicit = None;
-                    }
-                    (d.name.clone(), p)
-                }));
+                out.extend(printed.map(|d| (d.name.clone(), Printed::from(d))));
             }
         }
         out

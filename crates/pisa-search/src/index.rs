@@ -18,9 +18,6 @@ use crate::text::split_name;
 
 pub const FORMAT_VERSION: u32 = 5;
 
-/// The first format whose bundles have conclusion keys for the conclusion lane.
-pub const CONCLUSION_FORMAT: u32 = 5;
-
 /// What a hit or `/declarations` shows for one declaration.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StoredDecl {

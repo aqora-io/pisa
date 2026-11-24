@@ -144,7 +144,7 @@ impl Snapshots {
         // A module whose imports declare one name twice fails before the
         // kernel sees it, and the chain stops there: the re-check would
         // describe its names from whichever import came first. Creates refuse
-        // such a header; this catches modules built before they did.
+        // such a header, and this refuses it again, should one get through.
         let mut clashed = None;
         for (i, module) in todo.iter().enumerate() {
             let imports = self.catalog.module(&module.id).await?.imports;

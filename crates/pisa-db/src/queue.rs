@@ -89,8 +89,8 @@ fn group_pools(rows: Vec<PoolRow>) -> Vec<PoolHealth> {
             });
         }
         let pool = pools.last_mut().unwrap();
-        // Its workers share them, as its version hashes them; one from
-        // before workers said them has none.
+        // Its workers share them, as its version hashes them; one without a
+        // project has none.
         if pool.toolchain.is_empty() && !toolchain.is_empty() {
             pool.toolchain = toolchain;
             pool.packages = serde_json::from_str(&packages).unwrap_or_default();
@@ -759,7 +759,7 @@ mod tests {
                 packages: vec![cslib.clone()],
                 ..reg(worker, "v", 1, 0, false)
             };
-            // One from before workers said them, which sorts first.
+            // One without a project, which sorts first.
             q.register(&reg("a", "v", 1, 0, false)).await.unwrap();
             q.register(&pinned("b")).await.unwrap();
             q.register(&reg("c", "u", 1, 0, false)).await.unwrap();

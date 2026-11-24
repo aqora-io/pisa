@@ -24,7 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
 use crate::dense::{Embedder, QUERY_INSTRUCTION};
 use crate::encode;
-use crate::index::{BundleManifest, CONCLUSION_FORMAT, StoredDecl};
+use crate::index::{BundleManifest, StoredDecl};
 use crate::informal_store::description_hash;
 use crate::points::{PointPayload, collection, entries_collection};
 use crate::qdrant::{Qdrant, ScoredPoint, any, is};
@@ -718,7 +718,7 @@ impl Engine {
         {
             lane(json!(encode::consts_query(&consts)), "consts", weight);
         }
-        if lanes.concl && self.manifest.format >= CONCLUSION_FORMAT {
+        if lanes.concl {
             let consts = conclusion(p, &self.symbols);
             if !consts.is_empty() {
                 lane(json!(encode::consts_query(&consts)), "concl", w.concl);

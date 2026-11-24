@@ -116,8 +116,7 @@ impl Linker<'_> {
         let d = declared(self.records.held(m)?, name)?.clone();
         let Some(own) = &d.own_axioms else {
             let why = format!(
-                "{} was described before what a declaration inherits was recorded: verify it \
-                 again",
+                "{}'s record doesn't say what its declarations inherit: verify it again",
                 snapshot::module(m)
             );
             return Some(Effective::recorded(&d).unread(name, &snapshot::module(m), why));
@@ -419,7 +418,7 @@ impl Reader {
                 continue;
             };
             // A head that can't be read says why, for each theorem it
-            // inherits through, or, from before that was recorded, for itself.
+            // inherits through, or, when its record doesn't say, for itself.
             if !head.verified {
                 let why = format!("{} isn't verified", t.head);
                 t.unlinked = (d.inherits.iter())
@@ -436,8 +435,7 @@ impl Reader {
                     name: d.name.clone(),
                     module: None,
                     reason: format!(
-                        "{} was described before what a declaration inherits was recorded: \
-                         verify it again",
+                        "{}'s record doesn't say what its declarations inherit: verify it again",
                         t.head
                     ),
                 }];
