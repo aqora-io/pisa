@@ -93,9 +93,15 @@ impl Repl {
         if self.dead {
             return Err(ReplFailure::Dead);
         }
+        // Dead until the response is read: if this is dropped before, the
+        // process's next response would be this command's.
+        self.dead = true;
         let result = tokio::time::timeout(timeout, self.exchange(cmd)).await;
         let failure = match result {
-            Ok(Ok(response)) => return Ok(response),
+            Ok(Ok(response)) => {
+                self.dead = false;
+                return Ok(response);
+            }
             Ok(Err(e)) => e,
             Err(_) => ReplFailure::Timeout,
         };
@@ -217,6 +223,23 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(r, ReplResponse::Command(c) if c.env == 0));
+        assert!(repl.is_alive());
+    }
+
+    /// A send dropped before its response, as when the job it serves is
+    /// cancelled, leaves the process dead: its next response would be the
+    /// dropped command's.
+    #[tokio::test]
+    async fn a_dropped_send_leaves_the_process_dead() {
+        let mut repl = Repl::spawn(sh("sleep 10")).unwrap();
+        let cmd = ReplCommand::cmd("x", None);
+        let send = repl.send(&cmd, Duration::from_secs(10));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), send)
+                .await
+                .is_err()
+        );
+        assert!(!repl.is_alive());
     }
 
     #[tokio::test]

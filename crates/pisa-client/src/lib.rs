@@ -1245,8 +1245,12 @@ impl Client {
         }
     }
 
-    /// Withdraws `job` if no worker has started it. A job that is running
-    /// or done stays as it is; the status says which.
+    /// Withdraws `job` if no worker has started it (`Cancelled`). A running
+    /// check, session check, snapshot verify or acceptance is stopped by its
+    /// worker (`Cancelling`): waiting for it then fails with a `NotFound`
+    /// that says it was cancelled, unless it finished first. Any other job
+    /// that is running, and one that is done, stays as it is; the status
+    /// says which.
     pub async fn cancel_job<T>(&self, job: &Job<T>) -> Result<api::Job, Error> {
         self.endpoint.delete(self.job_url(&job.id)?).await
     }

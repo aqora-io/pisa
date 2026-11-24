@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use pisa_db::db::Notice;
 use pisa_db::environments::Environments;
-use pisa_db::queue::{Candidate, Claimed, LIVE, Peer, Queue, Registration};
+use pisa_db::queue::{Candidate, Claim, Claimed, LIVE, Peer, Queue, Registration};
 use pisa_db::scope::Scope;
 use pisa_protocol::api::JobProgress;
 use pisa_protocol::wire::{self, Job, JobResult};
@@ -167,6 +167,24 @@ fn heartbeat_every(lease: Duration) -> Duration {
     lease / 3
 }
 
+/// Whether `job` stops as soon as its claim moves or its client cancels it:
+/// those that leave nothing half-written do, as the server's
+/// `stops_when_cancelled` says.
+fn stops(job: &Job) -> bool {
+    matches!(
+        job,
+        Job::Check(_) | Job::SessionCheck(_) | Job::SnapshotVerify(_) | Job::SnapshotAccept(_)
+    )
+}
+
+/// Why [`Shared::watch`] stopped a job.
+enum Stopped {
+    /// Its claim moved to another attempt.
+    Moved,
+    /// Its client cancelled it.
+    Cancelled,
+}
+
 /// [`pisa_protocol::now_micros`], as the queue's columns hold it.
 fn now_micros() -> i64 {
     pisa_protocol::now_micros() as i64
@@ -267,9 +285,10 @@ impl Shared {
     }
 
     /// Runs `claimed`, a job on a document if `on_document`, and writes its
-    /// result if its claim holds. An accept stops as soon as its claim moves
-    /// to another attempt ([`Shared::watch`]), and writes nothing; its
-    /// acceptance is stored with its result.
+    /// result if its claim holds. A job that [stops](stops) does so as soon
+    /// as its claim moves to another attempt ([`Shared::watch`]), and writes
+    /// nothing, or as soon as its client cancels it, and ends it as
+    /// cancelled. An accept's acceptance is stored with its result.
     async fn answer(&self, claimed: Claimed, on_document: bool) {
         let documents = self.documents.as_deref();
         let started = Instant::now();
@@ -289,16 +308,16 @@ impl Shared {
                         "the worker could not read the job, which may come from a server of \
                          another release: {e}"
                     );
-                    return Some((JobResult::Failed { error }, None));
+                    return Ok((JobResult::Failed { error }, None));
                 }
             };
-            let accept = matches!(job, Job::SnapshotAccept(_));
+            let stops = stops(&job);
             let (progress, said) = watch::channel(None);
             let running = run_job(&self.pool, &self.sessions, documents, job, &progress);
-            let mut result = match accept {
+            let mut result = match stops {
                 true => tokio::select! {
                     result = running => result,
-                    () = self.watch(id, at, said) => return None,
+                    stopped = self.watch(id, at, said) => return Err(stopped),
                 },
                 false => running.await,
             };
@@ -316,15 +335,27 @@ impl Shared {
                 }
                 None => None,
             };
-            Some((result, acceptance))
+            Ok((result, acceptance))
         })
         .await;
-        let Some((mut result, acceptance)) = ran else {
-            tracing::warn!(
-                id,
-                "the job's claim moved to another attempt: stopped it, and wrote nothing"
-            );
-            return;
+        let (mut result, acceptance) = match ran {
+            Ok(ran) => ran,
+            Err(Stopped::Moved) => {
+                tracing::warn!(
+                    id,
+                    "the job's claim moved to another attempt: stopped it, and wrote nothing"
+                );
+                return;
+            }
+            Err(Stopped::Cancelled) => {
+                // If this fails, the sweep ends it once its claim lapses.
+                match self.queue.stopped(&self.me, id, at).await {
+                    Ok(true) => tracing::info!(id, "the job's client cancelled it: stopped it"),
+                    Ok(false) => tracing::warn!(id, "stopped the job, whose claim moved since"),
+                    Err(e) => tracing::warn!(id, "ending the job stopped as cancelled failed: {e}"),
+                }
+                return;
+            }
         };
         if let Some(timing) = result.timing_mut() {
             timing.queue = queue;
@@ -371,14 +402,15 @@ impl Shared {
 
     /// Returns once the claim on job `id` that this worker made at
     /// `claimed_micros` has moved to another attempt, which a lapsed lease
-    /// alone doesn't do. Until then it writes what the job last said it was
-    /// doing, `progress`, as often as the heartbeat renews the claims.
+    /// alone doesn't do, or once its client cancelled the job. Until then it
+    /// writes what the job last said it was doing, `progress`, as often as
+    /// the heartbeat renews the claims.
     async fn watch(
         &self,
         id: i64,
         claimed_micros: i64,
         progress: watch::Receiver<Option<JobProgress>>,
-    ) {
+    ) -> Stopped {
         loop {
             tokio::time::sleep(heartbeat_every(self.lease)).await;
             let said = (progress.borrow().as_ref()).and_then(|p| serde_json::to_value(p).ok());
@@ -390,8 +422,9 @@ impl Shared {
                 None => self.queue.claim_held(id, &self.me, claimed_micros).await,
             };
             match held {
-                Ok(true) => {}
-                Ok(false) => return,
+                Ok(Claim::Held) => {}
+                Ok(Claim::Cancelling) => return Stopped::Cancelled,
+                Ok(Claim::Moved) => return Stopped::Moved,
                 Err(e) => tracing::warn!(id, "reading the job's claim failed: {e}"),
             }
         }

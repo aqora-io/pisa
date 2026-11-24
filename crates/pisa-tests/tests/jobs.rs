@@ -300,13 +300,16 @@ async fn any_server_answers_for_a_job() {
     assert_eq!(r, json!({"id": job, "kind": "check", "status": "done"}));
 }
 
+/// Cancelling withdraws a job no worker holds, and has the worker running a
+/// check stop it: its slot is free at once, with a fresh REPL, which answers
+/// the next check rather than the stopped one.
 #[tokio::test(flavor = "multi_thread")]
-async fn cancelling_withdraws_only_what_no_worker_holds() {
+async fn cancelling_withdraws_a_queued_job_and_stops_a_running_check() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let running = accepted(
         &c,
         "/check",
-        json!({"code": "SLEEP 1500\n#check Nat"}),
+        json!({"code": "SLEEP 5000\n#check Nat"}),
         "check",
     )
     .await;
@@ -325,10 +328,29 @@ async fn cancelling_withdraws_only_what_no_worker_holds() {
     let (status, r) = look(&c, &queued_url, "0").await;
     assert_eq!((status, &r["error"]["kind"]), (404, &json!("not_found")));
 
+    let cancelled = Instant::now();
     let (status, r) = delete(&c, &running_url).await;
-    assert_eq!((status, &r["status"]), (200, &json!("running")));
-    let (status, r) = look(&c, &running_url, "30").await;
-    assert_eq!((status, &r["ok"]), (200, &json!(true)));
+    assert_eq!((status, &r["status"]), (200, &json!("cancelling")));
+    let (status, r) = look(&c, &running_url, "10").await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (404, &json!("not_found")),
+        "{r}"
+    );
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("was cancelled at"), "{message}");
+
+    // The stopped check's answer would say `Nat : Type`, and no error.
+    let (status, r) = c.post("/check", json!({"code": "error_here"})).await;
+    assert_eq!(status, 200, "{r}");
+    assert_eq!(r["ok"], json!(false), "{r}");
+    let messages = r["messages"].to_string();
+    assert!(messages.contains("unexpected error_here"), "{r}");
+    assert!(!messages.contains("Nat : Type"), "{r}");
+    assert!(
+        cancelled.elapsed() < Duration::from_secs(4),
+        "the stopped check held its slot"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

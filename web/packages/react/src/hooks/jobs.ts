@@ -1,4 +1,4 @@
-import { type Job, type JobSchema, type JobStatus, type PisaClient, PisaError } from "@aqora/pisa-client";
+import { isPisaError, type Job, type JobSchema, type JobStatus, type PisaClient, PisaError } from "@aqora/pisa-client";
 import { type UseMutationResult, useMutation } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
@@ -13,13 +13,17 @@ export interface LongJobOptions<T, V> {
 }
 
 export type LongJob<T, V> = UseMutationResult<T, PisaError, V> & {
-  /** The job as last seen: `queued`, `running`, then `done`; or `cancelled`.
-   *  Undefined until the server has queued it. */
+  /** The job as last seen: `queued`, `running`, then `done`; or `cancelled`,
+   *  by way of `cancelling` for one a worker stops. Undefined until the
+   *  server has queued it. */
   job: JobSchema | undefined;
   /** Withdraws the job if no worker has started it, and stops waiting: the
-   *  mutation then fails `aborted`. One a worker has started runs on, and is
-   *  still waited for. Resolves what became of it, or nothing if the
-   *  server hadn't queued it yet, which it is withdrawn as soon as it is. */
+   *  mutation then fails `aborted`. A running check, session check, snapshot
+   *  verify or acceptance is stopped by its worker (`cancelling`): the
+   *  mutation fails `aborted` once it has, unless the job finished first.
+   *  Any other job a worker has started runs on, and is still waited for.
+   *  Resolves what became of it, or nothing if the server hadn't queued it
+   *  yet, which it is withdrawn as soon as it is. */
   cancel: () => Promise<JobStatus | undefined>;
 };
 
@@ -71,9 +75,11 @@ export function useLongJob<T, V>(
         return answer;
       } catch (e) {
         // Withdrawn: the wait was aborted, or the job was gone before the
-        // cancel's answer came.
+        // cancel's answer came. Stopped: the job expired as cancelled.
         const status = await current.cancel?.catch(() => undefined);
-        if (status === "cancelled") throw new PisaError("aborted", "the job was cancelled", undefined, { cause: e });
+        const stopped = status === "cancelling" && isPisaError(e, "not_found");
+        if (stopped) setJob({ ...queued, status: "cancelled" });
+        if (status === "cancelled" || stopped) throw new PisaError("aborted", "the job was cancelled", undefined, { cause: e });
         throw e;
       }
     },

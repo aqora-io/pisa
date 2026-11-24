@@ -468,6 +468,7 @@ impl Dispatcher {
                     finished_micros,
                 }),
                 Stage::Running => Looking::Pending(JobStatus::Running, progress),
+                Stage::Cancelling => Looking::Pending(JobStatus::Cancelling, progress),
                 Stage::Queued { give_up_at } => {
                     // Then the next look closes it.
                     let left = (give_up_at - now_micros()).max(0) as u64;
@@ -493,8 +494,10 @@ impl Dispatcher {
         }
     }
 
-    /// Withdraws the async job `token` if no worker holds it. Returns its
-    /// kind and what became of it, or `None` if there's no such job.
+    /// Withdraws the async job `token` if no worker holds it, or asks the
+    /// worker that runs it to stop it if it is of a kind that
+    /// [stops](stops_when_cancelled). Returns its kind and what became of
+    /// it, or `None` if there's no such job.
     pub async fn cancel(&self, token: &str) -> Result<Option<(JobKind, Withdrawn)>, DispatchError> {
         let Some(status) = self.queue.status(token).await? else {
             return Ok(None);
@@ -519,10 +522,14 @@ impl Dispatcher {
         if self.queue.cancel(token).await?.is_some() {
             return Ok(Some((kind, Withdrawn::Status(JobStatus::Cancelled))));
         }
+        if stops_when_cancelled(kind) && self.queue.stop(token).await?.is_some() {
+            return Ok(Some((kind, Withdrawn::Status(JobStatus::Cancelling))));
+        }
         let state = match self.queue.status(token).await?.map(|s| s.stage) {
             None => JobStatus::Cancelled,
             Some(Stage::Queued { .. }) => JobStatus::Queued,
             Some(Stage::Running) => JobStatus::Running,
+            Some(Stage::Cancelling) => JobStatus::Cancelling,
             Some(Stage::Done(_) | Stage::GaveUp { .. }) => JobStatus::Done,
             // Another cancel or the sweep got there first.
             Some(Stage::Expired { outcome, .. }) => match outcome {
@@ -569,6 +576,16 @@ pub(crate) fn kind_name(kind: JobKind) -> String {
         Ok(serde_json::Value::String(name)) => name,
         _ => unreachable!("a JobKind serializes as a string"),
     }
+}
+
+/// Whether a worker running a job of `kind` stops it when its client
+/// cancels it, as `pisa_worker` does. Those that leave nothing half-written
+/// do; a server runs rebuilds and resubmits itself, and stops neither.
+fn stops_when_cancelled(kind: JobKind) -> bool {
+    matches!(
+        kind,
+        JobKind::Check | JobKind::CheckSession | JobKind::VerifySnapshot | JobKind::AcceptRun
+    )
 }
 
 /// The kind the queue recorded, which a server of another release may not
@@ -722,6 +739,77 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// A running job of a kind its worker stops reads `cancelling` once its
+    /// client cancels it, and goes on doing so; one of another kind, or one
+    /// a server runs itself, runs on.
+    #[tokio::test]
+    async fn a_running_job_that_stops_reads_cancelling() {
+        let queue = Queue::new(Db::memory().await, "q");
+        let d = Dispatcher::start(queue.clone(), DispatchConfig::default()).await;
+        let check = Job::Check(CheckJob {
+            code: String::new(),
+            timeout_secs: 1,
+            detail: Vec::new(),
+            at: Vec::new(),
+            runs: Vec::new(),
+            source: None,
+            against: None,
+        });
+        let prepared = |job: &Job| Prepared {
+            job: job.clone(),
+            route: Route {
+                version: Some("v".into()),
+                ..Default::default()
+            },
+            priority: Priority::Batch,
+        };
+        let running = |kind: JobKind| {
+            let (d, queue, p) = (&d, &queue, prepared(&check));
+            async move {
+                let token = d.submit_async(kind, p).await.unwrap();
+                let id = queue.status(&token).await.unwrap().unwrap().id;
+                let claimed = queue.claim("w", &[id], Duration::from_secs(60)).await;
+                assert_eq!(claimed.unwrap().len(), 1);
+                token
+            }
+        };
+        let cancelled = |token: String| {
+            let d = &d;
+            async move { d.cancel(&token).await.unwrap().unwrap().1 }
+        };
+
+        let token = running(JobKind::Check).await;
+        for _ in 0..2 {
+            assert_eq!(
+                cancelled(token.clone()).await,
+                Withdrawn::Status(JobStatus::Cancelling)
+            );
+        }
+        let looked = d.look(&token, Duration::ZERO).await.unwrap().unwrap();
+        assert!(
+            matches!(looked.state, Looking::Pending(JobStatus::Cancelling, None)),
+            "{:?}",
+            looked.state
+        );
+
+        let token = running(JobKind::CreateSnapshot).await;
+        assert_eq!(
+            cancelled(token).await,
+            Withdrawn::Status(JobStatus::Running)
+        );
+        let rebuild = Job::SnapshotRebuild(SnapshotRebuildJob {
+            from: "f".into(),
+            to: "t".into(),
+            labels: Default::default(),
+            allow_changes: false,
+        });
+        let held = d.hold(JobKind::RebuildSnapshots, &rebuild).await.unwrap();
+        assert_eq!(
+            cancelled(held.token.clone()).await,
+            Withdrawn::Status(JobStatus::Running)
+        );
     }
 
     #[tokio::test]

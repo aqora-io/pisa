@@ -858,8 +858,8 @@ async fn client_submits_and_waits_for_jobs() {
     assert_eq!(job.kind, JobKind::VerifySnapshot);
     assert!(client.wait_job(&job).await.unwrap().snapshot.verified);
 
-    // A job resumed by its id; a slow one is pending, and once a worker
-    // holds it, it can't be cancelled.
+    // A job resumed by its id; a slow one is pending. One queued behind it
+    // is withdrawn, and one running is stopped.
     let slow = client.submit_check("SLEEP 1000\n#check Nat").await.unwrap();
     let resumed: Job<pisa_client::CheckResult> = Job::new(slow.id.clone(), slow.kind);
     let pending = client.poll_job(&resumed, Duration::ZERO).await.unwrap();
@@ -877,6 +877,21 @@ async fn client_submits_and_waits_for_jobs() {
         JobStatus::Cancelled
     );
     assert!(client.wait_job(&resumed).await.unwrap().ok);
+
+    let stopped = client.submit_check("SLEEP 5000\n#check Nat").await.unwrap();
+    loop {
+        match client.poll_job(&stopped, Duration::ZERO).await.unwrap() {
+            JobPoll::Pending(p) if p.status == JobStatus::Running => break,
+            JobPoll::Pending(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            done => panic!("{done:?}"),
+        }
+    }
+    assert_eq!(
+        client.cancel_job(&stopped).await.unwrap().status,
+        JobStatus::Cancelling
+    );
+    let e = client.wait_job(&stopped).await.unwrap_err();
+    assert!(e.to_string().contains("was cancelled at"), "{e}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -668,7 +668,7 @@ JobKind = Literal[
     "create_snapshot", "verify_snapshot", "rebuild_snapshots", "accept_run",
     "resubmit_snapshots",
 ]
-JobStatus = Literal["queued", "running", "done", "cancelled"]
+JobStatus = Literal["queued", "running", "cancelling", "done", "cancelled"]
 
 class AcceptPhase(TypedDict):
     # "linking", "waiting" (for a slot), "exporting" (with `pair` and
@@ -1318,7 +1318,11 @@ class Client:
         for a snapshot's create and a run's acceptance)."""
     def cancel_job(self, job: Job) -> Job:
         """Withdraw the job if no worker has started it (`status` is then
-        `cancelled`); one that is `running` or `done` stays as it is."""
+        `cancelled`). A running check, session check, snapshot verify or
+        acceptance is stopped by its worker (`cancelling`): waiting for it
+        then raises NotFoundError, saying it was cancelled, unless it
+        finished first. Any other `running` job, and a `done` one, stays as
+        it is."""
     def search(
         self,
         text: str | None = None,
@@ -1876,7 +1880,11 @@ class AsyncClient:
         for a snapshot's create and a run's acceptance)."""
     def cancel_job(self, job: Job) -> Future[Job]:
         """Withdraw the job if no worker has started it (`status` is then
-        `cancelled`); one that is `running` or `done` stays as it is."""
+        `cancelled`). A running check, session check, snapshot verify or
+        acceptance is stopped by its worker (`cancelling`): waiting for it
+        then raises NotFoundError, saying it was cancelled, unless it
+        finished first. Any other `running` job, and a `done` one, stays as
+        it is."""
     def search(
         self,
         text: str | None = None,

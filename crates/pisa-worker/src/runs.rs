@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 
 use crate::catalog::{Acceptance, ModuleMeta, record_fits};
 use crate::launcher::{Launcher, Ran};
-use crate::pool::{Lease, Pool};
+use crate::pool::Pool;
 use crate::snapshots::Snapshots;
 
 mod judge;
@@ -301,53 +301,6 @@ impl Drop for Judging {
     }
 }
 
-/// The slot a judgment runs on. Dropped before the judgment is
-/// [`done`](Self::done), as when its job's claim moves to another attempt,
-/// it kills what is left in the slot's cgroup and waits for it to go before
-/// the slot goes back to the pool, so that the next job finds it empty: the
-/// exporter and Lake are killed as their handles drop, and the kernels die
-/// with Lake, but not at once.
-struct JudgingSlot {
-    pool: Arc<Pool>,
-    lease: Option<Lease>,
-}
-
-impl JudgingSlot {
-    /// The judgment is done: the slot goes back as it is.
-    fn done(mut self) {
-        self.lease.take();
-    }
-}
-
-impl std::ops::Deref for JudgingSlot {
-    type Target = Lease;
-    fn deref(&self) -> &Lease {
-        self.lease.as_ref().unwrap()
-    }
-}
-
-impl std::ops::DerefMut for JudgingSlot {
-    fn deref_mut(&mut self) -> &mut Lease {
-        self.lease.as_mut().unwrap()
-    }
-}
-
-impl Drop for JudgingSlot {
-    fn drop(&mut self) {
-        let Some(lease) = self.lease.take() else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let pool = self.pool.clone();
-        runtime.spawn(async move {
-            pool.launcher().kill(lease.id).await;
-            drop(lease);
-        });
-    }
-}
-
 /// Judges the run `job` names: audits it, and judges the pairs the audit
 /// compared with `lake comparator`, each in turn, on exports of the modules
 /// pisa built, saying what it is doing to `progress`. Returns the result,
@@ -418,10 +371,10 @@ pub async fn accept(
     progress.begin(AcceptPhase::Waiting);
     let slot = (progress)
         .during(async {
-            let mut slot = JudgingSlot {
-                pool: pool.clone(),
-                lease: Some(pool.acquire("").await),
-            };
+            // Dropped before the judgment is done, the slot is cleared: the
+            // exporter and Lake are killed as their handles drop, and the
+            // kernels die with Lake, but not at once.
+            let mut slot = pool.acquire("").await.clear_on_drop();
             // The exporter and the kernels load the modules, so free the
             // slot's memory first.
             slot.retire_and_wait("evict").await;

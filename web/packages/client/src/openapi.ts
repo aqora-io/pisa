@@ -224,7 +224,7 @@ export interface paths {
         post?: never;
         /**
          * Cancel an async request
-         * @description Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is. An expired job is the same 404 as `GET`.
+         * @description Withdraws the job if no worker has started it (`cancelled`). A running check, session check, snapshot verify or acceptance is stopped by its worker (`cancelling`), then expires as cancelled, unless it finishes first; any other `running` job, and a `done` one, is left as it is. An expired job is the same 404 as `GET`.
          */
         delete: operations["cancelJob"];
         options?: never;
@@ -2247,7 +2247,7 @@ export interface components {
             seconds: number;
         };
         /** @enum {string} */
-        JobStatus: "queued" | "running" | "done" | "cancelled";
+        JobStatus: "queued" | "running" | "cancelling" | "done" | "cancelled";
         /** @enum {string} */
         KernelOutcome: "accepted" | "rejected" | "unsupported" | "cannot_run" | "failed" | "out_of_memory";
         /**

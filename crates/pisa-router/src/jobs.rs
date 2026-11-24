@@ -295,8 +295,11 @@ pub async fn get(
 #[utoipa::path(
     delete, path = "/jobs/{id}", operation_id = "cancelJob", tag = "jobs",
     summary = "Cancel an async request",
-    description = "Withdraws the job if no worker has started it (`cancelled`); one that is \
-        `running` or `done` is left as it is. An expired job is the same 404 as `GET`.",
+    description = "Withdraws the job if no worker has started it (`cancelled`). A running \
+        check, session check, snapshot verify or acceptance is stopped by its worker \
+        (`cancelling`), then expires as cancelled, unless it finishes first; any other \
+        `running` job, and a `done` one, is left as it is. An expired job is the same 404 as \
+        `GET`.",
     params(("id" = String, Path, description = "The job's id, from the 202")),
     responses((status = 200, description = "What became of it", body = Job), ApiErrors),
 )]

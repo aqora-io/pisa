@@ -14,7 +14,9 @@ The first public release.
   - Checks, batches, proof sessions, documents on Lean Beam, snapshots,
     runs, audits, acceptance with `lake comparator`, rebuilds, settles,
     amendments and refutations.
-  - Jobs, with async requests on every long endpoint.
+  - Jobs, with async requests on every long endpoint. Cancelling one
+    withdraws it if it is queued, and stops a running check, session
+    check, snapshot verify or acceptance.
   - Scopes.
   - Environments with a pool each.
   - Declaration search over Qdrant, snapshots included.

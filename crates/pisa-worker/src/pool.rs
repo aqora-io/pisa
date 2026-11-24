@@ -192,6 +192,48 @@ impl Drop for Prewarming {
     }
 }
 
+/// A [`Lease`] that, dropped before it is [`done`](Self::done), as when its
+/// job is cancelled or its claim moves to another attempt, kills what is
+/// left in the slot's cgroup and waits for it to go before the slot goes
+/// back to the pool, so that the next job finds it empty: a process is
+/// killed as its handle drops, but what it started may outlive it a while.
+pub struct ClearOnDrop(Option<Lease>);
+
+impl ClearOnDrop {
+    /// Its work is done: the slot goes back as it is.
+    pub fn done(mut self) {
+        self.0.take();
+    }
+}
+
+impl Deref for ClearOnDrop {
+    type Target = Lease;
+    fn deref(&self) -> &Lease {
+        self.0.as_ref().unwrap()
+    }
+}
+
+impl DerefMut for ClearOnDrop {
+    fn deref_mut(&mut self) -> &mut Lease {
+        self.0.as_mut().unwrap()
+    }
+}
+
+impl Drop for ClearOnDrop {
+    fn drop(&mut self) {
+        let Some(lease) = self.0.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            lease.pool.launcher().kill(lease.id).await;
+            drop(lease);
+        });
+    }
+}
+
 /// Exclusive use of one slot; returned to the pool on drop.
 pub struct Lease {
     pool: Arc<Pool>,
@@ -214,6 +256,11 @@ impl DerefMut for Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        // A job dropped midway, as when it is cancelled, leaves its process
+        // dead but at work: it goes now rather than on the slot's next use.
+        if self.repl.as_ref().is_some_and(|r| !r.is_alive()) {
+            self.retire("dropped");
+        }
         let mut slot = self.slot.take().unwrap();
         slot.last_used = Instant::now();
         self.pool.idle.lock().unwrap().push(slot);
@@ -221,6 +268,12 @@ impl Drop for Lease {
 }
 
 impl Lease {
+    /// This slot, for processes other than its REPL, such as a judgment's or
+    /// a re-check's, which may start processes of their own.
+    pub fn clear_on_drop(self) -> ClearOnDrop {
+        ClearOnDrop(Some(self))
+    }
+
     /// Makes sure this slot's process has `header` imported and returns its
     /// environment ID and whether it was already warm.
     pub async fn warm_up(&mut self, header: &str, key: &str) -> Result<(u64, bool), HeaderFailure> {

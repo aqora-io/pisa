@@ -281,6 +281,10 @@ CREATE TABLE jobs (
     claimed_micros BIGINT,
     -- The claim lapses then, unless the worker renews it.
     lease_micros BIGINT,
+    -- When its client asked a worker running it to stop. It is never claimed
+    -- again: its worker, or the sweep once its claim lapses, ends it as
+    -- cancelled.
+    cancel_micros BIGINT,
     attempts INTEGER NOT NULL DEFAULT 0,
     -- What its attempt last said it was doing (an accept's phase, kernel and
     -- peak memory), for GET /jobs/{id}. A claim clears it.

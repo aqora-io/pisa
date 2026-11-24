@@ -105,7 +105,9 @@ in TypeScript). Then:
 - `wait_job` waits however long the job takes, looking every 25 s, and
   returns what the call would have, or raises what it would have raised;
 - `poll_job` looks once, waiting up to the seconds it is given (at most 60);
-- `cancel_job` withdraws a job no worker has started.
+- `cancel_job` withdraws a job no worker has started, and stops a running
+  check, session check, snapshot verify or acceptance (see
+  [Cancelling](api.md#async-requests-and-jobs)).
 
 The server keeps a job's answer for an hour after the job is done, a day for
 a snapshot's create and a run's acceptance. A dry run is answered at once,

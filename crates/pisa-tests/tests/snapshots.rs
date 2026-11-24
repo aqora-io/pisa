@@ -1209,6 +1209,69 @@ async fn a_snapshot_deleted_during_verification_stays_deleted() {
     assert_eq!(stored(&c).await, (vec![], vec![]));
 }
 
+/// A verify its client cancels stops at once: the snapshot stays unverified,
+/// and the slot is free for the next job.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_verify_stops() {
+    let c = Cluster::start(&[("w0", "v", 1)]).await;
+    let snapshot = unverified(
+        &c,
+        "import Foo\n\ntheorem s : 1 = 1 := rfl\n-- SLOW_KERNEL 8000",
+    )
+    .await;
+    let r = (c.client)
+        .post(c.url(&format!("/snapshots/{}/verify", entry(&snapshot))))
+        .header("prefer", "respond-async")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 202);
+    let job: Value = r.json().await.unwrap();
+    let url = c.url(&format!("/jobs/{}", job["id"].as_str().unwrap()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let r: Value = c
+            .client
+            .get(&url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if r["status"] == "running" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "never started: {r}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let cancelled = Instant::now();
+    let r: Value = c
+        .client
+        .delete(&url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(r["status"], "cancelling", "{r}");
+    let r = c.client.get(format!("{url}?wait=10")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+    let r: Value = r.json().await.unwrap();
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("was cancelled at"), "{message}");
+
+    assert_eq!(info(&c, &snapshot).await["verified"], false);
+    let r = check(&c, "#check Nat").await;
+    assert_eq!(r["ok"], true, "{r}");
+    assert!(
+        cancelled.elapsed() < Duration::from_secs(6),
+        "the stopped verify held its slot"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_verify_that_runs_out_of_time_stops_at_the_module() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;

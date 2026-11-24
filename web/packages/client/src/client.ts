@@ -851,8 +851,11 @@ export class PisaClient {
     }
   }
 
-  /** Withdraws `job` if no worker has started it (`cancelled`); one that is
-   *  `running` or `done` stays as it is. */
+  /** Withdraws `job` if no worker has started it (`cancelled`). A running
+   *  check, session check, snapshot verify or acceptance is stopped by its
+   *  worker (`cancelling`): waiting for it then fails `not_found`, saying it
+   *  was cancelled, unless it finished first. Any other `running` job, and a
+   *  `done` one, stays as it is. */
   cancelJob(job: JobSchema, options: RequestOptions = {}): Promise<JobSchema> {
     return this.call("DELETE", ["jobs", job.id], undefined, options);
   }

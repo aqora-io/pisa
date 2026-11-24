@@ -213,6 +213,16 @@ pub enum Poll {
     Gone,
 }
 
+/// Where a worker's claim on a job stands, as [`Queue::claim_held`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    Held,
+    /// Held, and its client asked for the job to stop ([`Queue::stop`]).
+    Cancelling,
+    /// Another attempt has claimed the job since, or it is done or gone.
+    Moved,
+}
+
 /// An async job, as its client reads it back by token.
 #[derive(Debug, Clone)]
 pub struct Status {
@@ -237,6 +247,8 @@ pub enum Stage {
     Queued { give_up_at: i64 },
     /// A worker holds a live claim on it.
     Running,
+    /// Its client asked the worker running it to stop ([`Queue::stop`]).
+    Cancelling,
     /// Its worker's result.
     Done(Value),
     /// Nobody could run it: no worker claimed it in time if `attempts` is
@@ -403,6 +415,14 @@ impl Queue {
         dispatch!(&self.db, cancel(&self.name, token))
     }
 
+    /// Asks the worker that holds a live claim on the async job `token` to
+    /// stop it: it is never claimed again, and its worker reads
+    /// [`Claim::Cancelling`] and ends it ([`Queue::stopped`]). Returns its id
+    /// if this asked, or `None` if no worker runs it or it was asked already.
+    pub async fn stop(&self, token: &str) -> Result<Option<i64>, DbError> {
+        dispatch!(&self.db, stop(&self.name, token))
+    }
+
     /// Where job `id` stands, taking it out of the queue if it is done or
     /// lost.
     pub async fn poll(&self, id: i64) -> Result<Poll, DbError> {
@@ -546,6 +566,18 @@ impl Queue {
         dispatch!(&self.db, complete(worker, id, claimed_micros, result))
     }
 
+    /// Takes job `id`, which its client asked to [`stop`](Queue::stop), out
+    /// of the queue as cancelled, if `worker` still holds the claim it made
+    /// at `claimed_micros`; returns whether it did.
+    pub async fn stopped(
+        &self,
+        worker: &str,
+        id: i64,
+        claimed_micros: i64,
+    ) -> Result<bool, DbError> {
+        dispatch!(&self.db, stopped(&self.name, worker, id, claimed_micros))
+    }
+
     /// [`Queue::complete`], and in the same transaction stores `acceptance`,
     /// the run's acceptance the job's result answers: both if `worker` still
     /// holds the claim it made at `claimed_micros`, else neither. Returns
@@ -574,27 +606,27 @@ impl Queue {
         id: i64,
         worker: &str,
         claimed_micros: i64,
-    ) -> Result<bool, DbError> {
+    ) -> Result<Claim, DbError> {
         dispatch!(&self.db, claim_held(id, worker, claimed_micros))
     }
 
     /// Records what job `id`'s attempt is doing, `progress`, which
     /// [`Queue::status`] reads, if `worker` still holds the claim it made at
-    /// `claimed_micros`, as [`Queue::claim_held`] says; returns whether it
-    /// does.
+    /// `claimed_micros`; returns where the claim stands, as
+    /// [`Queue::claim_held`] does.
     pub async fn set_progress(
         &self,
         id: i64,
         worker: &str,
         claimed_micros: i64,
         progress: &Value,
-    ) -> Result<bool, DbError> {
+    ) -> Result<Claim, DbError> {
         dispatch!(&self.db, set_progress(id, worker, claimed_micros, progress))
     }
 
     /// Renews the leases of the claims `worker` made since it registered at
-    /// `since`, and marks it seen: live anew if it was last seen longer
-    /// than [`LIVE`] ago.
+    /// `since`, but not of jobs asked to [`stop`](Queue::stop), and marks it
+    /// seen: live anew if it was last seen longer than [`LIVE`] ago.
     pub async fn heartbeat(
         &self,
         worker: &str,
@@ -987,18 +1019,21 @@ mod tests {
             let second = claimed(&q, "w", id).await;
             assert_ne!(first.claimed_micros, second);
             let old = first.claimed_micros;
-            assert!(
-                !q.claim_held(id, "w", old).await.unwrap(),
+            assert_eq!(
+                q.claim_held(id, "w", old).await.unwrap(),
+                Claim::Moved,
                 "the first attempt still holds the claim"
             );
             let progress = json!({"phase": {"name": "linking"}});
-            assert!(!q.set_progress(id, "w", old, &progress).await.unwrap());
+            let said = q.set_progress(id, "w", old, &progress).await.unwrap();
+            assert_eq!(said, Claim::Moved);
             assert!(
                 !q.complete("w", id, old, &json!(1)).await.unwrap(),
                 "the first attempt completed the job"
             );
-            assert!(q.claim_held(id, "w", second).await.unwrap());
-            assert!(q.set_progress(id, "w", second, &progress).await.unwrap());
+            assert_eq!(q.claim_held(id, "w", second).await.unwrap(), Claim::Held);
+            let said = q.set_progress(id, "w", second, &progress).await.unwrap();
+            assert_eq!(said, Claim::Held);
             assert!(q.complete("w", id, second, &json!(2)).await.unwrap());
             let Poll::Done(result) = q.poll(id).await.unwrap() else {
                 panic!("not done");
@@ -1022,22 +1057,25 @@ mod tests {
             let a = q.claim("a", &[id], short).await.unwrap().remove(0);
             tokio::time::sleep(Duration::from_millis(20)).await;
             let at = a.claimed_micros;
-            assert!(
+            assert_eq!(
                 q.claim_held(id, "a", at).await.unwrap(),
+                Claim::Held,
                 "a lapsed lease ended the claim"
             );
             let progress = json!({"phase": {"name": "judging", "pair": 1}, "seconds": 2.0});
-            assert!(q.set_progress(id, "a", at, &progress).await.unwrap());
+            let said = q.set_progress(id, "a", at, &progress).await.unwrap();
+            assert_eq!(said, Claim::Held);
             let status = q.status(&token).await.unwrap().unwrap();
             assert_eq!(status.progress, Some(progress.clone()));
 
             let b = claimed(&q, "b", id).await;
-            assert!(!q.claim_held(id, "a", at).await.unwrap());
-            assert!(!q.set_progress(id, "a", at, &progress).await.unwrap());
+            assert_eq!(q.claim_held(id, "a", at).await.unwrap(), Claim::Moved);
+            let said = q.set_progress(id, "a", at, &progress).await.unwrap();
+            assert_eq!(said, Claim::Moved);
             let status = q.status(&token).await.unwrap().unwrap();
             assert!(matches!(status.stage, Stage::Running), "{:?}", status.stage);
             assert_eq!(status.progress, None, "the new attempt has the old one's");
-            assert!(q.claim_held(id, "b", b).await.unwrap());
+            assert_eq!(q.claim_held(id, "b", b).await.unwrap(), Claim::Held);
         }
     }
 
@@ -1126,6 +1164,12 @@ mod tests {
             let elsewhere = Scope::parse("user=b").unwrap();
             assert!(
                 within(elsewhere.clone(), q.status(&token))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                within(elsewhere.clone(), q.stop(&token))
                     .await
                     .unwrap()
                     .is_none()
@@ -1763,6 +1807,100 @@ mod tests {
             );
             // It is not cancelled twice.
             assert_eq!(q.cancel(&token).await.unwrap(), None);
+        }
+    }
+
+    /// A client asks for a job a worker runs to stop: the worker reads that
+    /// it is cancelling as it renews its claim, stops, and the job leaves a
+    /// tombstone that says it was cancelled.
+    #[tokio::test]
+    async fn a_running_job_is_stopped_on_request() {
+        for q in queues().await {
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            // Nobody runs it: it is withdrawn instead.
+            assert_eq!(q.stop(&token).await.unwrap(), None);
+            let at = claimed(&q, "w", id).await;
+            assert_eq!(q.claim_held(id, "w", at).await.unwrap(), Claim::Held);
+            assert_eq!(q.stop(&token).await.unwrap(), Some(id));
+            // Asking again changes nothing.
+            assert_eq!(q.stop(&token).await.unwrap(), None);
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Cancelling), "{stage:?}");
+            assert_eq!(q.claim_held(id, "w", at).await.unwrap(), Claim::Cancelling);
+            let progress = json!({"phase": {"name": "linking"}});
+            let said = q.set_progress(id, "w", at, &progress).await.unwrap();
+            assert_eq!(said, Claim::Cancelling);
+
+            assert!(q.stopped("w", id, at).await.unwrap());
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Cancelled, None)
+            );
+            assert_eq!(q.claim_held(id, "w", at).await.unwrap(), Claim::Moved);
+            assert!(!q.stopped("w", id, at).await.unwrap());
+        }
+    }
+
+    /// A job that its worker finishes before it reads the request to stop is
+    /// done, and stays so.
+    #[tokio::test]
+    async fn a_job_finished_before_it_stops_is_done() {
+        for q in queues().await {
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            let at = claimed(&q, "w", id).await;
+            assert_eq!(q.stop(&token).await.unwrap(), Some(id));
+            assert!(q.complete("w", id, at, &json!(1)).await.unwrap());
+            assert!(!q.stopped("w", id, at).await.unwrap());
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Done(_)), "{stage:?}");
+        }
+    }
+
+    /// A job asked to stop whose worker is lost is not run again: the sweep
+    /// buries it as cancelled.
+    #[tokio::test]
+    async fn a_stopping_job_whose_worker_is_lost_is_cancelled() {
+        for q in queues().await {
+            q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            let short = Duration::from_millis(200);
+            let at = q.claim("w", &[id], short).await.unwrap()[0].claimed_micros;
+            assert_eq!(q.stop(&token).await.unwrap(), Some(id));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(ids(&q, "v").await.is_empty(), "it would run again");
+            assert!(q.claim("x", &[id], LEASE).await.unwrap().is_empty());
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert!(matches!(stage, Stage::Cancelling), "{stage:?}");
+
+            q.sweep().await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Cancelled, None)
+            );
+            assert!(!q.stopped("w", id, at).await.unwrap());
+        }
+    }
+
+    /// A heartbeat doesn't renew a claim on a job asked to stop, so that if
+    /// its worker can't end it, the sweep does once the claim lapses.
+    #[tokio::test]
+    async fn a_stopping_job_is_not_renewed() {
+        for q in queues().await {
+            let since = q.register(&reg("w", "v", 1, 0, false)).await.unwrap();
+            let (id, token) = q.enqueue_async(&job(Some("v"), 1), "check").await.unwrap();
+            let short = Duration::from_millis(200);
+            q.claim("w", &[id], short).await.unwrap();
+            assert_eq!(q.stop(&token).await.unwrap(), Some(id));
+            q.heartbeat("w", since, LEASE).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            q.sweep().await.unwrap();
+            let stage = q.status(&token).await.unwrap().unwrap().stage;
+            assert_eq!(
+                expired(stage),
+                ("check".to_string(), ExpiredOutcome::Cancelled, None)
+            );
         }
     }
 

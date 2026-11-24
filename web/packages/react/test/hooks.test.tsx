@@ -346,6 +346,29 @@ describe("long jobs", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
   });
 
+  it("stops a job a worker has started, and fails once it has", async () => {
+    const stopped = deferred<Response>();
+    const { client } = fakeClient((call) => {
+      if (call.method === "POST") return respond(job, 202);
+      if (call.method === "DELETE") return { ...job, status: "cancelling" };
+      return stopped.promise;
+    });
+    const { result } = renderHook(() => useLongJob(submitCheck), { wrapper: wrapper(client) });
+    act(() => result.current.mutate("#check Nat"));
+    await waitFor(() => expect(result.current.job?.status).toBe("queued"));
+    let status: string | undefined;
+    await act(async () => {
+      status = await result.current.cancel();
+    });
+    expect(status).toBe("cancelling");
+    expect(result.current.job?.status).toBe("cancelling");
+    const message = `job ${job.id} expired: a check that was cancelled at 2026-11-24T12:00:00Z`;
+    stopped.resolve(respond({ error: { kind: "not_found", message } }, 404));
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.error?.kind).toBe("aborted");
+    expect(result.current.job?.status).toBe("cancelled");
+  });
+
   it("cancels a job whose 202 hadn't arrived", async () => {
     const queued = deferred<Response>();
     const { client, calls } = fakeClient((call) => {

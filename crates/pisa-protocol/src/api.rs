@@ -364,6 +364,9 @@ pub enum JobStatus {
     Queued,
     /// A worker is running it.
     Running,
+    /// A worker is running it, and its client cancelled it: the worker stops
+    /// it, and it then expires as cancelled, unless it finishes first.
+    Cancelling,
     /// Its answer is waiting at `/jobs/{id}`.
     Done,
     /// Withdrawn before a worker started it.

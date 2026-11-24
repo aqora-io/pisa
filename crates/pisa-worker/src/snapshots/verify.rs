@@ -170,7 +170,9 @@ impl Snapshots {
             return Ok((checked, clashed));
         }
         // No header to prefer: this takes a slot with nothing warm if it can.
-        let mut slot = pool.acquire("").await;
+        // Dropped before the re-check ends, as when it is cancelled, the slot
+        // is cleared.
+        let mut slot = pool.acquire("").await.clear_on_drop();
         // The verifier imports everything again, so free the slot's memory first.
         slot.retire_and_wait("evict").await;
         let names: Vec<String> = todo.iter().map(|m| snapshot::module(&m.id)).collect();
@@ -222,6 +224,10 @@ impl Snapshots {
                 _ => return Ok((checked, None)),
             }
         }
+        // Every verdict is in, or the run ended at a failure: nothing is left
+        // to kill.
+        drop(run);
+        slot.done();
         Ok((checked, failure.or(clashed)))
     }
 

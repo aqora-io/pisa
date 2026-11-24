@@ -5,7 +5,7 @@ import { useState } from "react";
 import { useElapsed } from "../elapsed.ts";
 import { Badge, CopyButton, SubtleButton } from "./ui.tsx";
 
-const TONE = { submitting: "slate", queued: "amber", running: "indigo", done: "green", cancelled: "slate" } as const;
+const TONE = { submitting: "slate", queued: "amber", running: "indigo", cancelling: "amber", done: "green", cancelled: "slate" } as const;
 
 /** A request run as a job: where it stands, for how long, its id, and a
  *  way to withdraw it. */

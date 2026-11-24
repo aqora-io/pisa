@@ -235,7 +235,7 @@ covers is a 404 `not_found`. See [Search](search.md#api).
   seconds, peak_memory_mb?}` for a run's acceptance (see
   [Progress](acceptance.md#progress)).
 - `DELETE /jobs/{id}` → `{id, kind, status}`, `cancelled` if no worker had
-  started it.
+  started it, `cancelling` if its worker stops it.
 
 See [Async requests and jobs](#async-requests-and-jobs).
 
@@ -366,8 +366,8 @@ itself, sending each of its creates to a worker.
   have had, errors included, e.g. an `http_status` of 429 when no worker of
   its version is on record, or 503 `worker_lost` when the job was lost (see
   [When a worker is lost](#when-a-worker-is-lost)). Until then it answers
-  202 with `status` `queued` or `running`, and for a run's acceptance
-  `progress`, what its worker last said it was doing (see
+  202 with `status` `queued`, `running` or `cancelling`, and for a run's
+  acceptance `progress`, what its worker last said it was doing (see
   [Progress](acceptance.md#progress)).
 - **Waiting for a worker.** While every worker that could run it is busy,
   or none is live, e.g. across a restart, the job waits for a slot, up to a
@@ -387,7 +387,11 @@ itself, sending each of its creates to a worker.
   [Recovering a lost job](#recovering-a-lost-job). In any other scope, and
   for an id that never was, it says `unknown job`.
 - **Cancelling.** `DELETE /jobs/{id}` withdraws a job no worker has
-  started (`cancelled`); a `running` or `done` one stays as it is.
+  started (`cancelled`). A running check, session check, snapshot verify
+  or acceptance is stopped by its worker, which sees it within about 10 s:
+  until then it is `cancelling`, and then the 404 `was cancelled at …`,
+  unless it finished first. Any other running job, such as a create or a
+  rebuild, runs on, and a `done` one stays as it is.
 - **Keep the id secret.** Anyone with a job's id can read its answer or
   cancel it. Build its URL from `id` rather than `Location`, which is
   relative to the server's root.

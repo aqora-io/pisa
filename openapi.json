@@ -2476,6 +2476,7 @@
         "enum": [
           "queued",
           "running",
+          "cancelling",
           "done",
           "cancelled"
         ],
@@ -5791,7 +5792,7 @@
     },
     "/jobs/{id}": {
       "delete": {
-        "description": "Withdraws the job if no worker has started it (`cancelled`); one that is `running` or `done` is left as it is. An expired job is the same 404 as `GET`.",
+        "description": "Withdraws the job if no worker has started it (`cancelled`). A running check, session check, snapshot verify or acceptance is stopped by its worker (`cancelling`), then expires as cancelled, unless it finishes first; any other `running` job, and a `done` one, is left as it is. An expired job is the same 404 as `GET`.",
         "operationId": "cancelJob",
         "parameters": [
           {

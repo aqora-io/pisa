@@ -18,9 +18,9 @@ use pisa_protocol::api::DependencyState;
 use crate::catalog::{Acceptance, Fail, now_micros};
 use crate::db::{DbError, Notice, retry};
 use crate::queue::{
-    ASYNC_RETENTION, Candidate, Claimed, Counts, DAY_KINDS, ExpiredOutcome, LIVE, LOST_CEILING,
-    NewJob, Peer, Poll, RESULT_RETENTION, Registration, STALE_RETENTION, Stage, Status,
-    TOMBSTONE_RETENTION, answer_retention,
+    ASYNC_RETENTION, Candidate, Claim, Claimed, Counts, DAY_KINDS, ExpiredOutcome, LIVE,
+    LOST_CEILING, NewJob, Peer, Poll, RESULT_RETENTION, Registration, STALE_RETENTION, Stage,
+    Status, TOMBSTONE_RETENTION, answer_retention,
 };
 use crate::schema::{documents, expired_jobs, jobs, workers};
 
@@ -112,7 +112,8 @@ macro_rules! waited {
 
 /// Jobs a worker may claim at `$now`: unclaimed ones that haven't
 /// [`waited!`] since they were enqueued, and lapsed claims with attempts
-/// left that haven't waited since they lapsed.
+/// left that haven't waited since they lapsed, unless their client asked
+/// them to stop.
 macro_rules! claimable {
     ($now:expr) => {
         jobs::worker
@@ -121,6 +122,7 @@ macro_rules! claimable {
             .or(jobs::lease_micros
                 .lt($now)
                 .and(jobs::attempts.lt(jobs::max_attempts))
+                .and(jobs::cancel_micros.is_null())
                 .and(not(waited!(lapsed, $now))))
     };
 }
@@ -307,7 +309,7 @@ pub(crate) async fn poll(db: &Handle, id: i64) -> Result<Poll, DbError> {
 }
 
 /// An async job's row: its id and kind, its result, its claim, whether it
-/// is [`unclaimable!`], and its progress.
+/// is [`unclaimable!`], its progress, and when it was asked to stop.
 type Row = (
     i64,
     Option<String>,
@@ -320,6 +322,7 @@ type Row = (
     i64,
     Option<bool>,
     Option<Value>,
+    Option<i64>,
 );
 
 /// Whether the job of `token`, or its tombstone if its row is gone, is in
@@ -440,6 +443,7 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                     jobs::max_wait_micros,
                     unclaimable!(now),
                     jobs::progress,
+                    jobs::cancel_micros,
                 ))
                 .first::<Row>(&mut *c)
                 .await
@@ -465,6 +469,7 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                 max_wait,
                 lost,
                 progress,
+                cancelling,
             ) = row;
             let open = (worker, lease, attempts, max_attempts, enqueued, max_wait);
             let stage = match result {
@@ -473,6 +478,8 @@ pub(crate) async fn status(db: &Handle, q: &str, token: &str) -> Result<Option<S
                     exhausted: attempts >= max_attempts,
                 },
                 Some(result) => Stage::Done(result),
+                // Its worker ends it, or the sweep once its claim lapses.
+                None if cancelling.is_some() => Stage::Cancelling,
                 None if lost == Some(true) => {
                     let closed = diesel::update(
                         jobs::table
@@ -560,6 +567,74 @@ pub(crate) async fn cancel(db: &Handle, q: &str, token: &str) -> Result<Option<i
         wake(db, &mut *conn(db).await?, Notice::Done(id)).await;
     }
     Ok(id)
+}
+
+pub(crate) async fn stop(db: &Handle, q: &str, token: &str) -> Result<Option<i64>, DbError> {
+    if !token_in_scope(db, q, token).await? {
+        return Ok(None);
+    }
+    let now = now();
+    retry(|| async {
+        Ok(diesel::update(
+            jobs::table
+                .filter(jobs::queue.eq(q))
+                .filter(jobs::token.eq(token))
+                .filter(jobs::result.is_null())
+                .filter(jobs::worker.is_not_null())
+                .filter(jobs::lease_micros.ge(now))
+                .filter(jobs::cancel_micros.is_null()),
+        )
+        .set(jobs::cancel_micros.eq(now))
+        .returning(jobs::id)
+        .get_result::<i64>(&mut *conn(db).await?)
+        .await
+        .optional()?)
+    })
+    .await
+}
+
+pub(crate) async fn stopped(
+    db: &Handle,
+    q: &str,
+    worker: &str,
+    id: i64,
+    claimed_micros: i64,
+) -> Result<bool, DbError> {
+    let now = now();
+    let stopped = retry(|| async {
+        let mut c = conn(db).await?;
+        let conn = &mut *c;
+        tx!(conn, {
+            let row = diesel::delete(
+                held!(id, worker, claimed_micros).filter(jobs::cancel_micros.is_not_null()),
+            )
+            .returning((jobs::token, jobs::kind, jobs::labels))
+            .get_result::<(Option<String>, Option<String>, String)>(conn)
+            .await
+            .optional()?;
+            let Some((token, kind, labels)) = row else {
+                return Ok(false);
+            };
+            let (token, kind) = (token.unwrap_or_default(), kind.unwrap_or_default());
+            let burial = (
+                &*token,
+                q,
+                &*kind,
+                &*labels,
+                ExpiredOutcome::Cancelled,
+                None,
+                now,
+            );
+            bury(conn, burial).await?;
+            Ok(true)
+        })
+    })
+    .await
+    .map_err(db_error)?;
+    if stopped {
+        wake(db, &mut *conn(db).await?, Notice::Done(id)).await;
+    }
+    Ok(stopped)
 }
 
 pub(crate) async fn give_up(db: &Handle, id: i64) -> Result<Option<(u32, bool)>, DbError> {
@@ -725,6 +800,9 @@ pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, 
         )
         .execute(&mut *c)
         .await?;
+        // Before the given up are closed, as one asked to stop whose worker
+        // was lost is cancelled, not given up.
+        let cancelled = bury_stopping(&mut c, q, now).await?;
         // An async job's client reads that it was given up.
         let closed = diesel::update(
             jobs::table
@@ -750,7 +828,7 @@ pub(crate) async fn sweep_jobs(db: &Handle, q: &str, now: i64) -> Result<usize, 
         )
         .execute(&mut *c)
         .await?;
-        Ok(results + kept + unclaimable + closed + workers + tombstones)
+        Ok(results + kept + unclaimable + cancelled + closed + workers + tombstones)
     })
     .await
 }
@@ -812,6 +890,40 @@ async fn bury_answered(c: &mut Conn, q: &str, now: i64) -> Result<usize, DbError
             .execute(conn)
             .await?;
         Ok(deleted)
+    });
+    buried.map_err(db_error)
+}
+
+/// Deletes the async jobs asked to stop whose claims lapsed at `now`: their
+/// worker was lost before it stopped them. Each leaves a tombstone that says
+/// it was cancelled. Returns how many.
+async fn bury_stopping(c: &mut Conn, q: &str, now: i64) -> Result<usize, DbError> {
+    let conn = c;
+    let buried = tx!(conn, {
+        let rows = diesel::delete(
+            jobs::table
+                .filter(jobs::queue.eq(q))
+                .filter(jobs::token.is_not_null())
+                .filter(jobs::result.is_null())
+                .filter(jobs::cancel_micros.is_not_null())
+                .filter(jobs::lease_micros.lt(now)),
+        )
+        .returning((jobs::token, jobs::kind, jobs::labels))
+        .load::<(Option<String>, Option<String>, String)>(conn)
+        .await?;
+        for (token, kind, labels) in &rows {
+            let burial = (
+                token.as_deref().unwrap_or_default(),
+                q,
+                kind.as_deref().unwrap_or_default(),
+                &**labels,
+                ExpiredOutcome::Cancelled,
+                None,
+                now,
+            );
+            bury(conn, burial).await?;
+        }
+        Ok(rows.len())
     });
     buried.map_err(db_error)
 }
@@ -1118,15 +1230,27 @@ pub(crate) async fn complete_accepted(
     Ok(done)
 }
 
+/// The [`Claim`] a held row's `cancel_micros` says, or `Moved` with no row.
+fn claim_of(held: Option<Option<i64>>) -> Claim {
+    match held {
+        None => Claim::Moved,
+        Some(None) => Claim::Held,
+        Some(Some(_)) => Claim::Cancelling,
+    }
+}
+
 pub(crate) async fn claim_held(
     db: &Handle,
     id: i64,
     worker: &str,
     claimed_micros: i64,
-) -> Result<bool, DbError> {
-    Ok(diesel::select(exists(held!(id, worker, claimed_micros)))
-        .get_result::<bool>(&mut *conn(db).await?)
-        .await?)
+) -> Result<Claim, DbError> {
+    let held = held!(id, worker, claimed_micros)
+        .select(jobs::cancel_micros)
+        .first::<Option<i64>>(&mut *conn(db).await?)
+        .await
+        .optional()?;
+    Ok(claim_of(held))
 }
 
 pub(crate) async fn set_progress(
@@ -1135,13 +1259,15 @@ pub(crate) async fn set_progress(
     worker: &str,
     claimed_micros: i64,
     progress: &Value,
-) -> Result<bool, DbError> {
+) -> Result<Claim, DbError> {
     retry(|| async {
-        let n = diesel::update(held!(id, worker, claimed_micros))
+        let held = diesel::update(held!(id, worker, claimed_micros))
             .set(jobs::progress.eq(progress))
-            .execute(&mut *conn(db).await?)
-            .await?;
-        Ok(n == 1)
+            .returning(jobs::cancel_micros)
+            .get_result::<Option<i64>>(&mut *conn(db).await?)
+            .await
+            .optional()?;
+        Ok(claim_of(held))
     })
     .await
 }
@@ -1156,12 +1282,15 @@ pub(crate) async fn heartbeat(
 ) -> Result<(), DbError> {
     retry(|| async {
         let mut c = conn(db).await?;
+        // Not those asked to stop: if their worker doesn't end them, the
+        // sweep does once their claims lapse.
         diesel::update(
             jobs::table
                 .filter(jobs::queue.eq(q))
                 .filter(jobs::worker.eq(worker))
                 .filter(jobs::result.is_null())
-                .filter(jobs::claimed_micros.ge(since)),
+                .filter(jobs::claimed_micros.ge(since))
+                .filter(jobs::cancel_micros.is_null()),
         )
         .set(jobs::lease_micros.eq(now + micros(lease)))
         .execute(&mut *c)

@@ -211,6 +211,7 @@ diesel::table! {
         worker -> Nullable<Text>,
         claimed_micros -> Nullable<BigInt>,
         lease_micros -> Nullable<BigInt>,
+        cancel_micros -> Nullable<BigInt>,
         attempts -> Integer,
         result -> Nullable<Jsonb>,
         done_micros -> Nullable<BigInt>,
