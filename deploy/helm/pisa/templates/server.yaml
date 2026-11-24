@@ -30,6 +30,8 @@ spec:
     spec:
       # A replica told to stop keeps serving its requests in flight.
       terminationGracePeriodSeconds: {{ add .Values.server.drainTimeoutSecs 30 }}
+      {{- include "pisa.podCommon" . | nindent 6 }}
+      {{- include "pisa.scheduling" .Values.server | nindent 6 }}
       topologySpreadConstraints:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -39,7 +41,7 @@ spec:
               {{- include "pisa.selector" (dict "root" . "component" "server") | nindent 14 }}
       containers:
         - name: server
-          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag }}"
+          image: "{{ .Values.server.image.repository }}:{{ .Values.server.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.server.image.pullPolicy }}
           env:
             - { name: PISA_HTTP, value: "0.0.0.0:8000" }
@@ -63,7 +65,7 @@ spec:
             {{- end }}
             {{- if .Values.search.enabled }}
             - { name: PISA_SEARCH_QDRANT, value: {{ $qdrant | quote }} }
-            - { name: PISA_SEARCH_VERSION, value: {{ required "search.version is required" .Values.search.version | quote }} }
+            - { name: PISA_SEARCH_VERSION, value: {{ required "search.version or worker.version is required" (.Values.search.version | default .Values.worker.version) | quote }} }
             {{- with .Values.search.embedder }}
             - { name: PISA_SEARCH_EMBEDDER, value: {{ . | quote }} }
             {{- end }}

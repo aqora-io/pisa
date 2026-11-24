@@ -3,6 +3,7 @@ name = "pisa-search"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Declaration search over Mathlib and Physlib for pisa"
 
 [dependencies]

@@ -20,7 +20,7 @@ Workers scale between {{ .Values.keda.minReplicas }} and {{ .Values.keda.maxRepl
 {{- end }}
 {{- if .Values.search.enabled }}
 
-The servers search over Qdrant, serving version {{ .Values.search.version }}. Load its bundle into
+The servers search over Qdrant, serving version {{ .Values.search.version | default .Values.worker.version }}. Load its bundle into
 Qdrant once (and after each rebuild), e.g. through a port-forward:
   pisa-search load --bundle search/bundle --qdrant http://localhost:6333 --replication 2
 Until then /search answers 503, and /health says why.

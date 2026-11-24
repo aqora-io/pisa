@@ -4,10 +4,22 @@ build-backend = "maturin"
 
 [project]
 name = "pisa-client"
-description = "Python client for the pisa Lean server"
+description = "Python client for pisa, a server that checks Lean 4 code"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
 requires-python = ">=3.10"
 dynamic = ["version"]
-classifiers = ["Programming Language :: Rust", "Programming Language :: Python :: 3"]
+keywords = ["lean", "lean4", "theorem-prover", "pisa"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Repository = "https://github.com/aqora-io/pisa"
+Documentation = "https://github.com/aqora-io/pisa/tree/main/docs"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

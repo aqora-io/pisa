@@ -1,8 +1,22 @@
 {
   "name": "@aqora/pisa-react",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "React hooks for pisa: Lean checks, proof sessions, snapshots and declaration search, over TanStack Query",
   "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aqora-io/pisa.git",
+    "directory": "web/packages/react"
+  },
+  "homepage": "https://github.com/aqora-io/pisa/tree/main/web/packages/react#readme",
+  "keywords": [
+    "lean",
+    "lean4",
+    "theorem-prover",
+    "pisa",
+    "react",
+    "tanstack-query"
+  ],
   "type": "module",
   "exports": {
     ".": {

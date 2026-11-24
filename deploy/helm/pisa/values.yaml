@@ -6,11 +6,12 @@
 # workers take them from, so any replica serves any request.
 server:
   image:
-    # Built from docker/Dockerfile (target server). Build it with
-    # `--build-arg REVISION=<commit>`, so `/health` and the image label name the
-    # commit it runs.
-    repository: pisa-server
-    tag: latest
+    # Built from docker/Dockerfile (target server) and published with each
+    # release. An empty tag is the chart's appVersion. To build your own, pass
+    # `--build-arg REVISION=<commit>`, so `/health` and the image label name
+    # the commit it runs.
+    repository: ghcr.io/aqora-io/pisa-server
+    tag: ""
     pullPolicy: IfNotPresent
   replicas: 2
   service:
@@ -34,6 +35,22 @@ server:
   corsOrigins: []
   # e.g. SSL_CERT_FILE for a database with a private CA.
   extraEnv: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Secrets for pulling the images from a private registry, e.g.
+# [{ name: regcred }].
+imagePullSecrets: []
+
+# The servers' and workers' service account. Annotate it to give the pods a
+# cloud identity, e.g. EKS IRSA's eks.amazonaws.com/role-arn for the store's
+# bucket.
+serviceAccount:
+  create: true
+  # Empty means the release's full name when created, and "default" when not.
+  name: ""
+  annotations: {}
 
 # The job queue that the release's servers and workers share; empty means
 # the release's name, so releases sharing a database keep their jobs apart.
@@ -57,18 +74,21 @@ allowedAxioms: []
 
 worker:
   # The version this pool's image serves, `<toolchain>-<hash>`, as
-  # scripts/env.py prints it and GET /environments lists it. Required with
-  # `pools`, and optional without: the pool then scales on its own version's
-  # jobs and those that name none, requests that name none go to it unless
-  # router.defaultVersion says otherwise, and a worker whose image serves
-  # another version doesn't start.
-  version: ""
+  # scripts/env.py prints it and GET /environments lists it. The pool scales
+  # on its version's jobs and those that name none, requests that name none
+  # go to it unless router.defaultVersion says otherwise, and a worker whose
+  # image serves another version doesn't start. Empty, the pool scales on
+  # every job; `pools` need it. The default is docker/lean-project's: Lean
+  # v4.36.0 with Mathlib, Physlib and CSLib. docker/lean-core's, Lean alone,
+  # is v4.36.0-ca45ccf8.
+  version: v4.36.0-54500a67
   image:
-    # Built from docker/Dockerfile (target worker), with
-    # `--build-arg REVISION=<commit>` as the server's. The default project
-    # bundles Lean v4.36.0 with Mathlib, Physlib and CSLib.
-    repository: pisa-worker
-    tag: lean-project
+    # Built from docker/Dockerfile (target worker) on an environment's
+    # project, by scripts/env.py for one of your own. Each release publishes
+    # docker/lean-project's and docker/lean-core's. An empty tag is
+    # `<appVersion>-<version>`, as scripts/env.py tags it.
+    repository: ghcr.io/aqora-io/pisa-worker
+    tag: ""
     pullPolicy: IfNotPresent
   # Lean processes per pod.
   slots: 2
@@ -104,6 +124,9 @@ worker:
   # overheadMemoryMb.
   resources: {}
   extraEnv: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 # Worker pools for other environments, beside `worker`'s: other toolchains,
 # other libraries. Each is a Deployment and a ScaledObject of its own, on the
@@ -189,8 +212,8 @@ keda:
 # works.
 search:
   enabled: false
-  # The version of the bundle loaded into Qdrant, its env_id, e.g.
-  # v4.36.0-54500a67. Required.
+  # The version of the bundle loaded into Qdrant, its env_id. Empty means
+  # worker.version's.
   version: ""
   # Embeds queries and snapshot declarations; it must serve the model that
   # embedded the bundle. See `pisa-search embed`.

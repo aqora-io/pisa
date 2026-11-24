@@ -3,7 +3,11 @@ name = "pisa-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Async client for the pisa Lean server"
+repository.workspace = true
+description = "Async client for pisa, a server that checks Lean 4 code"
+readme = "README.md"
+keywords = ["lean", "lean4", "theorem-prover", "pisa"]
+categories = ["api-bindings", "mathematics"]
 
 [features]
 default = ["rustls"]

@@ -3,15 +3,16 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/aqora-io/pisa"
 
 [workspace.dependencies]
 pisa-beam = { path = "crates/pisa-beam" }
 pisa-client = { path = "crates/pisa-client" }
 pisa-db = { path = "crates/pisa-db" }
-pisa-protocol = { path = "crates/pisa-protocol" }
+pisa-protocol = { path = "crates/pisa-protocol", version = "1.0.0" }
 pisa-repl = { path = "crates/pisa-repl" }
 pisa-worker = { path = "crates/pisa-worker" }
 pisa-router = { path = "crates/pisa-router" }

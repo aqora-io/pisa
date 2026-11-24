@@ -3,6 +3,11 @@ name = "pisa-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "pisa's protocol types: its HTTP API, the Lean REPL's protocol, and its servers' messages to workers"
+readme = "README.md"
+keywords = ["lean", "lean4", "theorem-prover", "pisa"]
+categories = ["api-bindings", "mathematics"]
 
 [dependencies]
 hex.workspace = true

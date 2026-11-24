@@ -3,6 +3,7 @@ name = "pisa-db"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "The metadata database, PostgreSQL or SQLite, and the snapshot catalog stored in it"
 
 [dependencies]

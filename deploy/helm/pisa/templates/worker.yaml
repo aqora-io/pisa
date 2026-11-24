@@ -26,6 +26,8 @@ spec:
     spec:
       # SIGTERM starts a drain: no new jobs, finish the running ones, exit.
       terminationGracePeriodSeconds: {{ add $w.drainTimeoutSecs 30 }}
+      {{- include "pisa.podCommon" $ | nindent 6 }}
+      {{- include "pisa.scheduling" $w | nindent 6 }}
       containers:
         - name: worker
           image: "{{ $w.image.repository }}:{{ $w.image.tag }}"

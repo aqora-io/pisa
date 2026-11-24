@@ -3,6 +3,7 @@ name = "pisa-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "pisa's HTTP server: checks, sessions and snapshots through the job queue, and declaration search"
 
 [dependencies]
