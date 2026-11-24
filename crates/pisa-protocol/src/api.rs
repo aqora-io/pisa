@@ -13,6 +13,7 @@
 //! | `POST /sessions` | [`StartSessionRequest`] → [`Session`] |
 //! | `POST /states/{id}/tactic` | [`ApplyTacticRequest`] → [`ApplyTacticResponse`] |
 //! | `POST /sessions/{id}/check` | [`CheckSessionRequest`] → [`CheckResult`] |
+//! | `DELETE /sessions/{id}` | → 204 |
 //! | `POST /snapshots` | [`CreateSnapshotRequest`] → [`CreateSnapshotResponse`] |
 //! | `GET /snapshots` | `?label=key:value&limit=&after=` → [`ListSnapshotsResponse`] |
 //! | `GET /snapshots/{id}` | → [`SnapshotDetail`] |
@@ -27,6 +28,9 @@
 //! | `GET /snapshots/export` | `?against=<id>&allow=<name>&profile=palomar` → a Lake project, as a tar.gz |
 //! | `POST /snapshots/accept` | [`AcceptRequest`] → [`AcceptResponse`] |
 //! | `GET /snapshots/accept/{id}` | → [`AcceptResponse`] |
+//! | `GET /snapshots/accept` | `?against=<id>` → [`ListAcceptancesResponse`] |
+//! | `GET /runs/{name}` | → [`NamedRun`] |
+//! | `PUT /runs/{name}` | [`NameRunRequest`] → [`NamedRun`] |
 //! | `POST /documents` | [`OpenDocumentRequest`] → [`Document`] |
 //! | `PATCH /documents/{id}` | [`EditDocumentRequest`] → [`Document`] |
 //! | `POST /documents/{id}/goals` | [`DocumentGoalsRequest`] → [`DocumentGoals`] |
@@ -34,14 +38,17 @@
 //! | `DELETE /documents/{id}` | → 204 |
 //! | `GET /jobs/{id}` | `?wait=` ([`JobWait`]) → the request's answer, or [`Job`] (202) |
 //! | `DELETE /jobs/{id}` | → [`Job`] |
+//! | `GET /environments` | → [`ListEnvironmentsResponse`] |
+//! | `GET /health` | → [`Health`] |
 //!
+//! Search's endpoints are in [`crate::search`].
 //! Snapshot ids carry their worker version, as session and state ids do, so
 //! the endpoints that take one take no version; listings and audits take an
 //! optional `?version=`.
-//! Checks can ask for more in `detail` ([`Detail`]). Checks, sessions, and
-//! snapshot creates and verifies run asynchronously with
-//! `Prefer: respond-async` ([`PreferAsync`]), answering 202 with a
-//! [`Job`].
+//! Checks can ask for more in `detail` ([`Detail`]). Checks, sessions,
+//! snapshot creates and verifies, and runs' rebuilds, settles, resubmits and
+//! acceptances run asynchronously with `Prefer: respond-async`
+//! ([`PreferAsync`]), answering 202 with a [`Job`] ([`JobKind`]).
 
 use std::collections::BTreeMap;
 
@@ -88,8 +95,11 @@ pub enum ErrorKind {
     WorkerLost,
     BadRequest,
     NotFound,
-    /// The snapshot a create replaces is already replaced; see
-    /// [`fork`](CreateSnapshotRequest::fork).
+    /// The request doesn't fit what it found: the snapshot a create
+    /// replaces is already replaced (see
+    /// [`fork`](CreateSnapshotRequest::fork)), a document is at another
+    /// revision, a run name is another run's, a spec is amended already, or
+    /// a run to accept has heads to settle.
     Conflict,
     Internal,
 }
@@ -2452,8 +2462,7 @@ pub struct ReviewDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     /// As the build printed it, with notation. None when it didn't print,
-    /// as `unprinted` says, and from a build before private declarations
-    /// were exported.
+    /// as `unprinted` says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     /// Its type, with full names and no notation; None as `signature` is.
@@ -2465,7 +2474,7 @@ pub struct ReviewDeclaration {
     /// A hole's value on the head, and the value of each definition the
     /// head adds that a hole's value reaches, as the build printed it with
     /// full names and no notation, each `sorry` as `sorry`, cut at 4,000
-    /// characters. None from a build before values were printed.
+    /// characters. None when it didn't print, as `unprinted` says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     /// Why there is no `value` where there should be one, or no

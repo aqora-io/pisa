@@ -6,15 +6,17 @@
 #   kubectl apply -f deploy/minikube/garage.yaml
 #   kubectl apply -f deploy/minikube/postgres.yaml
 server:
-  image: { pullPolicy: Never }
+  image: { repository: pisa-server, tag: latest, pullPolicy: Never }
   # Rollouts of the demo needn't wait out long requests.
   drainTimeoutSecs: 30
   resources:
     requests: { cpu: 100m, memory: 64Mi }
 
 worker:
-  # The image without Mathlib, so loading it into minikube is quick.
-  image: { tag: lean-core, pullPolicy: Never }
+  # The image without Mathlib, so loading it into minikube is quick, and
+  # the version it serves: docker/lean-core's.
+  version: v4.36.0-ca45ccf8
+  image: { repository: pisa-worker, tag: lean-core, pullPolicy: Never }
   slots: 2
   memoryMaxMb: 1500
   maxRssMb: 1200

@@ -243,6 +243,7 @@ export function auditOptions(
     against: params.against ?? [],
     allow: params.allow ?? [],
     review: params.review ?? false,
+    reviewLimit: params.reviewLimit ?? null,
   };
   return {
     queryKey: [...pisaKeys.snapshots(client), "audit", version, asked] as QueryKey,

@@ -217,7 +217,7 @@ export interface paths {
         };
         /**
          * An async request's answer
-         * @description Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done, a snapshot's create and a run's acceptance for a day. After that, in the scope it was made in, the 404 says what the job was and how it ended, for 30 days; see the README's Recovering a lost job.
+         * @description Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done, a snapshot's create and a run's acceptance for a day. After that, in the scope it was made in, the 404 says what the job was and how it ended, for 30 days; see docs/api.md, Recovering a lost job.
          */
         get: operations["getJob"];
         put?: never;
@@ -287,7 +287,7 @@ export interface paths {
         put?: never;
         /**
          * Search declarations
-         * @description Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.
+         * @description Finds declarations of the index's libraries (Mathlib, Physlib and CSLib in the default one), and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.
          */
         post: operations["search"];
         delete?: never;
@@ -1627,7 +1627,7 @@ export interface components {
              * @description For a missing declaration, the snapshot module the new code builds on
              *     that declares an identical one, with the same kind, type and value.
              *     An import can't stand in for the spec's own declarations: keep them
-             *     in the module and import only helpers (README, *Reusing a proof*).
+             *     in the module and import only helpers (docs/runs.md, *Reusing a proof*).
              */
             imported_from?: string;
             /**
@@ -3007,8 +3007,7 @@ export interface components {
             origin: components["schemas"]["ReviewOrigin"];
             /**
              * @description As the build printed it, with notation. None when it didn't print,
-             *     as `unprinted` says, and from a build before private declarations
-             *     were exported.
+             *     as `unprinted` says.
              */
             signature?: string;
             /** @description A snapshot of its module, for one from below. */
@@ -3025,7 +3024,7 @@ export interface components {
              * @description A hole's value on the head, and the value of each definition the
              *     head adds that a hole's value reaches, as the build printed it with
              *     full names and no notation, each `sorry` as `sorry`, cut at 4,000
-             *     characters. None from a build before values were printed.
+             *     characters. None when it didn't print, as `unprinted` says.
              */
             value?: string;
         };
@@ -3056,7 +3055,7 @@ export interface components {
             /**
              * @description The model that snapshot declarations are sent to for descriptions,
              *     and for the check that a description states the hypotheses (the same
-             *     model), `null` if none are sent anywhere. See the README's "What
+             *     model), `null` if none are sent anywhere. See docs/search.md, "What
              *     snapshot search sends to a model".
              */
             describe_model: string | null;
@@ -5861,6 +5860,15 @@ export interface operations {
              *     declaration.
              */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `conflict`: the run has heads to settle first */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

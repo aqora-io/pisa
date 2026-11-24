@@ -273,7 +273,7 @@ pub struct SearchHealth {
     pub leader: bool,
     /// The model that snapshot declarations are sent to for descriptions,
     /// and for the check that a description states the hypotheses (the same
-    /// model), `null` if none are sent anywhere. See the README's "What
+    /// model), `null` if none are sent anywhere. See docs/search.md, "What
     /// snapshot search sends to a model".
     #[schema(required = true)]
     pub describe_model: Option<String>,

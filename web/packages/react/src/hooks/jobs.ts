@@ -35,7 +35,8 @@ interface Run {
 
 /** A request run as a job (`submit`, e.g. `client.submitCreateSnapshot`),
  *  waited for with its progress in `job`. Unmounting stops waiting only:
- *  the job runs on, and its answer is kept an hour under `job.id`. */
+ *  the job runs on, and its answer is kept under `job.id`: an hour, or a
+ *  day for a snapshot's create and a run's acceptance. */
 export function useLongJob<T, V>(
   submit: (client: PisaClient, variables: V, options: { signal: AbortSignal }) => Promise<Job<T>>,
   options: LongJobOptions<T, V> = {},

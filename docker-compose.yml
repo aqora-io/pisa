@@ -10,7 +10,7 @@
 #
 # The servers also search declarations when PISA_SEARCH_QDRANT is set, with
 # Qdrant from the search profile. Load a bundle built with `pisa-search build`
-# (see the README) into Qdrant once, then serve it; queries are embedded with
+# (docs/search-index.md) into Qdrant once, then serve it; queries are embedded with
 # Qwen3-Embedding-8B on Scaleway:
 #   docker compose --profile search-load run --rm search-load
 #   PISA_SEARCH_QDRANT=http://qdrant:6333 SCW_SECRET_KEY=... \
@@ -108,7 +108,7 @@ services:
       # Set a describe model (e.g. claude-haiku-5-5, with ANTHROPIC_API_KEY)
       # to describe every snapshot declaration with it; without one they are
       # searched by name, signature and docstring. What is sent, and to whom:
-      # README, "What snapshot search sends to a model".
+      # docs/search.md, "What snapshot search sends to a model".
       PISA_SEARCH_DESCRIBE_MODEL: ${PISA_SEARCH_DESCRIBE_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -136,8 +136,7 @@ services:
     stop_grace_period: 630s
     # bubblewrap needs to create namespaces and the worker writes to its own
     # cgroup subtree, so dev workers run privileged in a private cgroup
-    # namespace. Production would grant only what these need (see the design
-    # doc).
+    # namespace. Production would grant only what these need.
     privileged: true
     cgroup: private
     environment:

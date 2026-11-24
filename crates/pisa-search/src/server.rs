@@ -416,8 +416,8 @@ fn unavailable(e: impl std::fmt::Display) -> ApiError {
 #[utoipa::path(
     post, path = "/search", operation_id = "search", tag = "search",
     summary = "Search declarations",
-    description = "Finds Mathlib and Physlib declarations, and snapshot declarations when asked \
-        for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. \
+    description = "Finds declarations of the index's libraries (Mathlib, Physlib and CSLib in the \
+        default one), and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. \
         At most 64 queries; each gets a result, in order. A 404 on a server without search.",
     request_body = SearchRequest,
     responses((status = 200, description = "A result per query, in order", body = SearchResponse), ApiErrors),

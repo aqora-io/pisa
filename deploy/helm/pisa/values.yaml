@@ -53,7 +53,8 @@ serviceAccount:
   annotations: {}
 
 # The job queue that the release's servers and workers share; empty means
-# the release's name, so releases sharing a database keep their jobs apart.
+# the release's full name (its name if that contains "pisa", else
+# <release>-pisa), so releases sharing a database keep their jobs apart.
 queue: ""
 
 # How the servers queue jobs.
@@ -183,8 +184,8 @@ metadata:
     # Required: an existing Secret holding the database's URL, e.g.
     # postgres://pisa:...@db.example.com/pisa?sslmode=require. With
     # sslmode=require the server's certificate is checked against the
-    # image's roots; for a private CA, mount it and set SSL_CERT_FILE through
-    # server.extraEnv and worker.extraEnv. KEDA reads the queue through it too.
+    # image's roots; for a private CA, build the images with it and set
+    # SSL_CERT_FILE through server.extraEnv and worker.extraEnv. KEDA reads the queue through it too.
     urlSecret:
       name: ""
       key: url
@@ -207,7 +208,7 @@ keda:
 
 
 # Declaration search in the servers, over Qdrant, which holds the index (see
-# the README's Search section). Load a bundle into Qdrant first, with
+# docs/search.md). Load a bundle into Qdrant first, with
 # `pisa-search load`; until then search answers 503 and the rest of the API
 # works.
 search:
@@ -223,7 +224,7 @@ search:
   snapshots: true
   # Claude or OpenAI model that describes every snapshot declaration, so all
   # snapshot code goes to that provider; empty for none. What is sent, and
-  # to whom: README, "What snapshot search sends to a model".
+  # to whom: docs/search.md, "What snapshot search sends to a model".
   describeModel: ""
   # LLM and embedding requests in flight for snapshots.
   describeConcurrency: 8

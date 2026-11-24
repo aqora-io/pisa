@@ -206,7 +206,7 @@ fn expired_message(id: &str, kind: JobKind, job: ExpiredJob) -> String {
         "a"
     };
     format!(
-        "job {id} expired: {article} {kind} that {ended}; see the README's Recovering a lost job"
+        "job {id} expired: {article} {kind} that {ended}; see docs/api.md, Recovering a lost job"
     )
 }
 
@@ -252,7 +252,7 @@ fn is_token(id: &str) -> bool {
         not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's \
         answer is kept for an hour after it is done, a snapshot's create and a run's acceptance \
         for a day. After that, in the scope it was made in, the 404 says what the job was and how \
-        it ended, for 30 days; see the README's Recovering a lost job.",
+        it ended, for 30 days; see docs/api.md, Recovering a lost job.",
     params(("id" = String, Path, description = "The job's id, from the 202"), JobWait),
     responses(
         (status = 200, description = "Done: the request's status and answer", body = GetJobResponse),
@@ -338,7 +338,7 @@ mod tests {
             };
             expired_message("abc", kind, job)
         };
-        let see = "; see the README's Recovering a lost job";
+        let see = "; see docs/api.md, Recovering a lost job";
         assert_eq!(
             says(JobKind::CreateSnapshot, ExpiredOutcome::Done, Some(200)),
             format!(

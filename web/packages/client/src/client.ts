@@ -744,13 +744,16 @@ export class PisaClient {
     return this.call("POST", ["snapshots", "resubmit"], this.resubmitRequest(from, to, options), options);
   }
 
-  /** `resubmitSnapshots` as a job. A dry run isn't one: the server answers
-   *  it at once, which throws here. */
+  /** `resubmitSnapshots` as a job. A dry run is never one: the server
+   *  answers it at once, so it is refused here, unsent. */
   submitResubmitSnapshots(
     from: SnapshotId,
     to: SnapshotId,
-    options: ResubmitOptions = {},
+    options: Omit<ResubmitOptions, "dryRun"> = {},
   ): Promise<Job<ResubmitSnapshotsResponse>> {
+    if ((options as ResubmitOptions).dryRun) {
+      return Promise.reject(new PisaError("bad_request", "a dry run is answered at once: call resubmitSnapshots"));
+    }
     return this.submit(["snapshots", "resubmit"], this.resubmitRequest(from, to, options), options);
   }
 

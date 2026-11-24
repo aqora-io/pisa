@@ -1,0 +1,7 @@
+# Keeps the workflows' actions, pinned to commits in release.yml, current.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

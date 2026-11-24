@@ -16,7 +16,9 @@ use pisa_search::symbols::{self, Symbols};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(about = "Declaration search over Mathlib and Physlib")]
+#[command(
+    about = "Declaration search for pisa: builds, loads, evaluates and queries an index of a Lean project's declarations"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

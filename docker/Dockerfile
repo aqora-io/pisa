@@ -41,8 +41,8 @@ ENTRYPOINT ["pisa-server"]
 
 # The Lake project the workers import from: docker/${PROJECT} by default, or
 # another, with `--build-context project=<dir>`. Make that a wrapper project
-# that requires the library, not the library's own checkout (README, *A pool
-# for another project*).
+# that requires the library, not the library's own checkout
+# (docs/environments.md).
 FROM scratch AS project
 ARG PROJECT=lean-project
 COPY docker/${PROJECT} /

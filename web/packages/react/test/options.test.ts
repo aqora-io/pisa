@@ -123,7 +123,10 @@ describe("query options", () => {
     // Spec ids carry their version: an audit against them names none.
     const against = auditOptions(client, { against: ["w~s"] }).queryKey;
     expect(against.slice(0, 5)).toEqual([...snapshots, "audit", null]);
-    expect(auditOptions(client, { against: ["w~s"], review: true }).queryKey).not.toEqual(against);
+    const reviewed = auditOptions(client, { against: ["w~s"], review: true }).queryKey;
+    expect(reviewed).not.toEqual(against);
+    // A review cut shorter is another answer.
+    expect(auditOptions(client, { against: ["w~s"], review: true, reviewLimit: 5 }).queryKey).not.toEqual(reviewed);
   });
 
   it("keys a rebuild's plan on what it plans, under every snapshot query", () => {

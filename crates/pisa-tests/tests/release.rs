@@ -1,6 +1,6 @@
 //! What a release names agrees: every package has the workspace's version,
-//! and Compose and the chart default to the environments the repository
-//! builds.
+//! which the changelog has a section for, and Compose and the chart default
+//! to the environments the repository builds.
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,13 @@ fn every_package_has_the_workspaces_version() {
     let chart = read("deploy/helm/pisa/Chart.yaml");
     assert_eq!(value(chart.lines(), "version:"), release);
     assert_eq!(value(chart.lines(), "appVersion:"), release);
+    // The release workflow's notes are the changelog's section.
+    let changelog = read("CHANGELOG.md");
+    let heading = format!("## [{release}]");
+    assert!(
+        changelog.lines().any(|l| l.starts_with(&heading)),
+        "{heading}"
+    );
 }
 
 #[test]
@@ -51,4 +58,8 @@ fn compose_and_the_chart_default_to_the_projects_environments() {
     assert_eq!(value(worker, "  version:"), full);
     // The values name lean-core's, for a smaller image.
     assert!(values.contains(&format!("is {core}.")), "{core}");
+    // Minikube runs a lean-core image.
+    let minikube = read("deploy/minikube/values.yaml");
+    let worker = minikube.lines().skip_while(|l| *l != "worker:");
+    assert_eq!(value(worker, "  version:"), core);
 }

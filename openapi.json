@@ -1410,7 +1410,7 @@
             "type": "integer"
           },
           "imported_from": {
-            "description": "For a missing declaration, the snapshot module the new code builds on\nthat declares an identical one, with the same kind, type and value.\nAn import can't stand in for the spec's own declarations: keep them\nin the module and import only helpers (README, *Reusing a proof*).",
+            "description": "For a missing declaration, the snapshot module the new code builds on\nthat declares an identical one, with the same kind, type and value.\nAn import can't stand in for the spec's own declarations: keep them\nin the module and import only helpers (docs/runs.md, *Reusing a proof*).",
             "type": "string"
           },
           "includes": {
@@ -3706,7 +3706,7 @@
             "$ref": "#/components/schemas/ReviewOrigin"
           },
           "signature": {
-            "description": "As the build printed it, with notation. None when it didn't print,\nas `unprinted` says, and from a build before private declarations\nwere exported.",
+            "description": "As the build printed it, with notation. None when it didn't print,\nas `unprinted` says.",
             "type": "string"
           },
           "snapshot_id": {
@@ -3722,7 +3722,7 @@
             "type": "string"
           },
           "value": {
-            "description": "A hole's value on the head, and the value of each definition the\nhead adds that a hole's value reaches, as the build printed it with\nfull names and no notation, each `sorry` as `sorry`, cut at 4,000\ncharacters. None from a build before values were printed.",
+            "description": "A hole's value on the head, and the value of each definition the\nhead adds that a hole's value reaches, as the build printed it with\nfull names and no notation, each `sorry` as `sorry`, cut at 4,000\ncharacters. None when it didn't print, as `unprinted` says.",
             "type": "string"
           }
         },
@@ -3773,7 +3773,7 @@
         "description": "Search's state in a server's `GET /health`.",
         "properties": {
           "describe_model": {
-            "description": "The model that snapshot declarations are sent to for descriptions,\nand for the check that a description states the hypotheses (the same\nmodel), `null` if none are sent anywhere. See the README's \"What\nsnapshot search sends to a model\".",
+            "description": "The model that snapshot declarations are sent to for descriptions,\nand for the check that a description states the hypotheses (the same\nmodel), `null` if none are sent anywhere. See docs/search.md, \"What\nsnapshot search sends to a model\".",
             "type": [
               "string",
               "null"
@@ -5911,7 +5911,7 @@
         ]
       },
       "get": {
-        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done, a snapshot's create and a run's acceptance for a day. After that, in the scope it was made in, the 404 says what the job was and how it ended, for 30 days; see the README's Recovering a lost job.",
+        "description": "Waits up to `wait` seconds for the job to finish. Done, it answers 200 with the status its request would have answered with (`http_status`) and that answer (`body`), an error included, e.g. a 429 when no worker took it in time. Until then it answers 202. It answers within `wait` and five seconds even if the database does not: the last status it read, else a 503. A 404 or a 503 is the look's own. A job's answer is kept for an hour after it is done, a snapshot's create and a run's acceptance for a day. After that, in the scope it was made in, the 404 says what the job was and how it ended, for 30 days; see docs/api.md, Recovering a lost job.",
         "operationId": "getJob",
         "parameters": [
           {
@@ -6438,7 +6438,7 @@
     },
     "/search": {
       "post": {
-        "description": "Finds Mathlib and Physlib declarations, and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.",
+        "description": "Finds declarations of the index's libraries (Mathlib, Physlib and CSLib in the default one), and snapshot declarations when asked for, from a description, LaTeX, a Lean pattern or goal, or a partial or misspelled name. At most 64 queries; each gets a result, in order. A 404 on a server without search.",
         "operationId": "search",
         "parameters": [
           {
@@ -7519,6 +7519,16 @@
               }
             },
             "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`conflict`: the run has heads to settle first"
           },
           "422": {
             "content": {

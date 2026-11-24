@@ -1,6 +1,5 @@
 //! A pair of a run as a Palomar package (`/snapshots/export?profile=palomar`),
-//! made from the run's export as the Erdős campaign's
-//! `tools/pisa_to_palomar.py` made one.
+//! made from the run's export.
 //!
 //! The pair's challenge and solution take the names the request gives, and
 //! each module the pair needs becomes a module-system file, as Palomar
@@ -428,7 +427,7 @@ fn lakefile(name: &str, targets: &[String], mathlib: Option<&Value>, modules: &[
 }
 
 /// `formalization.yaml`, as JSON, which YAML reads, with every key of the
-/// Palomar v0.4 file the Erdős 882 package has: the run's name and the
+/// Palomar v0.4 file has: the run's name and the
 /// theorems `solution` proves, and in `status` what `comparator.json` makes
 /// true of a solution it accepts, no `sorry` and no axiom beyond the
 /// standard three. The rest, which pisa can't decide, reads `REVIEW`.
@@ -896,7 +895,7 @@ mod tests {
         }
     }
 
-    /// The shape of the Erdős 882 package's `formalization.yaml`, a Palomar
+    /// The shape of a published package's `formalization.yaml`, a Palomar
     /// v0.4 file that passed the template's validator: its keys, each
     /// value's type, and a list's items merged into one.
     const REFERENCE_METADATA: &str = r#"{"version": "", "project": {"name": "", "description": "",

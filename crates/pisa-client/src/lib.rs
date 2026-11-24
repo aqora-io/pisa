@@ -1620,8 +1620,8 @@ impl Client {
     }
 
     /// Judges the run that spec snapshots `against` start: audits it and
-    /// runs `lake comparator` on the pairs the audit compared, with this
-    /// client's timeout for each pair, and stores the result; see
+    /// runs `lake comparator` on the pairs the audit compared, with
+    /// `options.timeout` for each pair, and stores the result; see
     /// [`AcceptResponse`].
     pub async fn accept_run<I, S>(
         &self,

@@ -122,7 +122,8 @@ pub fn check_run_name(name: &str) -> Result<(), String> {
             && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
         if !ok {
             return Err(format!(
-                "run name {name:?} must be dotted parts, each a letter or '_' then letters,                  digits and '_'"
+                "run name {name:?} must be dotted parts, each a letter or '_' then letters, \
+                 digits and '_'"
             ));
         }
         if KEYWORDS.contains(&part) {

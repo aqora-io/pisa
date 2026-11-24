@@ -582,6 +582,10 @@ describe("PisaClient", () => {
     });
     const drySettle = { dryRun: true } as Parameters<typeof client.submitSettleRun>[1];
     await expect(client.submitSettleRun(["v2~a"], drySettle)).rejects.toMatchObject({ kind: "bad_request" });
+    const dryResubmit = { dryRun: true } as Parameters<typeof client.submitResubmitSnapshots>[2];
+    await expect(client.submitResubmitSnapshots("v2~a", "v2~b", dryResubmit)).rejects.toMatchObject({
+      kind: "bad_request",
+    });
     expect(sent).toHaveLength(0);
   });
 

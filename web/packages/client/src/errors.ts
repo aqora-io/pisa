@@ -62,7 +62,8 @@ export function isNotFoundError(e: unknown): e is PisaError {
 }
 
 /** The request doesn't fit what it found: a document at another revision,
- *  or a run name another run holds. */
+ *  a run name another run holds, a spec amended already, or a run to accept
+ *  with heads to settle. Read what is there now, and decide again. */
 export function isConflictError(e: unknown): e is PisaError {
   return isPisaError(e, "conflict");
 }

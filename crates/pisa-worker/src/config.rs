@@ -9,7 +9,8 @@ use crate::db::Db;
 pub struct WorkerConfig {
     #[arg(long, env = "PISA_WORKER_ID")]
     pub worker_id: Option<String>,
-    /// Pool label. Defaults to the project's toolchain plus a hash of its lake-manifest.json.
+    /// Pool label. Defaults to the project's toolchain plus a hash of its
+    /// lakefile, lake-manifest.json and top-level .lean files.
     #[arg(long, env = "PISA_VERSION")]
     pub version: Option<String>,
     /// The version this worker has to turn out to serve, e.g. the one its

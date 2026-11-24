@@ -390,7 +390,7 @@ pub struct DeclarationChange {
     /// For a missing declaration, the snapshot module the new code builds on
     /// that declares an identical one, with the same kind, type and value.
     /// An import can't stand in for the spec's own declarations: keep them
-    /// in the module and import only helpers (README, *Reusing a proof*).
+    /// in the module and import only helpers (docs/runs.md, *Reusing a proof*).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_from: Option<String>,
     pub change: Change,
@@ -499,7 +499,7 @@ impl std::fmt::Display for DeclarationChange {
             write!(
                 f,
                 "; `{from}` declares an identical {name} \u{2014} keep the spec's declarations in this \
-                 module and import only helpers (README, *Reusing a proof*)"
+                 module and import only helpers (docs/runs.md, *Reusing a proof*)"
             )?;
         }
         if !self.includes.is_empty() {

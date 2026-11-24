@@ -956,7 +956,7 @@ fn project_files(
                 "the run's modules import {}, which the worker's project builds itself, and the \
                  export can't say where that code comes from: set PISA_PROJECT_GIT and \
                  PISA_PROJECT_REV on the workers, or make the project a wrapper that requires \
-                 the library (README, *A pool for another project*)",
+                 the library (docs/environments.md)",
                 libraries.join(", ")
             );
             return Err(Error::new(ErrorKind::BadRequest, message));

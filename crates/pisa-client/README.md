@@ -29,14 +29,17 @@ async fn main() -> Result<(), pisa_client::Error> {
 
 - `with_version` names the environment the requests run in; without it, the
   server's default.
-- `with_timeout` sets Lean's time limit in seconds for each request.
-- `with_retry` sets how the client sends a request again after a 503, a
-  network error or a lost job. It only resends a request that is safe to
-  send twice.
+- `with_timeout` sets Lean's time limit in seconds for each request (60 by
+  default).
+- `with_retry` sets how the client sends a request again: after a 429, and,
+  for a request that is safe to send twice, after a 502, 503 or 504 (a lost
+  job is a 503) or a failed connection. `RetryPolicy::none()` sends each
+  request once.
 - Each long call has a `submit_*` twin that queues it as a job. `wait_job`
   and `poll_job` follow the job.
-- A failure in the input itself, such as Lean's error or a timeout, is an
-  `Error::Server` whose `kind` says which.
+- A request the server refuses is an `Error::Server` whose `kind` says why,
+  e.g. `Lean` for a tactic Lean rejects. A check reports Lean's errors and
+  limits in its result instead.
 
 The `rustls` feature (on by default) gives HTTPS; turn it off for plain
 HTTP.

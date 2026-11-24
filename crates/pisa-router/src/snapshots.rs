@@ -13,11 +13,12 @@ use axum::response::{IntoResponse, Response};
 use pisa_protocol::api::{
     ACCEPT_TIMEOUT, AcceptRequest, AcceptResponse, Accepted, ApiErrors, AuditSnapshotsResponse,
     CheckResult, CreateSnapshotRequest, CreateSnapshotResponse, DEFAULT_REVIEW_LIMIT,
-    DeleteSnapshotResponse, Detail, Error, ErrorKind, JobKind, JobStatus, ListAcceptancesResponse,
-    ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, MAX_REVIEW_LIMIT, PreferAsync,
-    RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
-    ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
-    UpdateSnapshotRequest, VerifySnapshotRequest, VerifySnapshotResponse,
+    DeleteSnapshotResponse, Detail, Error, ErrorKind, ErrorResponse, JobKind, JobStatus,
+    ListAcceptancesResponse, ListDependentsResponse, ListSnapshotsResponse, MAX_REASON,
+    MAX_REVIEW_LIMIT, PreferAsync, RebuildSnapshotsRequest, RebuildSnapshotsResponse,
+    ResubmitSnapshotsRequest, ResubmitSnapshotsResponse, SettleRunRequest, Snapshot,
+    SnapshotDetail, SnapshotId, Tarball, UpdateSnapshotRequest, VerifySnapshotRequest,
+    VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -819,7 +820,12 @@ fn tarball(run: &ExportedRun, root: &str) -> std::io::Result<Vec<u8>> {
         `Prefer: respond-async`.",
     params(PreferAsync),
     request_body = AcceptRequest,
-    responses((status = 200, description = "The audit and comparator's verdict on each pair", body = AcceptResponse), Accepted, ApiErrors),
+    responses(
+        (status = 200, description = "The audit and comparator's verdict on each pair", body = AcceptResponse),
+        Accepted,
+        (status = 409, description = "`conflict`: the run has heads to settle first", body = ErrorResponse),
+        ApiErrors,
+    ),
 )]
 /// `POST /snapshots/accept`.
 pub async fn accept(

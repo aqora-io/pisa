@@ -2,7 +2,7 @@
 """Builds the worker image of an environment: a Lean toolchain and the
 libraries its workers build, which requests may import.
 
-    scripts/env.py build environments/lean-4-35.toml [--repository R] [--push]
+    scripts/env.py build lean-4-35.toml [--repository R] [--push]
     scripts/env.py label docker/lean-project
 
 An environment is a TOML file:

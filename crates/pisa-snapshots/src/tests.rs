@@ -274,7 +274,7 @@ fn a_missing_declaration_names_the_import_that_declares_it_identically() {
         identical,
         [format!(
             "statement: t is missing; `{}` declares an identical t \u{2014} keep the spec's \
-             declarations in this module and import only helpers (README, *Reusing a proof*)",
+             declarations in this module and import only helpers (docs/runs.md, *Reusing a proof*)",
             snapshot::module("b")
         )]
     );

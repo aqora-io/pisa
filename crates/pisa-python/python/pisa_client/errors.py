@@ -58,7 +58,9 @@ class BadRequestError(PisaError):
 
 class ConflictError(PisaError):
     """The request doesn't fit what it found (kind ``conflict``): a
-    document at another revision, or a run name another run holds."""
+    document at another revision, a run name another run holds, a spec
+    amended already, or a run to accept with heads to settle. Read what is
+    there now, and decide again."""
 
 
 class InternalError(PisaError):
