@@ -54,6 +54,7 @@ import type {
   SnapshotScope,
   StateId,
   UpdateSnapshotRequest,
+  VerifySnapshotRequest,
   VerifySnapshotResponse,
 } from "./types.ts";
 
@@ -437,6 +438,12 @@ export class PisaClient {
     return this.submit(["sessions", session, "check"], this.checkSessionRequest(code, options), options);
   }
 
+  /** Closes a session, and its states with it. */
+  async closeSession(session: SessionId, options: RequestOptions = {}): Promise<void> {
+    const r = await this.send("DELETE", ["sessions", session], undefined, undefined, options.signal);
+    if (!r.ok) ok(r, await readJson(r));
+  }
+
   /** Checks code and keeps it as a snapshot that later code can import
    *  through its `header`. Failures are in `check.error`, with no
    *  `snapshot`. */
@@ -603,7 +610,7 @@ export class PisaClient {
   /** The acceptances that judged spec snapshot `spec`, newest first, at most
    *  100; each says `stale` once the run's heads have moved on. */
   listAcceptances(spec: SnapshotId, options: RequestOptions = {}): Promise<ListAcceptancesResponse> {
-    const query = new URLSearchParams({ spec });
+    const query = new URLSearchParams({ against: spec });
     return this.call("GET", ["snapshots", "accept"], undefined, options, query);
   }
 
@@ -775,18 +782,16 @@ export class PisaClient {
    *  with `timeout` seconds for each module once their imports are loaded. A
    *  rejection is in `failure`, not thrown. */
   verifySnapshot(id: SnapshotId, options: VerifyOptions = {}): Promise<VerifySnapshotResponse> {
-    return this.call("POST", ["snapshots", id, "verify"], undefined, options, this.verifyQuery(options));
+    return this.call("POST", ["snapshots", id, "verify"], this.verifyRequest(options), options);
   }
 
   /** `verifySnapshot` as a job. */
   submitVerifySnapshot(id: SnapshotId, options: VerifyOptions = {}): Promise<Job<VerifySnapshotResponse>> {
-    return this.submit(["snapshots", id, "verify"], undefined, options, this.verifyQuery(options));
+    return this.submit(["snapshots", id, "verify"], this.verifyRequest(options), options);
   }
 
-  private verifyQuery(options: VerifyOptions): URLSearchParams {
-    const query = this.timeoutQuery(options);
-    if (options.again) query.set("again", "true");
-    return query;
+  private verifyRequest(options: VerifyOptions): Partial<VerifySnapshotRequest> {
+    return { ...this.timeoutOf(options), ...(options.again && { again: true }) };
   }
 
   /** Settles the run that spec snapshots `against` start: rebuilds each of
@@ -938,11 +943,6 @@ export class PisaClient {
   private timeoutOf(options: RunOptions): { timeout?: number } {
     const timeout = options.timeout ?? this.timeout;
     return timeout !== undefined ? { timeout } : {};
-  }
-
-  private timeoutQuery(options: RunOptions): URLSearchParams {
-    const { timeout } = this.timeoutOf(options);
-    return new URLSearchParams(timeout !== undefined ? { timeout: String(timeout) } : {});
   }
 
   private versionQuery(options: VersionOptions): URLSearchParams {

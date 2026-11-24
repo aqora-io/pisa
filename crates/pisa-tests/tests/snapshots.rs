@@ -1213,8 +1213,8 @@ async fn a_snapshot_deleted_during_verification_stays_deleted() {
 async fn a_verify_that_runs_out_of_time_stops_at_the_module() {
     let c = Cluster::start(&[("w0", "v", 2)]).await;
     let snapshot = unverified(&c, SLOW).await;
-    let path = format!("/snapshots/{}/verify?timeout=1", entry(&snapshot));
-    let (status, r) = request(&c, reqwest::Method::POST, &path).await;
+    let path = format!("/snapshots/{}/verify", entry(&snapshot));
+    let (status, r) = c.post(&path, json!({"timeout": 1})).await;
     assert_eq!(status, 200, "{r}");
     assert_eq!(r["failure"]["module"], module(&snapshot), "{r}");
     let reason = r["failure"]["reason"].as_str().unwrap();
@@ -1444,12 +1444,21 @@ async fn verify_again_describes_a_verified_chain_again() {
     assert_eq!(top["snapshot"]["verified"], true, "{top}");
     // Verified already: nothing to re-check.
     assert_eq!(verify(&c, &top).await["checked"], json!([]));
-    let path = format!("/snapshots/{}/verify?again=true", entry(&top));
-    let (status, r) = request(&c, reqwest::Method::POST, &path).await;
+    let path = format!("/snapshots/{}/verify", entry(&top));
+    let (status, r) = c.post(&path, json!({"again": true})).await;
     assert_eq!(status, 200, "{r}");
     let modules = [&base, &top].map(|s| s["snapshot"]["module"].clone());
     assert_eq!(r["checked"], json!(modules), "{r}");
     assert_eq!(r["snapshot"]["verified"], true);
+    // A null body is no body: the defaults.
+    let (status, r) = c.post(&path, Value::Null).await;
+    assert_eq!((status, &r["checked"]), (200, &json!([])), "{r}");
+    let (status, r) = c.post(&path, json!({"again": "yes"})).await;
+    assert_eq!(
+        (status, &r["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{r}"
+    );
 }
 
 /// A record marked verified that the kernel rejects when asked again loses
@@ -1473,8 +1482,8 @@ async fn a_re_check_that_rejects_a_verified_module_clears_verified() {
     assert!(marked.await.unwrap().is_some());
     let above = create_with(&c, &on(&forged, "theorem c : 2 = 2 := rfl"), true).await;
     assert_eq!(above["snapshot"]["verified"], true, "{above}");
-    let path = format!("/snapshots/{}/verify?again=true", entry(&forged));
-    let (status, r) = request(&c, reqwest::Method::POST, &path).await;
+    let path = format!("/snapshots/{}/verify", entry(&forged));
+    let (status, r) = c.post(&path, json!({"again": true})).await;
     assert_eq!(status, 200, "{r}");
     assert_eq!(r["failure"]["kind"], "lean", "{r}");
     assert_eq!(info(&c, &forged).await["verified"], false);

@@ -18,7 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from pisa_client import AsyncClient, CapacityError, Client, LeanError, NotFoundError, PisaError
+from pisa_client import (
+    AsyncClient,
+    BadRequestError,
+    CapacityError,
+    Client,
+    ConflictError,
+    LeanError,
+    NotFoundError,
+    PisaError,
+)
 
 BIN = Path(os.environ.get("PISA_BIN_DIR", Path(__file__).parents[3] / "target" / "debug"))
 
@@ -188,6 +197,10 @@ def test_session(url):
     weaker = client.check_session(session["id"], "theorem t : 2 = 2 := by rfl")
     assert weaker["reasons"] == ["statement: t has a different type"]
 
+    assert client.close_session(session["id"]) is None
+    with pytest.raises(NotFoundError):
+        client.apply_tactic(root["id"], "simp")
+
 
 def test_jobs(url):
     client = Client(url, timeout=5)
@@ -226,7 +239,7 @@ def test_jobs(url):
 
 
 def test_errors(url):
-    with pytest.raises(PisaError) as e:
+    with pytest.raises(BadRequestError) as e:
         Client(url).apply_tactic("not-a-key", "rfl")
     assert (e.value.kind, e.value.status) == ("bad_request", 400)
 
@@ -572,6 +585,8 @@ def test_documents(url):
     assert probes["results"][0]["closed"] and not probes["results"][1]["ok"]
     edited = client.edit_document(document["id"], 1, code.replace("sorry", "rfl"))
     assert edited["revision"] == 2 and edited["sorries"] == []
+    with pytest.raises(ConflictError):
+        client.document_goals(document["id"], [{"line": 4}], revision=1)
     assert client.close_document(document["id"]) is None
     with pytest.raises(NotFoundError):
         client.document_goals(document["id"], [{"line": 4}])

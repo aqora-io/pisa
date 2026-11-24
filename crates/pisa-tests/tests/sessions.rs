@@ -266,6 +266,29 @@ async fn a_session_is_an_open_document_whose_code_stays() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn closing_a_session_ends_its_states() {
+    let c = Cluster::start_beam(&[("w0", "v", 1)]).await;
+    let s = start(&c, CODE).await;
+    let path = format!("/sessions/{}", s["id"].as_str().unwrap());
+    let (status, _) = c.request(reqwest::Method::DELETE, &path, None).await;
+    assert_eq!(status, 204);
+    let (status, e) = try_tactic(&c, &s["states"][0]["id"], "simp").await;
+    assert_eq!(
+        (status, &e["error"]["kind"]),
+        (404, &json!("not_found")),
+        "{e}"
+    );
+    let (status, e) = c
+        .request(reqwest::Method::DELETE, "/sessions/x", None)
+        .await;
+    assert_eq!(
+        (status, &e["error"]["kind"]),
+        (400, &json!("bad_request")),
+        "{e}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn without_beam_sessions_are_unavailable() {
     let c = Cluster::start(&[("w0", "v", 1)]).await;
     let (status, e) = c.post("/sessions", json!({"code": CODE})).await;

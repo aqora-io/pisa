@@ -453,7 +453,7 @@ class AuditSnapshotsResponse(TypedDict):
     unsettled: NotRequired[list[AuditUnsettled]]
 
 class PairError(TypedDict):
-    kind: Literal["refused", "build_failed", "export_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge", "unsupported"]
+    kind: Literal["refused", "export_failed", "timeout", "out_of_memory", "cannot_run", "nothing_to_judge", "unsupported"]
     message: str
 
 class LeftOut(TypedDict):
@@ -479,14 +479,10 @@ class AcceptPair(TypedDict):
     """Comparator's verdict on a spec snapshot and a head it reaches."""
     spec: str
     head: str
-    # Their modules, `PisaSnap.s…`: the code judged, named when a snapshot goes.
-    spec_module: NotRequired[str]
-    head_module: NotRequired[str]
-    # The modules comparator judged: `spec_module` and `head_module`, pisa's
-    # own builds. An older acceptance names them as the export does, a named
-    # run's `PisaSpec.<name>` and `PisaRun.<name>`.
-    challenge_module: NotRequired[str]
-    solution_module: NotRequired[str]
+    # Their modules, `PisaSnap.s…`: the code judged, named when a snapshot
+    # goes. Comparator judged them as the challenge and the solution.
+    spec_module: str
+    head_module: str
     # The pair's configuration in the export, `comparator/<n>.json`.
     config: str
     accepted: bool
@@ -892,6 +888,8 @@ class Client:
         """Re-check a completed proof from scratch; `ok` also requires that it
         proves the session's original statements, with its imports.
         `detail=["declarations"]` as for `check`."""
+    def close_session(self, session_id: str) -> None:
+        """Close a session, and its states with it."""
     def create_snapshot(
         self,
         code: str,
@@ -1448,6 +1446,8 @@ class AsyncClient:
         """Re-check a completed proof from scratch; `ok` also requires that it
         proves the session's original statements, with its imports.
         `detail=["declarations"]` as for `check`."""
+    def close_session(self, session_id: str) -> Future[None]:
+        """Close a session, and its states with it."""
     def create_snapshot(
         self,
         code: str,

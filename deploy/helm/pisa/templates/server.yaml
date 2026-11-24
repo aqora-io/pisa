@@ -63,9 +63,9 @@ spec:
             {{- end }}
             {{- if .Values.search.enabled }}
             - { name: PISA_SEARCH_QDRANT, value: {{ $qdrant | quote }} }
-            - { name: PISA_SEARCH_ENV_ID, value: {{ required "search.envId is required" .Values.search.envId | quote }} }
+            - { name: PISA_SEARCH_VERSION, value: {{ required "search.version is required" .Values.search.version | quote }} }
             {{- with .Values.search.embedder }}
-            - { name: PISA_SEARCH_TEI, value: {{ . | quote }} }
+            - { name: PISA_SEARCH_EMBEDDER, value: {{ . | quote }} }
             {{- end }}
             {{- if .Values.search.snapshots }}
             {{- with .Values.search.describeModel }}
@@ -73,7 +73,7 @@ spec:
             {{- end }}
             - { name: PISA_SEARCH_DESCRIBE_CONCURRENCY, value: {{ .Values.search.describeConcurrency | quote }} }
             {{- else }}
-            - { name: PISA_SEARCH_NO_SNAPSHOTS, value: "true" }
+            - { name: PISA_SEARCH_SNAPSHOTS, value: "false" }
             {{- end }}
             {{- with .Values.search.secret.name }}
             {{- range $var, $key := dict "SCW_SECRET_KEY" $.Values.search.secret.scwSecretKey "ANTHROPIC_API_KEY" $.Values.search.secret.anthropicApiKey "OPENAI_API_KEY" $.Values.search.secret.openaiApiKey }}

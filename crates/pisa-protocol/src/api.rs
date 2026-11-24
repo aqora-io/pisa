@@ -23,7 +23,7 @@
 //! | `GET /snapshots/audit` | `?label=key:value` or `?against=<id>` → [`AuditSnapshotsResponse`] |
 //! | `PATCH /snapshots/{id}` | [`UpdateSnapshotRequest`] → [`Snapshot`] |
 //! | `DELETE /snapshots/{id}` | → [`DeleteSnapshotResponse`] |
-//! | `POST /snapshots/{id}/verify` | → [`VerifySnapshotResponse`] |
+//! | `POST /snapshots/{id}/verify` | [`VerifySnapshotRequest`], or no body → [`VerifySnapshotResponse`] |
 //! | `GET /snapshots/export` | `?against=<id>&allow=<name>&profile=palomar` → a Lake project, as a tar.gz |
 //! | `POST /snapshots/accept` | [`AcceptRequest`] → [`AcceptResponse`] |
 //! | `GET /snapshots/accept/{id}` | → [`AcceptResponse`] |
@@ -2234,7 +2234,7 @@ pub struct AcceptResponse {
     pub truncated: Vec<String>,
 }
 
-/// `GET /snapshots/accept?spec=<id>`: a spec snapshot's acceptances,
+/// `GET /snapshots/accept?against=<id>`: a spec snapshot's acceptances,
 /// newest first.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ListAcceptancesResponse {
@@ -2248,25 +2248,14 @@ pub struct AcceptPair {
     /// The head.
     pub head: String,
     /// The spec snapshot's module, `PisaSnap.s…`: the code it judged, which
-    /// stays named when the snapshot goes.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// stays named when the snapshot goes. Comparator judged it as the
+    /// challenge.
     pub spec_module: String,
-    /// The head's module.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// The head's module, which comparator judged as the solution.
     pub head_module: String,
-    /// The module comparator judged as the challenge, as its configuration
-    /// names it: `spec_module`, which pisa built. An acceptance stored before
-    /// comparator judged pisa's own builds names it as the export does,
-    /// `PisaSpec.<name>` or `PisaRun.<name>` for a named run's.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub challenge_module: String,
-    /// The module comparator judged as the solution: `head_module`, or as the
-    /// export names it in an older acceptance.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub solution_module: String,
     /// The pair's configuration in `GET /snapshots/export`'s project,
     /// `comparator/<n>.json`. Comparator judged the pair by it, with the
-    /// modules named as `challenge_module` and `solution_module` name them.
+    /// challenge and solution as `spec_module` and `head_module`.
     pub config: String,
     pub accepted: bool,
     /// Why it isn't accepted, if it isn't.
@@ -2378,10 +2367,6 @@ pub enum PairErrorKind {
     /// definition differs, an axiom isn't permitted, or a kernel rejected it
     /// (exit 1). Never a kernel that was killed or couldn't run.
     Refused,
-    /// A module didn't build or export in comparator's sandbox, which is no
-    /// verdict on the proofs. Only acceptances stored while comparator built
-    /// the modules have it.
-    BuildFailed,
     /// pisa couldn't export a module from its build for comparator, so
     /// comparator didn't run: no verdict on the proofs.
     ExportFailed,
@@ -2670,6 +2655,28 @@ pub struct UpdateSnapshotRequest {
     /// A label set to `null` is removed, one set to a string takes that
     /// value, and those not named stay as they are.
     pub labels: BTreeMap<String, Option<String>>,
+}
+
+/// `POST /snapshots/{id}/verify`'s body. Without one, the defaults hold.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct VerifySnapshotRequest {
+    /// Lean's time limit in seconds for each module, once their imports are
+    /// loaded.
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
+    /// Re-check the modules that are verified already too, which describes
+    /// their records again.
+    #[serde(default)]
+    pub again: bool,
+}
+
+impl Default for VerifySnapshotRequest {
+    fn default() -> Self {
+        VerifySnapshotRequest {
+            timeout: default_timeout(),
+            again: false,
+        }
+    }
 }
 
 /// `POST /snapshots/{id}/verify`: re-checks the snapshot's module and

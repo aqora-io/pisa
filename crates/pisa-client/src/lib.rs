@@ -45,7 +45,7 @@ use std::time::Duration;
 use pisa_protocol::api::{
     ApplyTacticRequest, CheckBatchItem, CheckBatchRequest, CheckBatchResponse, CheckRequest,
     CheckSessionRequest, CreateSnapshotRequest, ErrorResponse, RebuildSnapshotsRequest,
-    StartSessionRequest, UpdateSnapshotRequest,
+    StartSessionRequest, UpdateSnapshotRequest, VerifySnapshotRequest,
 };
 use pisa_protocol::search::{
     FlagDescriptionRequest, FlagDescriptionResponse, GetDeclarationResponse, ResolveRequest,
@@ -663,10 +663,6 @@ impl Endpoint {
             .json()
     }
 
-    async fn post_url<T: DeserializeOwned>(&self, url: Url, repeat: Repeat) -> Result<T, Error> {
-        self.send(self.http.post(url), repeat).await?.json()
-    }
-
     async fn patch<B: Serialize, T: DeserializeOwned>(
         &self,
         url: Url,
@@ -946,6 +942,15 @@ impl Client {
         self.endpoint.submit(url, Some(&req), Repeat::Safe).await
     }
 
+    /// Closes a session, and its states with it.
+    pub async fn close_session(&self, session_id: &str) -> Result<(), Error> {
+        let mut url = self.endpoint.url("sessions")?;
+        url.path_segments_mut()
+            .map_err(|_| Error::Url(session_id.to_string()))?
+            .push(session_id);
+        self.endpoint.delete_empty(url).await
+    }
+
     fn check_session_request(&self, code: &str, detail: &[Detail]) -> CheckSessionRequest {
         CheckSessionRequest {
             code: code.to_string(),
@@ -1153,17 +1158,19 @@ impl Client {
     /// timeout for each module. A module the kernel rejects, or that runs out
     /// of time, is reported in `failure`, not as an error.
     pub async fn verify_snapshot(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
+        let req = self.verify_request(false);
         (self.endpoint)
-            .post_url(self.verify_url(id)?, Repeat::Safe)
+            .post_to(self.verify_url(id)?, &req, Repeat::Safe)
             .await
     }
 
     /// Like [`Client::verify_snapshot`], but re-checks the modules that are
     /// verified already too, and describes their records again.
     pub async fn verify_snapshot_again(&self, id: &str) -> Result<VerifySnapshotResponse, Error> {
-        let mut url = self.verify_url(id)?;
-        url.query_pairs_mut().append_pair("again", "true");
-        self.endpoint.post_url(url, Repeat::Safe).await
+        let req = self.verify_request(true);
+        (self.endpoint)
+            .post_to(self.verify_url(id)?, &req, Repeat::Safe)
+            .await
     }
 
     /// Like [`Client::verify_snapshot`], as a job.
@@ -1171,21 +1178,27 @@ impl Client {
         &self,
         id: &str,
     ) -> Result<Job<VerifySnapshotResponse>, Error> {
+        let req = self.verify_request(false);
         self.endpoint
-            .submit(self.verify_url(id)?, None::<&()>, Repeat::Safe)
+            .submit(self.verify_url(id)?, Some(&req), Repeat::Safe)
             .await
     }
 
-    /// `POST /snapshots/{id}/verify`, with this client's timeout for each
-    /// module.
+    /// `POST /snapshots/{id}/verify`.
     fn verify_url(&self, id: &str) -> Result<Url, Error> {
         let mut url = self.snapshot_url(id)?;
         url.path_segments_mut()
             .map_err(|_| Error::Url(id.to_string()))?
             .push("verify");
-        url.query_pairs_mut()
-            .append_pair("timeout", &self.timeout.to_string());
         Ok(url)
+    }
+
+    /// A verify with this client's timeout for each module.
+    fn verify_request(&self, again: bool) -> VerifySnapshotRequest {
+        VerifySnapshotRequest {
+            timeout: self.timeout,
+            again,
+        }
     }
 
     /// Where `job` stands, after waiting up to `wait` (at most 60 s) for it
@@ -1682,7 +1695,7 @@ impl Client {
     /// spec is amended, or a target is refuted.
     pub async fn list_acceptances(&self, spec: &str) -> Result<ListAcceptancesResponse, Error> {
         let mut url = self.endpoint.url("snapshots/accept")?;
-        url.query_pairs_mut().append_pair("spec", spec);
+        url.query_pairs_mut().append_pair("against", spec);
         self.endpoint.get(url).await
     }
 

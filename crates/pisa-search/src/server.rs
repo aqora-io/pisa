@@ -53,21 +53,22 @@ pub struct SearchArgs {
     /// The environment variable holding Qdrant's API key, if it needs one.
     #[arg(long = "qdrant-key-env", env = "PISA_SEARCH_QDRANT_KEY_ENV")]
     pub qdrant_key_env: Option<String>,
-    /// The environment whose loaded bundle to serve; required with `--qdrant`.
-    #[arg(long, env = "PISA_SEARCH_ENV_ID")]
-    pub env_id: Option<String>,
+    /// The version whose loaded bundle to serve, the bundle's `env_id`;
+    /// required with `--qdrant`.
+    #[arg(long, env = "PISA_SEARCH_VERSION")]
+    pub version: Option<String>,
     /// Symbol dictionary; defaults to the shipped search/symbols.toml.
     #[arg(long, env = "PISA_SEARCH_SYMBOLS")]
     pub symbols: Option<PathBuf>,
     /// Embedding server for queries (enables the dense lane); see `embed`.
     /// It also embeds snapshot declarations, so it must serve the model
     /// that embedded the bundle.
-    #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+    #[arg(long, env = "PISA_SEARCH_EMBEDDER")]
     pub embedder: Option<String>,
-    /// Don't search the workers' snapshots, from the database's catalog.
-    #[arg(long, env = "PISA_SEARCH_NO_SNAPSHOTS")]
-    pub no_snapshots: bool,
-    /// The worker version whose snapshots to search (default: the env_id).
+    /// Whether to search the workers' snapshots, from the database's catalog.
+    #[arg(long, env = "PISA_SEARCH_SNAPSHOTS", default_value_t = true, action = clap::ArgAction::Set)]
+    pub snapshots: bool,
+    /// The worker version whose snapshots to search (default: `--version`).
     #[arg(long, env = "PISA_SEARCH_SNAPSHOT_VERSION")]
     pub snapshot_version: Option<String>,
     /// Claude or OpenAI model that describes every snapshot declaration
@@ -119,8 +120,8 @@ impl Search {
         let Some(url) = some(args.qdrant) else {
             return Ok(None);
         };
-        let env_id = some(args.env_id)
-            .ok_or_else(|| anyhow::anyhow!("searching needs --env-id with --qdrant"))?;
+        let env_id = some(args.version)
+            .ok_or_else(|| anyhow::anyhow!("searching needs --version with --qdrant"))?;
         let q = Qdrant::with_key_env(&url, some(args.qdrant_key_env).as_deref())?;
         let symbols = match args.symbols {
             Some(p) => Symbols::parse(&std::fs::read_to_string(p)?)?,
@@ -143,11 +144,12 @@ impl Search {
             )),
             None => None,
         };
-        let describe_model = (!args.no_snapshots)
+        let describe_model = args
+            .snapshots
             .then(|| llm.as_ref().map(|(_, config)| config.model.clone()))
             .flatten();
         let flags = DescriptionFlags::new(db.clone());
-        let snapshots = (!args.no_snapshots).then(|| Snapshots {
+        let snapshots = args.snapshots.then(|| Snapshots {
             version: some(args.snapshot_version).unwrap_or_else(|| env_id.clone()),
             db,
             llm,
@@ -514,7 +516,10 @@ async fn get_declaration(
 
 /// A 404 for `name`, with the closest existing name.
 async fn unknown_declaration(engine: &Engine, name: &str) -> ApiError {
-    let r = match engine.resolve(&[name.to_string()], &SnapshotScope::None).await {
+    let r = match engine
+        .resolve(&[name.to_string()], &SnapshotScope::None)
+        .await
+    {
         Ok(r) => r,
         Err(e) => return unavailable(e),
     };

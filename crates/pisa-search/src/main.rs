@@ -127,8 +127,7 @@ struct EmbedArgs {
     /// A TEI URL, or `openai+<base url>?model=<model>[&key_env=<VAR>]`.
     #[arg(
         long,
-        alias = "tei",
-        env = "PISA_SEARCH_TEI",
+        env = "PISA_SEARCH_EMBEDDER",
         default_value = "http://localhost:8090"
     )]
     embedder: String,
@@ -239,9 +238,9 @@ struct LoadArgs {
 struct EvalArgs {
     #[command(flatten)]
     qdrant: QdrantArgs,
-    /// The environment whose loaded bundle to search.
+    /// The version whose loaded bundle to search, the bundle's `env_id`.
     #[arg(long)]
-    env_id: String,
+    version: String,
     /// MathlibQR.json (downloaded from the pinned commit if absent).
     #[arg(long)]
     data: Option<PathBuf>,
@@ -259,7 +258,7 @@ struct EvalArgs {
     #[arg(long)]
     fused_only: bool,
     /// Embedding server for queries (enables the dense lane); see `embed`.
-    #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+    #[arg(long, env = "PISA_SEARCH_EMBEDDER")]
     embedder: Option<String>,
     /// Write the report here as well as to stdout.
     #[arg(long)]
@@ -287,9 +286,10 @@ struct EvalSetsArgs {
 struct QueryArgs {
     #[command(flatten)]
     qdrant: QdrantArgs,
+    /// The version whose loaded bundle to search.
     #[arg(long)]
-    env_id: String,
-    #[arg(long, alias = "tei", env = "PISA_SEARCH_TEI")]
+    version: String,
+    #[arg(long, env = "PISA_SEARCH_EMBEDDER")]
     embedder: Option<String>,
     #[arg(long, default_value_t = 5)]
     k: usize,
@@ -763,7 +763,7 @@ async fn load(
 async fn eval(
     EvalArgs {
         qdrant,
-        env_id,
+        version,
         data,
         set,
         split,
@@ -773,7 +773,7 @@ async fn eval(
         out,
     }: EvalArgs,
 ) -> anyhow::Result<()> {
-    let mut engine = open_engine(&qdrant, &env_id, embedder).await?;
+    let mut engine = open_engine(&qdrant, &version, embedder).await?;
     engine.cache = std::sync::Arc::new(std::sync::Mutex::new(lru::LruCache::unbounded()));
     engine.embed_wait = engine::EMBED_TIMEOUT + std::time::Duration::from_secs(1);
     let weights: Vec<Weights> = if weights.is_empty() {
@@ -973,13 +973,13 @@ async fn validate_descriptions(
 async fn query(
     QueryArgs {
         qdrant,
-        env_id,
+        version,
         embedder,
         k,
         text,
     }: QueryArgs,
 ) -> anyhow::Result<()> {
-    let mut engine = open_engine(&qdrant, &env_id, embedder).await?;
+    let mut engine = open_engine(&qdrant, &version, embedder).await?;
     // Answering without the dense lane would skew what it shows.
     engine.embed_wait = engine::EMBED_TIMEOUT + std::time::Duration::from_secs(1);
     let q = pisa_protocol::search::Query {

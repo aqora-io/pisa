@@ -5,19 +5,16 @@ import {
   auditOptions,
   checkBatchOptions,
   checkOptions,
-  compactQuery,
   declarationOptions,
   dependentsOptions,
   documentGoalsOptions,
-  hasTerms,
-  isTransient,
-  pisaKeys,
   rebuildPlanOptions,
   retryQuery,
   searchOptions,
   snapshotOptions,
   snapshotsOptions,
 } from "../src/index.ts";
+import { compactQuery, hasTerms, isTransient, pisaKeys } from "../src/options.ts";
 
 const client = new PisaClient({ url: "http://pisa.test", version: "v" });
 const result = (kind?: string) => ({

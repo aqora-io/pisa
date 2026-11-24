@@ -561,8 +561,7 @@ def run_names(outside):
     # Acceptance judges pisa's own builds, named by their hash.
     verdict = post("/snapshots/accept", {"against": specs})
     assert verdict["accepted"] and verdict["clean"], verdict
-    assert all((p["challenge_module"], p["solution_module"]) == (p["spec_module"], p["head_module"])
-               for p in verdict["pairs"]), verdict
+    assert all(m.startswith("PisaSnap.") for p in verdict["pairs"] for m in (p["spec_module"], p["head_module"])), verdict
     if outside:
         built_outside(archive)
     step("run names: the export names each pair by its run, builds, and the run is accepted")

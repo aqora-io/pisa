@@ -282,7 +282,7 @@ describe("PisaClient", () => {
       ["POST", "/api/snapshots/accept", { against: ["v2~s0"] }],
       ["POST", "/api/snapshots/accept", { against: ["v2~s0"], allow: ["f"], paranoid: false, timeout: 60 }],
       ["GET", "/api/snapshots/accept/v2~a", undefined],
-      ["GET", "/api/snapshots/accept?spec=v2%7Es0", undefined],
+      ["GET", "/api/snapshots/accept?against=v2%7Es0", undefined],
     ]);
   });
 
@@ -404,7 +404,7 @@ describe("PisaClient", () => {
     expect(sent.map((s) => [s.url, s.body])).toEqual([
       ["/api/snapshots/settle", { against: ["v2~s", "v2~t"], allow: ["f"], dry_run: true }],
       ["/api/snapshots/settle", { against: ["v2~s"], timeout: 30, verify: true }],
-      ["/api/snapshots/v2~s/verify?timeout=9&again=true", undefined],
+      ["/api/snapshots/v2~s/verify", { timeout: 9, again: true }],
     ]);
   });
 

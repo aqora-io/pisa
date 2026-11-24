@@ -50,6 +50,21 @@ class NotFoundError(PisaError):
     snapshot or declaration."""
 
 
+class BadRequestError(PisaError):
+    """The request is malformed, e.g. an invalid id or a parameter that
+    doesn't fit the others (kind ``bad_request``); sent again as it is, it
+    fails again."""
+
+
+class ConflictError(PisaError):
+    """The request doesn't fit what it found (kind ``conflict``): a
+    document at another revision, or a run name another run holds."""
+
+
+class InternalError(PisaError):
+    """The server failed (kind ``internal``)."""
+
+
 _CLASSES = {
     "lean": LeanError,
     "policy": LeanError,
@@ -62,6 +77,9 @@ _CLASSES = {
     "unavailable": CapacityError,
     "worker_lost": CapacityError,
     "not_found": NotFoundError,
+    "bad_request": BadRequestError,
+    "conflict": ConflictError,
+    "internal": InternalError,
 }
 
 

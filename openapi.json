@@ -6,12 +6,8 @@
           "accepted": {
             "type": "boolean"
           },
-          "challenge_module": {
-            "description": "The module comparator judged as the challenge, as its configuration\nnames it: `spec_module`, which pisa built. An acceptance stored before\ncomparator judged pisa's own builds names it as the export does,\n`PisaSpec.<name>` or `PisaRun.<name>` for a named run's.",
-            "type": "string"
-          },
           "config": {
-            "description": "The pair's configuration in `GET /snapshots/export`'s project,\n`comparator/<n>.json`. Comparator judged the pair by it, with the\nmodules named as `challenge_module` and `solution_module` name them.",
+            "description": "The pair's configuration in `GET /snapshots/export`'s project,\n`comparator/<n>.json`. Comparator judged the pair by it, with the\nchallenge and solution as `spec_module` and `head_module`.",
             "type": "string"
           },
           "error": {
@@ -28,7 +24,7 @@
             "type": "string"
           },
           "head_module": {
-            "description": "The head's module.",
+            "description": "The head's module, which comparator judged as the solution.",
             "type": "string"
           },
           "kernels": {
@@ -56,16 +52,12 @@
             },
             "type": "array"
           },
-          "solution_module": {
-            "description": "The module comparator judged as the solution: `head_module`, or as the\nexport names it in an older acceptance.",
-            "type": "string"
-          },
           "spec": {
             "description": "The spec snapshot.",
             "type": "string"
           },
           "spec_module": {
-            "description": "The spec snapshot's module, `PisaSnap.s…`: the code it judged, which\nstays named when the snapshot goes.",
+            "description": "The spec snapshot's module, `PisaSnap.s…`: the code it judged, which\nstays named when the snapshot goes. Comparator judged it as the\nchallenge.",
             "type": "string"
           },
           "theorems": {
@@ -78,6 +70,8 @@
         "required": [
           "spec",
           "head",
+          "spec_module",
+          "head_module",
           "config",
           "accepted",
           "output",
@@ -2589,7 +2583,7 @@
         "type": "object"
       },
       "ListAcceptancesResponse": {
-        "description": "`GET /snapshots/accept?spec=<id>`: a spec snapshot's acceptances,\nnewest first.",
+        "description": "`GET /snapshots/accept?against=<id>`: a spec snapshot's acceptances,\nnewest first.",
         "properties": {
           "acceptances": {
             "items": {
@@ -2764,7 +2758,6 @@
       "PairErrorKind": {
         "enum": [
           "refused",
-          "build_failed",
           "export_failed",
           "timeout",
           "out_of_memory",
@@ -4375,6 +4368,22 @@
           "kind",
           "reason"
         ],
+        "type": "object"
+      },
+      "VerifySnapshotRequest": {
+        "description": "`POST /snapshots/{id}/verify`'s body. Without one, the defaults hold.",
+        "properties": {
+          "again": {
+            "description": "Re-check the modules that are verified already too, which describes\ntheir records again.",
+            "type": "boolean"
+          },
+          "timeout": {
+            "description": "Lean's time limit in seconds for each module, once their imports are\nloaded.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "VerifySnapshotResponse": {
@@ -6706,6 +6715,121 @@
         ]
       }
     },
+    "/sessions/{id}": {
+      "delete": {
+        "description": "Closes the session's document, and its states with it. Closing the document through `DELETE /documents/{id}` is the same.",
+        "operationId": "closeSession",
+        "parameters": [
+          {
+            "description": "A session's id",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing.",
+            "in": "header",
+            "name": "Pisa-Scope",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Closed"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`bad_request`: the request breaks the API's rules."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`not_found`: an unknown or expired job, state, session, snapshot or\ndeclaration."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a\nlimit was hit."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`capacity`: no worker took the job in time; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`internal`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "`unavailable`: e.g. search isn't ready; `worker_lost`: the job was\nlost, and `resend_safe` says whether to send it again; retry later.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying",
+                "schema": {
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Close a proof session",
+        "tags": [
+          "sessions"
+        ]
+      }
+    },
     "/sessions/{id}/check": {
       "post": {
         "description": "Re-checks the completed code from scratch and confirms it proves the statements the session started from, with the same imports. Failures are in-band, as for `/check`, with statement changes in `reasons`.",
@@ -7195,7 +7319,7 @@
           {
             "description": "The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since",
             "in": "query",
-            "name": "spec",
+            "name": "against",
             "required": true,
             "schema": {
               "type": "string"
@@ -8931,7 +9055,7 @@
     },
     "/snapshots/{id}/verify": {
       "post": {
-        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again.",
+        "description": "Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again. The body may be left out for the defaults.",
         "operationId": "verifySnapshot",
         "parameters": [
           {
@@ -8941,26 +9065,6 @@
             "required": true,
             "schema": {
               "type": "string"
-            }
-          },
-          {
-            "description": "Lean's time limit in seconds for each module, once their imports are loaded; 60 by default",
-            "in": "query",
-            "name": "timeout",
-            "required": false,
-            "schema": {
-              "format": "int64",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          {
-            "description": "`true` to re-check the modules that are verified already too, which describes their records again; `false` by default",
-            "in": "query",
-            "name": "again",
-            "required": false,
-            "schema": {
-              "type": "boolean"
             }
           },
           {
@@ -8982,6 +9086,22 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/VerifySnapshotRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {

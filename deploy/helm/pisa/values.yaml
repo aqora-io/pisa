@@ -116,8 +116,9 @@ pools: []
   #   # What its Deployment's name ends in. By default the version, with
   #   # dashes for dots.
   #   name: lean-4-35
-  #   # Its image: `worker`'s repository, tagged with the version, unless set.
-  #   image: { tag: v4.35.0-1a2b3c4d }
+  #   # Its image: `worker`'s repository, tagged `<appVersion>-<version>` as
+  #   # scripts/env.py tags it, unless set.
+  #   image: { tag: 1.0.0-v4.35.0-1a2b3c4d }
   #   # Its replicas, by default keda's. With 0 it runs no pod until a
   #   # request names its version, which then waits for one to start: keep
   #   # router.maxWaitSecs above that, the image's pull included.
@@ -188,8 +189,9 @@ keda:
 # works.
 search:
   enabled: false
-  # The env_id of the bundle loaded into Qdrant, e.g. v4.36.0-54500a67. Required.
-  envId: ""
+  # The version of the bundle loaded into Qdrant, its env_id, e.g.
+  # v4.36.0-54500a67. Required.
+  version: ""
   # Embeds queries and snapshot declarations; it must serve the model that
   # embedded the bundle. See `pisa-search embed`.
   embedder: "openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY"

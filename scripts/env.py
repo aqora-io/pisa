@@ -19,9 +19,10 @@ An environment is a TOML file:
 `build` writes its Lake project beside it, in a directory of its name: a
 wrapper like docker/lean-project, whose lake-manifest.json Lake resolves in
 Docker. It then builds docker/Dockerfile's worker on that project, tagged
-`<repository>:<version>`, and prints the version and the image. The version
-is the label the image's workers register (`<toolchain>-<hash of the
-project's files>`), which a chart pool or a request names.
+`<repository>:<release>-<version>`, and prints the version and the image.
+The version is the label the image's workers register (`<toolchain>-<hash of
+the project's files>`), which a chart pool or a request names; the release
+is pisa's, from Cargo.toml, as the image's worker is this checkout's.
 
 Commit the file and the directory: the manifest pins what the version hashes.
 A manifest is kept while the file says what it said, and resolved again with
@@ -37,6 +38,13 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def release():
+    """pisa's version, which the workspace's crates share."""
+    with open(ROOT / "Cargo.toml", "rb") as f:
+        return tomllib.load(f)["workspace"]["package"]["version"]
+
 # What a wrapper project is called, as docker/lean-project is.
 PACKAGE, LIBRARY = "pisa_project", "PisaProject"
 
@@ -140,7 +148,7 @@ def build(args):
     project = Path(args.out) if args.out else source.with_suffix("")
     write_project(spec, project, args.update)
     version = label(project)
-    image = f"{args.repository}:{version}"
+    image = f"{args.repository}:{release()}-{version}"
     if not args.project_only:
         revision = args.revision or subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True

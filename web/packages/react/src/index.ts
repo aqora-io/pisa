@@ -9,13 +9,10 @@ export {
   useLiveCheck,
 } from "./hooks/check.ts";
 export {
-  type DocumentAction,
   type DocumentHandle,
   type DocumentOptions,
   type DocumentState,
   type ProbeInput,
-  documentReducer,
-  initialDocument,
   useDocument,
   useDocumentGoals,
   useProbeDocument,
@@ -23,13 +20,10 @@ export {
 export { useHealth } from "./hooks/health.ts";
 export { type LongJob, type LongJobOptions, useLongJob } from "./hooks/jobs.ts";
 export {
-  type ProofAction,
   type ProofNode,
   type ProofSession,
   type ProofSessionOptions,
   type ProofState,
-  initialProof,
-  proofReducer,
   useProofSession,
 } from "./hooks/proof.ts";
 export {
@@ -72,14 +66,10 @@ export {
   auditOptions,
   checkBatchOptions,
   checkOptions,
-  compactQuery,
   declarationOptions,
   dependentsOptions,
   documentGoalsOptions,
-  hasTerms,
   healthOptions,
-  isTransient,
-  pisaKeys,
   rebuildPlanOptions,
   resolveOptions,
   searchOptions,
@@ -87,4 +77,4 @@ export {
   snapshotsOptions,
 } from "./options.ts";
 export { PisaProvider, usePisaClient } from "./provider.tsx";
-export { queryRetry, retryQuery } from "./retry.ts";
+export { retryQuery } from "./retry.ts";

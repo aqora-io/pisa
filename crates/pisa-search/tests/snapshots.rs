@@ -625,10 +625,7 @@ async fn snapshot_names_resolve_by_scope() {
     let e = s.engine().await;
     s.index(&e, false);
     let names = ["double_eq".to_string(), "doubel_eq".to_string()];
-    until_true(async || {
-        e.resolve(&names, &SnapshotScope::All).await.unwrap()[0].exists
-    })
-    .await;
+    until_true(async || e.resolve(&names, &SnapshotScope::All).await.unwrap()[0].exists).await;
 
     let r = e.resolve(&names, &SnapshotScope::All).await.unwrap();
     assert_eq!(

@@ -30,6 +30,7 @@ export {
 export {
   PisaError,
   isCapacityError,
+  isConflictError,
   isLeanError,
   isLimitError,
   isNotFoundError,

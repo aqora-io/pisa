@@ -3,11 +3,9 @@ import { QueryClient } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
+import { documentReducer, initialDocument } from "../src/hooks/documents.ts";
+import { initialProof, proofReducer } from "../src/hooks/proof.ts";
 import {
-  documentReducer,
-  initialDocument,
-  initialProof,
-  proofReducer,
   snapshotOptions,
   useAcceptRun,
   useAcceptances,
@@ -109,11 +107,11 @@ describe("useProofSession", () => {
     expect(result.current.proofText([trivial ?? -1])).toBe(`theorem t : True := by skip\n${" ".repeat(23)}trivial`);
   });
 
-  it("closes its session's document on starting again, on reset, and on unmount", async () => {
+  it("closes its session on starting again, on reset, and on unmount", async () => {
     let started = 0;
     const { client, calls } = fakeClient((call) => {
       if (call.path === "/sessions") return { id: `v~s${++started}`, states: [], messages: [] };
-      // A document that is gone already: nothing to show for it.
+      // A session that is gone already: nothing to show for it.
       if (call.method === "DELETE") return new Response(JSON.stringify({ error: { kind: "not_found", message: "gone" } }), { status: 404 });
       return route(call);
     });
@@ -123,14 +121,14 @@ describe("useProofSession", () => {
     await waitFor(() => expect(result.current.session).toBe("v~s1"));
     act(() => result.current.start("b"));
     await waitFor(() => expect(result.current.session).toBe("v~s2"));
-    expect(deletes()).toEqual(["/documents/v~s1"]);
+    expect(deletes()).toEqual(["/sessions/v~s1"]);
     act(() => result.current.reset());
-    expect(deletes()).toEqual(["/documents/v~s1", "/documents/v~s2"]);
+    expect(deletes()).toEqual(["/sessions/v~s1", "/sessions/v~s2"]);
     expect(result.current.error).toBeUndefined();
     act(() => result.current.start("c"));
     await waitFor(() => expect(result.current.session).toBe("v~s3"));
     unmount();
-    expect(deletes()).toEqual(["/documents/v~s1", "/documents/v~s2", "/documents/v~s3"]);
+    expect(deletes()).toEqual(["/sessions/v~s1", "/sessions/v~s2", "/sessions/v~s3"]);
   });
 
   it("checks a proof with its declarations in full when asked", async () => {
@@ -214,7 +212,7 @@ describe("snapshots", () => {
     const { client, calls } = fakeClient(() => ({ snapshot: detail("v~e"), checked: [] }));
     const { result } = renderHook(() => useVerifySnapshot(), { wrapper: wrapper(client) });
     await act(() => result.current.mutateAsync({ id: "v~e", timeout: 30 }));
-    expect(calls[0]).toMatchObject({ method: "POST", path: "/snapshots/v~e/verify?timeout=30" });
+    expect(calls[0]).toMatchObject({ method: "POST", path: "/snapshots/v~e/verify", body: { timeout: 30 } });
   });
 });
 
@@ -426,7 +424,7 @@ describe("accepting a run", () => {
     const { result } = renderHook(() => useAcceptances("v~s"), { wrapper: wrapper(client) });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(result.current.data?.acceptances[0]?.stale).toBe(true);
-    expect(calls[0]?.path).toBe("/snapshots/accept?spec=v%7Es");
+    expect(calls[0]?.path).toBe("/snapshots/accept?against=v%7Es");
     const idle = renderHook(() => useAcceptances(null), { wrapper: wrapper(client) });
     expect(idle.result.current.fetchStatus).toBe("idle");
   });

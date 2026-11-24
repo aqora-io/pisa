@@ -62,6 +62,9 @@ async fn client_covers_checks_and_sessions() {
         .await
         .unwrap();
     assert!(verdict.ok, "{verdict:?}");
+    client.close_session(&s.id).await.unwrap();
+    let err = client.apply_tactic(&s.states[0].id, "simp").await;
+    assert_eq!(err.unwrap_err().kind(), Some(ErrorKind::NotFound));
 
     match client.apply_tactic("not-a-key", "rfl").await {
         Err(Error::Server { status, kind, .. }) => {

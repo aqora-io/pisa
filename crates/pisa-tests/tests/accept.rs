@@ -201,13 +201,9 @@ async fn a_named_run_exports_its_files_by_name() {
     let pair = &verdict.pairs[0];
     assert!(pair.accepted, "{verdict:?}");
     assert_eq!(
-        (
-            pair.challenge_module.as_str(),
-            pair.solution_module.as_str()
-        ),
+        (pair.spec_module.as_str(), pair.head_module.as_str()),
         (module(&s).as_str(), module(&p).as_str())
     );
-    assert_eq!(pair.spec_module, module(&s));
     assert_eq!(pair.config, "comparator/1.json");
 
     // Forked, the run's heads keep their hash names; its spec keeps its.
@@ -1036,7 +1032,7 @@ async fn an_unsettled_run_is_refused_at_once() {
     };
     assert_eq!(e.kind, pisa_protocol::api::ErrorKind::Conflict, "{e:?}");
     assert!(e.message.contains("POST /snapshots/settle"), "{e:?}");
-    let listed = get(&c, &format!("/snapshots/accept?spec={}", id(&spec_t))).await;
+    let listed = get(&c, &format!("/snapshots/accept?against={}", id(&spec_t))).await;
     assert_eq!(listed["acceptances"], json!([]), "{listed}");
 }
 
@@ -1181,7 +1177,7 @@ async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
     );
     assert_eq!(first.audit.review[0].head, id(&h), "{first:?}");
     let second = accept(&c, &[&id(&s)], &[], false, 60).await;
-    let listed = get(&c, &format!("/snapshots/accept?spec={}", id(&s))).await;
+    let listed = get(&c, &format!("/snapshots/accept?against={}", id(&s))).await;
     let listed = listed["acceptances"].as_array().unwrap();
     let ids: Vec<&Value> = listed.iter().map(|a| &a["id"]).collect();
     assert_eq!(ids, [&json!(second.id), &json!(first.id)]);
@@ -1203,7 +1199,7 @@ async fn an_acceptance_keeps_what_it_judged_and_is_found_by_spec() {
         json!({"code": "import Foo\n\ntheorem z : 1 = 1 := sorry"}),
     )
     .await;
-    let none = get(&c, &format!("/snapshots/accept?spec={}", id(&other))).await;
+    let none = get(&c, &format!("/snapshots/accept?against={}", id(&other))).await;
     assert_eq!(none["acceptances"], json!([]));
 }
 
@@ -1346,7 +1342,7 @@ async fn a_lost_claim_stops_the_comparator_and_stores_no_acceptance() {
         .filter(|p| p.is_dir())
         .collect();
     assert!(left.is_empty(), "{left:?}");
-    let listed = get(&c, &format!("/snapshots/accept?spec={}", id(&s))).await;
+    let listed = get(&c, &format!("/snapshots/accept?against={}", id(&s))).await;
     let ids: Vec<&Value> = (listed["acceptances"].as_array().unwrap().iter())
         .map(|a| &a["id"])
         .collect();

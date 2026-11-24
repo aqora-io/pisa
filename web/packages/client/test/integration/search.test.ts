@@ -70,9 +70,10 @@ describe.skipIf(qdrant === undefined)("search", () => {
       join(dir, "pisa.db"),
       "--qdrant",
       qdrant ?? "",
-      "--env-id",
+      "--version",
       envId,
-      "--no-snapshots",
+      "--snapshots",
+      "false",
     ]);
     await until("search", async () => (await health(url)).search?.ready === true);
     client = new PisaClient({ url });

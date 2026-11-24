@@ -22,7 +22,6 @@ import { parseList } from "../../labels.ts";
 /** Why comparator didn't accept a pair, in words. */
 const ERROR: Record<PairErrorKind, string> = {
   refused: "refused",
-  build_failed: "a build failed",
   export_failed: "an export failed",
   timeout: "ran out of time",
   out_of_memory: "ran out of memory",

@@ -119,7 +119,7 @@ pub struct WorkerConfig {
     pub queue: String,
     /// How long a claimed job stays this worker's without a heartbeat. A job
     /// whose worker died runs elsewhere once it lapses.
-    #[arg(long, env = "PISA_LEASE_SECS", default_value_t = 10)]
+    #[arg(long, env = "PISA_LEASE_SECS", default_value_t = 30)]
     pub lease_secs: u64,
     /// Delete documents, sessions and their states older than this (0 keeps
     /// them).

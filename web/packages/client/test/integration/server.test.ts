@@ -5,7 +5,7 @@
 
 import { describe, expect, inject, it } from "vitest";
 
-import { PisaClient, isPisaError } from "../../src/index.ts";
+import { PisaClient, isConflictError, isPisaError } from "../../src/index.ts";
 
 const url = inject("pisaUrl");
 const client = new PisaClient({ url, timeout: 5 });
@@ -170,7 +170,7 @@ describe("documents", () => {
     const edited = await docs.editDocument(d.id, 1, code.replace("sorry", "rfl"));
     expect([edited.revision, edited.sorries]).toEqual([2, []]);
     const stale = await docs.documentGoals(d.id, [{ line: 4 }], { revision: 1 }).catch((e: unknown) => e);
-    expect(isPisaError(stale, "conflict")).toBe(true);
+    expect(isConflictError(stale)).toBe(true);
 
     await docs.closeDocument(d.id);
     const closed = await docs.documentGoals(d.id, [{ line: 4 }]).catch((e: unknown) => e);
@@ -184,7 +184,7 @@ describe("documents", () => {
     expect((await client.documentGoals(session.id, [at])).at[0]?.pos).toEqual(at);
     const edit = await client.editDocument(session.id, 1, "def f := 1").catch((e: unknown) => e);
     expect(edit).toMatchObject({ kind: "bad_request", status: 400 });
-    await client.closeDocument(session.id);
+    await client.closeSession(session.id);
     const gone = await client.applyTactic(root?.id ?? "", "rfl").catch((e: unknown) => e);
     expect(gone).toMatchObject({ kind: "not_found" });
   });

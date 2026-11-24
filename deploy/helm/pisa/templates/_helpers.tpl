@@ -32,8 +32,8 @@ map, then each of `pools`.
 A pool's settings, as YAML: `worker`'s, under those the pool names (`.pool`,
 empty for `worker`'s own). Besides `worker`'s keys it has `suffix`, which its
 names and its component label end in, and `minReplicas` and `maxReplicas`.
-One of `pools` needs its `version`, which is its image's tag unless it names
-one.
+One of `pools` needs its `version`. Its image's tag is `<appVersion>-<version>`,
+as scripts/env.py tags it, unless it names one.
 */ -}}
 {{- define "pisa.pool" -}}
 {{- $w := mergeOverwrite (deepCopy .root.Values.worker) (deepCopy .pool) -}}
@@ -41,7 +41,7 @@ one.
 {{- if .pool -}}
 {{- $version := required "each of pools needs its version, which its image's workers serve" .pool.version -}}
 {{- $_ := set $w "suffix" (printf "-%s" (.pool.name | default ($version | replace "." "-"))) -}}
-{{- $_ := set $w.image "tag" (dig "image" "tag" $version .pool) -}}
+{{- $_ := set $w.image "tag" (dig "image" "tag" (printf "%s-%s" .root.Chart.AppVersion $version) .pool) -}}
 {{- else if and .root.Values.pools (not $w.version) -}}
 {{- fail "worker.version is required with pools: each pool scales on its own version's jobs" -}}
 {{- end -}}

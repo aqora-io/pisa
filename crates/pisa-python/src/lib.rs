@@ -388,6 +388,15 @@ impl Base {
         )
     }
 
+    fn close_session<'py>(
+        &self,
+        py: Python<'py>,
+        session_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        self.call(py, async move { inner.close_session(&session_id).await })
+    }
+
     #[pyo3(signature = (session_id, code, *, detail = Vec::new()))]
     fn check_session<'py>(
         &self,
@@ -1157,7 +1166,10 @@ impl Base {
                 .map_err(|e| PyValueError::new_err(format!("invalid snapshots: {e}")))?,
             None => Default::default(),
         };
-        self.call(py, async move { inner.resolve_with(names, snapshots).await })
+        self.call(
+            py,
+            async move { inner.resolve_with(names, snapshots).await },
+        )
     }
 
     #[pyo3(signature = (name, *, module = None))]

@@ -17,7 +17,7 @@ use pisa_protocol::api::{
     ListDependentsResponse, ListSnapshotsResponse, MAX_REASON, MAX_REVIEW_LIMIT, PreferAsync,
     RebuildSnapshotsRequest, RebuildSnapshotsResponse, ResubmitSnapshotsRequest,
     ResubmitSnapshotsResponse, SettleRunRequest, Snapshot, SnapshotDetail, SnapshotId, Tarball,
-    UpdateSnapshotRequest, VerifySnapshotResponse,
+    UpdateSnapshotRequest, VerifySnapshotRequest, VerifySnapshotResponse,
 };
 use pisa_protocol::header::{header_key, split_header};
 use pisa_protocol::labels::{
@@ -32,7 +32,7 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 
 use crate::dispatch::{Prepared, Priority, Route};
-use crate::http::{ApiError, App, Body, ResolvedRuns};
+use crate::http::{ApiError, App, Body, OptionalBody, ResolvedRuns};
 use crate::jobs::{Params, Prefer, accepted};
 use crate::rebuild;
 use crate::resubmit;
@@ -889,19 +889,22 @@ pub async fn acceptance(
     description = "The stored acceptances that judged a spec snapshot, newest first, at most \
         100. Each says `stale` once the run's heads are no longer the ones it judged, its spec \
         is amended, or a target is refuted that its audit didn't list.",
-    params(("spec" = String, Query, description = "The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since")),
+    params(("against" = String, Query, description = "The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since")),
     responses((status = 200, description = "Its acceptances", body = ListAcceptancesResponse), ApiErrors),
 )]
-/// `GET /snapshots/accept?spec=<id>`.
+/// `GET /snapshots/accept?against=<id>`.
 pub async fn acceptances(
     State(app): State<Arc<App>>,
     RawQuery(query): RawQuery,
 ) -> Result<Json<ListAcceptancesResponse>, ApiError> {
     let spec = form_urlencoded::parse(query.as_deref().unwrap_or_default().as_bytes())
-        .find(|(name, _)| name == "spec")
+        .find(|(name, _)| name == "against")
         .map(|(_, value)| value.into_owned())
         .ok_or_else(|| {
-            ApiError::new(ErrorKind::BadRequest, "name the spec snapshot: ?spec=<id>")
+            ApiError::new(
+                ErrorKind::BadRequest,
+                "name the spec snapshot: ?against=<id>",
+            )
         })?;
     let parsed = parse_id(&spec)?;
     let reader = app.snapshots.version(&parsed.version);
@@ -1320,50 +1323,36 @@ pub struct DeleteParams {
     with_replacers: bool,
 }
 
-/// `POST /snapshots/{id}/verify`'s query. Other parameters are ignored.
-#[derive(Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-pub struct VerifyParams {
-    /// Lean's time limit in seconds for each module, once their imports are loaded; 60 by default
-    #[serde(default = "default_verify_secs")]
-    timeout: u64,
-    /// `true` to re-check the modules that are verified already too, which describes their records again; `false` by default
-    #[serde(default)]
-    again: bool,
-}
-
-fn default_verify_secs() -> u64 {
-    60
-}
-
 #[utoipa::path(
     post, path = "/snapshots/{id}/verify", operation_id = "verifySnapshot", tag = "snapshots",
     summary = "Re-check a snapshot's module with the kernel",
     description = "Re-checks the module and the modules it imports, in one process that loads \
         their imports once; `failure` says which one failed and why. A module verified already \
-        is skipped unless `again`, which re-checks it and describes its record again.",
-    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), VerifyParams, PreferAsync),
+        is skipped unless `again`, which re-checks it and describes its record again. The body \
+        may be left out for the defaults.",
+    params(("id" = String, Path, description = "The snapshot's id, `<version>~<32 hex>`"), PreferAsync),
+    request_body(content = Option<VerifySnapshotRequest>),
     responses((status = 200, description = "Whether the module passed", body = VerifySnapshotResponse), Accepted, ApiErrors),
 )]
-/// The query is taken as a `Result` so that the id is checked first.
+/// The body is taken as a `Result` so that the id is checked first.
 pub async fn verify(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    q: Result<Params<VerifyParams>, ApiError>,
     prefer: Prefer,
+    body: Result<OptionalBody<VerifySnapshotRequest>, ApiError>,
 ) -> Response {
     let version = match parse_id(&id) {
         Ok(id) => id.version,
         Err(e) => return e.into_response(),
     };
-    let params = match q {
-        Ok(Params(params)) => params,
+    let req = match body {
+        Ok(OptionalBody(req)) => req,
         Err(e) => return e.into_response(),
     };
     let job = Job::SnapshotVerify(SnapshotVerifyJob {
         entry: id,
-        timeout_secs: params.timeout,
-        again: params.again,
+        timeout_secs: req.timeout,
+        again: req.again,
     });
     let p = prepare(job, Some(version), Priority::Batch);
     app.answer(prefer, JobKind::VerifySnapshot, p).await

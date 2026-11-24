@@ -185,10 +185,9 @@ function asPisaError(e: unknown): PisaError {
   return isPisaError(e) ? e : new PisaError("bad_response", String(e));
 }
 
-/** Closes a session's document, without waiting: one already gone is
- *  fine. */
+/** Closes a session, without waiting: one already gone is fine. */
 function close(client: PisaClient, session: SessionId): void {
-  void client.closeDocument(session).catch(() => undefined);
+  void client.closeSession(session).catch(() => undefined);
 }
 
 /** A proof session as a tree of states, kept in the component. When it is

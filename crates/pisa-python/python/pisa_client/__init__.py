@@ -30,6 +30,26 @@ instead, which start at once:
 """
 
 from ._native import AsyncClient, Client
-from .errors import CapacityError, LeanError, LimitError, NotFoundError, PisaError
+from .errors import (
+    BadRequestError,
+    CapacityError,
+    ConflictError,
+    InternalError,
+    LeanError,
+    LimitError,
+    NotFoundError,
+    PisaError,
+)
 
-__all__ = ["AsyncClient", "Client", "PisaError", "LeanError", "LimitError", "CapacityError", "NotFoundError"]
+__all__ = [
+    "AsyncClient",
+    "Client",
+    "PisaError",
+    "LeanError",
+    "LimitError",
+    "CapacityError",
+    "NotFoundError",
+    "BadRequestError",
+    "ConflictError",
+    "InternalError",
+]

@@ -146,6 +146,7 @@ export type {
   Timing,
   UpdateSnapshotRequest,
   VerifyFailure,
+  VerifySnapshotRequest,
   VerifySnapshotResponse,
 } from "./openapi.ts";
 

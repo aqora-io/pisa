@@ -85,7 +85,7 @@ def url(tmp_path_factory):
     port = free_port()
     server = subprocess.Popen([BIN / "pisa-server", "--http", f"127.0.0.1:{port}",
                                "--database-url", tmp / "pisa.db", "--qdrant", qdrant,
-                               "--env-id", env_id, "--no-snapshots"], env=env)
+                               "--version", env_id, "--snapshots", "false"], env=env)
     url = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:

@@ -101,9 +101,9 @@ services:
       # playground served elsewhere; none by default.
       PISA_CORS_ORIGINS: ${PISA_CORS_ORIGINS:-}
       PISA_SEARCH_QDRANT: ${PISA_SEARCH_QDRANT:-}
-      # The env_id of the loaded bundle: that of docker/lean-project.
-      PISA_SEARCH_ENV_ID: ${PISA_SEARCH_ENV_ID:-v4.36.0-54500a67}
-      PISA_SEARCH_TEI: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
+      # The version of the loaded bundle: that of docker/lean-project.
+      PISA_SEARCH_VERSION: ${PISA_SEARCH_VERSION:-v4.36.0-54500a67}
+      PISA_SEARCH_EMBEDDER: ${PISA_SEARCH_EMBEDDER:-openai+https://api.scaleway.ai/v1?model=qwen3-embedding-8b&key_env=SCW_SECRET_KEY}
       SCW_SECRET_KEY: ${SCW_SECRET_KEY:-}
       # Set a describe model (e.g. claude-haiku-5-5, with ANTHROPIC_API_KEY)
       # to describe every snapshot declaration with it; without one they are
@@ -155,9 +155,6 @@ services:
       PISA_STORE: s3
       PISA_DATABASE_URL: *database-url
       PISA_STATE_TTL_SECS: 86400
-      # A claim on a job lasts 30 s without a heartbeat (every 10 s): a job
-      # whose worker died waits that long for another.
-      PISA_LEASE_SECS: 30
       AWS_ENDPOINT: http://garage:3900
       AWS_ALLOW_HTTP: "true"
       AWS_REGION: garage

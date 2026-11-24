@@ -60,3 +60,9 @@ export function isCapacityError(e: unknown): e is PisaError {
 export function isNotFoundError(e: unknown): e is PisaError {
   return isPisaError(e, "not_found");
 }
+
+/** The request doesn't fit what it found: a document at another revision,
+ *  or a run name another run holds. */
+export function isConflictError(e: unknown): e is PisaError {
+  return isPisaError(e, "conflict");
+}

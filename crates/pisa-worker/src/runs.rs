@@ -444,8 +444,6 @@ pub async fn accept(
         .map(|((pair, judged_as), judged)| AcceptPair {
             spec: pair.spec,
             head: pair.head,
-            challenge_module: judged_as.spec_module.clone(),
-            solution_module: judged_as.head_module.clone(),
             spec_module: judged_as.spec_module,
             head_module: judged_as.head_module,
             config: pair.config,
@@ -1444,8 +1442,6 @@ mod tests {
             head: "v~h".into(),
             spec_module: "PisaSnap.ss".into(),
             head_module: "PisaSnap.sh".into(),
-            challenge_module: "PisaSnap.ss".into(),
-            solution_module: "PisaSnap.sh".into(),
             config: "comparator/1.json".into(),
             accepted: true,
             error: None,

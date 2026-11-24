@@ -194,6 +194,21 @@ pub async fn check(
     app.answer(prefer, JobKind::CheckSession, p).await
 }
 
+#[utoipa::path(
+    delete, path = "/sessions/{id}", operation_id = "closeSession", tag = "sessions",
+    summary = "Close a proof session",
+    description = "Closes the session's document, and its states with it. Closing the document \
+        through `DELETE /documents/{id}` is the same.",
+    params(("id" = String, Path, description = "A session's id")),
+    responses((status = 204, description = "Closed"), ApiErrors),
+)]
+pub async fn close(
+    state: State<Arc<App>>,
+    id: Path<String>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    crate::documents::close(state, id).await
+}
+
 /// The completed proof's check result, with statement changes added to
 /// `reasons`. A bad or unknown session id is an HTTP error; everything else
 /// is in-band, as for `/check`.

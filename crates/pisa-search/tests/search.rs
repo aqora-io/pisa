@@ -495,7 +495,11 @@ async fn a_name_resolves_with_the_imports_that_load_it() {
         "QuantumMechanics.state_uncertainty_of_raw_commutator",
         "QuantumMechanics.state_uncertainty_of_raw_comutator",
     ];
-    let r = t.engine.resolve(&names.map(String::from), &SnapshotScope::None).await.unwrap();
+    let r = t
+        .engine
+        .resolve(&names.map(String::from), &SnapshotScope::None)
+        .await
+        .unwrap();
     assert_eq!(r[0].imports.as_deref(), Some(UNCERTAINTY_IMPORTS));
     assert_eq!(
         r[1].suggestions[0].imports.as_deref(),
@@ -512,7 +516,11 @@ async fn misspelled_names_resolve_with_suggestions() {
         "Real.sqrt_mul_self",
         "Real.sqrt_mul_self_old",
     ];
-    let r = t.engine.resolve(&names.map(String::from), &SnapshotScope::None).await.unwrap();
+    let r = t
+        .engine
+        .resolve(&names.map(String::from), &SnapshotScope::None)
+        .await
+        .unwrap();
     assert!(!r[0].exists);
     assert_eq!(r[0].suggestions[0].name, "Real.sqrt_mul_self");
     assert!(r[1].exists && r[1].suggestions.is_empty());

@@ -45,7 +45,8 @@ async fn search_that_isnt_ready_leaves_the_api_up() {
     // Nothing listens on the discard port.
     let search = SearchArgs {
         qdrant: Some("http://127.0.0.1:9".into()),
-        env_id: Some("e".into()),
+        version: Some("e".into()),
+        snapshots: true,
         ..Default::default()
     };
     let server = start_on(config(search), Db::memory().await).await.unwrap();
@@ -212,7 +213,8 @@ async fn health_answers_quickly_while_qdrant_and_the_database_stall() {
     let qdrant = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let search = SearchArgs {
         qdrant: Some(format!("http://{}", qdrant.local_addr().unwrap())),
-        env_id: Some("e".into()),
+        version: Some("e".into()),
+        snapshots: true,
         ..Default::default()
     };
     let db = Db::memory().await;

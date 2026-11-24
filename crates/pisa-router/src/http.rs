@@ -10,7 +10,7 @@ use std::time::Duration;
 use axum::extract::{FromRequest, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use futures::StreamExt;
 use pisa_db::catalog::Catalog;
@@ -53,6 +53,7 @@ pub struct App {
         sessions::start,
         sessions::apply_tactic,
         sessions::check,
+        sessions::close,
         snapshots::create,
         snapshots::list,
         snapshots::get,
@@ -88,6 +89,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/check", post(check))
         .route("/check/batch", post(check_batch))
         .route("/sessions", post(sessions::start))
+        .route("/sessions/{id}", delete(sessions::close))
         .route("/sessions/{id}/check", post(sessions::check))
         .route("/states/{id}/tactic", post(sessions::apply_tactic))
         .route("/snapshots", post(snapshots::create).get(snapshots::list))
@@ -187,6 +189,25 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Body<T> {
             Ok(Json(v)) => Ok(Body(v)),
             Err(rejection) => Err(ApiError::new(ErrorKind::BadRequest, rejection.body_text())),
         }
+    }
+}
+
+/// A JSON body that may be left out, or `null`, for `T::default()`.
+pub struct OptionalBody<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned + Default> FromRequest<S> for OptionalBody<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|rejection| ApiError::new(ErrorKind::BadRequest, rejection.body_text()))?;
+        if bytes.is_empty() {
+            return Ok(OptionalBody(T::default()));
+        }
+        serde_json::from_slice::<Option<T>>(&bytes)
+            .map(|body| OptionalBody(body.unwrap_or_default()))
+            .map_err(|e| ApiError::new(ErrorKind::BadRequest, format!("invalid body: {e}")))
     }
 }
 

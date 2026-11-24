@@ -269,7 +269,7 @@ async fn runs_keep_to_their_scope() {
     let stored = format!("/snapshots/accept/{}", verdict["id"].as_str().unwrap());
     assert_eq!(get(&c, A, &stored).await.0, 200);
     assert_eq!(get(&c, B, &stored).await.0, 404);
-    let by_spec = format!("/snapshots/accept?spec={}", id(&spec));
+    let by_spec = format!("/snapshots/accept?against={}", id(&spec));
     assert_eq!(
         get(&c, A, &by_spec).await.1["acceptances"]
             .as_array()

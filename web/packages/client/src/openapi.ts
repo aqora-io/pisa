@@ -316,6 +316,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Close a proof session
+         * @description Closes the session's document, and its states with it. Closing the document through `DELETE /documents/{id}` is the same.
+         */
+        delete: operations["closeSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/sessions/{id}/check": {
         parameters: {
             query?: never;
@@ -560,7 +580,7 @@ export interface paths {
         put?: never;
         /**
          * Re-check a snapshot's module with the kernel
-         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again.
+         * @description Re-checks the module and the modules it imports, in one process that loads their imports once; `failure` says which one failed and why. A module verified already is skipped unless `again`, which re-checks it and describes its record again. The body may be left out for the defaults.
          */
         post: operations["verifySnapshot"];
         delete?: never;
@@ -596,16 +616,9 @@ export interface components {
         AcceptPair: {
             accepted: boolean;
             /**
-             * @description The module comparator judged as the challenge, as its configuration
-             *     names it: `spec_module`, which pisa built. An acceptance stored before
-             *     comparator judged pisa's own builds names it as the export does,
-             *     `PisaSpec.<name>` or `PisaRun.<name>` for a named run's.
-             */
-            challenge_module?: string;
-            /**
              * @description The pair's configuration in `GET /snapshots/export`'s project,
              *     `comparator/<n>.json`. Comparator judged the pair by it, with the
-             *     modules named as `challenge_module` and `solution_module` name them.
+             *     challenge and solution as `spec_module` and `head_module`.
              */
             config: string;
             /** @description Why it isn't accepted, if it isn't. */
@@ -619,8 +632,8 @@ export interface components {
             exit_code?: number;
             /** @description The head. */
             head: string;
-            /** @description The head's module. */
-            head_module?: string;
+            /** @description The head's module, which comparator judged as the solution. */
+            head_module: string;
             /**
              * @description The kernels that checked the solution. For an accepted pair, the
              *     kernels pisa configured, each `accepted`, and `unsupported` for any
@@ -641,18 +654,14 @@ export interface components {
              *     each second. Empty when nothing was exported for it.
              */
             phases?: components["schemas"]["PairPhase"][];
-            /**
-             * @description The module comparator judged as the solution: `head_module`, or as the
-             *     export names it in an older acceptance.
-             */
-            solution_module?: string;
             /** @description The spec snapshot. */
             spec: string;
             /**
              * @description The spec snapshot's module, `PisaSnap.s…`: the code it judged, which
-             *     stays named when the snapshot goes.
+             *     stays named when the snapshot goes. Comparator judged it as the
+             *     challenge.
              */
-            spec_module?: string;
+            spec_module: string;
             /**
              * Format: int64
              * @description How many of the spec's theorems the configuration names.
@@ -2298,7 +2307,7 @@ export interface components {
             line: number;
         };
         /**
-         * @description `GET /snapshots/accept?spec=<id>`: a spec snapshot's acceptances,
+         * @description `GET /snapshots/accept?against=<id>`: a spec snapshot's acceptances,
          *     newest first.
          */
         ListAcceptancesResponse: {
@@ -2399,7 +2408,7 @@ export interface components {
             message: string;
         };
         /** @enum {string} */
-        PairErrorKind: "refused" | "build_failed" | "export_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge" | "unsupported";
+        PairErrorKind: "refused" | "export_failed" | "timeout" | "out_of_memory" | "cannot_run" | "nothing_to_judge" | "unsupported";
         /** @description A step of judging a pair, and what it took. */
         PairPhase: {
             /**
@@ -3375,6 +3384,20 @@ export interface components {
             /** @description Why the re-check failed, e.g. the kernel's error or a timeout. */
             reason: string;
         };
+        /** @description `POST /snapshots/{id}/verify`'s body. Without one, the defaults hold. */
+        VerifySnapshotRequest: {
+            /**
+             * @description Re-check the modules that are verified already too, which describes
+             *     their records again.
+             */
+            again?: boolean;
+            /**
+             * Format: int64
+             * @description Lean's time limit in seconds for each module, once their imports are
+             *     loaded.
+             */
+            timeout?: number;
+        };
         /**
          * @description `POST /snapshots/{id}/verify`: re-checks the snapshot's module and
          *     everything it imports through the kernel, imports first, skipping what
@@ -3537,6 +3560,7 @@ export type TermInfo = components['schemas']['TermInfo'];
 export type Timing = components['schemas']['Timing'];
 export type UpdateSnapshotRequest = components['schemas']['UpdateSnapshotRequest'];
 export type VerifyFailure = components['schemas']['VerifyFailure'];
+export type VerifySnapshotRequest = components['schemas']['VerifySnapshotRequest'];
 export type VerifySnapshotResponse = components['schemas']['VerifySnapshotResponse'];
 export type $defs = Record<string, never>;
 export interface operations {
@@ -5268,6 +5292,97 @@ export interface operations {
             };
         };
     };
+    closeSession: {
+        parameters: {
+            query?: never;
+            header?: {
+                /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
+                "Pisa-Scope"?: string;
+            };
+            path: {
+                /** @description A session's id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description `bad_request`: the request breaks the API's rules. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `not_found`: an unknown or expired job, state, session, snapshot or
+             *     declaration.
+             */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `lean` or `policy`: refused; `timeout`, `out_of_memory` or `crash`: a
+             *     limit was hit.
+             */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `capacity`: no worker took the job in time; retry later. */
+            429: {
+                headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description `internal`. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /**
+             * @description `unavailable`: e.g. search isn't ready; `worker_lost`: the job was
+             *     lost, and `resend_safe` says whether to send it again; retry later.
+             */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     checkSession: {
         parameters: {
             query?: never;
@@ -5600,7 +5715,7 @@ export interface operations {
         parameters: {
             query: {
                 /** @description The spec snapshot's id, `<version>~<32 hex>`, which may be deleted since */
-                spec: string;
+                against: string;
             };
             header?: {
                 /** @description The request's scope, `key=value` labels separated by commas, e.g. `user=42`: what the request creates carries them, and what it names or reaches must, else it is a 404. Run names and idempotency keys are unique within a scope. Without it, the request is bounded by nothing. */
@@ -6823,12 +6938,7 @@ export interface operations {
     };
     verifySnapshot: {
         parameters: {
-            query?: {
-                /** @description Lean's time limit in seconds for each module, once their imports are loaded; 60 by default */
-                timeout?: number;
-                /** @description `true` to re-check the modules that are verified already too, which describes their records again; `false` by default */
-                again?: boolean;
-            };
+            query?: never;
             header?: {
                 /**
                  * @description `respond-async` for a job at once (202), to wait for at
@@ -6844,7 +6954,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["VerifySnapshotRequest"] | null;
+            };
+        };
         responses: {
             /** @description Whether the module passed */
             200: {
