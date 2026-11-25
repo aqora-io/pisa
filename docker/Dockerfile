@@ -14,8 +14,11 @@ FROM rust:1.99-trixie AS build
 ARG REVISION=unknown
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+# The two build stages share these caches, and run at once under
+# `docker compose build`. Cargo's lock on the registry is outside its cache,
+# so the stages take turns, or they unpack the same crate together.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
     PISA_REVISION=$REVISION cargo build --release -p pisa-worker \
     && cp target/release/pisa-worker /usr/local/bin/
 
@@ -24,8 +27,8 @@ FROM rust:1.99-trixie AS build-server
 ARG REVISION=unknown
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
     PISA_REVISION=$REVISION cargo build --release -p pisa-server -p pisa-search \
     && cp target/release/pisa-server target/release/pisa-search /usr/local/bin/
 
