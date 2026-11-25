@@ -42,7 +42,7 @@ jobs:
       # The search suites skip without it.
       PISA_TEST_QDRANT_URL: http://localhost:6333
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: dtolnay/rust-toolchain@stable
@@ -86,7 +86,7 @@ jobs:
       # The clients' search tests skip without it.
       PISA_TEST_QDRANT_URL: http://localhost:6333
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the server, the worker and the fake Lean
@@ -127,7 +127,7 @@ jobs:
       PISA_PORT: "8000"
       PISA_BEAM_SLOTS: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - name: Check the compose file
