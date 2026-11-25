@@ -91,7 +91,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build the server, the worker and the fake Lean
         run: cargo build -p pisa-server -p pisa-worker -p pisa-tests -p pisa-search
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: web/package.json
       - uses: actions/setup-node@v4
